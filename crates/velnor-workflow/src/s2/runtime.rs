@@ -1098,15 +1098,24 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
 /// Score reported results against the planner's expected work: the same
 /// [`crate::s2::reuse::aggregate`] the generator's tests exercise, run against
 /// the expected-work file the plan wrote and the results file the unit jobs
-/// collected. Prints the audit report and fails when the aggregate rejects.
+/// collected. The file's recorded plan SHAs must match this job's own
+/// checkout (`BASE_SHA`/`HEAD_SHA`, defaulting exactly like the selection
+/// artifact's binding); a stale or mis-threaded file fails before any
+/// verdict. Prints the audit report and fails when the aggregate rejects.
 fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorError> {
     let expected_text = fs::read_to_string(expected)
         .map_err(|error| GeneratorError::io("read expected work", expected, &error))?;
     let results_text = fs::read_to_string(results)
         .map_err(|error| GeneratorError::io("read reported results", results, &error))?;
-    let verdict = crate::s2::reuse::aggregate_files(&expected_text, &results_text)
-        .map_err(GeneratorError::usage)?;
+    let base_sha = env::var("BASE_SHA").unwrap_or_default();
+    let head_sha = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    let verdict =
+        crate::s2::reuse::aggregate_files(&expected_text, &results_text, &base_sha, &head_sha)
+            .map_err(GeneratorError::usage)?;
     print!("{}", crate::s2::reuse::render_report(&verdict));
+    if let Some(line) = explicit_no_work_line(&expected_text, &verdict) {
+        println!("{line}");
+    }
     if verdict.passed {
         Ok(())
     } else {
@@ -1114,6 +1123,49 @@ fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorErr
             "aggregate: expected work did not complete",
         ))
     }
+}
+
+/// The machine-readable no-work line for an explicit-no-work PASS: the
+/// planner's marker plus zero expected units plus a passing verdict. `None`
+/// for every other verdict — real-work output, and failed no-work verdicts,
+/// stay byte-identical. A missing `units` key reads as empty, matching the
+/// schema default the aggregate itself scores.
+fn explicit_no_work_line(
+    expected_json: &str,
+    verdict: &crate::s2::reuse::AggregateVerdict,
+) -> Option<String> {
+    if !verdict.passed {
+        return None;
+    }
+    let document: serde_json::Value = serde_json::from_str(expected_json).ok()?;
+    if document
+        .get("planned_no_work")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let empty = document
+        .get("units")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(Vec::is_empty);
+    if !empty {
+        return None;
+    }
+    let extras = verdict
+        .explanations
+        .iter()
+        .filter(|explanation| explanation.disposition == crate::s2::reuse::Disposition::Extra)
+        .count();
+    Some(match extras {
+        0 => "no_work_reason=planner selected zero workload units and no workload results were reported"
+            .to_owned(),
+        1 => "no_work_reason=planner selected zero workload units; 1 reported result ignored as outside the plan"
+            .to_owned(),
+        extras => format!(
+            "no_work_reason=planner selected zero workload units; {extras} reported results ignored as outside the plan"
+        ),
+    })
 }
 
 /// Print the affected selection for a diff as JSON: the auditable
@@ -1582,24 +1634,64 @@ struct PlannedExclusion {
     reason: ExclusionReason,
 }
 
+/// Everything `plan` reads from its environment, as one injectable bundle.
+/// Production builds it from the live process; tests build fixture values,
+/// so the end-to-end plan path runs without mutating process-global env —
+/// which parallel tests also read.
+struct PlanInputs {
+    root: PathBuf,
+    event: String,
+    scope_override: Option<String>,
+    base: String,
+    head: String,
+    providers: String,
+    event_trusted: String,
+    selection_file: Option<PathBuf>,
+    expected_file: Option<PathBuf>,
+    github_output: Option<PathBuf>,
+}
+
+impl PlanInputs {
+    fn from_env() -> Result<Self, GeneratorError> {
+        Ok(Self {
+            event: env::var("EVENT_NAME").unwrap_or_default(),
+            scope_override: env::var("CI_SCOPE_OVERRIDE")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            root: env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
+            base: env::var("BASE_SHA").unwrap_or_default(),
+            head: env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+            providers: env::var("VELNOR_PROVIDERS").unwrap_or_default(),
+            event_trusted: env::var("VELNOR_EVENT_TRUSTED").unwrap_or_default(),
+            selection_file: env::var_os("VELNOR_SELECTION_FILE").map(PathBuf::from),
+            expected_file: env::var_os("VELNOR_EXPECTED_WORK_FILE").map(PathBuf::from),
+            github_output: env::var_os("GITHUB_OUTPUT").map(PathBuf::from),
+        })
+    }
+}
+
+fn plan(config_path: &Path) -> Result<(), GeneratorError> {
+    let inputs = PlanInputs::from_env()?;
+    plan_with(config_path, &inputs)
+}
+
+/// Run the planner against explicit inputs: `plan`'s whole body behind an
+/// injectable environment, so tests drive file writing and outputs exactly.
 #[allow(
     clippy::too_many_lines,
     reason = "d2a shape: one complete plan command"
 )]
-fn plan(config_path: &Path) -> Result<(), GeneratorError> {
+fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    let scope = match scope_for_event()? {
+    let scope = match scope_for_event_values(&inputs.event, inputs.scope_override.as_deref())? {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
-    let root = env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-    let base = env::var("BASE_SHA").unwrap_or_default();
-    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
     let universe = parse_provider_set(&config.providers, "providers")?;
-    let effective = plan_providers(&universe)?;
-    let event_trusted = event_is_trusted();
-    let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
+    let effective = plan_providers_for_value(&inputs.providers, &universe)?;
+    let event_trusted = event_trusted_for_value(&inputs.event_trusted);
+    let selection = selection_for_diff(&inputs.root, &config, scope, &inputs.base, &inputs.head)?;
     let selected: BTreeSet<&str> = selection
         .units
         .iter()
@@ -1717,32 +1809,39 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         .map(|unit| unit.unit_id.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    if let Some(path) = env::var_os("VELNOR_SELECTION_FILE") {
+    // A non-empty selection always plans something or fails above ("selected
+    // but eligible on no provider"), so the selection's no-work reason is
+    // exactly the plan's. Checked before any artifact escapes: an unproven
+    // empty selection must fail here, not after writing a no-work file.
+    let no_work = planned_no_work_reason(&selection)?;
+    if let Some(path) = &inputs.selection_file {
         write_selection_file(
-            &PathBuf::from(path),
-            &base,
-            &head,
+            path,
+            &inputs.base,
+            &inputs.head,
             scope,
             &unit_ids,
             &full_units,
             &digest,
         )?;
     }
-    if let Some(output) = env::var_os("GITHUB_OUTPUT") {
-        let output_path = PathBuf::from(output);
+    if let Some(path) = &inputs.expected_file {
+        write_expected_work_file(path, &planned, &config, &inputs.base, &inputs.head)?;
+    }
+    if let Some(output_path) = &inputs.github_output {
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&output_path)
-            .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
+            .open(output_path)
+            .map_err(|error| GeneratorError::io("open GitHub output", output_path, &error))?;
         // `units` is plan JSON for the callers' `contains()` needles and the
         // required check's jq; `unit_ids` is the same affected set as CSV for
         // the selection file, whose `units=` field the runner parses as CSV.
         // The two channels carry one format each — never JSON into `units=`.
         for (name, value) in [
             ("scope", scope_name(scope).to_owned()),
-            ("base_sha", base.clone()),
-            ("head_sha", head.clone()),
+            ("base_sha", inputs.base.clone()),
+            ("head_sha", inputs.head.clone()),
             ("units", units_json.clone()),
             ("unit_ids", unit_ids.clone()),
             ("full_units", full_units.clone()),
@@ -1750,13 +1849,19 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             ("excluded", excluded_json.clone()),
         ] {
             writeln!(file, "{name}={value}")
-                .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
         }
         if let Some(reason) = &selection.fallback_reason {
             writeln!(file, "fallback_reason={reason}")
-                .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
         }
-        write_kind_matrices(&mut file, &config, &selection, &output_path)?;
+        if let Some(reason) = &no_work {
+            writeln!(file, "planned_no_work=true")
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+            writeln!(file, "no_work_reason={reason}")
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+        }
+        write_kind_matrices(&mut file, &config, &selection, output_path)?;
     }
     println!("scope={}", scope_name(scope));
     println!("units={units_json}");
@@ -1766,6 +1871,10 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
     println!("excluded={excluded_json}");
     if let Some(reason) = &selection.fallback_reason {
         println!("fallback_reason={reason}");
+    }
+    if let Some(reason) = &no_work {
+        println!("planned_no_work=true");
+        println!("no_work_reason={reason}");
     }
     Ok(())
 }
@@ -1823,14 +1932,6 @@ fn unit_matrix_output(unit: &CiUnit) -> String {
     format!("{}_matrix", unit.kind.as_str())
 }
 
-fn scope_for_event() -> Result<Option<String>, GeneratorError> {
-    let event = env::var("EVENT_NAME").unwrap_or_default();
-    let override_scope = env::var("CI_SCOPE_OVERRIDE")
-        .ok()
-        .filter(|value| !value.is_empty());
-    scope_for_event_values(&event, override_scope.as_deref())
-}
-
 pub(crate) fn scope_for_event_values(
     event: &str,
     override_scope: Option<&str>,
@@ -1875,11 +1976,6 @@ fn scope_name(scope: Scope) -> &'static str {
 /// environment the generated plan step renders (the dispatch `providers:`
 /// input on dispatch events, the automatic set otherwise). Absent means the
 /// full universe (local runs). Dispatch narrows, never widens.
-fn plan_providers(universe: &ProviderSet) -> Result<ProviderSet, GeneratorError> {
-    let value = env::var("VELNOR_PROVIDERS").unwrap_or_default();
-    plan_providers_for_value(&value, universe)
-}
-
 fn plan_providers_for_value(
     value: &str,
     universe: &ProviderSet,
@@ -1900,8 +1996,11 @@ fn plan_providers_for_value(
 /// Whether the current event is trusted. The generated plan step renders
 /// `VELNOR_EVENT_TRUSTED` from the controller-side verdict (fork and bot PRs
 /// are untrusted); local runs without the variable are trusted.
-fn event_is_trusted() -> bool {
-    env::var("VELNOR_EVENT_TRUSTED").map_or(true, |value| value.trim() != "false")
+/// Whether the plan's event is trusted, from the `VELNOR_EVENT_TRUSTED`
+/// environment: trusted unless explicitly `"false"`. Absent means trusted —
+/// local runs plan without trust narrowing, exactly as before.
+fn event_trusted_for_value(value: &str) -> bool {
+    value.trim() != "false"
 }
 
 #[cfg(test)]
@@ -2284,7 +2383,22 @@ pub(crate) fn run_units_with_selection_file(
     }
     let full_units = selection.full_units;
     let selected = select_units_for_job(selected, only_unit)?;
+    if selected.is_empty() {
+        // `select_units_for_job` already failed closed when a unit was
+        // requested: reaching here means nothing was asked for and the
+        // validated, SHA-bound artifact selects nothing. That is planner
+        // success with no work, reported explicitly — never silent, never
+        // an error.
+        println!("{}", no_work_report_line());
+        return Ok(());
+    }
     run_layers(root, &selected, scope, &full_units, phase)
+}
+
+/// The machine-readable line a validated empty selection reports instead of
+/// succeeding silently.
+fn no_work_report_line() -> &'static str {
+    "no_work_reason=CI selection artifact selects zero workload units; nothing to run"
 }
 
 fn select_units_for_job<'a>(
@@ -2310,6 +2424,10 @@ struct UnitSelection<'a> {
     /// Why the full set was chosen by fallback. `None` for requested-full,
     /// narrow, and empty selections; surfaced additively by `plan`.
     fallback_reason: Option<String>,
+    /// Why the planner selected zero workload units. `Some` exactly when
+    /// `units` is empty for a proven no-work plan; `None` for real-work
+    /// plans. The aggregate binds this reason to its explicit no-work pass.
+    no_work_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2323,6 +2441,108 @@ struct PlannedSelection {
 }
 
 pub(crate) const SELECTION_FILE_VERSION: &str = "2";
+
+/// The explicit no-work reason for a finished selection: the planner's
+/// recorded reason when it selected nothing, and `None` for real-work
+/// plans. An empty selection without a recorded reason is a plan error,
+/// never a silent pass: every selection arm that can go empty must prove
+/// why, so no future arm can silently become a no-work PASS. `plan` checks
+/// this before writing any artifact and surfaces the reason beside the
+/// `planned_no_work` marker; the aggregate binds it to its explicit
+/// no-work pass.
+fn planned_no_work_reason(selection: &UnitSelection<'_>) -> Result<Option<String>, GeneratorError> {
+    if !selection.units.is_empty() {
+        return Ok(None);
+    }
+    selection.no_work_reason.clone().map_or_else(
+        || {
+            Err(GeneratorError::usage(
+                "plan selected zero workload units without a recorded no-work reason",
+            ))
+        },
+        |reason| Ok(Some(reason)),
+    )
+}
+
+/// Write the planner's expected-work file: the aggregate's binding to this
+/// plan, in the [`crate::s2::reuse::ExpectedWorkFile`] schema. The aggregate
+/// scores exactly this document against the collected results, so the writer
+/// mirrors the runner's own rules:
+///
+/// - lanes: the unit's post-eligibility providers, in canonical provider
+///   order — one verdict per provider execution, matching what the required
+///   check already scores. A planned unit with no provider fails the plan
+///   closed: it is contradictory, not empty.
+/// - matrix: always empty. Units carry no per-unit matrix in the plan
+///   model, and an empty matrix means exactly one unmatrixed item — the
+///   unit's single verdict on that lane — never zero, never many.
+/// - required: always true. A selected, eligible unit must succeed.
+/// - `planned_skip`: never set. The planner excludes units from the plan with
+///   a declared reason instead of pre-skipping them; a reported skip still
+///   needs the planner's recorded reason to hold.
+/// - prerequisites: the in-plan `depends_on` edges only. Out-of-plan
+///   prerequisites neither gate the runner (`run_layers` filters edges
+///   outside the executed set) nor enter the aggregate's graph, so the
+///   aggregate scores the same graph the runner executed. An in-plan
+///   prerequisite that did not pass fails its dependents closed.
+/// - `planned_no_work`: set exactly when the plan is empty, with the
+///   [`planned_no_work_reason`] on the plan's outputs beside it.
+/// - `base_sha`/`head_sha`: the plan's transport identity, exactly as the
+///   plan saw it. The aggregate compares these against its own checkout and
+///   rejects any file from another plan — including a stale no-work file.
+fn write_expected_work_file(
+    path: &Path,
+    planned: &[PlannedUnit],
+    config: &CiConfig,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<(), GeneratorError> {
+    let depends: BTreeMap<&str, &[String]> = config
+        .unit
+        .iter()
+        .map(|unit| (unit.id.as_str(), unit.depends_on.as_slice()))
+        .collect();
+    let selected: BTreeSet<&str> = planned.iter().map(|unit| unit.unit_id.as_str()).collect();
+    let mut units = Vec::with_capacity(planned.len());
+    let mut prerequisites = BTreeMap::new();
+    for unit in planned {
+        if unit.providers.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "CI unit `{}` is selected but runnable on no provider",
+                unit.unit_id
+            )));
+        }
+        units.push(serde_json::json!({
+            "id": unit.unit_id,
+            "lanes": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
+            "matrix": Vec::<String>::new(),
+            "required": true,
+        }));
+        prerequisites.insert(
+            unit.unit_id.clone(),
+            depends
+                .get(unit.unit_id.as_str())
+                .map_or_else(Vec::new, |edges| {
+                    edges
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|dependency| selected.contains(dependency))
+                        .collect::<Vec<_>>()
+                }),
+        );
+    }
+    let document = serde_json::json!({
+        "planned_no_work": planned.is_empty(),
+        "units": units,
+        "prerequisites": prerequisites,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+    });
+    let text = serde_json::to_string_pretty(&document)
+        .map_err(|error| GeneratorError::usage(format!("serialize expected work: {error}")))?;
+    fs::write(path, format!("{text}\n"))
+        .map_err(|error| GeneratorError::io("write expected work", path, &error))
+}
 
 fn write_selection_file(
     path: &Path,
@@ -2451,6 +2671,16 @@ fn selected_units_for_diff<'a>(
     Ok(selection_for_diff(root, config, scope, base, head)?.units)
 }
 
+/// The no-work reason for an affected selection that classified to empty.
+/// Unknown paths fail closed to full before classification runs, so every
+/// remaining path was irrelevant to every workload unit, or release-scoped,
+/// and emptiness here is proven no-work. `None` for real-work selections.
+fn empty_selection_no_work_reason(selected: &BTreeSet<String>) -> Option<String> {
+    selected
+        .is_empty()
+        .then_some("no changed path selected a workload unit".to_owned())
+}
+
 fn selection_for_diff<'a>(
     root: &Path,
     config: &'a CiConfig,
@@ -2475,6 +2705,7 @@ fn selection_for_diff<'a>(
             units: Vec::new(),
             full_units: BTreeSet::new(),
             fallback_reason: None,
+            no_work_reason: Some("empty diff selects no workload units".to_owned()),
         });
     }
     if version_bump_matches(
@@ -2497,6 +2728,7 @@ fn selection_for_diff<'a>(
             units: ordered_units(&config.unit, Some(&selected))?,
             full_units: selected,
             fallback_reason: None,
+            no_work_reason: None,
         });
     }
     let watched: Vec<crate::s2::reuse::WatchedUnit> = config
@@ -2549,10 +2781,12 @@ fn selection_for_diff<'a>(
     }
     extend_workspace_checks_for_cargo_roots(config, &mut selected);
     let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
+    let no_work_reason = empty_selection_no_work_reason(&selected);
     Ok(UnitSelection {
         units: ordered_units(&config.unit, Some(&selected))?,
         full_units,
         fallback_reason: None,
+        no_work_reason,
     })
 }
 
@@ -2591,6 +2825,7 @@ fn full_selection<'a>(
         units: ordered_units(&config.unit, None)?,
         full_units: config.unit.iter().map(|unit| unit.id.clone()).collect(),
         fallback_reason: fallback_reason.map(ToOwned::to_owned),
+        no_work_reason: None,
     })
 }
 
@@ -5754,6 +5989,7 @@ workspace_check = true
                 .filter(|id| id != "swift-app")
                 .collect(),
             fallback_reason: full.fallback_reason,
+            no_work_reason: full.no_work_reason,
         };
         let units = narrowed
             .units
@@ -8338,5 +8574,1121 @@ workspace_check = true
         assert_eq!(response.status, 403);
         assert!(split_curl_response("no trailer here").is_none());
         assert!(split_curl_response("body\n__PREPARED_TOOL_STATUS:banana\n").is_none());
+    }
+
+    // S4 aggregate wiring cut: the planner's expected work binds the
+    // required-check aggregate, and a proven no-work plan passes via planner
+    // + aggregate only, with an explicit machine-readable reason.
+
+    /// A scratch directory for one S4 aggregate/run fixture.
+    fn s4_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-workflow-s4-{name}-{}-{}",
+            std::process::id(),
+            crate::unique_suffix()
+        ));
+        must(std::fs::create_dir_all(&dir), "create s4 fixture");
+        dir
+    }
+
+    /// The post-eligibility plan for `selection` on the hosted provider, in
+    /// plan order: what `plan` hands the expected-work writer.
+    fn s4_planned_for_selection(
+        config: &CiConfig,
+        selection: &UnitSelection<'_>,
+    ) -> Vec<PlannedUnit> {
+        let mut planned: Vec<PlannedUnit> = selection
+            .units
+            .iter()
+            .map(|unit| PlannedUnit {
+                unit_id: unit.id.clone(),
+                providers: BTreeSet::from([ProviderId::GithubHosted]),
+                command_digest: format!("s4-test-digest-{}", unit.id),
+            })
+            .collect();
+        assert!(
+            planned
+                .iter()
+                .all(|unit| config.unit.iter().any(|known| known.id == unit.unit_id)),
+            "planned units must come from the config",
+        );
+        planned.sort_by(|left, right| left.unit_id.cmp(&right.unit_id));
+        planned
+    }
+
+    /// The ambient checkout SHAs the aggregate command binds against, so
+    /// writer fixtures pass under any outer environment (mirrors
+    /// `s4_run_paths`).
+    fn s4_ambient_shas() -> (String, String) {
+        (
+            std::env::var("BASE_SHA").unwrap_or_default(),
+            std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+        )
+    }
+
+    /// The expected-work JSON the planner writes for `selection`, bound to
+    /// the ambient checkout SHAs.
+    fn s4_expected_for_selection(config: &CiConfig, selection: &UnitSelection<'_>) -> String {
+        let planned = s4_planned_for_selection(config, selection);
+        let dir = s4_dir("expected");
+        let path = dir.join("expected.json");
+        let (base, head) = s4_ambient_shas();
+        must(
+            write_expected_work_file(&path, &planned, config, &base, &head),
+            "write expected work",
+        );
+        let text = must(std::fs::read_to_string(&path), "read expected work");
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+        text
+    }
+
+    /// Score one expected/results pair against the ambient checkout SHAs —
+    /// the same binding the aggregate command verifies.
+    fn s4_score(
+        expected_json: &str,
+        results_json: &str,
+    ) -> Result<crate::s2::reuse::AggregateVerdict, String> {
+        let (base, head) = s4_ambient_shas();
+        crate::s2::reuse::aggregate_files(expected_json, results_json, &base, &head)
+    }
+
+    /// All-success results JSON covering every (unit, lane) the expected-work
+    /// JSON names. Tests mutate one entry to prove each fail-closed case.
+    fn s4_success_results_for(expected_json: &str) -> String {
+        let document: serde_json::Value =
+            must(serde_json::from_str(expected_json), "parse expected work");
+        let units = must_some(
+            document.get("units").and_then(serde_json::Value::as_array),
+            "expected units array",
+        );
+        let mut results = Vec::new();
+        for unit in units {
+            let id = must_some(
+                unit.get("id").and_then(serde_json::Value::as_str),
+                "expected unit id",
+            );
+            let lanes = must_some(
+                unit.get("lanes").and_then(serde_json::Value::as_array),
+                "expected unit lanes",
+            );
+            for lane in lanes {
+                results.push(serde_json::json!({
+                    "unit": id,
+                    "lane": must_some(lane.as_str(), "expected lane name"),
+                    "outcome": "success",
+                }));
+            }
+        }
+        must(
+            serde_json::to_string(&serde_json::json!({ "results": results })),
+            "serialize success results",
+        )
+    }
+
+    /// Rewrite one (unit, lane) entry's outcome, attaching extra fields
+    /// (`reason`, `reused_from`) beside it.
+    fn s4_set_result(
+        results_json: &str,
+        unit: &str,
+        lane: &str,
+        outcome: &str,
+        extra: &[(&str, &str)],
+    ) -> String {
+        let mut document: serde_json::Value =
+            must(serde_json::from_str(results_json), "parse results");
+        let results = must_some(
+            document
+                .get_mut("results")
+                .and_then(serde_json::Value::as_array_mut),
+            "results array",
+        );
+        let mut patched = false;
+        for entry in results.iter_mut() {
+            let same_unit = entry.get("unit").and_then(serde_json::Value::as_str) == Some(unit);
+            let same_lane = entry.get("lane").and_then(serde_json::Value::as_str) == Some(lane);
+            if same_unit && same_lane {
+                entry["outcome"] = serde_json::Value::String(outcome.to_owned());
+                for (key, value) in extra {
+                    entry[*key] = serde_json::Value::String((*value).to_owned());
+                }
+                patched = true;
+            }
+        }
+        assert!(patched, "missing result entry for {unit} {lane}");
+        must(serde_json::to_string(&document), "serialize results")
+    }
+
+    /// Drop one (unit, lane) entry from a results JSON document.
+    fn s4_drop_result(results_json: &str, unit: &str, lane: &str) -> String {
+        let mut document: serde_json::Value =
+            must(serde_json::from_str(results_json), "parse results");
+        let results = must_some(
+            document
+                .get_mut("results")
+                .and_then(serde_json::Value::as_array_mut),
+            "results array",
+        );
+        let before = results.len();
+        results.retain(|entry| {
+            entry.get("unit").and_then(serde_json::Value::as_str) != Some(unit)
+                || entry.get("lane").and_then(serde_json::Value::as_str) != Some(lane)
+        });
+        assert_eq!(
+            results.len() + 1,
+            before,
+            "missing result entry for {unit} {lane}"
+        );
+        must(serde_json::to_string(&document), "serialize results")
+    }
+
+    /// Score one expected/results pair through the aggregate CLI wiring and
+    /// return the core verdict beside the CLI exit, so tests pin both the
+    /// exact failure lines and the pass/fail behavior.
+    fn s4_verdict(
+        dir: &Path,
+        expected_json: &str,
+        results_json: &str,
+    ) -> (
+        crate::s2::reuse::AggregateVerdict,
+        Result<(), GeneratorError>,
+    ) {
+        let expected_path = dir.join("expected.json");
+        let results_path = dir.join("results.json");
+        must(
+            std::fs::write(&expected_path, expected_json),
+            "write expected work",
+        );
+        must(
+            std::fs::write(&results_path, results_json),
+            "write reported results",
+        );
+        let verdict = must(s4_score(expected_json, results_json), "score expected work");
+        let exit = aggregate_command(&expected_path, &results_path);
+        (verdict, exit)
+    }
+
+    /// The real-work binding input: an owned change's planned selection plus
+    /// the expected-work JSON the planner writes for it, on the hosted
+    /// provider.
+    fn s4_owned_binding(
+        name: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture(name, "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = s4_expected_for_selection(&config, &selection);
+        let results = s4_success_results_for(&expected);
+        Ok((root, expected, results))
+    }
+
+    const S4_RUN_CONFIG_TOML: &str = r#"schema = 3
+repository = "example/s4"
+profile = "s4-no-work"
+verified = true
+default_branch = "main"
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+
+[[unit]]
+id = "base"
+kind = "rust"
+watch = ["crates/base/**"]
+pr_commands = ["true"]
+full_commands = ["true"]
+platform = "linux-x64"
+trust = "untrusted-ok"
+"#;
+
+    /// A plan-level config mirroring `polyglot_selection_config`: a root
+    /// contributor document matches no watch, so the plan is proven no-work.
+    const S4_PLAN_CONFIG_TOML: &str = r#"schema = 3
+repository = "example/s4-plan"
+profile = "s4-plan-e2e"
+verified = true
+default_branch = "main"
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+
+[[unit]]
+id = "rust-alpha"
+kind = "rust"
+watch = ["Cargo.lock", "Cargo.toml", "crates/alpha/**/*.rs", "crates/alpha/Cargo.toml", "crates/alpha/src/**", "rust-toolchain.toml"]
+pr_commands = ["true"]
+full_commands = ["true"]
+platform = "linux-x64"
+trust = "untrusted-ok"
+
+[[unit]]
+id = "bun-web"
+kind = "bun"
+watch = ["web/**/*.ts", "web/**/*.tsx", "web/bun.lock", "web/package.json"]
+pr_commands = ["true"]
+full_commands = ["true"]
+platform = "linux-x64"
+trust = "untrusted-ok"
+
+[[unit]]
+id = "docker-construct"
+kind = "docker"
+watch = ["docker/construct/**"]
+pr_commands = ["true"]
+full_commands = ["true"]
+platform = "linux-x64"
+trust = "untrusted-ok"
+
+[[unit]]
+id = "swift-native"
+kind = "swift"
+watch = ["native/**/*.swift", "native/Package.swift", "native/Package.resolved"]
+pr_commands = ["true"]
+full_commands = ["true"]
+platform = "linux-x64"
+trust = "untrusted-ok"
+"#;
+
+    /// The scope the ambient job environment demands: trusted events run
+    /// full, everything else runs affected. The test adapts to the outer
+    /// environment instead of mutating process-global env.
+    fn s4_run_scope() -> Scope {
+        if event_requires_full_scope(&std::env::var("EVENT_NAME").unwrap_or_default()) {
+            Scope::Full
+        } else {
+            Scope::Affected
+        }
+    }
+
+    /// A runnable config plus a selection file matching the ambient SHAs, so
+    /// the SHA binding passes under any outer environment.
+    fn s4_run_paths(dir: &Path, scope: Scope, units: &str, full_units: &str) -> (PathBuf, PathBuf) {
+        let config_path = dir.join("project.toml");
+        must(
+            std::fs::write(&config_path, S4_RUN_CONFIG_TOML),
+            "write s4 config",
+        );
+        let selection_path = dir.join("velnor-ci-selection");
+        let base = std::env::var("BASE_SHA").unwrap_or_default();
+        let head = std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+        must(
+            write_selection_file(
+                &selection_path,
+                &base,
+                &head,
+                scope,
+                units,
+                full_units,
+                "s4-test-digest",
+            ),
+            "write s4 selection",
+        );
+        (config_path, selection_path)
+    }
+
+    #[test]
+    fn no_work_plan_passes_aggregate_with_explicit_reason() -> Result<(), Box<dyn Error>> {
+        // The S0 shape end to end: an unmatched root doc selects nothing,
+        // the planner records why, and planner success plus zero workload
+        // results passes the aggregate with a machine-readable reason.
+        let (root, base, head) = selection_git_fixture("s4-unmatched", "AGENTS.md")?;
+        let config = polyglot_selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(selection.units.is_empty() && selection.full_units.is_empty());
+        assert_eq!(
+            selection.no_work_reason.as_deref(),
+            Some("no changed path selected a workload unit"),
+        );
+        assert_eq!(
+            must(
+                planned_no_work_reason(&selection),
+                "record the no-work reason"
+            )
+            .as_deref(),
+            Some("no changed path selected a workload unit"),
+        );
+        let expected = s4_expected_for_selection(&config, &selection);
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+        );
+        assert_eq!(
+            document
+                .get("units")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+        );
+        let dir = s4_dir("no-work");
+        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"results": []}"#);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(exit.is_ok(), "no-work must pass the aggregate: {exit:?}");
+        assert_eq!(
+            explicit_no_work_line(&expected, &verdict).as_deref(),
+            Some(
+                "no_work_reason=planner selected zero workload units and no workload results were reported"
+            ),
+        );
+        // A stray report beside a no-work plan stays extra and ignored: the
+        // pass stands, and the reason names the ignored report.
+        let stray =
+            r#"{"results": [{"unit": "ghost", "lane": "github-hosted", "outcome": "success"}]}"#;
+        let (verdict, exit) = s4_verdict(&dir, &expected, stray);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            exit.is_ok(),
+            "extra results never red a no-work plan: {exit:?}"
+        );
+        assert_eq!(
+            explicit_no_work_line(&expected, &verdict).as_deref(),
+            Some(
+                "no_work_reason=planner selected zero workload units; 1 reported result ignored as outside the plan"
+            ),
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn empty_diff_carries_a_reason_while_unproven_empty_errors() -> Result<(), Box<dyn Error>> {
+        let (root, base, _) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        assert!(selection.units.is_empty());
+        assert_eq!(
+            must(
+                planned_no_work_reason(&selection),
+                "record the empty-diff reason"
+            )
+            .as_deref(),
+            Some("empty diff selects no workload units"),
+        );
+        std::fs::remove_dir_all(root)?;
+
+        // An empty selection that somehow carries no recorded reason is a
+        // plan error, never a silent no-work pass: no future selection arm
+        // can go empty without proving why. Reachable only by construction —
+        // every selection arm that can go empty records its reason.
+        let degenerate = UnitSelection {
+            units: Vec::new(),
+            full_units: BTreeSet::new(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let error = must_fail(
+            planned_no_work_reason(&degenerate),
+            "an unproven empty selection must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without a recorded no-work reason"),
+            "{error}",
+        );
+        // Real-work selections carry no no-work reason. (Eligibility
+        // narrowing lives in `plan`, which fails a selected-but-ineligible
+        // unit closed instead of narrowing it to no-work.)
+        let (root, base, head) = selection_git_fixture("s4-real", "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(!selection.units.is_empty());
+        assert!(must(
+            planned_no_work_reason(&selection),
+            "real work carries no no-work reason"
+        )
+        .is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn expected_work_writer_maps_units_lanes_and_in_plan_prerequisites(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture("s4-owned", "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units.clone()),
+            vec!["base", "app", "consumer"]
+        );
+        assert!(must(
+            planned_no_work_reason(&selection),
+            "real work carries no no-work reason"
+        )
+        .is_none());
+        let expected = s4_expected_for_selection(&config, &selection);
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+        );
+        let (ambient_base, ambient_head) = s4_ambient_shas();
+        assert_eq!(
+            document.get("base_sha").and_then(serde_json::Value::as_str),
+            Some(ambient_base.as_str()),
+            "the writer binds the plan's base SHA",
+        );
+        assert_eq!(
+            document.get("head_sha").and_then(serde_json::Value::as_str),
+            Some(ambient_head.as_str()),
+            "the writer binds the plan's head SHA",
+        );
+        let units = document
+            .get("units")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("the writer must emit a units array")?;
+        assert_eq!(units.len(), 3);
+        for unit in units {
+            assert_eq!(
+                unit.get("lanes"),
+                Some(&serde_json::json!(["github-hosted"])),
+                "every eligible provider must hear a verdict",
+            );
+            assert_eq!(unit.get("matrix"), Some(&serde_json::json!([])));
+            assert_eq!(
+                unit.get("required").and_then(serde_json::Value::as_bool),
+                Some(true),
+            );
+            assert!(
+                unit.get("planned_skip").is_none(),
+                "the planner excludes with a declared reason instead of pre-skipping",
+            );
+        }
+        assert_eq!(
+            document.get("prerequisites"),
+            Some(&serde_json::json!({
+                "app": ["base"],
+                "base": [],
+                "consumer": ["app"],
+            })),
+        );
+        std::fs::remove_dir_all(root)?;
+
+        // Dependency skipping follows the executed set: a prerequisite the
+        // plan did not select neither gates the runner (`run_layers` filters
+        // out-of-plan edges) nor appears in the aggregate's graph, so the
+        // dependent's own success holds.
+        let config = selection_config();
+        let planned = vec![PlannedUnit {
+            unit_id: "app".to_owned(),
+            providers: BTreeSet::from([ProviderId::GithubHosted]),
+            command_digest: "s4-test-digest".to_owned(),
+        }];
+        let dir = s4_dir("in-plan-prereqs");
+        let path = dir.join("expected.json");
+        let (base, head) = s4_ambient_shas();
+        must(
+            write_expected_work_file(&path, &planned, &config, &base, &head),
+            "write expected work",
+        );
+        let expected = must(std::fs::read_to_string(&path), "read expected work");
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document.get("prerequisites"),
+            Some(&serde_json::json!({ "app": [] })),
+            "out-of-plan prerequisites leave the expected graph",
+        );
+        let results = s4_success_results_for(&expected);
+        let verdict = s4_score(&expected, &results)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_but_missing_result_fails_aggregate() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-missing")?;
+        // Sanity: full coverage passes before one verdict goes missing.
+        let clean = s4_score(&expected, &results)?;
+        assert!(clean.passed, "failures: {:?}", clean.failures);
+        let results = s4_drop_result(&results, "consumer", "github-hosted");
+        let dir = s4_dir("missing");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("missing result for consumer github-hosted")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(exit.is_err(), "a missing result must fail the aggregate");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unexpected_skip_fails_aggregate() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-skip")?;
+        let results = s4_set_result(
+            &results,
+            "app",
+            "github-hosted",
+            "skipped",
+            &[("reason", "runner drained the queue")],
+        );
+        let dir = s4_dir("skip");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("unexpected skip of app github-hosted")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(exit.is_err(), "an unplanned skip must fail the aggregate");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn partial_matrix_fails_while_empty_matrix_expects_one_verdict() -> Result<(), Box<dyn Error>> {
+        // A matrixed unit must report every entry: one missing entry fails
+        // the aggregate as an incomplete matrix.
+        let (base, head) = s4_ambient_shas();
+        let expected = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "planned_no_work": false,
+                "units": [{"id": "shard", "lanes": ["github-hosted"], "matrix": ["a", "b"], "required": true}],
+                "prerequisites": {"shard": []},
+            })),
+            "serialize matrixed plan",
+        );
+        let results = r#"{"results": [{"unit": "shard", "lane": "github-hosted", "matrix": "a", "outcome": "success"}]}"#;
+        let dir = s4_dir("matrix");
+        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("missing result for shard github-hosted[b]")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(
+            verdict
+                .explanations
+                .iter()
+                .any(|explanation| explanation.detail.contains("incomplete matrix")),
+            "the explanation must name the incomplete matrix",
+        );
+        assert!(exit.is_err(), "a partial matrix must fail the aggregate");
+
+        // The empty-matrix rule: no matrix means exactly one unmatrixed
+        // item — the unit's single verdict — never zero, never many.
+        let config = selection_config();
+        let planned = vec![PlannedUnit {
+            unit_id: "base".to_owned(),
+            providers: BTreeSet::from([ProviderId::GithubHosted]),
+            command_digest: "s4-test-digest".to_owned(),
+        }];
+        let path = dir.join("single.json");
+        must(
+            write_expected_work_file(&path, &planned, &config, &base, &head),
+            "write expected work",
+        );
+        let expected = must(std::fs::read_to_string(&path), "read expected work");
+        let results =
+            r#"{"results": [{"unit": "base", "lane": "github-hosted", "outcome": "success"}]}"#;
+        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            exit.is_ok(),
+            "one verdict satisfies an empty matrix: {exit:?}"
+        );
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_result_fails_aggregate() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-cancelled")?;
+        let results = s4_set_result(&results, "base", "github-hosted", "cancelled", &[]);
+        let dir = s4_dir("cancelled");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("cancelled required work base github-hosted")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(exit.is_err(), "a cancellation has no verdict and must fail");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_prerequisite_blocks_its_dependent() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-prereq")?;
+        let results = s4_set_result(&results, "base", "github-hosted", "failure", &[]);
+        let dir = s4_dir("prereq");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("prerequisite `base` of `app` did not pass")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(
+            exit.is_err(),
+            "a success behind a failed prerequisite proves nothing"
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unplanned_reports_never_green_or_red_planned_work() -> Result<(), Box<dyn Error>> {
+        // Extra reports are noted and ignored beside real work too: they
+        // green nothing and red nothing — not even an extra failure.
+        let (root, expected, results) = s4_owned_binding("s4-extra")?;
+        let mut document: serde_json::Value = serde_json::from_str(&results)?;
+        document["results"]
+            .as_array_mut()
+            .ok_or("results array")?
+            .push(
+                serde_json::json!({"unit": "ghost", "lane": "github-hosted", "outcome": "failure"}),
+            );
+        let results = must(serde_json::to_string(&document), "serialize results");
+        let verdict = s4_score(&expected, &results)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            verdict
+                .explanations
+                .iter()
+                .any(|explanation| explanation.disposition == crate::s2::reuse::Disposition::Extra),
+            "the stray report must be noted as extra",
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn planner_failure_leaves_no_green_path() -> Result<(), Box<dyn Error>> {
+        // No plan artifacts, no green: missing files are hard errors, never
+        // an empty pass.
+        let dir = s4_dir("planner-failure");
+        let missing = dir.join("absent.json");
+        let error = must_fail(
+            aggregate_command(&missing, &missing),
+            "a missing expected-work file must fail",
+        );
+        assert!(error.to_string().contains("read expected work"), "{error}");
+        let expected_path = dir.join("expected.json");
+        must(
+            std::fs::write(&expected_path, r#"{"planned_no_work": true, "units": []}"#),
+            "write expected",
+        );
+        let error = must_fail(
+            aggregate_command(&expected_path, &missing),
+            "missing results must fail",
+        );
+        assert!(
+            error.to_string().contains("read reported results"),
+            "{error}"
+        );
+
+        let scope = s4_run_scope();
+        let (config_path, _) = s4_run_paths(&dir, scope, "", "");
+        let error = must_fail(
+            run_units_with_selection_file(&dir, &config_path, scope, None, None, &missing),
+            "a missing selection artifact must fail",
+        );
+        assert!(error.to_string().contains("read CI selection"), "{error}");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_plan_fails_closed() -> Result<(), Box<dyn Error>> {
+        // An unparseable plan is a usage error, never a pass.
+        let error = must_fail(
+            crate::s2::reuse::aggregate_files("{not json", "{}", "", "")
+                .map_err(GeneratorError::usage),
+            "an unparseable plan must fail",
+        );
+        assert!(error.to_string().contains("not valid JSON"), "{error}");
+        let dir = s4_dir("invalid");
+        let expected_path = dir.join("expected.json");
+        let results_path = dir.join("results.json");
+        must(
+            std::fs::write(&expected_path, "{not json"),
+            "write bad expected",
+        );
+        must(std::fs::write(&results_path, "{}"), "write results");
+        let error = must_fail(
+            aggregate_command(&expected_path, &results_path),
+            "an unparseable plan must fail the command",
+        );
+        assert!(error.to_string().contains("not valid JSON"), "{error}");
+
+        // A contradictory plan — the no-work marker beside listed units —
+        // fails inside the verdict.
+        let (base, head) = s4_ambient_shas();
+        let expected = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "planned_no_work": true,
+                "units": [{"id": "base", "lanes": ["github-hosted"]}],
+            })),
+            "serialize contradictory plan",
+        );
+        let verdict = s4_score(&expected, r#"{"results": []}"#)?;
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("contradictory")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+
+        // So does unmarked emptiness: zero units without the explicit
+        // marker is a broken plan, not proven no-work.
+        let expected = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "units": [],
+            })),
+            "serialize unmarked plan",
+        );
+        let verdict = s4_score(&expected, r#"{"results": []}"#)?;
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("without the explicit no-work marker")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+
+        // And a malformed selection artifact fails the runner before any
+        // unit — or any no-work line — runs.
+        let scope = s4_run_scope();
+        let (config_path, _) = s4_run_paths(&dir, scope, "", "");
+        let bad_selection = dir.join("bad-selection");
+        must(
+            std::fs::write(&bad_selection, "version=99\n"),
+            "write bad selection",
+        );
+        let error = must_fail(
+            run_units_with_selection_file(&dir, &config_path, scope, None, None, &bad_selection),
+            "a malformed selection artifact must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported CI selection artifact version"),
+            "{error}",
+        );
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reused_evidence_still_passes_aggregate() -> Result<(), Box<dyn Error>> {
+        // A success backed by producing evidence holds exactly like an
+        // executed one: the wiring must not regress reuse acceptance.
+        let (root, expected, results) = s4_owned_binding("s4-reuse")?;
+        let results = s4_set_result(
+            &results,
+            "app",
+            "github-hosted",
+            "success",
+            &[("reused_from", "run-7f3a")],
+        );
+        let dir = s4_dir("reuse");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(exit.is_ok(), "reused evidence must still pass: {exit:?}");
+        assert!(
+            verdict.explanations.iter().any(|explanation| explanation.disposition
+                == crate::s2::reuse::Disposition::Reused),
+            "the reused verdict must be recorded as reused",
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_empty_selection_reports_explicit_no_work() -> Result<(), Box<dyn Error>> {
+        // A validated empty selection succeeds explicitly: the machine-
+        // readable reason, not a silent pass and not an error.
+        assert_eq!(
+            no_work_report_line(),
+            "no_work_reason=CI selection artifact selects zero workload units; nothing to run",
+        );
+        let dir = s4_dir("run-no-work");
+        let scope = s4_run_scope();
+        let (config_path, selection_path) = s4_run_paths(&dir, scope, "", "");
+        must(
+            run_units_with_selection_file(&dir, &config_path, scope, None, None, &selection_path)
+                .map_err(|error| error.to_string()),
+            "an empty selection must succeed explicitly",
+        );
+        // Asking for a unit the plan did not select is never no-work.
+        let error = must_fail(
+            run_units_with_selection_file(
+                &dir,
+                &config_path,
+                scope,
+                Some("base"),
+                None,
+                &selection_path,
+            ),
+            "an unselected unit must fail closed",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not include requested unit `base`"),
+            "{error}",
+        );
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_no_work_line_stays_silent_for_real_work() -> Result<(), Box<dyn Error>> {
+        // Real-work verdicts print the audit report only: the no-work line
+        // never reshapes their bytes.
+        let (root, expected, results) = s4_owned_binding("s4-silence")?;
+        let verdict = s4_score(&expected, &results)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(explicit_no_work_line(&expected, &verdict).is_none());
+        // Failed no-work verdicts stay silent too: only a PASS carries the
+        // machine-readable reason.
+        let (base, head) = s4_ambient_shas();
+        let unmarked = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "units": [],
+            })),
+            "serialize unmarked plan",
+        );
+        let verdict = s4_score(&unmarked, r#"{"results": []}"#)?;
+        assert!(!verdict.passed);
+        assert!(explicit_no_work_line(&unmarked, &verdict).is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn planned_but_runnable_nowhere_fails_the_plan_closed() {
+        // A planned unit with no provider is a contradictory plan, not an
+        // empty one: the writer fails instead of emitting a unit the
+        // aggregate could never hear from. Unreachable after eligibility
+        // (which fails such units with its own error), proven here so the
+        // guard cannot silently rot.
+        let config = selection_config();
+        let planned = vec![PlannedUnit {
+            unit_id: "app".to_owned(),
+            providers: ProviderSet::new(),
+            command_digest: "s4-test-digest".to_owned(),
+        }];
+        let dir = s4_dir("nowhere");
+        let (base, head) = s4_ambient_shas();
+        let error = must_fail(
+            write_expected_work_file(&dir.join("expected.json"), &planned, &config, &base, &head),
+            "a unit runnable nowhere must fail the plan",
+        );
+        assert!(
+            error.to_string().contains("runnable on no provider"),
+            "{error}",
+        );
+        // Multi-provider fanout renders in canonical provider order.
+        let planned = vec![PlannedUnit {
+            unit_id: "app".to_owned(),
+            providers: BTreeSet::from([ProviderId::Velnor, ProviderId::GithubHosted]),
+            command_digest: "s4-test-digest".to_owned(),
+        }];
+        let path = dir.join("fanout.json");
+        must(
+            write_expected_work_file(&path, &planned, &config, &base, &head),
+            "write expected work",
+        );
+        let expected = must(std::fs::read_to_string(&path), "read expected work");
+        let document: serde_json::Value = must(serde_json::from_str(&expected), "parse expected");
+        assert_eq!(
+            document
+                .get("units")
+                .and_then(|units| units.get(0))
+                .and_then(|unit| unit.get("lanes")),
+            Some(&serde_json::json!(["github-hosted", "velnor"])),
+        );
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+    }
+
+    #[test]
+    fn stale_expected_work_fails_the_aggregate_closed() -> Result<(), Box<dyn Error>> {
+        // A no-work file from an earlier run paired with zero results must
+        // FAIL, never PASS: the identity binding — not artifact threading —
+        // proves the file is this plan's. The stale SHAs derive from the
+        // ambient checkout so the mismatch holds under any outer env.
+        let (ambient_base, ambient_head) = s4_ambient_shas();
+        let stale = must(
+            serde_json::to_string(&serde_json::json!({
+                "planned_no_work": true,
+                "units": [],
+                "prerequisites": {},
+                "base_sha": format!("{ambient_base}-earlier-run"),
+                "head_sha": format!("{ambient_head}-earlier-run"),
+            })),
+            "serialize stale plan",
+        );
+        let error = must_fail(
+            s4_score(&stale, r#"{"results": []}"#).map_err(GeneratorError::usage),
+            "a stale no-work file must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not match this aggregate checkout"),
+            "{error}",
+        );
+        // The command binds the same ambient SHAs: the stale file fails the
+        // CLI exit too, as does a file with no identity at all.
+        let dir = s4_dir("stale");
+        let expected_path = dir.join("expected.json");
+        let results_path = dir.join("results.json");
+        must(
+            std::fs::write(&expected_path, &stale),
+            "write stale expected",
+        );
+        must(
+            std::fs::write(&results_path, r#"{"results": []}"#),
+            "write results",
+        );
+        let error = must_fail(
+            aggregate_command(&expected_path, &results_path),
+            "a stale no-work file must fail the command",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not match this aggregate checkout"),
+            "{error}",
+        );
+        must(
+            std::fs::write(&expected_path, r#"{"planned_no_work": true, "units": []}"#),
+            "write unbound expected",
+        );
+        let error = must_fail(
+            aggregate_command(&expected_path, &results_path),
+            "an unbound file must fail the command",
+        );
+        assert!(error.to_string().contains("missing base_sha"), "{error}");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plan_writes_expected_work_file_and_no_work_marker() -> Result<(), Box<dyn Error>> {
+        // The planner end to end: a no-work diff writes the expected-work
+        // file — identity, marker, and empty units — and emits the marker to
+        // `GITHUB_OUTPUT`. Driven through injected env, never process-global
+        // mutation (which parallel tests also read).
+        let (root, base, head) = selection_git_fixture("s4-plan-e2e", "AGENTS.md")?;
+        let dir = s4_dir("plan-e2e");
+        let config_path = dir.join("project.toml");
+        must(
+            std::fs::write(&config_path, S4_PLAN_CONFIG_TOML),
+            "write s4 plan config",
+        );
+        let expected_path = dir.join("expected.json");
+        let output_path = dir.join("github-output");
+        must(
+            plan_with(
+                &config_path,
+                &PlanInputs {
+                    root: root.clone(),
+                    event: "pull_request".to_owned(),
+                    scope_override: None,
+                    base: base.clone(),
+                    head: head.clone(),
+                    providers: String::new(),
+                    event_trusted: String::new(),
+                    selection_file: None,
+                    expected_file: Some(expected_path.clone()),
+                    github_output: Some(output_path.clone()),
+                },
+            ),
+            "plan the no-work diff",
+        );
+        let expected = must(
+            std::fs::read_to_string(&expected_path),
+            "read expected work",
+        );
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document.get("base_sha").and_then(serde_json::Value::as_str),
+            Some(base.as_str()),
+            "the file binds the plan's base SHA",
+        );
+        assert_eq!(
+            document.get("head_sha").and_then(serde_json::Value::as_str),
+            Some(head.as_str()),
+            "the file binds the plan's head SHA",
+        );
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+        );
+        assert_eq!(
+            document
+                .get("units")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+        );
+        // The bound file scores against the same SHAs: proven no-work plus
+        // zero results passes with the machine-readable reason.
+        let verdict =
+            crate::s2::reuse::aggregate_files(&expected, r#"{"results": []}"#, &base, &head)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert_eq!(
+            explicit_no_work_line(&expected, &verdict).as_deref(),
+            Some(
+                "no_work_reason=planner selected zero workload units and no workload results were reported"
+            ),
+        );
+        let outputs = must(std::fs::read_to_string(&output_path), "read github output");
+        assert!(outputs.contains("planned_no_work=true"), "{outputs}");
+        assert!(
+            outputs.contains("no_work_reason=no changed path selected a workload unit"),
+            "{outputs}",
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
