@@ -1676,7 +1676,7 @@ fn render_identity_debian_job(
     let metadata_artifact = release_metadata_artifact_name(preview);
     let (metadata_path, metadata_dir) = release_metadata_staging();
     let mut steps = format!(
-        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: {metadata_path}\n",
+        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Install cross C toolchain\n        run: |\n          set -euo pipefail\n          if [ \"${{{{ matrix.arch }}}}\" = \"arm64\" ]; then\n            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or\n            # vendored openssl (sys/types.h / bits/libc-header-start.h).\n            sudo apt-get update\n            sudo apt-get install -y --no-install-recommends \\\n              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          fi\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: {metadata_path}\n",
     );
     if preview {
         let _ = writeln!(
@@ -4019,7 +4019,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let matrix_runner = release_matrix_runner(config, &release.targets);
     let _ = writeln!(
         output,
-        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Checkout\n        uses: {publish_checkout}\n        with:\n          persist-credentials: false\n{tag_check}      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
+        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Install cross C toolchain\n        run: |\n          set -euo pipefail\n          if [ \"${{{{ matrix.target }}}}\" = \"aarch64-unknown-linux-gnu\" ]; then\n            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or\n            # vendored openssl (sys/types.h / bits/libc-header-start.h).\n            sudo apt-get update\n            sudo apt-get install -y --no-install-recommends \\\n              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          fi\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Checkout\n        uses: {publish_checkout}\n        with:\n          persist-credentials: false\n{tag_check}      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
         yaml_scalar(&release.package),
@@ -6107,7 +6107,7 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "9bac3040c77b0dc9fb9acf31cabb426f20a8da419f86f976d34819b0c1bc5e75",
+                "d9a4ed35948eb7cf0f14494d0cccb03ea8650d0fc388de92364f3cc3ee5b44ca",
             ),
             (
                 "preview.yml",
@@ -6230,11 +6230,11 @@ cp "$record" "$out"
             // input are gone; the build gate declares tag scope statically.
             (
                 "release.yml",
-                "f990cc992dfdf2cd8c788c96b72b937498ce3e163b55271ebcb7933371127593",
+                "d5dfa340f64456d0b29e1f1d13698d353aaa888ec0b32d0f24404bae6eb208aa",
             ),
             (
                 "preview.yml",
-                "2986fc55fa37a3ca35bd370e12c328db78f302f299e7dc9859c2396d7f9137fc",
+                "6bcd1410095549da56ec0175c8aa6736ea525659b833126c3a76992e1e5d7317",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -6284,6 +6284,65 @@ cp "$record" "$out"
         assert!(
             !debian.contains("path: metadata\n"),
             "metadata must not enter the source checkout: {debian}"
+        );
+    }
+
+    #[test]
+    fn identity_debian_job_installs_the_cross_c_toolchain_for_arm64() {
+        // The arm64 row cross-compiles on the x64 runner, so without the
+        // cross C toolchain aws-lc-sys/openssl-sys fail to find
+        // aarch64-linux-gnu-gcc. Mirrors the guest-payload pattern.
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        for workflow in [
+            super::render_preview(&config, Some(release)),
+            super::render_release(&config, release),
+        ] {
+            let debian = yaml_job(&workflow, "debian");
+            assert!(
+                debian.contains("- name: Install cross C toolchain"),
+                "missing cross toolchain step:\n{debian}"
+            );
+            assert!(
+                debian.contains("[ \"${{ matrix.arch }}\" = \"arm64\" ]"),
+                "cross toolchain must gate on the arm64 row:\n{debian}"
+            );
+            assert!(
+                debian.contains(
+                    "gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross"
+                ),
+                "cross toolchain must carry the aarch64 sysroot:\n{debian}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_build_job_installs_the_cross_c_toolchain_for_arm64() {
+        // The aarch64 row cross-compiles on the x64 runner, so without the
+        // cross C toolchain aws-lc-sys/openssl-sys fail to find
+        // aarch64-linux-gnu-gcc. The build matrix keys rows by target, not
+        // arch, so the gate matches the full Linux target triple and macOS
+        // rows skip apt entirely.
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let build = yaml_job(&workflow, "build");
+        assert!(
+            build.contains("- name: Install cross C toolchain"),
+            "missing cross toolchain step:\n{build}"
+        );
+        assert!(
+            build.contains("[ \"${{ matrix.target }}\" = \"aarch64-unknown-linux-gnu\" ]"),
+            "cross toolchain must gate on the aarch64 Linux target:\n{build}"
+        );
+        assert!(
+            build
+                .contains("gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross"),
+            "cross toolchain must carry the aarch64 sysroot:\n{build}"
         );
     }
 

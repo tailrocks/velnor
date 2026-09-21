@@ -2397,6 +2397,16 @@ jobs:
           version: v0.16.0
       - name: Add Rust target
         run: rustup target add "${{ matrix.target }}"
+      - name: Install cross C toolchain
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or
+            # vendored openssl (sys/types.h / bits/libc-header-start.h).
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
+          fi
       - name: Build release binary
         env:
           CARGO_INCREMENTAL: "0"
@@ -3228,6 +3238,16 @@ jobs:
           mold --version | grep -F "$MOLD_VERSION"
       - name: Add Rust target
         run: rustup target add "$TARGET"
+      - name: Install cross C toolchain
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or
+            # vendored openssl (sys/types.h / bits/libc-header-start.h).
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
+          fi
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:

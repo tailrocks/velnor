@@ -215,6 +215,17 @@ impl PolicyReport {
 /// Usage errors, unreadable inputs, and a failed evaluation (the rendered
 /// report is printed first; the error names the failing rules).
 pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    run_cli_with_env(arguments, &|name| env::var_os(name))
+}
+
+/// `run_cli` with an injectable environment lookup. Production passes
+/// `env::var_os`; tests pass a fixed map so cases that must observe a
+/// missing variable stay hermetic under any ambient environment (mutating
+/// process env in-process is racy under parallel tests).
+fn run_cli_with_env(
+    arguments: &[OsString],
+    getenv: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<(), GeneratorError> {
     let mut options = BTreeMap::new();
     let mut build_pin = false;
     let mut index = 0;
@@ -263,14 +274,14 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let root = options
         .get("workflow-root")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("WORKFLOW_ROOT").map(PathBuf::from))
-        .or_else(|| env::var_os("GITHUB_WORKSPACE").map(PathBuf::from))
+        .or_else(|| getenv("WORKFLOW_ROOT").map(PathBuf::from))
+        .or_else(|| getenv("GITHUB_WORKSPACE").map(PathBuf::from))
         .or_else(|| env::current_dir().ok())
         .ok_or_else(|| GeneratorError::usage("resolve workflow root"))?;
     let base_revision = options
         .get("base-revision")
         .cloned()
-        .or_else(|| env::var(BASE_REVISION_ENV).ok())
+        .or_else(|| getenv(BASE_REVISION_ENV).and_then(|value| value.into_string().ok()))
         .ok_or_else(|| {
             GeneratorError::usage(format!(
                 "--base-revision or {BASE_REVISION_ENV} is required: the validator revision the base branch runs"
@@ -284,8 +295,10 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     });
-    let candidate_manifest =
-        candidate_manifest_source(options.get("candidate-manifest").map(String::as_str));
+    let candidate_manifest = candidate_manifest_source_with_env(
+        options.get("candidate-manifest").map(String::as_str),
+        getenv,
+    );
     let report = evaluate(&PolicyOptions {
         root,
         head_sha: options.get("head-sha").cloned(),
@@ -313,14 +326,17 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
 /// Resolve the candidate manifest the policy run binds env-slot candidates
 /// to: the `--candidate-manifest` flag wins (an empty value disables the
 /// binding), else [`VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV`], else none.
-fn candidate_manifest_source(cli: Option<&str>) -> Option<PathBuf> {
+fn candidate_manifest_source_with_env(
+    cli: Option<&str>,
+    getenv: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
     if let Some(flag) = cli {
         if flag.is_empty() {
             return None;
         }
         return Some(PathBuf::from(flag));
     }
-    env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
+    getenv(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
@@ -1084,14 +1100,32 @@ impl PinnedBinaryLookup {
         build_pin: bool,
         candidate_manifest: Option<PathBuf>,
     ) -> Self {
+        Self::from_env_with(revision, build_pin, candidate_manifest, &|name| {
+            env::var_os(name)
+        })
+    }
+
+    /// `from_env` with an injectable environment lookup. Production passes
+    /// `env::var_os`; tests pass a fixed map so cases that must observe a
+    /// missing (or present) variable stay hermetic under any ambient
+    /// environment (mutating process env in-process is racy under parallel
+    /// tests).
+    pub(crate) fn from_env_with(
+        revision: &str,
+        build_pin: bool,
+        candidate_manifest: Option<PathBuf>,
+        getenv: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Self {
         Self {
-            pinned_binary: env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
-            search_path: env::var_os("PATH"),
+            pinned_binary: getenv(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            search_path: getenv("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
-                || env::var("CARGO_NET_OFFLINE").is_ok_and(|value| value == "true"),
+                || getenv("CARGO_NET_OFFLINE")
+                    .and_then(|value| value.into_string().ok())
+                    .is_some_and(|value| value == "true"),
             candidate_manifest: candidate_manifest.or_else(|| {
-                env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
+                getenv(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from)
             }),
