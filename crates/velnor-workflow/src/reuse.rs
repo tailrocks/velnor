@@ -2803,12 +2803,14 @@ mod tests {
             &["bun run build"],
         )];
         let compiled = compile_ownership(&solo)?;
-        let PathVerdict::Unknown { reason } = classify_path(&compiled, "AGENTS.md") else {
-            panic!("one opaque unit cannot narrow");
-        };
         assert!(
-            reason.contains("missing contract") && reason.contains("for unit `bun-web`"),
-            "the all-opaque reason names the missing contract key: {reason:?}"
+            matches!(
+                classify_path(&compiled, "AGENTS.md"),
+                PathVerdict::Unknown { reason }
+                if reason.contains("missing contract")
+                    && reason.contains("for unit `bun-web`")
+            ),
+            "the all-opaque reason names the missing contract key"
         );
         Ok(())
     }

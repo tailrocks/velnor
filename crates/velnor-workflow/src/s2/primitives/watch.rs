@@ -596,12 +596,12 @@ mod tests {
         ))?;
         let mut bad_args = BTreeMap::new();
         bad_args.insert("reads".to_owned(), bad);
-        let Err(error) = Primitive::render(&WatchGraph, &ctx, &Args(&bad_args)) else {
-            panic!("a mistyped contract must fail the render");
-        };
         assert!(
-            error.to_string().contains("takes type"),
-            "the render names the valid contract types: {error}"
+            matches!(
+                Primitive::render(&WatchGraph, &ctx, &Args(&bad_args)),
+                Err(error) if error.to_string().contains("takes type")
+            ),
+            "a mistyped contract fails the render naming the valid types"
         );
 
         fs::remove_dir_all(root)?;
