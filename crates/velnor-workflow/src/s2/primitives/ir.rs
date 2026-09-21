@@ -1703,6 +1703,45 @@ mod tests {
     }
 
     #[test]
+    fn xcode_probe_selects_through_globs_without_ls_pipelines() {
+        let script = WorkflowIr::xcode_probe_script("26.6");
+        for forbidden in ["ls ", "| grep", "grep ", "| sort", "| tail"] {
+            assert!(
+                !script.contains(forbidden),
+                "the probe must select through globs, never by parsing ls ({forbidden}): {script}"
+            );
+        }
+        assert!(
+            script.contains("for candidate in \"/Applications/Xcode_${want}\"*.app")
+                && script.contains("for candidate in /Applications/*"),
+            "glob loops select the newest prefix match and list the install diagnostic: {script}"
+        );
+        // Selection order is exact match, newest prefix match, matching
+        // unversioned install, error: the staged behavioral tests prove the
+        // behavior; the branch order pins the shape.
+        let exact = must_some(
+            script.find("if [ -d \"/Applications/Xcode_${want}.app\" ]; then"),
+            "probe keeps its exact-match branch",
+        );
+        let prefix = must_some(
+            script.find("for candidate in \"/Applications/Xcode_${want}\"*.app"),
+            "probe keeps its prefix-match branch",
+        );
+        let unversioned = must_some(
+            script.find("Xcode.app/Contents/Developer/usr/bin/xcodebuild -version"),
+            "probe keeps its unversioned fallback",
+        );
+        let error = must_some(
+            script.find("::error::no installed Xcode matches pin"),
+            "probe keeps its error diagnostic",
+        );
+        assert!(
+            exact < prefix && prefix < unversioned && unversioned < error,
+            "probe branches keep selection order: {script}"
+        );
+    }
+
+    #[test]
     fn swift_without_xcode_pin_renders_no_probe_step() {
         let mut swift = rust_unit("swift-package-native", "native");
         swift.kind = UnitKind::Swift;
@@ -7773,10 +7812,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     /// The `Select Xcode` probe body, factored out so behavioral tests
-    /// execute the exact script the workflow renders.
+    /// execute the exact script the workflow renders. Selection never parses
+    /// `ls` output: the glob expands in sorted order, so the last directory
+    /// assigned is the newest prefix match, exactly what `sort | tail -n 1`
+    /// over `ls -d` computed. The `[ -d ]` guard skips the unexpanded
+    /// literal when nothing matches (and any non-directory a stray `*.app`
+    /// file would otherwise select as a bogus `DEVELOPER_DIR`).
     fn xcode_probe_script(pin: &str) -> String {
         format!(
-            "set -euo pipefail\nwant=\"{pin}\"\ndir=\"\"\nif [ -d \"/Applications/Xcode_${{want}}.app\" ]; then\n  dir=\"/Applications/Xcode_${{want}}.app\"\nelse\n  dir=\"$(ls -d /Applications/Xcode_${{want}}*.app 2>/dev/null | sort | tail -n 1 || true)\"\nfi\nif [ -z \"$dir\" ] && [ -d /Applications/Xcode.app ]; then\n  found=\"$(/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version 2>/dev/null | head -n 1 | awk '{{print $2}}' || true)\"\n  case \"$found\" in\n    \"$want\"|\"$want\".*) dir=/Applications/Xcode.app ;;\n  esac\nfi\nif [ -z \"$dir\" ]; then\n  echo \"::error::no installed Xcode matches pin $want\" >&2\n  ls /Applications | grep -i xcode || true\n  exit 1\nfi\necho \"DEVELOPER_DIR=$dir/Contents/Developer\" >> \"$GITHUB_ENV\"\nexport DEVELOPER_DIR=\"$dir/Contents/Developer\"\nxcodebuild -version\nswift --version"
+            "set -euo pipefail\nwant=\"{pin}\"\ndir=\"\"\nif [ -d \"/Applications/Xcode_${{want}}.app\" ]; then\n  dir=\"/Applications/Xcode_${{want}}.app\"\nelse\n  for candidate in \"/Applications/Xcode_${{want}}\"*.app; do\n    [ -d \"$candidate\" ] || continue\n    dir=\"$candidate\"\n  done\nfi\nif [ -z \"$dir\" ] && [ -d /Applications/Xcode.app ]; then\n  found=\"$(/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version 2>/dev/null | head -n 1 | awk '{{print $2}}' || true)\"\n  case \"$found\" in\n    \"$want\"|\"$want\".*) dir=/Applications/Xcode.app ;;\n  esac\nfi\nif [ -z \"$dir\" ]; then\n  echo \"::error::no installed Xcode matches pin $want\" >&2\n  for candidate in /Applications/*; do\n    case \"$candidate\" in\n      *[Xx][Cc][Oo][Dd][Ee]*) echo \"${{candidate##*/}}\" ;;\n    esac\n  done || true\n  exit 1\nfi\necho \"DEVELOPER_DIR=$dir/Contents/Developer\" >> \"$GITHUB_ENV\"\nexport DEVELOPER_DIR=\"$dir/Contents/Developer\"\nxcodebuild -version\nswift --version"
         )
     }
 
