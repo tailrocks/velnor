@@ -22,8 +22,8 @@ use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, runs_on_labels_yaml,
     selector_runs_on_yaml, shell_quote, unit_display_label, workflow_runtime_setup,
     workflow_runtime_setup_with_install_rev, workflow_setup_install_rev, yaml_scalar, ActionPin,
-    GeneratorError, ProjectConfig, ReleaseJobSpec, ReleaseSpec, Unit, UnitKind, GENERATED_HEADER,
-    MACOS_HOSTED_RUNS_ON, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    GeneratorError, ProjectConfig, ReleaseImageSpec, ReleaseJobSpec, ReleaseSpec, Unit, UnitKind,
+    GENERATED_HEADER, MACOS_HOSTED_RUNS_ON, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -360,6 +360,9 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         registry_username_secret,
         registry_password_secret,
         jobs: Vec::new(),
+        // `[[release.image]]` rows are config-only, like `[[release.job]]`:
+        // flat declare args cannot express N rows with `needs` edges.
+        images: Vec::new(),
     })
 }
 
@@ -420,6 +423,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         registry_username_secret: String::new(),
         registry_password_secret: String::new(),
         jobs: Vec::new(),
+        images: Vec::new(),
     })
 }
 
@@ -945,8 +949,12 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
         "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
         "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
         "docker" => {
-            !release.image.is_empty()
-                && crate::s2::config::valid_docker_platforms(&release.platforms)
+            // Row validation happens at config load, and the declare path
+            // can never set images, so non-empty rows are a complete
+            // contract on their own.
+            (!release.image.is_empty()
+                && crate::s2::config::valid_docker_platforms(&release.platforms))
+                || !release.images.is_empty()
         }
         "tasks" => !release.jobs.is_empty(),
         // `versioned-tool` included: it never arrives as a `ReleaseSpec` —
@@ -4293,14 +4301,14 @@ fn native_image_jobs(config: &ProjectConfig, release: &ReleaseSpec, debian: bool
 /// declares none. Rows dedupe by arch so one platform can never gain two
 /// authorized publishers. Unknown platforms fail closed at contract
 /// validation, so this mapping is total over complete contracts.
-fn docker_platform_arches(release: &ReleaseSpec) -> Vec<(&'static str, String)> {
-    let platforms: Vec<String> = if release.platforms.is_empty() {
+fn docker_platform_arches(platforms: &[String]) -> Vec<(&'static str, String)> {
+    let platforms: Vec<String> = if platforms.is_empty() {
         crate::s2::config::DOCKER_PLATFORMS
             .iter()
             .map(|platform| (*platform).to_owned())
             .collect()
     } else {
-        release.platforms.clone()
+        platforms.to_vec()
     };
     let mut arches = Vec::new();
     for platform in &platforms {
@@ -4360,9 +4368,9 @@ fn docker_cache_scope(image: &str) -> String {
 /// The multi-arch platform matrix: one native builder per declared
 /// platform. Arm64 builders run on the hosted arm64 label; anything else
 /// would silently emulate under QEMU, so there is no fallback.
-fn docker_platform_matrix(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+fn docker_platform_matrix(config: &ProjectConfig, platforms: &[String]) -> String {
     let mut matrix = String::new();
-    for (arch, platform) in docker_platform_arches(release) {
+    for (arch, platform) in docker_platform_arches(platforms) {
         let runner = match arch {
             "amd64" => selected_runner(config),
             // GitHub's hosted arm64 label; the release contract names it and
@@ -4404,6 +4412,61 @@ fn docker_login_step(release: &ReleaseSpec) -> String {
     }
 }
 
+/// One image the `docker` publisher publishes: the scalar contract's
+/// inputs, or one `[[release.image]]` row. The suffix keeps N chains
+/// disjoint (`-<name>` per row); empty renders the scalar contract's
+/// exact bytes.
+struct DockerImageView<'a> {
+    suffix: String,
+    image: &'a str,
+    dockerfile: &'a str,
+    context: &'a str,
+    platforms: &'a [String],
+}
+
+impl<'a> DockerImageView<'a> {
+    /// The scalar contract's single image: no suffix, today's bytes.
+    fn scalar(release: &'a ReleaseSpec) -> Self {
+        Self {
+            suffix: String::new(),
+            image: &release.image,
+            dockerfile: docker_dockerfile(release),
+            context: docker_context(release),
+            platforms: &release.platforms,
+        }
+    }
+
+    /// One `[[release.image]]` row: a `-<name>` chain with the row's own
+    /// reference, build inputs, and platforms.
+    fn row(row: &'a ReleaseImageSpec) -> Self {
+        Self {
+            suffix: format!("-{}", row.name),
+            image: &row.image,
+            dockerfile: docker_image_dockerfile(row),
+            context: docker_image_context(row),
+            platforms: &row.platforms,
+        }
+    }
+}
+
+/// The consumer-owned Dockerfile one `[[release.image]]` row builds.
+fn docker_image_dockerfile(row: &ReleaseImageSpec) -> &str {
+    if row.dockerfile.is_empty() {
+        "Dockerfile"
+    } else {
+        &row.dockerfile
+    }
+}
+
+/// The build context one `[[release.image]]` row builds from.
+fn docker_image_context(row: &ReleaseImageSpec) -> &str {
+    if row.context.is_empty() {
+        "."
+    } else {
+        &row.context
+    }
+}
+
 // NOTE: no admit-provider job. Release publishes from the visibility
 // provider unconditionally; with no provider dispatch input there is no
 // dispatch scope left to admit or reject.
@@ -4427,13 +4490,24 @@ fn render_docker_verify_job(config: &ProjectConfig) -> String {
 /// The image admission gate: inspect the version tag without mutating it. An
 /// absent tag opens the platform lane; a present tag is adopted only with an
 /// explicitly supplied recovery digest naming its exact index, so a version
-/// tag is never clobbered and unknown bytes are never adopted.
-fn render_docker_admission_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+/// tag is never clobbered and unknown bytes are never adopted. A row with
+/// `needs` additionally waits on each dependency's published tag, so it
+/// never inspects or builds before its base exists.
+fn render_docker_admission_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    image: &DockerImageView<'_>,
+    dependencies: &[String],
+) -> String {
     let buildx = ActionPin::DockerBuildx.reference();
+    let mut needs = vec!["verify".to_owned()];
+    needs.extend(dependencies.iter().cloned());
+    let needs = needs.join(", ");
     format!(
-        "  image-admission:\n    needs: [verify]\n    name: Admit immutable image tag\n    timeout-minutes: 10\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: read\n    outputs:\n      existing: ${{{{ steps.inspect.outputs.existing }}}}\n      index_digest: ${{{{ steps.inspect.outputs.index_digest }}}}\n    steps:\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Inspect version tag without mutation\n        id: inspect\n        env:\n          GHCR_IMAGE: {image}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          RECOVERY_INDEX_DIGEST: ${{{{ github.event_name == 'workflow_dispatch' && inputs.existing-image-digest || '' }}}}\n        run: |\n          set -euo pipefail\n          ref=\"${{GHCR_IMAGE}}:${{VERSION}}\"\n          error_file=\"$(mktemp)\"\n          if docker buildx imagetools inspect \"$ref\" --format '{{{{json .}}}}' > image.json 2>\"$error_file\"; then\n            index_digest=\"$(jq -er '.manifest.digest' image.json)\"\n            case \"$index_digest\" in\n              sha256:[0-9a-fA-F]*) ;;\n              *) echo \"::error::existing image tag $ref returned an invalid index digest\" >&2; exit 1 ;;\n            esac\n            if [ -z \"$RECOVERY_INDEX_DIGEST\" ] || [ \"$index_digest\" != \"$RECOVERY_INDEX_DIGEST\" ]; then\n              echo \"::error::OCI tag $ref already exists with an unverified index digest; refusing to adopt unknown bytes (supply existing-image-digest to resume a verified run)\" >&2\n              exit 1\n            fi\n            echo \"adopting explicitly supplied recovery index $index_digest\"\n            {{\n              echo \"existing=true\"\n              echo \"index_digest=$index_digest\"\n            }} >> \"$GITHUB_OUTPUT\"\n          elif grep -Eiq 'manifest unknown|no such manifest|not found|name unknown' \"$error_file\"; then\n            {{\n              echo \"existing=false\"\n              echo \"index_digest=\"\n            }} >> \"$GITHUB_OUTPUT\"\n          else\n            cat \"$error_file\" >&2\n            echo \"::error::could not determine whether OCI tag $ref exists; refusing a fail-open publish\" >&2\n            exit 1\n          fi\n",
+        "  image-admission{suffix}:\n    needs: [{needs}]\n    name: Admit immutable image tag\n    timeout-minutes: 10\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: read\n    outputs:\n      existing: ${{{{ steps.inspect.outputs.existing }}}}\n      index_digest: ${{{{ steps.inspect.outputs.index_digest }}}}\n    steps:\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Inspect version tag without mutation\n        id: inspect\n        env:\n          GHCR_IMAGE: {image}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          RECOVERY_INDEX_DIGEST: ${{{{ github.event_name == 'workflow_dispatch' && inputs.existing-image-digest || '' }}}}\n        run: |\n          set -euo pipefail\n          ref=\"${{GHCR_IMAGE}}:${{VERSION}}\"\n          error_file=\"$(mktemp)\"\n          if docker buildx imagetools inspect \"$ref\" --format '{{{{json .}}}}' > image.json 2>\"$error_file\"; then\n            index_digest=\"$(jq -er '.manifest.digest' image.json)\"\n            case \"$index_digest\" in\n              sha256:[0-9a-fA-F]*) ;;\n              *) echo \"::error::existing image tag $ref returned an invalid index digest\" >&2; exit 1 ;;\n            esac\n            if [ -z \"$RECOVERY_INDEX_DIGEST\" ] || [ \"$index_digest\" != \"$RECOVERY_INDEX_DIGEST\" ]; then\n              echo \"::error::OCI tag $ref already exists with an unverified index digest; refusing to adopt unknown bytes (supply existing-image-digest to resume a verified run)\" >&2\n              exit 1\n            fi\n            echo \"adopting explicitly supplied recovery index $index_digest\"\n            {{\n              echo \"existing=true\"\n              echo \"index_digest=$index_digest\"\n            }} >> \"$GITHUB_OUTPUT\"\n          elif grep -Eiq 'manifest unknown|no such manifest|not found|name unknown' \"$error_file\"; then\n            {{\n              echo \"existing=false\"\n              echo \"index_digest=\"\n            }} >> \"$GITHUB_OUTPUT\"\n          else\n            cat \"$error_file\" >&2\n            echo \"::error::could not determine whether OCI tag $ref exists; refusing a fail-open publish\" >&2\n            exit 1\n          fi\n",
+        suffix = image.suffix,
         runner = selected_runner(config),
-        image = yaml_scalar(&release.image),
+        image = yaml_scalar(image.image),
         login_step = docker_login_step(release),
     )
 }
@@ -4443,18 +4517,23 @@ fn render_docker_admission_job(config: &ProjectConfig, release: &ReleaseSpec) ->
 /// provenance attestations, then records the digest the manifest job
 /// assembles. The `tags:` input names the bare repository the digest push
 /// targets; only the manifest job writes a version tag.
-fn render_docker_platform_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+fn render_docker_platform_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    image: &DockerImageView<'_>,
+) -> String {
     let checkout = ActionPin::Checkout.reference();
     let upload = ActionPin::UploadArtifact.reference();
     let buildx = ActionPin::DockerBuildx.reference();
     let build = ActionPin::DockerBuild.reference();
-    let matrix = docker_platform_matrix(config, release);
+    let matrix = docker_platform_matrix(config, image.platforms);
     format!(
-        "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} image\n    needs: [verify, image-admission]\n    if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n{login_step}      - name: Build + push platform image by digest\n        id: build\n        uses: {build}\n        with:\n          context: {context}\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          outputs: type=image,push-by-digest=true,name-canonical=true,push=true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope={scope}-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope={scope}-${{{{ matrix.arch }}}},mode=max\n          build-args: |\n            VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n      - name: Record platform digest\n        run: |\n          set -euo pipefail\n          digest=\"${{{{ steps.build.outputs.digest }}}}\"\n          hex=\"${{digest#sha256:}}\"\n          case \"$digest\" in\n            sha256:*) ;;\n            *) echo \"::error::platform build did not return a digest\" >&2; exit 1 ;;\n          esac\n          case \"$hex\" in\n            ''|*[!0-9a-f]*) echo \"::error::platform digest is not lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#hex}}\" -eq 64 ] || {{ echo \"::error::platform digest has invalid length\" >&2; exit 1; }}\n          printf '%s\\n' \"$digest\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
-        image = yaml_scalar(&release.image),
-        context = yaml_scalar(docker_context(release)),
-        dockerfile = yaml_scalar(docker_dockerfile(release)),
-        scope = docker_cache_scope(&release.image),
+        "  image-platform{suffix}:\n    name: Build ${{{{ matrix.arch }}}} image\n    needs: [verify, image-admission{suffix}]\n    if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n{login_step}      - name: Build + push platform image by digest\n        id: build\n        uses: {build}\n        with:\n          context: {context}\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          outputs: type=image,push-by-digest=true,name-canonical=true,push=true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope={scope}-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope={scope}-${{{{ matrix.arch }}}},mode=max\n          build-args: |\n            VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n      - name: Record platform digest\n        run: |\n          set -euo pipefail\n          digest=\"${{{{ steps.build.outputs.digest }}}}\"\n          hex=\"${{digest#sha256:}}\"\n          case \"$digest\" in\n            sha256:*) ;;\n            *) echo \"::error::platform build did not return a digest\" >&2; exit 1 ;;\n          esac\n          case \"$hex\" in\n            ''|*[!0-9a-f]*) echo \"::error::platform digest is not lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#hex}}\" -eq 64 ] || {{ echo \"::error::platform digest has invalid length\" >&2; exit 1; }}\n          printf '%s\\n' \"$digest\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform{suffix}-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        suffix = image.suffix,
+        image = yaml_scalar(image.image),
+        context = yaml_scalar(image.context),
+        dockerfile = yaml_scalar(image.dockerfile),
+        scope = docker_cache_scope(image.image),
         source_url = docker_source_url(config),
         login_step = docker_login_step(release),
     )
@@ -4469,6 +4548,7 @@ fn render_docker_platform_job(config: &ProjectConfig, release: &ReleaseSpec) -> 
 fn render_docker_manifest_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
+    image: &DockerImageView<'_>,
     needs: &[String],
 ) -> String {
     let checkout = ActionPin::Checkout.reference();
@@ -4478,7 +4558,7 @@ fn render_docker_manifest_job(
     // The manifest job follows the release provider onto its runner, so its
     // runtime install is keyed to that same placement.
     let setup = workflow_runtime_setup_for_config(config);
-    let arches = docker_platform_arches(release);
+    let arches = docker_platform_arches(image.platforms);
     let mut reads = String::new();
     let mut sources = Vec::new();
     let mut jq_args = String::new();
@@ -4486,7 +4566,8 @@ fn render_docker_manifest_job(
     for (arch, _) in &arches {
         let _ = writeln!(
             reads,
-            "            {arch}_digest=\"$(tr -d '[:space:]' < \"image-artifacts/image-{arch}.digest\")\""
+            "            {arch}_digest=\"$(tr -d '[:space:]' < \"image-artifacts{suffix}/image-{arch}.digest\")\"",
+            suffix = image.suffix,
         );
         sources.push(format!("              \"${{GHCR_IMAGE}}@${arch}_digest\""));
         let _ = write!(jq_args, " --arg {arch} \"${arch}_digest\"");
@@ -4503,9 +4584,10 @@ fn render_docker_manifest_job(
         .join(",");
     let needs = needs.join(", ");
     format!(
-        "  image:\n    if: ${{{{ always() && needs.verify.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  image{suffix}:\n    if: ${{{{ always() && needs.verify.result == 'success' && needs.image-admission{suffix}.result == 'success' && (needs.image-platform{suffix}.result == 'success' || needs.image-platform{suffix}.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform{suffix}-*\n          path: image-artifacts{suffix}\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts{suffix} --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission{suffix}.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission{suffix}.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests{suffix}\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        suffix = image.suffix,
         runner = selected_runner(config),
-        image = yaml_scalar(&release.image),
+        image = yaml_scalar(image.image),
         count = arches.len(),
         login_step = docker_login_step(release),
     )
@@ -4516,23 +4598,65 @@ fn render_docker_manifest_job(
 /// platform with caches and attestations, and assembled from the complete
 /// verified digest set by the single manifest job. One concurrency group
 /// per ref serializes publishers so a resume and a fresh publication can
-/// never interleave on the same tag.
+/// never interleave on the same tag. A multi-image contract renders one
+/// `-<name>` chain per `[[release.image]]` row in config order, each
+/// admission waiting on its `needs` tags; the scalar contract renders
+/// today's exact bytes.
 fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
-    let mut manifest_needs = vec![
-        "verify".to_owned(),
-        "image-admission".to_owned(),
-        "image-platform".to_owned(),
-    ];
-    manifest_needs.extend(unit_job_ids);
+    let chains = if release.images.is_empty() {
+        let scalar = DockerImageView::scalar(release);
+        let mut manifest_needs = vec![
+            "verify".to_owned(),
+            "image-admission".to_owned(),
+            "image-platform".to_owned(),
+        ];
+        manifest_needs.extend(unit_job_ids);
+        format!(
+            "{admission}\n{platform}\n{manifest}",
+            admission = render_docker_admission_job(config, release, &scalar, &[]),
+            platform = render_docker_platform_job(config, release, &scalar),
+            manifest = render_docker_manifest_job(config, release, &scalar, &manifest_needs),
+        )
+    } else {
+        let mut chains = String::new();
+        for row in &release.images {
+            let image = DockerImageView::row(row);
+            let dependencies = row
+                .needs
+                .iter()
+                .map(|dependency| format!("image-{dependency}"))
+                .collect::<Vec<_>>();
+            let mut manifest_needs = vec![
+                "verify".to_owned(),
+                format!("image-admission{}", image.suffix),
+                format!("image-platform{}", image.suffix),
+            ];
+            manifest_needs.extend(unit_job_ids.iter().cloned());
+            chains.push_str(&render_docker_admission_job(
+                config,
+                release,
+                &image,
+                &dependencies,
+            ));
+            chains.push('\n');
+            chains.push_str(&render_docker_platform_job(config, release, &image));
+            chains.push('\n');
+            chains.push_str(&render_docker_manifest_job(
+                config,
+                release,
+                &image,
+                &manifest_needs,
+            ));
+        }
+        chains
+    };
     format!(
-        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [{tags}]\n  workflow_dispatch:\n    inputs:\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{verify}\n{unit_jobs}{admission}\n{platform}\n{manifest}",
+        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [{tags}]\n  workflow_dispatch:\n    inputs:\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{verify}\n{unit_jobs}{chains}",
         tags = yaml_scalar(release_tag_pattern(release)),
         verify = render_docker_verify_job(config),
         unit_jobs = unit_jobs,
-        admission = render_docker_admission_job(config, release),
-        platform = render_docker_platform_job(config, release),
-        manifest = render_docker_manifest_job(config, release, &manifest_needs),
+        chains = chains,
     )
 }
 
@@ -5857,6 +5981,7 @@ cp "$record" "$out"
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -5901,6 +6026,7 @@ cp "$record" "$out"
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -5942,6 +6068,7 @@ cp "$record" "$out"
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -5979,6 +6106,7 @@ cp "$record" "$out"
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -8858,6 +8986,7 @@ cp "$record" "$out"
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
                 jobs: Vec::new(),
+                images: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -9040,6 +9169,7 @@ cp "$record" "$out"
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
                 jobs: Vec::new(),
+                images: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -9335,6 +9465,7 @@ cp "$record" "$out"
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -10692,6 +10823,353 @@ cp "$record" "$out"
             release.matches("secrets.GITHUB_TOKEN").count(),
             3,
             "all three logins must keep the automatic token"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The scalar docker contract renders one unsuffixed chain, pinned to
+    /// the bytes the reviewed renderer produced. Multi-image work must
+    /// leave this path byte-identical: the pin is the tripwire.
+    #[test]
+    fn scalar_docker_release_render_is_pinned() {
+        let root = scanned_root("scalar-docker-pin");
+        let config = config(&["release.yml"], Some(docker_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        assert_eq!(
+            digest_of(&release),
+            "de8b89dc8e7f38d2a8cad3cd603bd5fba0cfdb2fa79b63dc4a3388acd1f019cb",
+            "the scalar docker render must stay byte-identical"
+        );
+        assert!(release.contains("  image-admission:\n"));
+        assert!(release.contains("  image-platform:\n"));
+        assert!(!release.contains("  image-admission-"));
+        assert!(!release.contains("  image-platform-"));
+        assert!(release.contains("  image:\n"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Two `[[release.image]]` rows: a defaulted base and an amd64-only
+    /// node that builds on it, with the scalar contract cleared.
+    fn multi_image_docker_spec() -> ReleaseSpec {
+        let mut spec = docker_spec();
+        spec.image = String::new();
+        spec.dockerfile = String::new();
+        spec.context = String::new();
+        spec.platforms = Vec::new();
+        spec.images = vec![
+            ReleaseImageSpec {
+                name: "base".to_owned(),
+                image: "example/base".to_owned(),
+                ..ReleaseImageSpec::default()
+            },
+            ReleaseImageSpec {
+                name: "node".to_owned(),
+                image: "example/node".to_owned(),
+                dockerfile: "images/node/Dockerfile".to_owned(),
+                context: "images/node".to_owned(),
+                platforms: vec!["linux/amd64".to_owned()],
+                needs: vec!["base".to_owned()],
+            },
+        ];
+        spec
+    }
+
+    /// Rows without a scalar image are a complete docker contract on their
+    /// own; an empty contract stays incomplete.
+    #[test]
+    fn docker_contract_complete_accepts_rows_without_scalar() {
+        let mut spec = docker_spec();
+        spec.image = String::new();
+        assert!(
+            !release_contract_complete(&spec),
+            "no scalar image and no rows must stay incomplete"
+        );
+        spec.images = vec![ReleaseImageSpec {
+            name: "app".to_owned(),
+            image: "example/app".to_owned(),
+            ..ReleaseImageSpec::default()
+        }];
+        assert!(
+            release_contract_complete(&spec),
+            "rows alone must complete the docker contract"
+        );
+    }
+
+    /// Every row renders its own admission/platform/manifest chain in
+    /// config order, and a row's admission waits on its dependencies'
+    /// published tags before it inspects or builds.
+    #[test]
+    fn multi_image_docker_renders_one_chain_per_row_in_config_order() {
+        let root = scanned_root("multi-image-chains");
+        let config = config(&["release.yml"], Some(multi_image_docker_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        for job in [
+            "image-admission-base",
+            "image-platform-base",
+            "image-base",
+            "image-admission-node",
+            "image-platform-node",
+            "image-node",
+        ] {
+            assert!(
+                release.contains(&format!("  {job}:\n")),
+                "the surface must render {job}:\n{release}"
+            );
+        }
+        let base = release
+            .find("  image-admission-base:\n")
+            .unwrap_or(usize::MAX);
+        let node = release
+            .find("  image-admission-node:\n")
+            .unwrap_or(usize::MAX);
+        assert!(
+            base < node,
+            "chains must render in config order:\n{release}"
+        );
+        assert_eq!(
+            yaml_job_needs(yaml_job(&release, "image-admission-base")),
+            vec!["verify".to_owned()],
+            "a row without needs waits only on the tag gate"
+        );
+        assert_eq!(
+            yaml_job_needs(yaml_job(&release, "image-admission-node")),
+            vec!["verify".to_owned(), "image-base".to_owned()],
+            "a row's admission must wait on its dependencies' tags"
+        );
+        let manifest = yaml_job_needs(yaml_job(&release, "image-node"));
+        assert!(
+            manifest.contains(&"image-admission-node".to_owned())
+                && manifest.contains(&"image-platform-node".to_owned()),
+            "the manifest must assemble its own chain: {manifest:?}"
+        );
+        let platform = yaml_job(&release, "image-platform-node");
+        assert!(
+            platform.contains("context: \"images/node\"")
+                && platform.contains("file: \"images/node/Dockerfile\""),
+            "the platform lane must build the row's own Dockerfile:\n{platform}"
+        );
+        let admission = yaml_job(&release, "image-admission-node");
+        assert!(
+            admission.contains("GHCR_IMAGE: \"example/node\""),
+            "the admission gate must inspect the row's own tag:\n{admission}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Platforms are per row: the amd64-only row renders one native leg
+    /// and verifies one digest, while the defaulted row keeps both.
+    #[test]
+    fn multi_image_docker_platforms_are_per_row() {
+        let root = scanned_root("multi-image-platforms");
+        let config = config(&["release.yml"], Some(multi_image_docker_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let node = yaml_job(&release, "image-platform-node");
+        assert_eq!(
+            node.matches("- arch:").count(),
+            1,
+            "the amd64-only row must render one leg:\n{node}"
+        );
+        assert!(
+            node.contains("arch: amd64") && !node.contains("arch: arm64"),
+            "the single leg must be amd64:\n{node}"
+        );
+        assert!(
+            !node.contains("ubuntu-24.04-arm"),
+            "no arm64 leg means no arm64 runner:\n{node}"
+        );
+        let base = yaml_job(&release, "image-platform-base");
+        assert_eq!(
+            base.matches("- arch:").count(),
+            2,
+            "the defaulted row must keep both legs:\n{base}"
+        );
+        let manifest = yaml_job(&release, "image-node");
+        assert!(
+            manifest.contains("--archs amd64"),
+            "the manifest must verify exactly the row's archs:\n{manifest}"
+        );
+        assert!(
+            !manifest.contains("arm64_digest"),
+            "no arm64 leg means no arm64 digest read:\n{manifest}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Cache scopes, artifact names, and digest directories are per row,
+    /// so N chains never share a cache scope or a digest file.
+    #[test]
+    fn multi_image_docker_scopes_and_artifacts_are_disjoint() {
+        let root = scanned_root("multi-image-scopes");
+        let config = config(&["release.yml"], Some(multi_image_docker_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        for (row, scope) in [("base", "example-base"), ("node", "example-node")] {
+            let platform = yaml_job(&release, &format!("image-platform-{row}"));
+            assert!(
+                platform.contains(&format!("scope={scope}-")),
+                "{row} must cache under its own scope:\n{platform}"
+            );
+            assert!(
+                platform.contains(&format!("name: image-platform-{row}-")),
+                "{row} must upload its own digest artifact:\n{platform}"
+            );
+            let manifest = yaml_job(&release, &format!("image-{row}"));
+            assert!(
+                manifest.contains(&format!("pattern: image-platform-{row}-*"))
+                    && manifest.contains(&format!("path: image-artifacts-{row}")),
+                "{row} must download into its own digest directory:\n{manifest}"
+            );
+            assert!(
+                manifest.contains(&format!("name: image-digests-{row}")),
+                "{row} must upload its own digest bundle:\n{manifest}"
+            );
+        }
+        let node = yaml_job(&release, "image-node");
+        assert!(
+            !node.contains("image-artifacts-base"),
+            "the node chain must never touch the base digests:\n{node}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The declared registry triple reaches all 3N docker logins: every
+    /// chain logs in to the declared host, never GHCR.
+    #[test]
+    fn multi_image_docker_registry_triple_reaches_every_login() {
+        let mut spec = multi_image_docker_spec();
+        spec.registry = "docker.io".to_owned();
+        spec.registry_username_secret = "REGISTRY_USERNAME".to_owned();
+        spec.registry_password_secret = "REGISTRY_PASSWORD".to_owned();
+        let root = scanned_root("multi-image-registry");
+        let config = config(&["release.yml"], Some(spec));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        assert_eq!(
+            release.matches("Log in to docker.io").count(),
+            6,
+            "two chains need six declared-registry logins"
+        );
+        assert!(
+            !release.contains("Log in to GHCR"),
+            "the declared registry must replace every default login"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The blockchain 3-tier shape: base → build → two leaves, one of
+    /// them amd64-only, publishing through the docker.io triple.
+    fn blockchain_tiers_docker_spec() -> ReleaseSpec {
+        let mut spec = docker_spec();
+        spec.image = String::new();
+        spec.dockerfile = String::new();
+        spec.context = String::new();
+        spec.platforms = Vec::new();
+        spec.registry = "docker.io".to_owned();
+        spec.registry_username_secret = "REGISTRY_USERNAME".to_owned();
+        spec.registry_password_secret = "REGISTRY_PASSWORD".to_owned();
+        spec.images = vec![
+            ReleaseImageSpec {
+                name: "base".to_owned(),
+                image: "example/base".to_owned(),
+                dockerfile: "docker-base/Dockerfile".to_owned(),
+                context: "docker-base".to_owned(),
+                ..ReleaseImageSpec::default()
+            },
+            ReleaseImageSpec {
+                name: "build".to_owned(),
+                image: "example/build".to_owned(),
+                dockerfile: "docker-build/Dockerfile".to_owned(),
+                context: "docker-build".to_owned(),
+                needs: vec!["base".to_owned()],
+                ..ReleaseImageSpec::default()
+            },
+            ReleaseImageSpec {
+                name: "geth".to_owned(),
+                image: "example/geth".to_owned(),
+                dockerfile: "docker-geth/Dockerfile".to_owned(),
+                context: "docker-geth".to_owned(),
+                platforms: vec!["linux/amd64".to_owned()],
+                needs: vec!["base".to_owned(), "build".to_owned()],
+            },
+            ReleaseImageSpec {
+                name: "node".to_owned(),
+                image: "example/node".to_owned(),
+                dockerfile: "docker-node/Dockerfile".to_owned(),
+                context: "docker-node".to_owned(),
+                needs: vec!["base".to_owned(), "build".to_owned()],
+                ..ReleaseImageSpec::default()
+            },
+        ];
+        spec
+    }
+
+    /// Four chains with correct needs edges, per-image logins, platforms,
+    /// and scopes for the blockchain 3-tier shape.
+    #[test]
+    fn multi_image_docker_blockchain_tiers_render_four_chains() {
+        let spec = blockchain_tiers_docker_spec();
+        let root = scanned_root("multi-image-tiers");
+        let config = config(&["release.yml"], Some(spec));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let rerendered = rendered(&generate(&root, &config, None), "release.yml");
+        assert_eq!(
+            rerendered, release,
+            "the multi-image surface must render deterministically"
+        );
+        for row in ["base", "build", "geth", "node"] {
+            for job in [
+                format!("image-admission-{row}"),
+                format!("image-platform-{row}"),
+                format!("image-{row}"),
+            ] {
+                assert!(
+                    release.contains(&format!("  {job}:\n")),
+                    "the surface must render {job}:\n{release}"
+                );
+            }
+        }
+        assert_eq!(
+            yaml_job_needs(yaml_job(&release, "image-admission-build")),
+            vec!["verify".to_owned(), "image-base".to_owned()],
+        );
+        assert_eq!(
+            yaml_job_needs(yaml_job(&release, "image-admission-geth")),
+            vec![
+                "verify".to_owned(),
+                "image-base".to_owned(),
+                "image-build".to_owned()
+            ],
+        );
+        assert_eq!(
+            yaml_job_needs(yaml_job(&release, "image-admission-node")),
+            vec![
+                "verify".to_owned(),
+                "image-base".to_owned(),
+                "image-build".to_owned()
+            ],
+        );
+        let geth = yaml_job(&release, "image-platform-geth");
+        assert_eq!(
+            geth.matches("- arch:").count(),
+            1,
+            "the amd64-only leaf must render one leg:\n{geth}"
+        );
+        assert!(
+            geth.contains("scope=example-geth-"),
+            "the leaf must cache under its own scope:\n{geth}"
+        );
+        assert_eq!(
+            release.matches("Log in to docker.io").count(),
+            12,
+            "four chains need twelve declared-registry logins"
+        );
+        assert!(
+            !release.contains("Log in to GHCR"),
+            "the declared registry must replace every default login"
         );
         let _ = fs::remove_dir_all(root);
     }
