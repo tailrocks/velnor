@@ -295,6 +295,13 @@ overrides the terminal result — GitHub remains authoritative for both, as in
 
 `CURRENT`: every verdict carries its reason. Work through this order:
 
+A `no_work_reason` of `no selected workload unit runs on the admitted
+lanes` means lane admission narrowed a real selection to zero: the diff
+selected units, but none run on the lanes this plan admits
+(`crates/velnor-workflow/src/runtime.rs:1909-1920`). `select` takes no
+lanes input and still shows those units selected, so compare its output
+against the plan's `units`, not against the verdict.
+
 1. Read the plan outputs: `scope`, `units`, `full_units`, and — when present
    — `fallback_reason`, `planned_no_work`, `no_work_reason` (field reference
    in [interface](/reference/interface#workflow-generation-and-monitoring)).
