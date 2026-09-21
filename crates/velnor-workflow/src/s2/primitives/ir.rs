@@ -4985,7 +4985,7 @@ const MISE_BARE_BACKEND_DEFAULTS: &[(&str, &str)] = &[
 /// unknowable, for the loud refusal in
 /// [`validate_mise_install_deps_are_closed`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum UnknownBackend {
+pub(crate) enum UnknownBackend {
     /// A `vfox:` tool (or a bare id the lock records as one): dependencies
     /// come from plugin metadata that planning cannot read.
     Vfox,
@@ -5039,7 +5039,7 @@ fn install_dep_matches_lock_key(name: &str, lock_key: &str) -> bool {
 /// resolves to nothing has no installable spelling; backend-implied names
 /// then simply do not apply (mise only enforces configured tools), while a
 /// dangling `depends` name fails validation loudly.
-fn resolve_install_dep_names(name: &str, lock_keys: &BTreeSet<String>) -> Vec<String> {
+pub(crate) fn resolve_install_dep_names(name: &str, lock_keys: &BTreeSet<String>) -> Vec<String> {
     lock_keys
         .iter()
         .filter(|key| install_dep_matches_lock_key(name, key))
@@ -5071,11 +5071,27 @@ fn bare_default_backend_key(short: &str) -> Option<&'static str> {
         .map(|(_, key)| *key)
 }
 
+/// The human-readable reason an [`UnknownBackend`] refuses planning, shared
+/// by the unit and check-profile validators so both name the same remedy.
+/// `tools_field` names the declaration list the remedy removes the tool
+/// from (`mise_tools` for units, `tools` for profiles).
+pub(crate) fn unknown_backend_reason(unknown: &UnknownBackend, tools_field: &str) -> String {
+    match unknown {
+        UnknownBackend::Vfox => format!(
+            "whose `vfox` backend declares install dependencies in plugin metadata that planning cannot read, so the derived subset may omit an edge mise enforces; remove the tool from `{tools_field}` and provision it outside the locked install"
+        ),
+        UnknownBackend::Prefix(prefix) => format!(
+            "whose `{prefix}` backend mise does not define, so its install dependencies come from plugin metadata that planning cannot read and the derived subset may omit an edge mise enforces; remove the tool from `{tools_field}` and provision it outside the locked install"
+        ),
+        UnknownBackend::Bare => "which names no backend and whose lock entry records none, so planning cannot tell which backend's install dependencies apply; re-lock so `mise.lock` records a `backend` for it".to_owned(),
+    }
+}
+
 /// The backend key whose install dependencies govern one subset member: a
 /// qualified member carries its prefix, while a bare member resolves
 /// through the lock's recorded backend first (mise consults it for
 /// non-explicit shorts) and then the known registry defaults.
-fn member_backend_key(
+pub(crate) fn member_backend_key(
     member: &str,
     lock_backends: &BTreeMap<String, String>,
 ) -> Result<String, UnknownBackend> {
@@ -5476,13 +5492,7 @@ pub(crate) fn validate_mise_install_deps_are_closed(
             let Err(unknown) = member_backend_key(tool, lock_backends) else {
                 continue;
             };
-            let reason = match unknown {
-                UnknownBackend::Vfox => "whose `vfox` backend declares install dependencies in plugin metadata that planning cannot read, so the derived subset may omit an edge mise enforces; remove the tool from `mise_tools` and provision it outside the locked install".to_owned(),
-                UnknownBackend::Prefix(prefix) => format!(
-                    "whose `{prefix}` backend mise does not define, so its install dependencies come from plugin metadata that planning cannot read and the derived subset may omit an edge mise enforces; remove the tool from `mise_tools` and provision it outside the locked install"
-                ),
-                UnknownBackend::Bare => "which names no backend and whose lock entry records none, so planning cannot tell which backend's install dependencies apply; re-lock so `mise.lock` records a `backend` for it".to_owned(),
-            };
+            let reason = unknown_backend_reason(&unknown, "mise_tools");
             return Err(GeneratorError::usage(format!(
                 "unit {} installs {tool}, {reason} (planning models mise {} install dependencies), known keys: {}",
                 unit.id,

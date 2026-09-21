@@ -516,6 +516,54 @@ fn render_checkout_step(output: &mut String, full_history: bool) {
 /// installs with the preinstalled `mise` binary instead. Every profile runs
 /// named tasks, so hosted runners always set up even when no tool needs
 /// installing.
+/// Refuse a check profile whose closed tool subset planning cannot prove
+/// installable: the same promise as the unit validator, over the profile's
+/// own `tools` list. A member whose backend planning cannot model, or a
+/// `depends` name the lock does not pin, fails here with the exact missing
+/// edge instead of failing at install time on the runner.
+///
+/// # Errors
+/// Returns a usage error naming the first profile whose subset is not
+/// provably closed, with every key the lock does pin.
+pub(crate) fn validate_profile_install_deps_are_closed(
+    profiles: &[CheckProfileSpec],
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &std::collections::BTreeMap<String, String>,
+    install_deps: &crate::s2::config::MiseInstallDeps,
+) -> Result<(), GeneratorError> {
+    for profile in profiles {
+        let mut tools = profile.tools.clone();
+        super::close_mise_tool_subset(&mut tools, lock_keys, lock_backends, install_deps);
+        let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+        for tool in &tools {
+            if let Err(unknown) = super::member_backend_key(tool, lock_backends) {
+                let reason = super::unknown_backend_reason(&unknown, "tools");
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {} installs {tool}, {reason} (planning models mise {} install dependencies), known keys: {}",
+                    profile.id,
+                    super::MISE_INSTALL_DEPS_MODEL_VERSION,
+                    known()
+                )));
+            }
+        }
+        for tool in &tools {
+            let Some(names) = install_deps.depends.get(tool) else {
+                continue;
+            };
+            for name in names {
+                if super::resolve_install_dep_names(name, lock_keys).is_empty() {
+                    return Err(GeneratorError::usage(format!(
+                        "[[check_profile]] {} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
+                        profile.id,
+                        known()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &CheckProfileSpec) {
     let mise = ActionPin::Mise.reference();
     // The declared subset closes over the root config's install edges like
@@ -574,7 +622,7 @@ mod tests {
         reason = "tests need setup failures to name their root cause"
     )]
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::s2::config;
@@ -694,6 +742,40 @@ mod tests {
             render_scheduled_checks(config, "scheduled-daily.yml", name, profiles),
             "render scheduled checks",
         )
+    }
+
+    #[test]
+    fn profile_tool_subset_refuses_an_unknowable_backend() {
+        let mut plugin = profile("smoke");
+        plugin.tools = vec!["vfox:example/example-lint".to_owned()];
+        let lock = BTreeSet::from(["vfox:example/example-lint".to_owned()]);
+        let error = must_fail(
+            super::validate_profile_install_deps_are_closed(
+                std::slice::from_ref(&plugin),
+                &lock,
+                &BTreeMap::new(),
+                &config::MiseInstallDeps::default(),
+            ),
+            "a vfox profile tool must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("smoke"), "{message}");
+        assert!(message.contains("vfox:example/example-lint"), "{message}");
+        assert!(message.contains("plugin metadata"), "{message}");
+        // A closed backend-helper subset passes: the profile installs the
+        // `cargo:` tool beside its locked helper.
+        let mut closed = profile("smoke");
+        closed.tools = vec!["cargo:example-cli".to_owned()];
+        let lock = BTreeSet::from(["cargo:example-cli".to_owned(), "cargo:sccache".to_owned()]);
+        must(
+            super::validate_profile_install_deps_are_closed(
+                std::slice::from_ref(&closed),
+                &lock,
+                &BTreeMap::new(),
+                &config::MiseInstallDeps::default(),
+            ),
+            "a closable profile subset must pass",
+        );
     }
 
     #[test]

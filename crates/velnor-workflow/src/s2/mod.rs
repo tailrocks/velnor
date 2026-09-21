@@ -1906,6 +1906,14 @@ fn scan_target(
         &mise_lock_backends,
         &mise_install_deps,
     )?;
+    // Check profiles render their own locked installs from their own tool
+    // lists; the same unprovable subset fails here with the profile id.
+    crate::s2::primitives::check_profiles::validate_profile_install_deps_are_closed(
+        &config.check_profiles,
+        &mise_lock_keys,
+        &mise_lock_backends,
+        &mise_install_deps,
+    )?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
