@@ -1608,7 +1608,10 @@ pub(crate) fn native_input_closure(
                 )),
             }
         }
-        inputs.extend(include_str_paths(root, files, file_set, &current)?);
+        let (include_targets, include_limitations) =
+            include_str_paths(root, files, file_set, &current)?;
+        inputs.extend(include_targets);
+        gaps.extend(include_limitations);
         for dependency in &facts.dependencies {
             let Some(path) = dependency.path.as_deref() else {
                 continue;
