@@ -5981,6 +5981,7 @@ cp "$record" "$out"
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -6168,6 +6169,7 @@ cp "$record" "$out"
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
@@ -6194,7 +6196,13 @@ cp "$record" "$out"
         let providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
         let shape = must(
-            crate::s2::scan::scan_shape(root, &providers, "main", &[]),
+            crate::s2::scan::scan_shape(
+                root,
+                &providers,
+                "main",
+                &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
+            ),
             "scan release fixture",
         );
         let generation = generation.map(|rows| {
@@ -8931,6 +8939,7 @@ cp "$record" "$out"
                     ]),
                     "main",
                     &[],
+                    &crate::s2::scan::rust::AppleNativePolicy::default(),
                 ),
                 "scan guest fixture",
             );
@@ -9105,6 +9114,7 @@ cp "$record" "$out"
                     ]),
                     "main",
                     &[],
+                    &crate::s2::scan::rust::AppleNativePolicy::default(),
                 ),
                 "scan identity fixture",
             );

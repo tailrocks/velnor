@@ -701,6 +701,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -754,6 +755,7 @@ mod tests {
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
@@ -808,7 +810,13 @@ mod tests {
         let providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
         let shape = must(
-            crate::s2::scan::scan_shape(root, &providers, "main", &[]),
+            crate::s2::scan::scan_shape(
+                root,
+                &providers,
+                "main",
+                &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
+            ),
             "scan fixture",
         );
         let directory = root.join(crate::s2::config::GENERATION_CONFIG_PATH);

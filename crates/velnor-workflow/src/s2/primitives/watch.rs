@@ -362,7 +362,13 @@ mod tests {
 
         let scan_providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
-        let shape = crate::s2::scan::scan_shape(&root, &scan_providers, "main", &[])?;
+        let shape = crate::s2::scan::scan_shape(
+            &root,
+            &scan_providers,
+            "main",
+            &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
+        )?;
         let config = crate::s2::ProjectConfig::from(shape.clone());
         let units = config.units.iter().collect::<Vec<_>>();
         let pins = super::super::Pins::resolved();
@@ -428,7 +434,13 @@ mod tests {
 
         let scan_providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
-        let shape = crate::s2::scan::scan_shape(&root, &scan_providers, "main", &[])?;
+        let shape = crate::s2::scan::scan_shape(
+            &root,
+            &scan_providers,
+            "main",
+            &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
+        )?;
         let config = crate::s2::ProjectConfig::from(shape.clone());
         let unit_id = config
             .units

@@ -718,6 +718,7 @@ mod tests {
             velnor_concurrency_group: None,
             velnor_serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: true,
             mise_lock_keys: std::collections::BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),

@@ -842,6 +842,7 @@ fn xcodegen_generate_unit(
             ..crate::s2::provider::Capabilities::default()
         },
         workspace_check: false,
+        full_history: false,
         products: Vec::new(),
         prerequisites: Vec::new(),
         docker_contexts: Vec::new(),
@@ -1087,6 +1088,7 @@ fn xcode_scheme_unit(
             ..crate::s2::provider::Capabilities::default()
         },
         workspace_check: false,
+        full_history: false,
         products: Vec::new(),
         prerequisites: Vec::new(),
         docker_contexts: Vec::new(),
@@ -1651,6 +1653,7 @@ mod tests {
                 &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
                 "main",
                 &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
             ),
             "scan fixture",
         )
@@ -2449,6 +2452,7 @@ mod tests {
                 &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
                 "main",
                 &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
             ),
             "a malformed pin fails the scan",
         );

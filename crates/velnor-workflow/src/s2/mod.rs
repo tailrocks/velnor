@@ -736,6 +736,12 @@ pub struct Unit {
     /// runtimes reject unknown unit fields, and the emitted command list
     /// carries the contract.
     pub(crate) workspace_check: bool,
+    /// Whether the unit's checkout clones full history. Generation-time
+    /// only, like [`Unit::services`]: pinned Planning runtimes reject
+    /// unknown unit fields, so the flag is skipped from serialization and
+    /// never emitted into `toml()`; the rendered `fetch-depth` carries it.
+    #[serde(skip_serializing)]
+    pub(crate) full_history: bool,
     /// Named build products this unit produces for consumers, each rebuilt
     /// through its named task. Generation-time only: edges compile into
     /// `depends_on` and prepare commands, which the runtime contract carries.
@@ -978,6 +984,9 @@ pub(crate) struct CheckProfileSpec {
     /// `continue-on-error`.
     pub(crate) advisory: bool,
     pub(crate) env: BTreeMap<String, String>,
+    /// Whether the profile's checkout clones full history (`fetch-depth: 0`).
+    /// Generation-time only: profiles never enter the runtime `project.toml`.
+    pub(crate) full_history: bool,
 }
 
 /// The documentation-site contract the `docs-site` primitive renders. Every
@@ -1223,7 +1232,7 @@ pub struct ProjectConfig {
     /// Require the generated CI aggregate check to conclude the workflow.
     pub(crate) ci_required: bool,
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
-    /// must expose as job display names.
+    /// or `ci-policy.yml` must expose as job display names.
     pub(crate) ruleset_required_status_checks: Vec<String>,
     /// Status-check contexts the repository ruleset gates on that GitHub Apps
     /// report rather than workflows.
@@ -1242,6 +1251,10 @@ pub struct ProjectConfig {
     /// Repository-local files the generated output owns verbatim, read from
     /// the declared sources at scan time.
     pub(crate) static_files: Vec<StaticFile>,
+    /// Reviewer rules from `[[reviewers]]` rows, in declaration order.
+    /// Generation time only: they render into `.github/CODEOWNERS`, never
+    /// into the runtime contract. Empty renders no file.
+    pub(crate) reviewers: Vec<ReviewerRule>,
     /// The repository states its own surface in a generation config: the
     /// checked-in `.github/workflows` are outputs and are never adopted as
     /// inputs.
@@ -1267,6 +1280,13 @@ pub(crate) struct StaticFile {
     pub(crate) path: String,
     pub(crate) source: String,
     pub(crate) content: String,
+}
+
+/// One CODEOWNERS rule: a file pattern and its owners, in declaration order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReviewerRule {
+    pub(crate) pattern: String,
+    pub(crate) owners: Vec<String>,
 }
 
 fn default_workflow_files() -> Vec<String> {
@@ -1726,7 +1746,12 @@ fn scan_target(
         .as_ref()
         .and_then(config::RepoGenerationConfig::default_branch)
         .unwrap_or(default_branch);
-    let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude)?;
+    let apple = scan::rust::AppleNativePolicy::from_cargo_profile(
+        generation
+            .as_ref()
+            .and_then(|generation| generation.native_apple().cargo_profile.as_deref()),
+    )?;
+    let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude, &apple)?;
     let mut config = ProjectConfig::from(shape.clone());
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
@@ -2341,6 +2366,7 @@ fn apply_generation_config(
     apply_unit_rows(config, generation.units(), root)?;
     materialize_capability_commands(config, root)?;
     read_static_files(config, generation.static_files(), root)?;
+    apply_reviewer_rows(config, generation.reviewers());
     config.github_cache = generation.cache_github().clone();
     config.velnor_host_cache = generation.cache_velnor().clone();
     refresh_mr_boxington_note(config);
@@ -2584,6 +2610,7 @@ fn apply_check_profiles(
             artifacts: row.artifacts().unwrap_or_default().to_vec(),
             advisory: row.status().is_some_and(|status| status == "advisory"),
             env: row.env().clone(),
+            full_history: row.full_history(),
         });
     }
     config.check_profiles = profiles;
@@ -2919,6 +2946,7 @@ fn apply_unit_row(
                 .unwrap_or(provider::Platform::LinuxX64),
             capabilities: provider::Capabilities::default(),
             workspace_check: row.workspace_check(),
+            full_history: row.full_history(),
             products,
             prerequisites,
             docker_contexts,
@@ -2945,6 +2973,12 @@ fn apply_unit_row(
         unit.pr_commands = vec!["cargo check --workspace --all-targets --locked".to_owned()];
         unit.full_commands.clone_from(&unit.pr_commands);
         unit.clear_phases();
+    }
+    // One-way latch, like `workspace_check` above: an override row opts a
+    // scanned unit into full history, but nothing opts one back out, so a
+    // silent shallow fallback can never make a diff-aware gate vacuous.
+    if row.full_history() {
+        unit.full_history = true;
     }
     for task in row.ci_tasks() {
         let command = format!("mise run {task}");
@@ -3370,6 +3404,21 @@ fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
 /// # Errors
 /// Returns errors for a declared source that is missing, unreadable, or not
 /// UTF-8.
+/// Carry validated `[[reviewers]]` rows onto the config in declaration
+/// order. Validation runs before apply, so a row missing its pattern is
+/// unreachable; it is skipped rather than rendered half-formed.
+fn apply_reviewer_rows(config: &mut ProjectConfig, rows: &[config::ReviewerSection]) {
+    for row in rows {
+        let Some(pattern) = row.pattern() else {
+            continue;
+        };
+        config.reviewers.push(ReviewerRule {
+            pattern: pattern.to_owned(),
+            owners: row.owners().to_vec(),
+        });
+    }
+}
+
 fn read_static_files(
     config: &mut ProjectConfig,
     rows: &[config::StaticFileSection],
@@ -5460,16 +5509,18 @@ fn validate_unit_provider_coverage(config: &ProjectConfig) -> Result<(), Generat
 }
 
 const CI_PR_WORKFLOW: &str = ".github/workflows/ci-pr.yml";
+const CI_POLICY_WORKFLOW: &str = ".github/workflows/ci-policy.yml";
 
-pub(crate) fn workflow_job_display_names(yaml: &str) -> Result<BTreeSet<String>, GeneratorError> {
+pub(crate) fn workflow_job_display_names(
+    source: &str,
+    yaml: &str,
+) -> Result<BTreeSet<String>, GeneratorError> {
     let doc: Value = serde_yaml::from_str(yaml).map_err(|error| {
-        GeneratorError::usage(format!(
-            "parse {CI_PR_WORKFLOW} for ruleset validation: {error}"
-        ))
+        GeneratorError::usage(format!("parse {source} for ruleset validation: {error}"))
     })?;
     let Some(jobs) = doc.get("jobs").and_then(Value::as_mapping) else {
         return Err(GeneratorError::usage(format!(
-            "{CI_PR_WORKFLOW} is missing a top-level `jobs` mapping"
+            "{source} is missing a top-level `jobs` mapping"
         )));
     };
     let mut names = BTreeSet::new();
@@ -5502,7 +5553,8 @@ pub(crate) fn declared_ruleset_contexts_literal(config: &ProjectConfig) -> Strin
     contexts.into_iter().collect::<Vec<_>>().join(",")
 }
 
-/// Fail closed when a repository ruleset context is absent from `ci-pr.yml`.
+/// Fail closed when a repository ruleset context is absent from the union
+/// of `ci-pr.yml` and `ci-policy.yml` job display names.
 fn validate_ruleset_required_status_checks(
     config: &ProjectConfig,
     files: &BTreeMap<PathBuf, String>,
@@ -5511,16 +5563,19 @@ fn validate_ruleset_required_status_checks(
     if required.is_empty() {
         return Ok(());
     }
-    let path = PathBuf::from(CI_PR_WORKFLOW);
-    let Some(yaml) = files.get(&path) else {
+    let pr_path = PathBuf::from(CI_PR_WORKFLOW);
+    let Some(pr_yaml) = files.get(&pr_path) else {
         // Adopted or release-only surfaces omit the PR aggregate by design.
         return Ok(());
     };
-    let names = workflow_job_display_names(yaml)?;
+    let mut names = workflow_job_display_names(CI_PR_WORKFLOW, pr_yaml)?;
+    if let Some(policy_yaml) = files.get(&PathBuf::from(CI_POLICY_WORKFLOW)) {
+        names.extend(workflow_job_display_names(CI_POLICY_WORKFLOW, policy_yaml)?);
+    }
     for context in required {
         if !names.contains(&context) {
             return Err(GeneratorError::usage(format!(
-                "ruleset required status check `{context}` is absent from {CI_PR_WORKFLOW} job names; found [{}]",
+                "ruleset required status check `{context}` is absent from {CI_PR_WORKFLOW} and {CI_POLICY_WORKFLOW} job names; found [{}]",
                 names.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
             )));
         }
@@ -6309,8 +6364,15 @@ fn generated_files_with_surface(
     // The agent-instruction file is unconditional: every render owns these
     // exact bytes, even for minimal repositories. A `static_files` row for a
     // generator-owned agent path can never take effect, so it fails closed
-    // with a remediation instead of being silently overridden.
-    for reserved in [crate::GITHUB_AGENTS_MD, crate::GITHUB_CLAUDE_MD] {
+    // with a remediation instead of being silently overridden. The
+    // reviewer-assignment file is generator-owned the same way even though
+    // its emission is conditional: an unvalidated passthrough row must never
+    // stand in for typed `[[reviewers]]` input.
+    for reserved in [
+        crate::GITHUB_AGENTS_MD,
+        crate::GITHUB_CLAUDE_MD,
+        crate::CODEOWNERS_PATH,
+    ] {
         if config
             .static_files
             .iter()
@@ -6325,6 +6387,19 @@ fn generated_files_with_surface(
         PathBuf::from(crate::GITHUB_AGENTS_MD),
         crate::GENERATED_GITHUB_AGENTS_MD.to_owned(),
     );
+    // Reviewer assignment is opt-in: zero rows render no file, so
+    // repositories without `[[reviewers]]` rows see no tree change.
+    if !config.reviewers.is_empty() {
+        let rules = config
+            .reviewers
+            .iter()
+            .map(|rule| (rule.pattern.as_str(), rule.owners.as_slice()))
+            .collect::<Vec<_>>();
+        files.insert(
+            PathBuf::from(crate::CODEOWNERS_PATH),
+            crate::render_codeowners_contents(&rules),
+        );
+    }
     validate_ruleset_required_status_checks(&config, &files)?;
     validate_hosted_mr_boxington_store_budget(&files)?;
     validate_policy_jobs_check_out_full_history(&files)?;
@@ -10875,6 +10950,7 @@ mod tests {
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             platform,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -10953,6 +11029,7 @@ mod tests {
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),
@@ -12053,6 +12130,167 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn scanned_units_default_to_shallow_checkouts() {
+        let config = scanned_fixture(provider_set([provider::ProviderId::GithubHosted]));
+        assert!(
+            !config.units.is_empty(),
+            "the fixture scans at least one unit"
+        );
+        for unit in &config.units {
+            assert!(
+                !unit.full_history,
+                "scanned unit {} defaults to a shallow checkout",
+                unit.id
+            );
+        }
+    }
+
+    #[test]
+    fn full_history_override_row_latches_a_scanned_unit_deep() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nfull_history = true\n";
+        let root = configured_repository("full-history-override", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        let unit = must_some(
+            scanned
+                .config
+                .units
+                .iter()
+                .find(|unit| unit.id == "rust-fixture"),
+            "scanned unit",
+        );
+        assert!(
+            unit.full_history,
+            "the override row latches the scanned unit into full history"
+        );
+        for other in scanned
+            .config
+            .units
+            .iter()
+            .filter(|unit| unit.id != "rust-fixture")
+        {
+            assert!(
+                !other.full_history,
+                "unlabeled unit {} stays shallow",
+                other.id
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_history_declared_unit_carries_the_flag_on_the_add_arm() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"extra-docs\"\nkind = \"docs\"\nroot = \".\"\nfull_history = true\n";
+        let root = configured_repository("full-history-add", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        let unit = must_some(
+            scanned
+                .config
+                .units
+                .iter()
+                .find(|unit| unit.id == "extra-docs"),
+            "declared unit",
+        );
+        assert!(
+            unit.full_history,
+            "the add arm carries full_history onto the declared unit"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn emitted_runtime_contract_omits_full_history() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nfull_history = true\n";
+        let root = configured_repository("full-history-omitted", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        assert!(
+            scanned
+                .config
+                .units
+                .iter()
+                .any(|unit| unit.id == "rust-fixture" && unit.full_history),
+            "the fixture carries a deep unit"
+        );
+        let emitted = scanned.config.toml();
+        assert!(
+            !emitted.contains("full_history"),
+            "the generation-time flag never enters the runtime contract: {emitted}"
+        );
+        let path = root.join(".github/ci/project.toml");
+        must(
+            fs::create_dir_all(must_some(path.parent(), "runtime config parent")),
+            "create runtime config directory",
+        );
+        must(fs::write(&path, &emitted), "write emitted runtime config");
+        must(
+            runtime::read_config_for_test(&path),
+            "the emitted contract parses through the runtime parser",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn check_profile_rows_carry_full_history_into_specs() {
+        let root = temporary_repository("check-profile-full-history");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[tasks.check-perf]\nrun = \"true\"\n",
+            ),
+            "write mise tasks",
+        );
+        let parsed = must(
+            toml::from_str::<config::RepoGenerationConfig>(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[check_profile]]\nid = \"perf\"\nname = \"Perf probe\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-perf\"]\nfull_history = true\n\n\
+                 [[check_profile]]\nid = \"perf-strict\"\nname = \"Perf strict probe\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-perf\"]\n",
+            ),
+            "parse check profile rows",
+        );
+        let mut project = scanned_fixture(provider_set([provider::ProviderId::GithubHosted]));
+        must(
+            apply_check_profiles(&mut project, parsed.check_profiles(), &root),
+            "apply check profile rows",
+        );
+        assert_eq!(project.check_profiles.len(), 2, "both rows map");
+        assert!(
+            project.check_profiles[0].full_history,
+            "the perf row maps full_history into its spec"
+        );
+        assert!(
+            !project.check_profiles[1].full_history,
+            "the perf-strict row keeps the shallow default"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Pinned runtimes reject unknown fields, so the emitted `[release]`
     /// table carries exactly this allowlist: any new key fails here first,
     /// before it can strand a pinned `plan --config` (F1).
@@ -12186,6 +12424,72 @@ mod tests {
             !scanned.config.toml().contains("runs_on"),
             "selectors are generation-time routing, never runtime fields: {}",
             scanned.config.toml()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_native_apple_profile_reaches_boltffi_recipe() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [native.apple]\ncargo_profile = \"ci-release\"\n";
+        let root = configured_repository("native-apple-profile", Some(config));
+        must(
+            fs::create_dir_all(root.join("libs/bridge-ffi")),
+            "create ffi directory",
+        );
+        must(
+            fs::write(
+                root.join("libs/bridge-ffi/boltffi.toml"),
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            "write BoltFFI manifest",
+        );
+        must(
+            fs::write(
+                root.join("libs/bridge-ffi/Cargo.toml"),
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n",
+            ),
+            "write ffi manifest",
+        );
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        assert_eq!(scanned.shape.boltffi_producers.len(), 1);
+        assert_eq!(
+            scanned.shape.boltffi_producers[0]
+                .recipe
+                .profile
+                .as_ref()
+                .map(scan::rust::CargoProfile::as_str),
+            Some("ci-release")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_native_apple_profile_refuses_bad_charset() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [native.apple]\ncargo_profile = \"has space\"\n";
+        let root = configured_repository("native-apple-profile-bad", Some(config));
+        let error = match scan_target(
+            &root,
+            Some(provider_set([ProviderId::GithubHosted])),
+            "main",
+        ) {
+            Ok(_) => String::from("accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("[native.apple] cargo_profile"),
+            "a bad profile must name the section: {error}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -13427,6 +13731,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -13456,6 +13761,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -13485,6 +13791,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -13867,6 +14174,7 @@ channel = "stable"
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             platform: provider::Platform::LinuxX64,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -17294,6 +17602,67 @@ lockfile = true
     }
 
     #[test]
+    fn ruleset_validation_accepts_ci_pr_and_ci_policy_contexts() {
+        let mut config = scanned_fixture(all_providers());
+        config.ruleset_required_status_checks = vec!["ci-required".to_owned(), "Policy".to_owned()];
+        must(
+            generated_files(&config),
+            "contexts from ci-pr.yml and ci-policy.yml validate",
+        );
+    }
+
+    #[test]
+    fn ruleset_validation_rejects_contexts_absent_from_both_workflows() {
+        let mut config = scanned_fixture(all_providers());
+        config.ruleset_required_status_checks = vec![
+            "ci-required".to_owned(),
+            "Policy".to_owned(),
+            "bogus-context".to_owned(),
+        ];
+        let error = must_fail(
+            generated_files(&config),
+            "a context absent from both workflows must fail validation",
+        );
+        assert!(
+            error.to_string().contains("bogus-context"),
+            "the error names the absent context: {error}"
+        );
+    }
+
+    #[test]
+    fn ruleset_validation_skips_surfaces_without_the_pr_aggregate() {
+        let mut config = scanned_fixture(all_providers());
+        config.ruleset_required_status_checks = vec!["ci-required".to_owned(), "Policy".to_owned()];
+        let files: BTreeMap<PathBuf, String> = BTreeMap::new();
+        must(
+            validate_ruleset_required_status_checks(&config, &files),
+            "surfaces without ci-pr.yml skip validation",
+        );
+    }
+
+    #[test]
+    fn ruleset_validation_has_no_hard_coded_policy_exemption() {
+        let config = scanned_fixture(all_providers());
+        let mut files = must(generated_files(&config), "generate");
+        assert!(
+            files
+                .remove(&PathBuf::from(".github/workflows/ci-policy.yml"))
+                .is_some(),
+            "the fixture renders ci-policy.yml"
+        );
+        let mut declared = config.clone();
+        declared.ruleset_required_status_checks = vec!["Policy".to_owned()];
+        let error = must_fail(
+            validate_ruleset_required_status_checks(&declared, &files),
+            "Policy without a rendered ci-policy.yml must fail validation",
+        );
+        assert!(
+            error.to_string().contains("Policy"),
+            "the error names the absent context: {error}"
+        );
+    }
+
+    #[test]
     fn generated_maintenance_splits_prune_and_cache_when_runners_are_velnor() {
         let config = scanned_fixture(provider_set([ProviderId::Velnor]));
         let files = must(generated_files(&config), "generate");
@@ -18109,6 +18478,7 @@ lockfile = true
                 platform: provider::Platform::LinuxX64,
                 capabilities: provider::Capabilities::default(),
                 workspace_check: false,
+                full_history: false,
                 products: Vec::new(),
                 prerequisites: Vec::new(),
                 docker_contexts: Vec::new(),
@@ -18199,6 +18569,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -18258,6 +18629,7 @@ lockfile = true
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),
@@ -20100,6 +20472,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20435,6 +20808,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20525,6 +20899,10 @@ lockfile = true
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test pins one explicit unit per tool-union combination"
+    )]
     fn kind_reusable_unions_member_tools_and_covers_every_fetch_unit() {
         let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
         let rust_index = must_some(
@@ -20558,6 +20936,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20661,6 +21040,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20764,6 +21144,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20870,6 +21251,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -21027,6 +21409,7 @@ lockfile = true
                     platform: crate::s2::provider::Platform::LinuxX64,
                     capabilities: crate::s2::provider::Capabilities::default(),
                     workspace_check: false,
+                    full_history: false,
                     products: Vec::new(),
                     prerequisites: Vec::new(),
                     docker_contexts: Vec::new(),
@@ -21056,6 +21439,7 @@ lockfile = true
                     platform: crate::s2::provider::Platform::LinuxX64,
                     capabilities: crate::s2::provider::Capabilities::default(),
                     workspace_check: false,
+                    full_history: false,
                     products: Vec::new(),
                     prerequisites: Vec::new(),
                     docker_contexts: Vec::new(),
@@ -22251,6 +22635,181 @@ lockfile = true
         );
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn reviewers_render_in_declared_order_with_header() {
+        let config = format!(
+            "{DECLARED_SURFACE_CONFIG}\n\
+             [[reviewers]]\n\
+             pattern = \"*\"\n\
+             owners = [\"@tailrocks\"]\n\
+             [[reviewers]]\n\
+             pattern = \"/docs/**\"\n\
+             owners = [\"@tailrocks/docs-team\", \"docs@example.com\"]\n"
+        );
+        let root = declared_surface_repository("reviewers-order", &config, &[], &[]);
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan the declared surface",
+        );
+        let files = must(generated_files(&scanned.config), "generate");
+        let codeowners = must_some(
+            files.get(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            "CODEOWNERS is emitted",
+        );
+        assert_eq!(
+            codeowners,
+            &format!(
+                "{GENERATED_HEADER}* @tailrocks\n/docs/** @tailrocks/docs-team docs@example.com\n"
+            ),
+            "CODEOWNERS must carry the generated header and one line per row"
+        );
+        assert!(
+            codeowners.find("* @tailrocks").unwrap_or(usize::MAX)
+                < codeowners.find("/docs/**").unwrap_or(0),
+            "row order is semantic under last-match-wins: {codeowners}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codeowners_static_file_row_is_refused() {
+        let root = temporary_repository("codeowners-reserved");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let mut config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        config.static_files.push(StaticFile {
+            path: crate::CODEOWNERS_PATH.to_owned(),
+            source: "x".to_owned(),
+            content: "* @evil\n".to_owned(),
+        });
+        let error = must_some(
+            generated_files(&config).err(),
+            "a passthrough row must not stand in for typed reviewers",
+        );
+        assert!(
+            error.to_string().contains(crate::CODEOWNERS_PATH),
+            "refusal must name the reserved path: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zero_reviewer_rows_emit_no_codeowners() {
+        let root = temporary_repository("codeowners-absent");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        let files = must(generated_files(&config), "generate");
+        assert!(
+            !files.contains_key(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            "reviewer assignment is opt-in: no rows, no file"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codeowners_hand_edit_blocks_regeneration() {
+        let config = format!(
+            "{DECLARED_SURFACE_CONFIG}\n\
+             [[reviewers]]\n\
+             pattern = \"*\"\n\
+             owners = [\"@tailrocks\"]\n"
+        );
+        let root = declared_surface_repository("codeowners-drift", &config, &[], &[]);
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan the declared surface",
+        );
+        let files = must(generated_files(&scanned.config), "generate");
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write the generated tree",
+        );
+        let codeowners = root.join(crate::CODEOWNERS_PATH);
+        let tampered = format!(
+            "{}* @someone-else\n",
+            must(fs::read_to_string(&codeowners), "read CODEOWNERS")
+        );
+        must(fs::write(&codeowners, &tampered), "hand-edit CODEOWNERS");
+        let error = must_some(
+            write_generated(&root, &files, false, false, false).err(),
+            "a hand edit must block regeneration",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("manually modified generated file")
+                && error.to_string().contains(crate::CODEOWNERS_PATH),
+            "refusal must name the drifted file: {error}"
+        );
+        assert_eq!(
+            must(fs::read_to_string(&codeowners), "read preserved CODEOWNERS"),
+            tampered
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codeowners_render_is_deterministic() {
+        let config = format!(
+            "{DECLARED_SURFACE_CONFIG}\n\
+             [[reviewers]]\n\
+             pattern = \"*\"\n\
+             owners = [\"@tailrocks\"]\n"
+        );
+        let root = declared_surface_repository("codeowners-determinism", &config, &[], &[]);
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan the declared surface",
+        );
+        let first = must(generated_files(&scanned.config), "generate once");
+        let second = must(generated_files(&scanned.config), "generate twice");
+        assert_eq!(
+            first.get(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            second.get(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            "repeated renders must be byte-identical"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn publish_failure_rolls_back_partial_installs() {
@@ -24069,6 +24628,7 @@ lockfile = true
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             platform: provider::Platform::LinuxX64,
             products: Vec::new(),
             prerequisites: Vec::new(),

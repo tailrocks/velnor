@@ -293,6 +293,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -490,6 +491,225 @@ mod tests {
                 !output.contains("prepared-tool"),
                 "undeclared provisioning on {provider:?} mentions no prepared tool"
             );
+        }
+    }
+
+    #[test]
+    fn full_history_facts_travel_per_invocation_and_render_unquoted() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
+        for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+            let deep_facts =
+                ir.unit_provider_facts(&deep, &ir.default_unit_contract(&deep, true), provider);
+            let shallow_facts = ir.unit_provider_facts(
+                &shallow,
+                &ir.default_unit_contract(&shallow, true),
+                provider,
+            );
+            assert!(
+                deep_facts.full_history,
+                "{provider:?} carries the deep unit's flag"
+            );
+            assert!(
+                !shallow_facts.full_history,
+                "{provider:?} leaves the shallow unit shallow"
+            );
+            let deep_values = deep_facts.input_values();
+            assert!(
+                deep_values.contains(&(provider_input::FULL_HISTORY, "true".to_owned())),
+                "{provider:?} passes the flag for the deep unit: {deep_values:?}"
+            );
+            assert!(
+                !shallow_facts
+                    .input_values()
+                    .iter()
+                    .any(|(name, _)| *name == provider_input::FULL_HISTORY),
+                "{provider:?} omits the flag for the shallow unit"
+            );
+            let rendered = super::render_caller_inputs(&deep_values);
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line == "      full_history: true"),
+                "{provider:?} renders the boolean unquoted: {rendered}"
+            );
+        }
+        let bare = super::ProviderStepFacts::default();
+        assert!(
+            !bare
+                .input_values()
+                .iter()
+                .any(|(name, _)| *name == provider_input::FULL_HISTORY),
+            "default facts omit the flag"
+        );
+    }
+
+    #[test]
+    fn kind_header_declares_full_history_only_when_a_member_needs_it() {
+        let shallow_ir = owner_test_ir(
+            "example/full-history",
+            vec![rust_unit("rust-a", "crates/a")],
+        );
+        let shallow = must_some(
+            must_ok(
+                shallow_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "shallow kind renders",
+            ),
+            "shallow kind has members",
+        )
+        .1;
+        assert!(
+            !shallow.contains("full_history"),
+            "a kind with no deep member declares nothing: {shallow}"
+        );
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let mixed_ir = owner_test_ir(
+            "example/full-history",
+            vec![deep, rust_unit("rust-shallow", "crates/shallow")],
+        );
+        let mixed = must_some(
+            must_ok(
+                mixed_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "mixed kind renders",
+            ),
+            "mixed kind has members",
+        )
+        .1;
+        let declaration =
+            "      full_history:\n        required: false\n        type: boolean\n        default: false";
+        assert!(
+            mixed.contains(declaration),
+            "a kind with a deep member declares the boolean flag: {mixed}"
+        );
+        assert_eq!(
+            mixed.matches("full_history:").count(),
+            1,
+            "the flag is declared exactly once: {mixed}"
+        );
+        assert_eq!(
+            provider_input::declaration(provider_input::FULL_HISTORY),
+            declaration,
+            "the declaration helper pins the exact bytes"
+        );
+    }
+
+    #[test]
+    fn collapsed_checkout_stays_byte_identical_without_deep_members() {
+        let unit = rust_unit("rust-a", "crates/a");
+        let ir = owner_test_ir("example/full-history", vec![unit.clone()]);
+        let mut output = String::new();
+        must_ok(
+            ir.render_collapsed_provider_verify_job(
+                &mut output,
+                &[&unit],
+                None,
+                ProviderId::GithubHosted,
+                "verify",
+                "Verify",
+                "ubuntu-24.04",
+                None,
+            ),
+            "shallow job renders",
+        );
+        assert!(
+            !output.contains("fetch-depth"),
+            "a shallow job carries no fetch-depth key: {output}"
+        );
+        let checkout = format!(
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+            ir.pins.checkout
+        );
+        assert!(
+            output.contains(&checkout),
+            "the shallow checkout keeps today's exact bytes: {output}"
+        );
+    }
+
+    #[test]
+    fn mixed_kind_renders_one_flipped_fetch_depth_expression_per_checkout() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow]);
+        let mut output = String::new();
+        must_ok(
+            ir.render_collapsed_provider_verify_job(
+                &mut output,
+                &[&deep],
+                None,
+                ProviderId::GithubHosted,
+                "verify",
+                "Verify",
+                "ubuntu-24.04",
+                None,
+            ),
+            "deep job renders",
+        );
+        // The caller invokes once per (unit, provider), so one expression
+        // serves mixed kinds; the operand order is load-bearing because 0 is
+        // falsy in GitHub Actions expressions.
+        let checkout = format!(
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}\n          fetch-depth: ${{{{ inputs.full_history == false && 1 || 0 }}}}",
+            ir.pins.checkout
+        );
+        assert!(
+            output.contains(&checkout),
+            "the deep checkout pins the exact flipped expression: {output}"
+        );
+        assert!(
+            !output.contains("inputs.full_history && 0"),
+            "never the falsy-0 form, which yields 1 in both cases: {output}"
+        );
+        let rendered = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "mixed kind renders",
+            ),
+            "mixed kind has members",
+        )
+        .1;
+        assert!(
+            rendered.contains("fetch-depth: ${{ inputs.full_history == false && 1 || 0 }}"),
+            "the kind reusable carries the flipped expression: {rendered}"
+        );
+        assert!(
+            !rendered.contains("inputs.full_history && 0"),
+            "the kind reusable never carries the falsy-0 form: {rendered}"
+        );
+    }
+
+    #[test]
+    fn callers_pass_full_history_only_on_deep_unit_call_jobs() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
+        let file = nested_unit_workflow_file(&deep);
+        for (unit, expect) in [(&deep, true), (&shallow, false)] {
+            let callers = ir.unit_provider_callers(unit, &file, None);
+            assert!(!callers.is_empty(), "unit {} renders call jobs", unit.id);
+            for caller in &callers {
+                let mut output = String::new();
+                ir.render_unit_provider_caller(&mut output, unit, caller, false, &[], false);
+                if expect {
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line == "      full_history: true"),
+                        "the deep unit's {} call job passes unquoted true: {output}",
+                        caller.job_id
+                    );
+                } else {
+                    assert!(
+                        !output.contains("full_history"),
+                        "the shallow unit's {} call job passes nothing: {output}",
+                        caller.job_id
+                    );
+                }
+            }
         }
     }
 
@@ -1119,6 +1339,175 @@ mod tests {
             !rust_workflow.contains("runs-on: macos-15")
                 && !rust_workflow.contains("runs-on: macos-26"),
             "{rust_workflow}"
+        );
+    }
+
+    /// One macOS Rust member (a `BoltFFI` producer) beside Linux Rust
+    /// members: the collapsed hosted jobs split by executor, so the Linux
+    /// units stay on the hosted selector instead of following the one
+    /// macOS member onto the Apple image.
+    fn mixed_platform_rust_units() -> Vec<Unit> {
+        let mut producer = boltffi_unit("rust-bridge-ffi");
+        producer.platform = crate::s2::provider::Platform::MacosArm64;
+        vec![
+            rust_unit("rust-widget", "crates/widget"),
+            producer,
+            rust_unit("rust-gadget", "crates/gadget"),
+        ]
+    }
+
+    #[test]
+    fn mixed_platform_rust_kind_splits_hosted_jobs_by_executor() {
+        let ir = owner_test_ir("example/fixture", mixed_platform_rust_units());
+        // Facts level: only the (hosted, macOS) pair sets the flag.
+        for unit in &ir.units {
+            let contract = ir.contract_for(unit, None);
+            let hosted = ir.unit_provider_facts(unit, &contract, ProviderId::GithubHosted);
+            assert_eq!(
+                hosted.apple_executor,
+                unit.id == "rust-bridge-ffi",
+                "{} sets the executor flag only on macOS",
+                unit.id
+            );
+            for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+                assert!(
+                    !ir.unit_provider_facts(unit, &contract, provider)
+                        .apple_executor,
+                    "local providers never set the executor flag: {} on {provider:?}",
+                    unit.id
+                );
+            }
+        }
+        // Render level: one job per executor, each admitting only its own
+        // callers at the job gate and the result record alike.
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            "rust kind reusable renders",
+        );
+        let workflow = must_some(rendered, "rust kind has members").1;
+        assert!(
+            workflow.contains(
+                "      apple_executor:\n        required: false\n        type: boolean\n        default: false"
+            ),
+            "the header declares the executor flag: {workflow}"
+        );
+        let default = job_block(&workflow, "verify-github-hosted");
+        assert!(
+            default.contains("runs-on: ubuntu-24.04"),
+            "Linux units stay on the hosted selector: {default}"
+        );
+        assert!(
+            default.contains("inputs.apple_executor != true"),
+            "the default job admits only default callers: {default}"
+        );
+        assert!(
+            default.contains("if: ${{ always() && inputs.apple_executor != true }}"),
+            "the default job records only default dispatches: {default}"
+        );
+        let apple = job_block(&workflow, "verify-github-hosted-apple");
+        assert!(
+            apple.contains("runs-on: macos-26"),
+            "the macOS unit takes the Apple image: {apple}"
+        );
+        assert!(
+            apple.contains("inputs.apple_executor }}"),
+            "the Apple job admits only Apple callers: {apple}"
+        );
+        assert!(
+            apple.contains("if: ${{ always() && inputs.apple_executor }}"),
+            "the Apple job records only Apple dispatches: {apple}"
+        );
+        // Caller level: exactly the macOS hosted caller passes the flag.
+        let nodes = aggregate_fixture_nodes(&ir);
+        for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
+            let rendered = ir.render_nested(kind, &nodes, None);
+            assert_eq!(
+                rendered.matches("apple_executor: true").count(),
+                1,
+                "exactly the macOS hosted caller passes the flag on {kind:?}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn executor_split_keeps_unsplit_kinds_on_one_job() {
+        // All-Linux: the one hosted job on the selector, no executor clause.
+        let linux = owner_test_ir(
+            "example/fixture",
+            vec![
+                rust_unit("rust-a", "crates/a"),
+                rust_unit("rust-b", "crates/b"),
+            ],
+        );
+        let rendered = must_some(
+            must_ok(
+                linux.render_kind_unit_workflow(UnitKind::Rust, None),
+                "rust kind reusable renders",
+            ),
+            "rust kind has members",
+        )
+        .1;
+        assert!(rendered.contains("  verify-github-hosted:\n"), "{rendered}");
+        assert!(
+            !rendered.contains("verify-github-hosted-apple"),
+            "an unsplit kind renders no Apple job: {rendered}"
+        );
+        let hosted = job_block(&rendered, "verify-github-hosted");
+        assert!(hosted.contains("runs-on: ubuntu-24.04"), "{hosted}");
+        assert!(
+            !hosted.contains("apple_executor"),
+            "an unsplit job carries no executor clause: {hosted}"
+        );
+        // All-macOS: the same one job, on the Apple image, no clause.
+        let mut apple_a = rust_unit("swift-a", "a");
+        apple_a.kind = UnitKind::Swift;
+        apple_a.platform = crate::s2::provider::Platform::MacosArm64;
+        let mut apple_b = rust_unit("swift-b", "b");
+        apple_b.kind = UnitKind::Swift;
+        apple_b.platform = crate::s2::provider::Platform::MacosArm64;
+        let macos = owner_test_ir("example/fixture", vec![apple_a, apple_b]);
+        let rendered = must_some(
+            must_ok(
+                macos.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            !rendered.contains("verify-github-hosted-apple"),
+            "a uniform Apple kind renders no second job: {rendered}"
+        );
+        let hosted = job_block(&rendered, "verify-github-hosted");
+        assert!(hosted.contains("runs-on: macos-26"), "{hosted}");
+        assert!(
+            !hosted.contains("apple_executor"),
+            "a uniform Apple job carries no executor clause: {hosted}"
+        );
+    }
+
+    #[test]
+    fn executor_split_is_deterministic() {
+        let render = |units| {
+            let ir = owner_test_ir("example/fixture", units);
+            must_some(
+                must_ok(
+                    ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                    "rust kind reusable renders",
+                ),
+                "rust kind has members",
+            )
+            .1
+        };
+        let first = render(mixed_platform_rust_units());
+        let second = render(mixed_platform_rust_units());
+        assert_eq!(first, second, "identical members render identical bytes");
+        let mut reordered = mixed_platform_rust_units();
+        reordered.rotate_right(1);
+        assert_eq!(
+            first,
+            render(reordered),
+            "member order never leaks into the split render"
         );
     }
 
@@ -4503,6 +4892,10 @@ pub(crate) mod provider_input {
     /// (`fmt,clippy,test,doctest`); empty when the unit keeps the single
     /// legacy checks step.
     pub(crate) const VALIDATION_PHASES: &str = "validation_phases";
+    /// `true` when the unit's checkout must clone full history instead of
+    /// the default depth-1 shallow clone. Diff-aware gates (merge-base
+    /// against the base SHA) need ancestry the shallow checkout lacks.
+    pub(crate) const FULL_HISTORY: &str = "full_history";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -4526,6 +4919,7 @@ pub(crate) mod provider_input {
         HOST_WARM_LAYERS,
         POLICY_RUNTIME,
         CANDIDATE_PUBLISH,
+        APPLE_EXECUTOR,
         UNIT_PLATFORM,
         UNIT_TRUST,
         UNIT_DEPENDENCIES,
@@ -4534,6 +4928,7 @@ pub(crate) mod provider_input {
         PRODUCT_PROVIDES,
         PRODUCT_TRANSPORT_READY,
         VALIDATION_PHASES,
+        FULL_HISTORY,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -4550,6 +4945,7 @@ pub(crate) mod provider_input {
                 | POLICY_RUNTIME
                 | CANDIDATE_PUBLISH
                 | APPLE_EXECUTOR
+                | FULL_HISTORY
         )
     }
 
@@ -4628,6 +5024,7 @@ pub(crate) struct ProviderStepFacts {
     pub(crate) host_warm_layers: Vec<&'static str>,
     pub(crate) policy_runtime: bool,
     pub(crate) candidate_publish: bool,
+    pub(crate) apple_executor: bool,
     pub(crate) platform: String,
     pub(crate) trust: String,
     pub(crate) unit_dependencies: Vec<String>,
@@ -4641,10 +5038,17 @@ pub(crate) struct ProviderStepFacts {
     /// The validation phases the unit verifies through, in step order;
     /// empty when the unit keeps the single legacy checks step.
     pub(crate) validation_phases: Vec<ValidationPhase>,
+    /// Whether the unit's checkout clones full history. Provider-independent:
+    /// the same value travels per (unit, provider) invocation.
+    pub(crate) full_history: bool,
 }
 
 impl ProviderStepFacts {
     /// The `with:` values a caller passes: one entry per non-empty fact.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one branch per workflow_call input, in declaration order"
+    )]
     pub(crate) fn input_values(&self) -> Vec<(&'static str, String)> {
         let mut values = Vec::new();
         if !self.mise_tools.is_empty() {
@@ -4719,6 +5123,9 @@ impl ProviderStepFacts {
         if self.candidate_publish {
             values.push((provider_input::CANDIDATE_PUBLISH, "true".to_owned()));
         }
+        if self.apple_executor {
+            values.push((provider_input::APPLE_EXECUTOR, "true".to_owned()));
+        }
         // Cache keys always carry the platform/trust segments, so every
         // caller passes them unconditionally.
         values.push((provider_input::UNIT_PLATFORM, self.platform.clone()));
@@ -4745,6 +5152,9 @@ impl ProviderStepFacts {
                 provider_input::VALIDATION_PHASES,
                 ValidationPhase::id_list(&self.validation_phases).join(","),
             ));
+        }
+        if self.full_history {
+            values.push((provider_input::FULL_HISTORY, "true".to_owned()));
         }
         values
     }
@@ -4918,6 +5328,17 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
             "          if {expected_condition}; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"${admitted}\" == true ]]; then\n              case \"$result\" in\n                success) ;;\n                skipped) echo \"expected {noun} {job_id} was skipped: a skipped expected result cannot pass\" >&2; exit 1 ;;\n                cancelled) echo \"expected {noun} {job_id} was cancelled: a cancelled expected result cannot pass\" >&2; exit 1 ;;\n                *) echo \"expected {noun} {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                skipped) ;;\n                *) echo \"selected {noun} {job_id} ran outside its provider admission ({admitted}=${admitted}): $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              skipped) ;;\n              success) echo \"unexpected {noun} {job_id} succeeded outside the expected set: the plan did not declare it\" >&2; exit 1 ;;\n              *) echo \"unexpected {noun} {job_id} ran outside the expected set: $result\" >&2; exit 1 ;;\n            esac\n          fi"
         );
     }
+}
+
+/// One collapsed provider job awaiting render: the provider, its
+/// trust/executor partition members, the owned identity strings, and the
+/// executor partition (`None` when the provider does not split).
+struct CollapsedProviderJob<'a> {
+    provider: ProviderId,
+    members: Vec<&'a Unit>,
+    job_id: String,
+    display: String,
+    apple: Option<bool>,
 }
 
 #[allow(dead_code)]
@@ -5620,6 +6041,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 continue;
             }
+            // The full-history input is declared only when a member needs
+            // it: an unconditional declaration would rewrite every kind
+            // header for a feature only diff-aware gates use.
+            if *name == provider_input::FULL_HISTORY
+                && !members.iter().any(|unit| unit.full_history)
+            {
+                continue;
+            }
             let _ = writeln!(output, "{}", provider_input::declaration(name));
         }
         if !env.is_empty() {
@@ -5677,17 +6106,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// The job gate of a collapsed provider job: the provider the caller selected, the
     /// unit's membership in the plan's selection, and the provider's admission
     /// predicate. Membership is a single `contains` over `inputs.unit`, never
-    /// an enumeration of the kind's units.
+    /// an enumeration of the kind's units. A kind split across executors adds
+    /// the `apple_executor` clause, so each partition admits only its own
+    /// callers; an unsplit kind carries no clause.
     fn collapsed_provider_gate(
         &self,
         provider: ProviderId,
         admission: ProviderAdmission,
+        apple: Option<bool>,
     ) -> String {
-        format!(
+        let mut gate = format!(
             "inputs.provider == '{}' && contains(inputs.selected_units, format('\"unit_id\":\"{{0}}\"', inputs.unit)) && ({})",
             provider.as_str(),
             self.provider_admission_expression(admission)
-        )
+        );
+        match apple {
+            None => {}
+            Some(true) => gate.push_str(" && inputs.apple_executor"),
+            Some(false) => gate.push_str(" && inputs.apple_executor != true"),
+        }
+        gate
     }
 
     fn collapsed_timeout_minutes(
@@ -5732,9 +6170,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     /// Render the collapsed provider jobs of one kind: one job per (provider,
-    /// trust) class that has members. Hosted members share one job; local
-    /// providers split trusted-only members into their own job so the
-    /// trusted-event gate stays per-job.
+    /// trust) class that has members. Hosted members share one job unless the
+    /// kind splits across executors; local providers split trusted-only
+    /// members into their own job so the trusted-event gate stays per-job.
     fn render_collapsed_kind_verify_job(
         &self,
         output: &mut String,
@@ -5744,22 +6182,53 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if members.is_empty() {
             return Ok(());
         }
-        // Collect (provider, trust split, job id, display name) first so the
-        // owned strings outlive each render call.
-        let mut jobs: Vec<(ProviderId, Vec<&Unit>, String, String)> = Vec::new();
+        // Collect the jobs first so the owned strings outlive each render
+        // call.
+        let mut jobs: Vec<CollapsedProviderJob<'_>> = Vec::new();
         for provider in &self.providers {
             let provider = *provider;
             if provider == ProviderId::GithubHosted {
                 let hosted = self.collapsed_provider_members(members, contracts, provider, None);
-                if hosted.is_empty() {
-                    continue;
+                // A kind split across executors (portable units beside macOS
+                // units) renders one collapsed job per executor: a single
+                // `runs-on` cannot serve both. An unsplit kind keeps the one
+                // job it has always rendered. Each partition samples its own
+                // members for the runner and admits only its own callers, so
+                // one macOS member can no longer route the kind's Linux units
+                // onto the macOS image.
+                let (apple, default): (Vec<_>, Vec<_>) = hosted
+                    .into_iter()
+                    .partition(|unit| unit.platform == crate::s2::provider::Platform::MacosArm64);
+                let split = !apple.is_empty() && !default.is_empty();
+                if !default.is_empty() {
+                    jobs.push(CollapsedProviderJob {
+                        provider,
+                        members: default,
+                        job_id: "verify-github-hosted".to_owned(),
+                        display: "GitHub · hosted".to_owned(),
+                        apple: split.then_some(false),
+                    });
                 }
-                jobs.push((
-                    provider,
-                    hosted,
-                    "verify-github-hosted".to_owned(),
-                    "GitHub · hosted".to_owned(),
-                ));
+                if !apple.is_empty() {
+                    let (job_id, display) = if split {
+                        (
+                            "verify-github-hosted-apple".to_owned(),
+                            "GitHub · hosted · Apple".to_owned(),
+                        )
+                    } else {
+                        (
+                            "verify-github-hosted".to_owned(),
+                            "GitHub · hosted".to_owned(),
+                        )
+                    };
+                    jobs.push(CollapsedProviderJob {
+                        provider,
+                        members: apple,
+                        job_id,
+                        display,
+                        apple: split.then_some(true),
+                    });
+                }
                 continue;
             }
             for trusted in [false, true] {
@@ -5778,23 +6247,39 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 } else {
                     provider.as_str().to_owned()
                 };
-                jobs.push((provider, split, job_id, display));
+                jobs.push(CollapsedProviderJob {
+                    provider,
+                    members: split,
+                    job_id,
+                    display,
+                    apple: None,
+                });
             }
         }
-        for (provider, split, job_id, display) in &jobs {
-            // macOS-platform members only exist on hosted, and need the
-            // GitHub-owned macOS image instead of the Linux selector.
-            let macos = *provider == ProviderId::GithubHosted
-                && split
+        for job in &jobs {
+            // macOS-platform members only exist on hosted partitions, and
+            // need the GitHub-owned macOS image instead of the Linux
+            // selector. Each partition is executor-homogeneous, so sampling
+            // any member selects the partition's runner.
+            let macos = job.provider == ProviderId::GithubHosted
+                && job
+                    .members
                     .iter()
                     .any(|unit| unit.platform == crate::s2::provider::Platform::MacosArm64);
             let runs_on = if macos {
                 yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)
             } else {
-                self.runs_on_yaml(*provider)
+                self.runs_on_yaml(job.provider)
             };
             self.render_collapsed_provider_verify_job(
-                output, split, contracts, *provider, job_id, display, &runs_on,
+                output,
+                &job.members,
+                contracts,
+                job.provider,
+                &job.job_id,
+                &job.display,
+                &runs_on,
+                job.apple,
             )?;
         }
         Ok(())
@@ -5814,7 +6299,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// caller's inputs.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the job identity (provider, id, display name, runner) is passed explicitly per provider job"
+        reason = "the job identity (provider, id, display name, runner, executor partition) is passed explicitly per provider job"
     )]
     fn render_collapsed_provider_verify_job(
         &self,
@@ -5825,12 +6310,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         job_id: &str,
         display_name: &str,
         runs_on: &str,
+        apple: Option<bool>,
     ) -> Result<(), GeneratorError> {
         // Every member of a collapsed job shares one admission class
         // (`collapsed_provider_members` splits local providers by trust), so the
         // first member's class is the job's.
-        let gate = self
-            .collapsed_provider_gate(provider, ProviderAdmission::for_unit(provider, members[0]));
+        let gate = self.collapsed_provider_gate(
+            provider,
+            ProviderAdmission::for_unit(provider, members[0]),
+            apple,
+        );
         let display_name = yaml_scalar(display_name);
         let _ = writeln!(
             output,
@@ -5839,9 +6328,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         output.push_str("    steps:\n");
         render_ci_job_started_marker(output);
+        // The caller invokes once per (unit, provider) and passes
+        // `full_history` per invocation, so one expression serves mixed
+        // kinds: deep legs clone full history, shallow legs stay depth-1.
+        // The operand order is load-bearing: number 0 is FALSY in GitHub
+        // Actions expressions, so `inputs.full_history && 0 || 1` yields 1
+        // in both cases and would silently keep deep legs shallow. The
+        // flipped form below yields 0 for deep legs and 1 otherwise.
+        let fetch_depth = if members.iter().any(|unit| unit.full_history) {
+            "\n          fetch-depth: ${{ inputs.full_history == false && 1 || 0 }}"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}{fetch_depth}",
             self.pins.checkout
         );
         Self::render_unit_dependency_info_step(output);
@@ -5861,13 +6362,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ));
         render_ci_selection_end_marker(output);
         self.render_collapsed_provider_steps(output, provider, members, contracts)?;
-        // Exactly one record per dispatch: hosted providers never split, so
-        // the one job records every dispatch; local providers split by
-        // trust, so each job records only dispatches of its own partition.
-        // The `==` form fails closed on a missing input (no record, and the
-        // aggregate fails the missing record) instead of recording for an
-        // unknown dispatch.
-        let record_gate = if provider.is_local() {
+        // Exactly one record per dispatch: an unsplit hosted provider job
+        // records every dispatch; local providers split by trust, so each
+        // job records only dispatches of its own partition, plus its
+        // executor partition when the kind splits one. Sibling jobs run the
+        // same collapsed steps for the dispatch but stay silent here, so the
+        // aggregate never sees a duplicate key. The `==` form fails closed
+        // on a missing input (no record, and the aggregate fails the missing
+        // record) instead of recording for an unknown dispatch.
+        let mut record_gate = if provider.is_local() {
             format!(
                 "always() && inputs.unit_trust == '{}'",
                 members[0].trust.as_str()
@@ -5875,6 +6378,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         } else {
             "always()".to_owned()
         };
+        match apple {
+            None => {}
+            Some(true) => record_gate.push_str(" && inputs.apple_executor"),
+            Some(false) => record_gate.push_str(" && inputs.apple_executor != true"),
+        }
         output.push_str(&render_unit_result_steps(
             self.pins.upload_artifact,
             provider.as_str(),
@@ -5978,6 +6486,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && !self.repository.is_empty()
                 && self.repository == crate::s2::workflow_setup_action_repository()
                 && unit_owns_workflow_crate(unit),
+            apple_executor: hosted && unit.platform == crate::s2::provider::Platform::MacosArm64,
             platform: unit.platform.as_str().to_owned(),
             trust: unit.trust.as_str().to_owned(),
             unit_dependencies: unit.depends_on.clone(),
@@ -5986,6 +6495,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             product_provides: Self::transport_provides(unit, provider),
             product_transport_ready: Self::transport_ready(&self.units, unit, provider),
             validation_phases: unit.runnable_phases(),
+            full_history: unit.full_history,
         }
     }
 
