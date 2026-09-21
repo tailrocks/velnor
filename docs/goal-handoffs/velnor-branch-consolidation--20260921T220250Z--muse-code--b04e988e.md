@@ -15,7 +15,7 @@
 | Source branch / HEAD at pause | Primary checkout on `integrate/p962-port` @ `5349ec3297f5c2fcd13fb303c312abc307a88f97` (clean, = remote) |
 | Preservation branch | `goal-handoff/velnor-consolidation-b04e988e` @ `<SHA filled at publish>` |
 | PR base / observed SHA | `main` @ `45ef1ebe` (#1062; observed via `ls-remote` during audits; local `main` is stale at `14a9ff84`) |
-| Handoff PR | `<URL filled at publish>` (DRAFT, auto-merge off) |
+| Handoff PR | `https://github.com/tailrocks/velnor/pull/1065` (#1065, DRAFT, auto-merge null/off, base `main`, head `goal-handoff/velnor-consolidation-b04e988e`) |
 | Recovery portability | **NOT fully remote-portable.** Remote-portable: HANDOFF + supporting files on preservation branch, all pushed branches/PRs. Local-only (same-machine): `/tmp/velnor-recovery-20260921.bundle` (107M, deleted-branch history), `/tmp` reports not committed (b40–b58 reports, recon files — summarized in committed ledger copy), session logs. Details §E.2/§K. |
 | Resume authorization | Explicit later user request only, via `/goal Read and resume docs/goal-handoffs/velnor-branch-consolidation--20260921T220250Z--muse-code--b04e988e.md` |
 
@@ -300,8 +300,8 @@ handoff — see WT-6.
 Merged task ports: #998, #1000, #1004, #1013, #1021, #1034, #1040, #1047 (all squash, commits §E).
 Merged author PRs (externally-resolved, not re-evaluated): #985, #966, #968, #1053, #1059, #1060,
 #1061, #1062, + earlier per ledger. Closed-unmerged this session: #955, #957, #960, #961 (with
-explanatory comments). Handoff PR: `GOAL: ... — paused handoff [b04e988e]` (URL filled at publish;
-DRAFT, base `main`).
+explanatory comments). Handoff PR: `GOAL: consolidate velnor branches into main — paused handoff
+[b04e988e]` = #1065 (`https://github.com/tailrocks/velnor/pull/1065`; DRAFT, base `main`).
 Stack: #978/#979/#980 share base `97bac4c4`. No other head→head stacking detected.
 
 ### E.5 Integration map and ordered landing plan — FUTURE EXECUTION ONLY
