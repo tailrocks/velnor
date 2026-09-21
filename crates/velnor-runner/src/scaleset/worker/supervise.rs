@@ -39,7 +39,7 @@ use super::WorkerRunner;
 /// How many DinD restarts one worker tolerates before failing.
 pub const MAX_DIND_RESTARTS: u32 = 3;
 /// JIT runner startup deadline, persisted as an absolute epoch time.
-pub const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(120);
+pub const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Per-worker DinD restart budget (persisted with the worker record once
 /// the journal extension lands; until then owned by the tick caller).
