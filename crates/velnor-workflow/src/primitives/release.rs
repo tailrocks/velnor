@@ -4157,6 +4157,8 @@ fn render_docker_manifest_job(
 /// never interleave on the same tag.
 // Schema-1 is frozen: multi-image release is a schema-2 `[[release.image]]`
 // contract, so this publisher keeps its single scalar image.
+// Per-image `lfs` is likewise schema-2 only: schema-1 is frozen, so this
+// publisher keeps its shallow checkout without LFS objects.
 fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
     let mut manifest_needs = vec![

@@ -4545,6 +4545,7 @@ struct DockerImageView<'a> {
     dockerfile: &'a str,
     context: &'a str,
     platforms: &'a [String],
+    lfs: bool,
 }
 
 impl<'a> DockerImageView<'a> {
@@ -4556,11 +4557,12 @@ impl<'a> DockerImageView<'a> {
             dockerfile: docker_dockerfile(release),
             context: docker_context(release),
             platforms: &release.platforms,
+            lfs: false,
         }
     }
 
     /// One `[[release.image]]` row: a `-<name>` chain with the row's own
-    /// reference, build inputs, and platforms.
+    /// reference, build inputs, platforms, and LFS checkout knob.
     fn row(row: &'a ReleaseImageSpec) -> Self {
         Self {
             suffix: format!("-{}", row.name),
@@ -4568,6 +4570,7 @@ impl<'a> DockerImageView<'a> {
             dockerfile: docker_image_dockerfile(row),
             context: docker_image_context(row),
             platforms: &row.platforms,
+            lfs: row.lfs,
         }
     }
 }
@@ -4650,8 +4653,15 @@ fn render_docker_platform_job(
     let buildx = ActionPin::DockerBuildx.reference();
     let build = ActionPin::DockerBuild.reference();
     let matrix = docker_platform_matrix(config, image.platforms);
+    // The LFS line renders only for rows that declare it; the empty
+    // string keeps every other checkout byte-identical.
+    let lfs = if image.lfs {
+        "          lfs: true\n"
+    } else {
+        ""
+    };
     format!(
-        "  image-platform{suffix}:\n    name: Build ${{{{ matrix.arch }}}} image\n    needs: [verify, image-admission{suffix}]\n    if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n{login_step}      - name: Build + push platform image by digest\n        id: build\n        uses: {build}\n        with:\n          context: {context}\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          outputs: type=image,push-by-digest=true,name-canonical=true,push=true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope={scope}-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope={scope}-${{{{ matrix.arch }}}},mode=max\n          build-args: |\n            VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n      - name: Record platform digest\n        run: |\n          set -euo pipefail\n          digest=\"${{{{ steps.build.outputs.digest }}}}\"\n          hex=\"${{digest#sha256:}}\"\n          case \"$digest\" in\n            sha256:*) ;;\n            *) echo \"::error::platform build did not return a digest\" >&2; exit 1 ;;\n          esac\n          case \"$hex\" in\n            ''|*[!0-9a-f]*) echo \"::error::platform digest is not lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#hex}}\" -eq 64 ] || {{ echo \"::error::platform digest has invalid length\" >&2; exit 1; }}\n          printf '%s\\n' \"$digest\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform{suffix}-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  image-platform{suffix}:\n    name: Build ${{{{ matrix.arch }}}} image\n    needs: [verify, image-admission{suffix}]\n    if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n{lfs}          persist-credentials: false\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n{login_step}      - name: Build + push platform image by digest\n        id: build\n        uses: {build}\n        with:\n          context: {context}\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          outputs: type=image,push-by-digest=true,name-canonical=true,push=true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope={scope}-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope={scope}-${{{{ matrix.arch }}}},mode=max\n          build-args: |\n            VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n      - name: Record platform digest\n        run: |\n          set -euo pipefail\n          digest=\"${{{{ steps.build.outputs.digest }}}}\"\n          hex=\"${{digest#sha256:}}\"\n          case \"$digest\" in\n            sha256:*) ;;\n            *) echo \"::error::platform build did not return a digest\" >&2; exit 1 ;;\n          esac\n          case \"$hex\" in\n            ''|*[!0-9a-f]*) echo \"::error::platform digest is not lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#hex}}\" -eq 64 ] || {{ echo \"::error::platform digest has invalid length\" >&2; exit 1; }}\n          printf '%s\\n' \"$digest\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform{suffix}-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
         suffix = image.suffix,
         image = yaml_scalar(image.image),
         context = yaml_scalar(image.context),
@@ -4659,6 +4669,7 @@ fn render_docker_platform_job(
         scope = docker_cache_scope(image.image),
         source_url = docker_source_url(config),
         login_step = docker_login_step(release),
+        lfs = lfs,
     )
 }
 
@@ -11786,6 +11797,7 @@ cp "$record" "$out"
                 context: "images/node".to_owned(),
                 platforms: vec!["linux/amd64".to_owned()],
                 needs: vec!["base".to_owned()],
+                lfs: false,
             },
         ];
         spec
@@ -12009,6 +12021,7 @@ cp "$record" "$out"
                 context: "docker-geth".to_owned(),
                 platforms: vec!["linux/amd64".to_owned()],
                 needs: vec!["base".to_owned(), "build".to_owned()],
+                lfs: false,
             },
             ReleaseImageSpec {
                 name: "node".to_owned(),
@@ -12086,6 +12099,78 @@ cp "$record" "$out"
         assert!(
             !release.contains("Log in to GHCR"),
             "the declared registry must replace every default login"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// `lfs: true` lands on exactly the requesting row's platform-lane
+    /// checkout: siblings, admission gates, and manifests keep the
+    /// non-LFS checkout, and the surface renders deterministically.
+    #[test]
+    fn multi_image_docker_lfs_renders_only_on_the_requesting_platform_checkout() {
+        let mut spec = multi_image_docker_spec();
+        spec.images[1].lfs = true;
+        let root = scanned_root("multi-image-lfs");
+        let config = config(&["release.yml"], Some(spec));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let rerendered = rendered(&generate(&root, &config, None), "release.yml");
+        assert_eq!(
+            rerendered, release,
+            "the LFS surface must render deterministically"
+        );
+        assert_eq!(
+            release.matches("lfs: true").count(),
+            1,
+            "exactly one checkout must fetch LFS objects"
+        );
+        let node = yaml_job(&release, "image-platform-node");
+        assert!(
+            node.contains(
+                "fetch-depth: 1\n          lfs: true\n          persist-credentials: false"
+            ),
+            "the requesting row's platform checkout must fetch LFS objects:\n{node}"
+        );
+        let base = yaml_job(&release, "image-platform-base");
+        assert!(
+            !base.contains("lfs:"),
+            "the sibling row must keep the non-LFS checkout:\n{base}"
+        );
+        for job in [
+            "image-admission-base",
+            "image-admission-node",
+            "image-base",
+            "image-node",
+        ] {
+            let rendered_job = yaml_job(&release, job);
+            assert!(
+                !rendered_job.contains("lfs:"),
+                "{job} must keep the non-LFS checkout:\n{rendered_job}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Rows without `lfs` render no LFS checkout line at all, and an
+    /// explicit `lfs = false` renders byte-identical to the unset knob.
+    #[test]
+    fn multi_image_docker_without_lfs_renders_no_lfs_checkout() {
+        let root = scanned_root("multi-image-no-lfs");
+        let default_config = config(&["release.yml"], Some(multi_image_docker_spec()));
+        let release = rendered(&generate(&root, &default_config, None), "release.yml");
+        assert!(
+            !release.contains("lfs:"),
+            "unset rows must render no LFS checkout line:\n{release}"
+        );
+        let mut explicit = multi_image_docker_spec();
+        for row in &mut explicit.images {
+            row.lfs = false;
+        }
+        let explicit_config = config(&["release.yml"], Some(explicit));
+        let rerendered = rendered(&generate(&root, &explicit_config, None), "release.yml");
+        assert_eq!(
+            rerendered, release,
+            "explicit lfs = false must render byte-identical to the unset knob"
         );
         let _ = fs::remove_dir_all(root);
     }

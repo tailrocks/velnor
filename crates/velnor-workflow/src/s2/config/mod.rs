@@ -426,6 +426,11 @@ pub(crate) struct ReleaseImageSection {
     platforms: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     needs: Option<Vec<String>>,
+    /// Fetch Git LFS objects in this row's platform-lane checkout.
+    /// Absent keeps the non-LFS default; per row, so an LFS image never
+    /// slows its siblings' checkouts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lfs: Option<bool>,
 }
 
 /// The `image` key of a `[release]` contract: either the scalar reference
@@ -1190,6 +1195,10 @@ impl ReleaseImageSection {
 
     pub(crate) fn needs(&self) -> Option<&[String]> {
         self.needs.as_deref()
+    }
+
+    pub(crate) fn lfs(&self) -> bool {
+        self.lfs == Some(true)
     }
 }
 
@@ -4964,6 +4973,53 @@ mod tests {
         assert_eq!(rows[1].platforms(), &["linux/amd64".to_owned()]);
         assert_eq!(rows[1].needs(), Some(&["base".to_owned()][..]));
         assert_eq!(config.release().image(), None);
+    }
+
+    #[test]
+    fn docker_images_lfs_defaults_to_false_and_binds_when_declared() {
+        let config = docker_images_config(
+            "kind = \"docker\"\n",
+            "[[release.image]]\nname = \"base\"\nimage = \"example/base\"\n\n\
+             [[release.image]]\nname = \"heimdall\"\nimage = \"example/heimdall\"\nlfs = true\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate multi-image docker release with lfs",
+        );
+        let rows = config.release().images();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].lfs(), "an absent lfs keeps the non-LFS default");
+        assert!(rows[1].lfs(), "a declared lfs binds to the row");
+    }
+
+    #[test]
+    fn docker_images_lfs_refuses_non_boolean_values() {
+        for (name, value) in [("string", "\"yes\""), ("integer", "1")] {
+            let text = format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [release]\nenabled = true\nkind = \"docker\"\n\n\
+                 [[release.image]]\nname = \"app\"\nimage = \"example/app\"\nlfs = {value}\n"
+            );
+            let error = must_fail(
+                toml::from_str::<RepoGenerationConfig>(&text),
+                "a non-boolean lfs must not parse",
+            )
+            .to_string();
+            assert!(
+                error.contains("boolean"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_images_lfs_rows_stay_docker_kind_only() {
+        let rows = "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\nlfs = true\n";
+        let error = docker_images_validation_error("kind = \"tasks\"\n", rows);
+        assert!(
+            error.contains("render only for kind `docker`, not `tasks`"),
+            "{error}"
+        );
     }
 
     #[test]
