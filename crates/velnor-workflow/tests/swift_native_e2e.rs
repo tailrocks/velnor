@@ -301,6 +301,68 @@ fn generation_refuses_cargo_subset_without_binstall_provider() -> Result<(), Box
     fs::remove_dir_all(&scratch)?;
     Ok(())
 }
+
+#[test]
+fn xcodegen_framework_link_renders_product_transport_edge() -> Result<(), Box<dyn Error>> {
+    let (scratch, root) = fixture_root("xcodegen-edge")?;
+    let spec = fs::read_to_string(root.join("clients/apple/project.yml"))?;
+    let marker = "  BridgeAppTests:\n";
+    let start = spec
+        .find(marker)
+        .ok_or("the fixture spec names no BridgeAppTests target")?;
+    let mut patched = spec.clone();
+    patched.insert_str(
+        start,
+        "  BridgeLib:\n    type: library.static\n    platform: macOS\n    sources:\n      - BridgeLib\n    dependencies:\n      - framework: ../../target/xcframework/BridgeCore.xcframework\n",
+    );
+    fs::write(root.join("clients/apple/project.yml"), patched)?;
+    let out = scratch.join("out");
+    generate(&root, &out)?;
+    let project = fs::read_to_string(out.join(".github/ci/project.toml"))?;
+
+    let app = unit_block(&project, APP)?;
+    assert!(
+        app.contains(&format!("depends_on = [\"{PRODUCER}\"]")),
+        "the XcodeGen app selects the producer:\n{app}"
+    );
+    let rebuild = app
+        .find("VELNOR_PRODUCT_RUST_BRIDGE_CORE_FFI__XCFRAMEWORK_BRIDGECORE_READY")
+        .ok_or("the app guards on the XCFramework product")?;
+    let build = app
+        .find("xcodebuild")
+        .ok_or("the app builds via xcodebuild")?;
+    assert!(
+        rebuild < build,
+        "the producer materializes before `xcodebuild` consumes it:\n{app}"
+    );
+    assert!(
+        project.contains(
+            "XcodeGen spec clients/apple/project.yml consumes linked framework `BridgeCore`"
+        ),
+        "the join diagnostic names the spec and the bundle stem:\n{project}"
+    );
+
+    let ci_pr = fs::read_to_string(out.join(".github/workflows/ci-pr.yml"))?;
+    let job = format!("github-hosted-{APP}");
+    let job_start = ci_pr
+        .find(&format!("  {job}:\n"))
+        .ok_or_else(|| format!("ci-pr.yml declares no job {job}"))?;
+    let job_head = &ci_pr[job_start..(job_start + 1200).min(ci_pr.len())];
+    assert!(
+        job_head.contains("needs: [plan, github-hosted-rust-bridge-core-ffi]"),
+        "the app caller waits on the producer caller:\n{job_head}"
+    );
+    let app_caller = caller_block(&ci_pr, APP)?;
+    assert!(
+        app_caller
+            .contains("product_transport_ready: \"rust-bridge-core-ffi/xcframework-bridgecore:"),
+        "the app caller evaluates the transport verdict:\n{app_caller}"
+    );
+
+    fs::remove_dir_all(&scratch)?;
+    Ok(())
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
     let output = Command::new("git").current_dir(root).args(args).output()?;
     if !output.status.success() {

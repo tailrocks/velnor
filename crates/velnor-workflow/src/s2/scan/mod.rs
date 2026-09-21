@@ -82,7 +82,9 @@ pub(crate) fn scan_shape(
     Ok(shape)
 }
 
-/// Join Swift local-path binary targets against `BoltFFI` Apple producers.
+/// Join Swift local-path binaries against `BoltFFI` Apple producers, from
+/// `Package.swift` `.binaryTarget` stanzas and `XcodeGen` linked
+/// frameworks alike.
 ///
 /// A consumer joins its producer only when the normalized consumer path
 /// equals the producer's normalized `{parent}/{framework}.xcframework`
@@ -97,11 +99,13 @@ pub(crate) fn scan_shape(
 fn join_native_producers(shape: &mut RepositoryShape, file_set: &BTreeSet<String>) {
     let consumers = std::mem::take(&mut shape.swift_consumers);
     for consumer in &consumers {
-        let name = consumer.name.as_deref().unwrap_or("<unnamed>");
-        let Some(resolved) = file_walk::resolve_repo_path(&consumer.package_root, &consumer.path)
+        let name = consumer.display_name();
+        let manifest = consumer.source.manifest_noun();
+        let reference = consumer.source.reference_noun();
+        let Some(resolved) = file_walk::resolve_repo_path(&consumer.consumer_root, &consumer.path)
         else {
             shape.limitations.push(format!(
-                "Swift package {} declares binary target `{name}` at `{}`, which is absolute or escapes the repository; no producer can be joined statically.",
+                "{manifest} {} declares {reference} `{name}` at `{}`, which is absolute or escapes the repository; no producer can be joined statically.",
                 consumer.manifest, consumer.path,
             ));
             continue;
@@ -119,8 +123,9 @@ fn join_native_producers(shape: &mut RepositoryShape, file_set: &BTreeSet<String
                     .iter()
                     .any(|file| file.starts_with(&format!("{resolved}/")));
             if !tracked {
+                let materialization = consumer.source.materialization_clause();
                 shape.limitations.push(format!(
-                    "Swift package {} references binary target `{name}` at `{}`, which no tracked file provides; the producing step must materialize it before `swift build` consumes the package.",
+                    "{manifest} {} references {reference} `{name}` at `{}`, which no tracked file provides; the producing step must materialize it {materialization}.",
                     consumer.manifest, consumer.path,
                 ));
             }
@@ -138,7 +143,7 @@ fn join_native_producers(shape: &mut RepositoryShape, file_set: &BTreeSet<String
             .is_some_and(|name| name != producer.ffi_module)
         {
             shape.limitations.push(format!(
-                "Swift package {} binary target `{name}` at `{}` matches the XCFramework output of {}, which produces FFI module `{}`; the module disagrees, so no product edge was constructed.",
+                "{manifest} {} {reference} `{name}` at `{}` matches the XCFramework output of {}, which produces FFI module `{}`; the module disagrees, so no product edge was constructed.",
                 consumer.manifest, consumer.path, producer.manifest, producer.ffi_module,
             ));
             continue;
@@ -157,9 +162,11 @@ fn wire_native_edge(
     producer: &rust::BoltffiProducer,
     name: &str,
 ) {
+    let manifest = consumer.source.manifest_noun();
+    let reference = consumer.source.reference_noun();
     let Some(producer_unit) = producer.unit.clone() else {
         shape.limitations.push(format!(
-            "Swift package {} binary target `{name}` matches BoltFFI producer {}, but no Rust unit owns `{}`; no product edge was constructed.",
+            "{manifest} {} {reference} `{name}` matches BoltFFI producer {}, but no Rust unit owns `{}`; no product edge was constructed.",
             consumer.manifest, producer.manifest, producer.root,
         ));
         return;
@@ -169,7 +176,7 @@ fn wire_native_edge(
     let consumer_index = shape.units.iter().position(|unit| unit.id == consumer.unit);
     let (Some(producer_index), Some(consumer_index)) = (producer_index, consumer_index) else {
         shape.limitations.push(format!(
-            "Swift package {} binary target `{name}` matches BoltFFI producer {}, but the owning unit is missing; no product edge was constructed.",
+            "{manifest} {} {reference} `{name}` matches BoltFFI producer {}, but the owning unit is missing; no product edge was constructed.",
             consumer.manifest, producer.manifest,
         ));
         return;
@@ -249,8 +256,9 @@ fn wire_native_edge(
             task: None,
             env: std::collections::BTreeMap::new(),
         });
+    let materialization = consumer.source.materialization_clause();
     shape.limitations.push(format!(
-        "Swift package {} consumes binary target `{name}` from BoltFFI manifest {} (crate `{}`); the producer step must materialize `{}` before `swift build` consumes the package.",
+        "{manifest} {} consumes {reference} `{name}` from BoltFFI manifest {} (crate `{}`); the producer step must materialize `{}` {materialization}.",
         consumer.manifest, producer.manifest, producer.crate_name, producer.output,
     ));
 }
@@ -339,9 +347,10 @@ pub(crate) struct RepositoryShape {
     /// so they must not perturb the scan digest on their own.
     #[serde(skip_serializing)]
     pub(crate) boltffi_producers: Vec<rust::BoltffiProducer>,
-    /// Swift local-path binary targets awaiting the native join. Skipped
-    /// from canonical serialization for the same reason; consumed by the
-    /// join before `finalize`.
+    /// Swift local-path binaries awaiting the native join, from
+    /// `Package.swift` stanzas and `XcodeGen` specs alike. Skipped from
+    /// canonical serialization for the same reason; consumed by the join
+    /// before `finalize`.
     #[serde(skip_serializing)]
     pub(crate) swift_consumers: Vec<swift::SwiftBinaryConsumer>,
     /// Detected capabilities, sorted and deduplicated.
@@ -630,10 +639,11 @@ mod tests {
         };
         let consumer = super::swift::SwiftBinaryConsumer {
             manifest: "native/Package.swift".to_owned(),
-            package_root: "native".to_owned(),
+            consumer_root: "native".to_owned(),
             unit: consumer_id,
             name: Some("BridgeCore".to_owned()),
             path: "out/BridgeCore.xcframework".to_owned(),
+            source: super::swift::SwiftBinarySource::SwiftPackage,
         };
         super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore");
         let unit = &shape.units[0];
@@ -752,10 +762,11 @@ mod tests {
         for index in [1, 2] {
             let consumer = super::swift::SwiftBinaryConsumer {
                 manifest: format!("{}/Package.swift", shape.units[index].root),
-                package_root: shape.units[index].root.clone(),
+                consumer_root: shape.units[index].root.clone(),
                 unit: shape.units[index].id.clone(),
                 name: Some("BridgeCore".to_owned()),
                 path: "out/BridgeCore.xcframework".to_owned(),
+                source: super::swift::SwiftBinarySource::SwiftPackage,
             };
             super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore");
         }
