@@ -6247,7 +6247,8 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
         // candidate's render here made that valid staged state impossible and
         // recreated the candidate-as-authority exception in a different
         // layer. The active tree is therefore checked only against its
-        // declared active pin; candidate rendering is qualified separately.
+        // declared active pin; candidate rendering is qualified separately
+        // and can never authorize a checked-in tree.
         policy::verify_declared_pin_renders_tree(
             &output_root,
             checkout.path(),
