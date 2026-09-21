@@ -26,7 +26,10 @@
 //! against those same bytes, and only then creates the release without ever
 //! overwriting — no consumer can see a product whose verification failed.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+
+use serde::{Deserialize, Serialize};
 
 use super::{Args, Primitive, RenderCtx, Rendered};
 use crate::s2::closure::{
@@ -72,12 +75,138 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
 
+/// Schema for the per-platform build identity embedded in the release
+/// manifest. The identity is separate from the source closure: the closure
+/// names tracked inputs, while this record names the compiler and process
+/// inputs that a checkout cannot prove from Git alone.
+#[allow(
+    dead_code,
+    reason = "typed release-manifest contract is exercised by contract tests"
+)]
+pub(crate) const BUILD_IDENTITY_SCHEMA: &str = "velnor-workflow.runtime-build-identity.v1";
+
+/// The build identity every runtime product must carry. The producer writes
+/// one record per native platform; consumers compare the record with the
+/// binary's product metadata and reject a structurally incomplete manifest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code, reason = "the type is the release-manifest contract")]
+pub(crate) struct RuntimeBuildIdentity {
+    pub(crate) schema: String,
+    pub(crate) source_revision: String,
+    pub(crate) toolchain: String,
+    pub(crate) rustc: String,
+    pub(crate) target: String,
+    pub(crate) host: String,
+    pub(crate) platform: String,
+    pub(crate) profile: String,
+    pub(crate) features: String,
+    pub(crate) rustflags: String,
+    pub(crate) cargo_encoded_rustflags: String,
+    pub(crate) linker: String,
+    pub(crate) cc: String,
+    pub(crate) cflags: String,
+}
+
+#[allow(
+    dead_code,
+    reason = "typed release-manifest contract is exercised by contract tests"
+)]
+impl RuntimeBuildIdentity {
+    /// Validate the identity against the product-level facts and platform
+    /// selected by the release workflow.
+    fn validate(
+        &self,
+        source_revision: &str,
+        profile: &str,
+        features: &str,
+        platform: &str,
+    ) -> Result<(), String> {
+        if self.schema != BUILD_IDENTITY_SCHEMA {
+            return Err(format!(
+                "build identity schema must be {BUILD_IDENTITY_SCHEMA}, got {}",
+                self.schema
+            ));
+        }
+        if !is_full_sha(&self.source_revision) || self.source_revision != source_revision {
+            return Err(format!(
+                "build identity source revision {} does not match {source_revision}",
+                self.source_revision
+            ));
+        }
+        if self.profile != profile {
+            return Err(format!(
+                "build identity profile {} does not match {profile}",
+                self.profile
+            ));
+        }
+        if self.features != features {
+            return Err(format!(
+                "build identity features {:?} do not match {:?}",
+                self.features, features
+            ));
+        }
+        for (name, value) in [
+            ("toolchain", self.toolchain.as_str()),
+            ("rustc", self.rustc.as_str()),
+            ("target", self.target.as_str()),
+            ("host", self.host.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("build identity {name} is empty"));
+            }
+        }
+        if self.platform != platform {
+            return Err(format!(
+                "build identity platform {} does not match {platform}",
+                self.platform
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "typed release-manifest contract is exercised by contract tests"
+)]
+fn is_full_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// One release asset and its compiler/build identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code, reason = "the type is the release-manifest contract")]
+pub(crate) struct RuntimeProductManifestEntry {
+    pub(crate) binary: String,
+    pub(crate) asset: String,
+    pub(crate) build: RuntimeBuildIdentity,
+}
+
+/// Typed runtime release manifest used by contract tests and local
+/// validation. Hosted consumers use the same fields through jq because the
+/// manifest is assembled in the publisher shell.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code, reason = "the type is the release-manifest contract")]
+pub(crate) struct RuntimeProductManifest {
+    pub(crate) closure: String,
+    pub(crate) revision: String,
+    pub(crate) profile: String,
+    pub(crate) features: String,
+    pub(crate) products: BTreeMap<String, RuntimeProductManifestEntry>,
+}
+
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
-/// features, a 64-hex digest for the platform, and the asset name the
-/// platform expects. The publish job evaluates this same filter over the
-/// assembled manifest, so a manifest no consumer would accept never reaches
-/// a release.
+/// features, a complete build identity, a 64-hex digest for the platform,
+/// and the asset name the platform expects. The publish job evaluates this
+/// same filter over the assembled manifest, so a manifest no consumer would
+/// accept never reaches a release.
 ///
 /// The revision clause is well-formedness, not equality with the requested
 /// revision: several commits can share one closure (and therefore one
@@ -85,7 +214,7 @@ const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
 /// the consumer requested another. Both consumers bind the binary to the
 /// manifest instead, requiring its `--revision` report to equal the
 /// manifest's `revision`.
-const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
+const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == \"velnor-workflow.runtime-build-identity.v1\" and .source_revision == $revision and .platform == $platform and .toolchain != \"\" and .rustc != \"\" and .target != \"\" and .host != \"\" and .profile == \"release\" and .features == \"\" and (.rustflags | type == \"string\") and (.cargo_encoded_rustflags | type == \"string\") and (.linker | type == \"string\") and (.cc | type == \"string\") and (.cflags | type == \"string\"))";
 
 /// The isolated Cargo home the producer steps build under, as a rendered
 /// step-level `env:` value. The `runner` context is unavailable in job-level
@@ -235,7 +364,7 @@ pub(crate) fn runtime_products_content(
         }
         let _ = write!(
             manifest_products,
-            "\"{key}\": {{binary: ${var}, asset: \"{asset}\"}}",
+            "\"{key}\": {{binary: ${var}, asset: \"{asset}\", build: ${var}_build}}",
             key = platform.key(),
             asset = platform.asset(),
             var = platform_variable(platform),
@@ -249,6 +378,12 @@ pub(crate) fn runtime_products_content(
         let _ = writeln!(
             manifest_digests,
             "            --arg {var} \"$(cat dist/{asset}.sha256)\" \\",
+            var = platform_variable(platform),
+            asset = platform.asset(),
+        );
+        let _ = writeln!(
+            manifest_digests,
+            "            --argjson {var}_build \"$(cat dist/{asset}.build.json)\" \\",
             var = platform_variable(platform),
             asset = platform.asset(),
         );
@@ -356,16 +491,29 @@ jobs:
           fi
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
+          release="$(gh release view "$TAG" --repo {repository} --json assets)"
+          jq -e '[.assets[].name] | index("manifest.json") != null' <<<"$release" >/dev/null
           gh release download "$TAG" --repo {repository} --pattern manifest.json --dir "$temporary"
           gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
-          release="$(gh release view "$TAG" --repo {repository} --json assets)"
           for platform in {platform_list}; do
             asset="velnor-workflow-$platform"
-            jq -e --arg asset "$asset" --arg platform "$platform" \
-              '[.assets[].name] | index($asset) != null and index("manifest.json") != null' \
+            checksum="$asset.sha256"
+            jq -e --arg asset "$asset" --arg checksum "$checksum" \
+              '[.assets[].name] as $names |
+               ($names | index($asset) != null) and
+               ($names | index($checksum) != null)' \
               <<<"$release" >/dev/null
-            jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" \
+            gh release download "$TAG" --repo {repository} \
+              --pattern "$asset" --pattern "$checksum" --dir "$temporary"
+            gh attestation verify "$temporary/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
+            jq -e --arg closure "$CLOSURE" --arg revision "$(jq -er '.revision' "$temporary/manifest.json")" --arg platform "$platform" --arg asset "$asset" \
               '{accept_filter}' "$temporary/manifest.json" >/dev/null
+            expected="$(cat "$temporary/$checksum")"
+            [[ "$expected" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::malformed digest for existing product $asset" >&2; exit 1; }}
+            actual="$(sha256sum "$temporary/$asset" | awk '{{print $1}}')"
+            [[ "$actual" == "$expected" ]] || {{ echo "::error::existing product digest mismatch for $asset" >&2; exit 1; }}
+            declared="$(jq -er --arg platform "$platform" '.products[$platform].binary' "$temporary/manifest.json")"
+            [[ "$declared" == "$expected" ]] || {{ echo "::error::manifest digest mismatch for existing product $asset" >&2; exit 1; }}
           done
           echo "exists=true" >> "$GITHUB_OUTPUT"
 
@@ -425,7 +573,13 @@ jobs:
           head="$(git rev-parse HEAD)"
           reported_revision="$("$binary" --revision)"
           [[ "$reported_revision" == "$head" ]] || {{ echo "::error::built binary reports revision $reported_revision, expected $head" >&2; exit 1; }}
+          build_identity="$("$binary" --build-identity)"
+          jq -e --arg schema "velnor-workflow.runtime-build-identity.v1" \
+            --arg source "$head" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" \
+            '.schema == $schema and .source_revision == $source and .platform == $platform and .toolchain != "" and .rustc != "" and .target != "" and .host != "" and .profile == "release" and .features == "" and (.rustflags | type == "string") and (.cargo_encoded_rustflags | type == "string") and (.linker | type == "string") and (.cc | type == "string") and (.cflags | type == "string")' \
+            <<<"$build_identity" >/dev/null
           asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
+          printf '%s\n' "$build_identity" > "$asset.build.json"
           cp "$binary" "$asset"
           if command -v sha256sum >/dev/null 2>&1; then
             digest="$(sha256sum "$asset" | awk '{{print $1}}')"
@@ -446,6 +600,7 @@ jobs:
           path: |
             ${{{{ steps.prove.outputs.asset }}}}
             ${{{{ steps.prove.outputs.asset }}}}.sha256
+            ${{{{ steps.prove.outputs.asset }}}}.build.json
           if-no-files-found: error
           retention-days: 7
 
@@ -480,6 +635,7 @@ jobs:
             asset="velnor-workflow-$platform"
             test -s "dist/$asset" || {{ echo "::error::missing product asset $asset" >&2; exit 1; }}
             test -s "dist/$asset.sha256" || {{ echo "::error::missing digest for $asset" >&2; exit 1; }}
+            test -s "dist/$asset.build.json" || {{ echo "::error::missing build identity for $asset" >&2; exit 1; }}
             expected="$(cat "dist/$asset.sha256")"
             [[ "$expected" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::malformed digest for $asset" >&2; exit 1; }}
             actual="$(sha256sum "dist/$asset" | awk '{{print $1}}')"
@@ -497,8 +653,9 @@ jobs:
             --arg revision "$HEAD_SHA" \
 {manifest_digests}            '{manifest_products}' \
             > dist/manifest.json
+          manifest_revision="$(jq -er '.revision' dist/manifest.json)"
           for platform in {platform_list}; do
-            jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
+            jq -e --arg closure "$CLOSURE" --arg revision "$HEAD_SHA" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
               '{accept_filter}' dist/manifest.json >/dev/null
           done
           manifest_revision="$(jq -er '.revision' dist/manifest.json)"
@@ -522,7 +679,7 @@ jobs:
           asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
           gh attestation verify "dist/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
           gh attestation verify "dist/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
-          jq -e --arg closure "$CLOSURE" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
+          jq -e --arg closure "$CLOSURE" --arg revision "$(jq -er '.revision' "dist/manifest.json")" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
             '{accept_filter}' "dist/manifest.json" >/dev/null
           actual="$(sha256sum "dist/$asset" | awk '{{print $1}}')"
           expected="$(jq -er --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" '.products[$platform].binary' "dist/manifest.json")"
@@ -863,6 +1020,105 @@ mod tests {
         must(fs::read_to_string(&path), "read the setup action source")
     }
 
+    fn build_identity(platform: &str) -> RuntimeBuildIdentity {
+        RuntimeBuildIdentity {
+            schema: BUILD_IDENTITY_SCHEMA.to_owned(),
+            source_revision: FIXTURE_REVISION.to_owned(),
+            toolchain: "1.91.1-x86_64-unknown-linux-gnu".to_owned(),
+            rustc: "rustc 1.91.1 (fixture)".to_owned(),
+            target: "x86_64-unknown-linux-gnu".to_owned(),
+            host: "x86_64-unknown-linux-gnu".to_owned(),
+            platform: platform.to_owned(),
+            profile: "release".to_owned(),
+            features: String::new(),
+            rustflags: String::new(),
+            cargo_encoded_rustflags: String::new(),
+            linker: String::new(),
+            cc: String::new(),
+            cflags: String::new(),
+        }
+    }
+
+    #[test]
+    fn build_identity_binds_all_compiler_inputs_to_the_product() {
+        let identity = build_identity("Linux-X64");
+        assert_eq!(
+            identity.validate(FIXTURE_REVISION, "release", "", "Linux-X64"),
+            Ok(())
+        );
+        assert!(
+            identity
+                .validate(
+                    "fedcba9876543210fedcba9876543210fedcba98",
+                    "release",
+                    "",
+                    "Linux-X64"
+                )
+                .is_err(),
+            "a build from another source revision is not this product"
+        );
+        assert!(
+            identity
+                .validate(FIXTURE_REVISION, "release", "", "Linux-ARM64")
+                .is_err(),
+            "a binary built for another supported platform is not interchangeable"
+        );
+        assert!(
+            identity
+                .validate(FIXTURE_REVISION, "debug", "", "Linux-X64")
+                .is_err(),
+            "a debug binary cannot satisfy the release product contract"
+        );
+        let mut incomplete = identity.clone();
+        incomplete.rustc.clear();
+        assert!(incomplete
+            .validate(FIXTURE_REVISION, "release", "", "Linux-X64")
+            .is_err());
+    }
+
+    #[test]
+    fn typed_manifest_rejects_missing_or_unknown_build_identity_fields() {
+        let identity = must(
+            serde_json::to_value(build_identity("Linux-X64")),
+            "serialize fixture",
+        );
+        let manifest = serde_json::json!({
+            "closure": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "revision": FIXTURE_REVISION,
+            "profile": "release",
+            "features": "",
+            "products": {
+                "Linux-X64": {
+                    "binary": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "asset": "velnor-workflow-Linux-X64",
+                    "build": identity,
+                }
+            }
+        });
+        let parsed: RuntimeProductManifest = must(
+            serde_json::from_value(manifest.clone()),
+            "parse complete runtime manifest",
+        );
+        assert_eq!(
+            parsed.products["Linux-X64"].build,
+            build_identity("Linux-X64")
+        );
+        let mut missing = manifest.clone();
+        let _ = missing["products"]["Linux-X64"]
+            .as_object_mut()
+            .map(|entry| entry.remove("build"));
+        assert!(
+            serde_json::from_value::<RuntimeProductManifest>(missing).is_err(),
+            "a product without build identity cannot be published"
+        );
+        let mut unknown = manifest;
+        unknown["products"]["Linux-X64"]["build"]["unexpected"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<RuntimeProductManifest>(unknown).is_err(),
+            "unknown identity fields cannot bypass the typed contract"
+        );
+    }
+
     #[test]
     fn non_owner_repositories_render_no_producer() {
         assert!(
@@ -1160,7 +1416,8 @@ mod tests {
         for platform in ["Linux-X64", "Linux-ARM64", "macOS-ARM64"] {
             assert!(
                 content.contains(&format!(
-                    "\"{platform}\": {{binary: ${}, asset: \"velnor-workflow-{platform}\"}}",
+                    "\"{platform}\": {{binary: ${}, asset: \"velnor-workflow-{platform}\", build: ${}_build}}",
+                    platform.to_ascii_lowercase().replace('-', "_"),
                     platform.to_ascii_lowercase().replace('-', "_")
                 )),
                 "the manifest binds {platform} digest and asset: {content}"
@@ -1268,8 +1525,8 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches(signer).count(),
-            3,
-            "existing-product verification and the producer smoke test pin the signer: {content}"
+            4,
+            "existing-product verification and the producer smoke test pin every subject: {content}"
         );
     }
 
@@ -1401,6 +1658,37 @@ mod tests {
                 "the producer never overwrites ({overwrite}): {content}"
             );
         }
+    }
+
+    #[test]
+    fn existing_tags_require_complete_verified_products() {
+        let content = owner_content(&[]);
+        let check = must_some(
+            content
+                .split("      - name: Check for an existing product\n")
+                .nth(1)
+                .and_then(|tail| tail.split("\n  build:\n").next()),
+            "the existing-product check",
+        );
+        for marker in [
+            "gh release download \"$TAG\" --repo",
+            "--pattern manifest.json",
+            "--pattern \"$asset\" --pattern \"$checksum\"",
+            "gh attestation verify \"$temporary/manifest.json\"",
+            "gh attestation verify \"$temporary/$asset\"",
+            "expected=\"$(cat \"$temporary/$checksum\")\"",
+            "sha256sum \"$temporary/$asset\"",
+            "declared=\"$(jq -er --arg platform \"$platform\" '.products[$platform].binary' \"$temporary/manifest.json\")\"",
+        ] {
+            assert!(check.contains(marker), "existing-product check proves {marker}: {check}");
+        }
+        assert!(
+            check.find("echo \"exists=true\"").unwrap_or(0)
+                > check
+                    .find("gh attestation verify \"$temporary/$asset\"")
+                    .unwrap_or(usize::MAX),
+            "the existing tag is reusable only after every asset is verified: {check}"
+        );
     }
 
     #[test]
@@ -1695,8 +1983,8 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches("--source-ref refs/heads/main").count(),
-            3,
-            "existing-product verification and the smoke test pin the default-branch ref: {content}"
+            4,
+            "existing-product verification and the smoke test pin every subject: {content}"
         );
         let mut config = owner_config(&[]);
         config.default_branch = "trunk".to_owned();
@@ -1709,7 +1997,7 @@ mod tests {
         );
         assert_eq!(
             content.matches("--source-ref refs/heads/trunk").count(),
-            3,
+            4,
             "existing-product verification and the smoke-test pin follow the configured default branch: {content}"
         );
     }
@@ -1834,7 +2122,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "ed7b7619e75cfa784aa7d9bfc17ec53ad30612aa5996475b94b7752cfdd1cc06";
+        const PINNED: &str = "c29cf0c981402acbb282ef1c8dae6eaf62ad26a7093862f563d21bd8d7439cb9";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

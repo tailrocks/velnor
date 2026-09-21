@@ -227,6 +227,10 @@ pub const SOURCE_REVISION: &str = env!("VELNOR_WORKFLOW_SOURCE_SHA");
 /// no git). `velnor-workflow --closure` prints it; the D19 guard accepts a
 /// renderer whose closure equals the declared pin's closure.
 pub const SOURCE_CLOSURE: &str = env!("VELNOR_WORKFLOW_CLOSURE_DIGEST");
+/// JSON build identity embedded by `build.rs`. Runtime-product consumers use
+/// this self-report only after attestation and digest verification, then
+/// compare it byte-for-byte with the immutable release manifest entry.
+pub const SOURCE_BUILD_IDENTITY: &str = env!("VELNOR_WORKFLOW_BUILD_IDENTITY");
 /// The Cargo feature list and profile the stamped [`SOURCE_CLOSURE`] footer
 /// hashed. `promote` recomputes the stamped pin's closure under exactly this
 /// build identity, so the render-with-X-stamp-X binding holds for release
@@ -581,6 +585,11 @@ struct RawCli {
     /// Print the source-closure digest this binary was built from and exit.
     #[arg(long, exclusive = true)]
     closure: bool,
+
+    /// Print the compiler and build-environment identity embedded in this
+    /// binary and exit.
+    #[arg(long, exclusive = true)]
+    build_identity: bool,
 }
 
 impl Cli {
@@ -5966,6 +5975,10 @@ pub fn run_from_env() -> Result<(), GeneratorError> {
     }
     if raw.closure {
         println!("{SOURCE_CLOSURE}");
+        return Ok(());
+    }
+    if raw.build_identity {
+        println!("{SOURCE_BUILD_IDENTITY}");
         return Ok(());
     }
     let cli = raw.try_into()?;

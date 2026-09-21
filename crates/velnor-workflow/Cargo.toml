@@ -37,6 +37,7 @@ default = ["tui"]
 tui = ["dep:crossterm", "dep:ratatui", "dep:termrock"]
 
 [build-dependencies]
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 # Contract tests prove emitted `install_args` pass the runner's own lock gate.
