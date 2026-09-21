@@ -842,6 +842,7 @@ fn xcodegen_generate_unit(
             ..crate::s2::provider::Capabilities::default()
         },
         workspace_check: false,
+        full_history: false,
         products: Vec::new(),
         prerequisites: Vec::new(),
         docker_contexts: Vec::new(),
@@ -1087,6 +1088,7 @@ fn xcode_scheme_unit(
             ..crate::s2::provider::Capabilities::default()
         },
         workspace_check: false,
+        full_history: false,
         products: Vec::new(),
         prerequisites: Vec::new(),
         docker_contexts: Vec::new(),

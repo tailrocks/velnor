@@ -5857,6 +5857,7 @@ cp "$record" "$out"
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),

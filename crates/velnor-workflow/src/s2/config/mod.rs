@@ -335,6 +335,12 @@ pub(crate) struct CheckProfileSection {
     status: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
+    /// Whether the profile's checkout clones full history (`fetch-depth: 0`).
+    /// Diff-aware gates (merge-base against the base SHA) need ancestry the
+    /// default shallow checkout does not carry. Absent keeps the shallow
+    /// default; per-profile, so a deep `perf` never deepens `perf-strict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full_history: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -562,6 +568,13 @@ pub(crate) struct UnitSection {
     /// Workspace-wide `cargo check`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace_check: Option<bool>,
+    /// Whether the unit's checkout clones full history. Diff-aware gates
+    /// (merge-base against the base SHA) need ancestry the default shallow
+    /// checkout does not carry. Absent keeps the shallow default. The caller
+    /// passes the value per (unit, provider) invocation, so mixed kinds stay
+    /// isolated without splitting the kind reusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full_history: Option<bool>,
     /// Named mise tasks that exist in `mise.toml`. Not a shell-command array.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ci_tasks: Option<Vec<String>>,
@@ -1009,6 +1022,10 @@ impl CheckProfileSection {
     pub(crate) fn env(&self) -> &BTreeMap<String, String> {
         &self.env
     }
+
+    pub(crate) fn full_history(&self) -> bool {
+        self.full_history == Some(true)
+    }
 }
 
 impl UnitSection {
@@ -1058,6 +1075,10 @@ impl UnitSection {
 
     pub(crate) fn workspace_check(&self) -> bool {
         self.workspace_check == Some(true)
+    }
+
+    pub(crate) fn full_history(&self) -> bool {
+        self.full_history == Some(true)
     }
 
     pub(crate) fn ci_tasks(&self) -> &[String] {
@@ -4834,6 +4855,44 @@ mod tests {
             "error lists the scanned units: {error}"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unit_full_history_defaults_to_shallow_and_binds_when_declared() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"rust-deep\"\nfull_history = true\n\n\
+             [[units]]\nid = \"rust-shallow\"\n",
+        );
+        let rows = config.units();
+        assert_eq!(rows.len(), 2, "both rows parse");
+        assert!(
+            rows[0].full_history(),
+            "a declared full_history binds to the row"
+        );
+        assert!(
+            !rows[1].full_history(),
+            "an absent full_history keeps the shallow default"
+        );
+    }
+
+    #[test]
+    fn check_profile_full_history_defaults_to_shallow_and_binds_when_declared() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[check_profile]]\nid = \"perf\"\nfull_history = true\n\n\
+             [[check_profile]]\nid = \"perf-strict\"\n",
+        );
+        let rows = config.check_profiles();
+        assert_eq!(rows.len(), 2, "both rows parse");
+        assert!(
+            rows[0].full_history(),
+            "a declared full_history binds to the row"
+        );
+        assert!(
+            !rows[1].full_history(),
+            "an absent full_history keeps the shallow default"
+        );
     }
 
     fn mise_tools_config(unit: &str, tools: &str) -> String {
