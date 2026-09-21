@@ -499,6 +499,21 @@ pub(crate) fn verify_declared_pin_renders_tree(
     config: &ProjectConfig,
     build_pin: bool,
 ) -> Result<(), GeneratorError> {
+    let lookup = PinnedBinaryLookup::from_env(&config.workflow_revision, build_pin);
+    verify_declared_pin_renders_tree_with_lookup(output_root, checkout, config, &lookup)
+}
+
+/// Verify the active tree with a caller-provided, already-captured renderer
+/// lookup. Production callers use [`verify_declared_pin_renders_tree`], which
+/// captures the hosted environment. Keeping the lookup explicit here lets the
+/// CLI regression exercise the same path with a hermetic renderer and no
+/// process-environment mutation.
+pub(crate) fn verify_declared_pin_renders_tree_with_lookup(
+    output_root: &Path,
+    checkout: &Path,
+    config: &ProjectConfig,
+    lookup: &PinnedBinaryLookup,
+) -> Result<(), GeneratorError> {
     let pin = &config.workflow_revision;
     if !super::is_full_revision(pin) {
         return Err(GeneratorError::usage(format!(
@@ -516,14 +531,13 @@ pub(crate) fn verify_declared_pin_renders_tree(
             .as_ref()
             .and_then(config::RepoGenerationConfig::repository),
     );
-    let lookup = PinnedBinaryLookup::from_env(pin, build_pin);
     match regenerate_and_compare(
         checkout,
         output_root,
         pin,
         &config.default_branch,
         &excludes,
-        &lookup,
+        lookup,
         &source,
     )? {
         TreeComparison::Pin => Ok(()),

@@ -1077,6 +1077,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rendered_generator_unit_has_no_candidate_manifest_transport() {
+        let ir = owner_test_ir(
+            workflow_setup_action_repository(),
+            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
+        );
+        let content = must_render_kind(&ir);
+        for forbidden in [
+            "candidate_publish",
+            "candidate generator product",
+            "candidate-manifest.json",
+            "actions/workflows/ci-pr.yml/runs",
+        ] {
+            assert!(
+                !content.contains(forbidden),
+                "legacy candidate transport {forbidden:?} rendered: {content}"
+            );
+        }
+    }
+
     /// One job's body from a rendered workflow. Job bodies indent past two
     /// spaces, so the next `\n  ` past a job header is the next job whatever
     /// the render order.

@@ -61,7 +61,7 @@ jobs:
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$temporary"
             gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/${{ github.event.repository.default_branch }}"
             actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
-            expected="$(jq -er --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" '.closure == $closure and .profile == "release" and .features == "" and .products[$platform].asset == $asset and (.products[$platform].binary | test("^[0-9a-f]{64}$")) | .products[$platform].binary' "$temporary/manifest.json")"
+            expected="$(jq -er --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" 'select(.closure == $closure and .profile == "release" and .features == "" and .products[$platform].asset == $asset and (.products[$platform].binary | test("^[0-9a-f]{64}$"))) | .products[$platform].binary' "$temporary/manifest.json")"
             [[ "$actual" == "$expected" ]] || { echo "::error::published $platform product digest mismatch" >&2; exit 1; }
           done
           expiry="$(( $(date -u +%s) + 86400 ))"
@@ -77,10 +77,17 @@ jobs:
         run: |
           set -euo pipefail
           branch="activate-renderer-${REVISION:0:12}"
-          git switch --create "$branch"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch --no-tags origin "$branch"
+            git switch "$branch"
+          else
+            git switch --create "$branch"
+          fi
           git config user.name "velnor-workflow activation"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           velnor-workflow promote --rev "$REVISION" --publication-readiness "$RUNNER_TEMP/publication-readiness.json" --repo "$GITHUB_WORKSPACE" --generator-repo "$GITHUB_WORKSPACE"
           gh auth setup-git
           git push --set-upstream origin "$branch"
-          gh pr create --base "${{ github.event.repository.default_branch }}" --head "$branch" --title "chore(ci): activate renderer ${REVISION:0:12}" --body "Trusted activation: immutable runtime release, manifest, and all supported platform assets were attestation- and digest-verified before atomic pin/tree promotion."
+          if [[ "$(gh pr list --head "$branch" --base "${{ github.event.repository.default_branch }}" --state open --json number --jq 'length')" == 0 ]]; then
+            gh pr create --base "${{ github.event.repository.default_branch }}" --head "$branch" --title "chore(ci): activate renderer ${REVISION:0:12}" --body "Trusted activation: immutable runtime release, manifest, and all supported platform assets were attestation- and digest-verified before atomic pin/tree promotion."
+          fi

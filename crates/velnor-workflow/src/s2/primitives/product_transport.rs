@@ -10,14 +10,15 @@
 //! against the plan's expected identity before installing anything.
 //!
 //! Verification is strict and local: the manifest must name the expected
-//! schema, producer, product, and inputs digest; every staged file's SHA-256
-//! must match; every declared structural file must be present; every
-//! installed path must sit under a declared output root. A mismatch fails
-//! the consumer — a corrupt or tampered artifact is never a hit.
-//! Provenance is the same run and commit on both ends, so an empty inputs
-//! digest (an incomplete closure) still transports safely within the run;
-//! cross-run reuse stays disabled until the exact-product cache can bind the
-//! stronger identity.
+//! schema, producer, product, build inputs, source, builder, run/attempt, and
+//! platform; every staged file's SHA-256 must match; every declared structural
+//! file must be present; every installed path must sit under a declared output
+//! root. A mismatch fails the consumer — a corrupt or tampered artifact is
+//! never a hit.
+//! Provenance is the same run, attempt, source commit, builder, and platform on
+//! both ends, so an empty inputs digest (an incomplete closure) still
+//! transports safely within the run; cross-run reuse stays disabled until the
+//! exact-product cache can bind the stronger identity.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -33,7 +34,7 @@ use crate::s2::platform::{valid_env_name, valid_product_output, NamedProduct};
 use crate::s2::{shell_quote, GeneratorError};
 
 /// The manifest schema the producer writes and the consumer requires.
-pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/1";
+pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/2";
 /// The manifest filename inside the staged artifact directory.
 pub(crate) const MANIFEST_FILE: &str = "velnor-product-manifest.json";
 /// The artifact-internal directory holding the copied output trees.
@@ -45,12 +46,46 @@ pub(crate) const OUTPUT_FILES_ENV: &str = "VELNOR_TRANSPORT_OUTPUT_FILES";
 /// Same-run artifacts live only for the consuming jobs.
 const ARTIFACT_RETENTION_DAYS: u32 = 1;
 
-/// Whether a product can ride the transport: it declares at least one
-/// output root. Inputs identity strengthens verification but is not
-/// required — same-run same-commit provenance already binds the bytes.
+/// The product-to-consumer transport contract.
+///
+/// A product with declared outputs has an artifact contract: the consumer
+/// must have an explicit producer dependency and may proceed only after that
+/// producer succeeds. A product without outputs has no transport contract and
+/// stays on the existing local rebuild path. Keeping this distinction typed
+/// prevents a missing artifact edge from being treated as an optional cache
+/// miss for a product that cannot be reconstructed safely in the consumer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductTransportContract {
+    /// The product has no declared artifact outputs; rebuild locally.
+    LocalRebuild,
+    /// The product must arrive from the explicitly selected producer.
+    RequiredArtifact,
+}
+
+impl ProductTransportContract {
+    /// Whether this contract requires the producer job to succeed before the
+    /// consumer caller can be scheduled.
+    pub(crate) const fn requires_producer_success(self) -> bool {
+        matches!(self, Self::RequiredArtifact)
+    }
+}
+
+/// Resolve the transport contract from the product declaration. Inputs
+/// identity strengthens verification but is not required: same-run,
+/// same-commit provenance binds the transported bytes.
+#[must_use]
+pub(crate) fn transport_contract(product: &NamedProduct) -> ProductTransportContract {
+    if product.outputs.is_empty() {
+        ProductTransportContract::LocalRebuild
+    } else {
+        ProductTransportContract::RequiredArtifact
+    }
+}
+
+/// Whether a product can ride the required artifact transport.
 #[must_use]
 pub(crate) fn transport_eligible(product: &NamedProduct) -> bool {
-    !product.outputs.is_empty()
+    transport_contract(product).requires_producer_success()
 }
 
 /// The workflow input record identifying one transported edge.
@@ -110,13 +145,28 @@ struct LinkEntry {
     dir: bool,
 }
 
-/// The digest manifest binding one staged artifact to its product.
+/// The digest manifest binding one staged artifact to its product and the
+/// exact GitHub Actions build that produced it. These fields are required:
+/// the artifact service's name and same-run default are transport behavior,
+/// not provenance proof.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ProductManifest {
     schema: String,
     producer: String,
     product: String,
     inputs_digest: String,
+    /// The source commit checked out by the producer run (`GITHUB_SHA`).
+    source: String,
+    /// The exact workflow reference that built the product
+    /// (`GITHUB_WORKFLOW_REF`).
+    builder: String,
+    /// The Actions run that produced the artifact (`GITHUB_RUN_ID`).
+    run_id: String,
+    /// The attempt within that run (`GITHUB_RUN_ATTEMPT`).
+    run_attempt: String,
+    /// The consumer platform of the producer job (`RUNNER_OS-RUNNER_ARCH`).
+    platform: String,
     files: BTreeMap<String, String>,
     links: BTreeMap<String, LinkEntry>,
     dirs: Vec<String>,
@@ -127,6 +177,11 @@ pub(crate) struct StageRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) source: String,
+    pub(crate) builder: String,
+    pub(crate) run_id: String,
+    pub(crate) run_attempt: String,
+    pub(crate) platform: String,
     pub(crate) outputs: Vec<String>,
     pub(crate) stage: PathBuf,
 }
@@ -138,6 +193,11 @@ pub(crate) struct VerifyRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) source: String,
+    pub(crate) builder: String,
+    pub(crate) run_id: String,
+    pub(crate) run_attempt: String,
+    pub(crate) platform: String,
     pub(crate) outputs: Vec<String>,
     pub(crate) output_files: Vec<String>,
     pub(crate) stage: PathBuf,
@@ -323,6 +383,13 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             "stage-product needs at least one output; refusing to stage an empty product",
         ));
     }
+    validate_provenance(
+        &request.source,
+        &request.builder,
+        &request.run_id,
+        &request.run_attempt,
+        &request.platform,
+    )?;
     for output in &request.outputs {
         manifest_rel(output)?;
     }
@@ -370,6 +437,11 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
         producer: request.producer.clone(),
         product: request.product.clone(),
         inputs_digest: request.inputs_digest.clone(),
+        source: request.source.clone(),
+        builder: request.builder.clone(),
+        run_id: request.run_id.clone(),
+        run_attempt: request.run_attempt.clone(),
+        platform: request.platform.clone(),
         files,
         links,
         dirs,
@@ -419,6 +491,76 @@ fn link_target_safe(target: &str) -> bool {
     }
     !target.split('/').any(|segment| segment == "..")
 }
+
+/// Whether `value` is a full lowercase hexadecimal source revision.
+fn is_revision(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// Whether `value` is an Actions run identity: decimal digits only.
+fn is_run_identity(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether `value` is a runner platform ABI, for example `Linux-X64`.
+fn is_platform(value: &str) -> bool {
+    let mut segments = value.split('-');
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some(os), Some(arch), None) => {
+            fn segment_ok(segment: &str) -> bool {
+                !segment.is_empty()
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            }
+            segment_ok(os) && segment_ok(arch)
+        }
+        _ => false,
+    }
+}
+
+/// Validate the producer identity before writing it into a manifest or using
+/// the consumer's environment as an expectation. The request side is checked
+/// too, so a missing or malformed Actions context cannot degrade into an
+/// empty-string equality that appears to prove provenance.
+fn validate_provenance(
+    source: &str,
+    builder: &str,
+    run_id: &str,
+    run_attempt: &str,
+    platform: &str,
+) -> Result<(), GeneratorError> {
+    if !is_revision(source) {
+        return Err(GeneratorError::usage(format!(
+            "product provenance source must be a 40-character lowercase commit SHA, got `{source}`"
+        )));
+    }
+    if builder.trim().is_empty() {
+        return Err(GeneratorError::usage(
+            "product provenance builder must be non-empty",
+        ));
+    }
+    if !is_run_identity(run_id) {
+        return Err(GeneratorError::usage(format!(
+            "product provenance run_id must be decimal digits, got `{run_id}`"
+        )));
+    }
+    if !is_run_identity(run_attempt) {
+        return Err(GeneratorError::usage(format!(
+            "product provenance run_attempt must be decimal digits, got `{run_attempt}`"
+        )));
+    }
+    if !is_platform(platform) {
+        return Err(GeneratorError::usage(format!(
+            "product provenance platform must be OS-ARCH shaped, got `{platform}`"
+        )));
+    }
+    Ok(())
+}
+
 /// Verify one downloaded artifact and install it: check the manifest
 /// identity, digest every staged file, require the structural files, and
 /// install only under the declared output roots. Returns the installed
@@ -459,12 +601,26 @@ fn load_manifest(stage: &Path) -> Result<ProductManifest, GeneratorError> {
     })
 }
 
-/// The manifest must name the expected schema, producer, product, and
-/// inputs digest, and it must list at least one file.
+/// The manifest must name the expected schema, build tuple, and execution
+/// provenance, and it must list at least one file.
 fn check_manifest_identity(
     manifest: &ProductManifest,
     request: &VerifyRequest,
 ) -> Result<(), GeneratorError> {
+    validate_provenance(
+        &request.source,
+        &request.builder,
+        &request.run_id,
+        &request.run_attempt,
+        &request.platform,
+    )?;
+    validate_provenance(
+        &manifest.source,
+        &manifest.builder,
+        &manifest.run_id,
+        &manifest.run_attempt,
+        &manifest.platform,
+    )?;
     for (field, got, want) in [
         ("schema", manifest.schema.as_str(), MANIFEST_SCHEMA),
         (
@@ -481,6 +637,23 @@ fn check_manifest_identity(
             "inputs_digest",
             manifest.inputs_digest.as_str(),
             request.inputs_digest.as_str(),
+        ),
+        ("source", manifest.source.as_str(), request.source.as_str()),
+        (
+            "builder",
+            manifest.builder.as_str(),
+            request.builder.as_str(),
+        ),
+        ("run_id", manifest.run_id.as_str(), request.run_id.as_str()),
+        (
+            "run_attempt",
+            manifest.run_attempt.as_str(),
+            request.run_attempt.as_str(),
+        ),
+        (
+            "platform",
+            manifest.platform.as_str(),
+            request.platform.as_str(),
         ),
     ] {
         if got != want {
@@ -632,6 +805,27 @@ fn env_list(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Read the immutable producer identity supplied by GitHub Actions. These
+/// values are required at the command boundary: a locally supplied empty
+/// fallback would make the manifest self-consistent without proving which run
+/// and platform built it.
+fn runtime_provenance() -> Result<(String, String, String, String, String), GeneratorError> {
+    let required = |name: &str| {
+        std::env::var(name).map_err(|_| {
+            GeneratorError::usage(format!(
+                "product transport needs {name} from the GitHub Actions runtime"
+            ))
+        })
+    };
+    let source = required("GITHUB_SHA")?;
+    let builder = required("GITHUB_WORKFLOW_REF")?;
+    let run_id = required("GITHUB_RUN_ID")?;
+    let run_attempt = required("GITHUB_RUN_ATTEMPT")?;
+    let platform = format!("{}-{}", required("RUNNER_OS")?, required("RUNNER_ARCH")?);
+    validate_provenance(&source, &builder, &run_id, &run_attempt, &platform)?;
+    Ok((source, builder, run_id, run_attempt, platform))
+}
+
 /// Run `stage-product` from the runtime CLI: `root` is the repository
 /// checkout, the outputs arrive via [`OUTPUTS_ENV`].
 pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(), GeneratorError> {
@@ -645,10 +839,16 @@ pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(
             "stage-product needs --{name}"
         )));
     }
+    let (source, builder, run_id, run_attempt, platform) = runtime_provenance()?;
     let request = StageRequest {
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        source,
+        builder,
+        run_id,
+        run_attempt,
+        platform,
         outputs: env_list(OUTPUTS_ENV),
         stage: PathBuf::from(&options["stage"]),
     };
@@ -680,6 +880,7 @@ pub(crate) fn verify_product_cli(
             "verify-product needs --{name}"
         )));
     }
+    let (source, builder, run_id, run_attempt, platform) = runtime_provenance()?;
     let env_file = std::env::var("GITHUB_ENV").map_err(|_| {
         GeneratorError::usage("verify-product needs GITHUB_ENV; it runs in a GitHub Actions step")
     })?;
@@ -687,6 +888,11 @@ pub(crate) fn verify_product_cli(
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        source,
+        builder,
+        run_id,
+        run_attempt,
+        platform,
         outputs: env_list(OUTPUTS_ENV),
         output_files: env_list(OUTPUT_FILES_ENV),
         stage: PathBuf::from(&options["stage"]),
@@ -784,8 +990,8 @@ fn indent_block(value: &str, indent: &str) -> String {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        artifact_name, ready_records, stage_product, transport_eligible, verify_product,
-        StageRequest, VerifyRequest,
+        artifact_name, ready_records, stage_product, transport_contract, transport_eligible,
+        verify_product, ProductTransportContract, StageRequest, VerifyRequest,
     };
     use crate::s2::platform::NamedProduct;
 
@@ -801,6 +1007,17 @@ mod tests {
     fn transport_eligible_requires_declared_outputs() {
         assert!(transport_eligible(&product(&["out/Foo.xcframework"])));
         assert!(!transport_eligible(&product(&[])));
+    }
+
+    #[test]
+    fn transport_contract_requires_an_explicit_successful_producer() {
+        let required = transport_contract(&product(&["out/Foo.xcframework"]));
+        assert_eq!(required, ProductTransportContract::RequiredArtifact);
+        assert!(required.requires_producer_success());
+
+        let local = transport_contract(&product(&[]));
+        assert_eq!(local, ProductTransportContract::LocalRebuild);
+        assert!(!local.requires_producer_success());
     }
 
     #[test]
@@ -919,6 +1136,11 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            source: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            builder: "example/repo/.github/workflows/ci.yml@refs/heads/main".to_owned(),
+            run_id: "42".to_owned(),
+            run_attempt: "1".to_owned(),
+            platform: "Linux-X64".to_owned(),
             outputs: vec!["out/Foo.xcframework".to_owned()],
             stage: stage.to_path_buf(),
         }
@@ -929,6 +1151,11 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            source: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            builder: "example/repo/.github/workflows/ci.yml@refs/heads/main".to_owned(),
+            run_id: "42".to_owned(),
+            run_attempt: "1".to_owned(),
+            platform: "Linux-X64".to_owned(),
             outputs: vec!["out/Foo.xcframework".to_owned()],
             output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
             stage: stage.to_path_buf(),
@@ -1090,6 +1317,60 @@ mod tests {
         );
         let message = format!("{}", missing_file.expect_err("structural must fail"));
         assert!(message.contains("structural file"), "{message}");
+    }
+
+    #[test]
+    fn verify_rejects_provenance_mismatch() {
+        let stage = staged(&scratch("provenance-producer"));
+        let consumer = scratch("provenance-consumer");
+        let env_file = consumer.join("github-env");
+
+        let cases = [
+            (
+                "source",
+                VerifyRequest {
+                    source: "f".repeat(40),
+                    ..verify_request(&stage, &env_file)
+                },
+            ),
+            (
+                "builder",
+                VerifyRequest {
+                    builder: "other/repo/.github/workflows/ci.yml@refs/heads/main".to_owned(),
+                    ..verify_request(&stage, &env_file)
+                },
+            ),
+            (
+                "run_id",
+                VerifyRequest {
+                    run_id: "43".to_owned(),
+                    ..verify_request(&stage, &env_file)
+                },
+            ),
+            (
+                "run_attempt",
+                VerifyRequest {
+                    run_attempt: "2".to_owned(),
+                    ..verify_request(&stage, &env_file)
+                },
+            ),
+            (
+                "platform",
+                VerifyRequest {
+                    platform: "Linux-ARM64".to_owned(),
+                    ..verify_request(&stage, &env_file)
+                },
+            ),
+        ];
+        for (field, request) in cases {
+            let result = verify_product(&consumer, &request);
+            let message = format!("{}", result.expect_err("provenance must fail"));
+            assert!(message.contains(field), "{field}: {message}");
+        }
+        assert!(
+            !consumer.join("out/Foo.xcframework").exists(),
+            "nothing installs on provenance failure"
+        );
     }
 
     #[test]
