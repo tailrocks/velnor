@@ -55,6 +55,11 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
+/// The base-owned workflow that qualifies an untrusted candidate renderer.
+/// Its definition is itself part of the trust boundary: a pull request cannot
+/// change the producer or qualification predicates while asking the policy
+/// authority to approve the same change.
+const CANDIDATE_QUALIFICATION_WORKFLOW: &str = ".github/workflows/candidate-qualification.yml";
 /// Names a `velnor-workflow` binary built at the pinned revision.
 pub use super::VELNOR_WORKFLOW_PINNED_BINARY_ENV;
 /// The revision of the validator the base branch runs.
@@ -476,12 +481,129 @@ fn semantic_rules(
         "every workflow parses as GitHub would run it",
         audit.structure,
     ));
+    report.rules.push(candidate_workflow_authority(
+        root,
+        options.head_sha.as_deref(),
+        options.base_sha.as_deref(),
+    ));
     report.rules.push(required_checks(
         root,
         declared,
         options.ruleset_contexts.as_deref(),
     ));
     Ok(())
+}
+
+/// The candidate qualification workflow is a trusted bootstrap surface. A
+/// policy run on a pull request must prove that the audited head carries the
+/// exact bytes that the target base already trusted. Comparing the Git blobs
+/// rather than normalized YAML also protects comments, expressions, action
+/// pins, and trailing bytes that a semantic parser could discard.
+fn candidate_workflow_authority(root: &Path, head: Option<&str>, base: Option<&str>) -> RuleReport {
+    let head = match resolve_head(root, head) {
+        Ok(head) => head,
+        Err(reason) => {
+            return RuleReport::fail(
+                "candidate-workflow-authority",
+                format!("cannot identify the audited head: {reason}"),
+                Vec::new(),
+            )
+        }
+    };
+    let base = match base {
+        Some(base) if super::is_full_revision(base) => base.to_owned(),
+        Some(base) => {
+            return RuleReport::fail(
+                "candidate-workflow-authority",
+                format!("base revision must be a full 40-character SHA, got {base:?}"),
+                Vec::new(),
+            )
+        }
+        None => head.clone(),
+    };
+    let base_bytes = match git_blob(root, &base, CANDIDATE_QUALIFICATION_WORKFLOW) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            return RuleReport::fail(
+                "candidate-workflow-authority",
+                format!("cannot read the base candidate qualification workflow: {reason}"),
+                Vec::new(),
+            )
+        }
+    };
+    let head_bytes = match git_blob(root, &head, CANDIDATE_QUALIFICATION_WORKFLOW) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            return RuleReport::fail(
+                "candidate-workflow-authority",
+                format!("cannot read the audited candidate qualification workflow: {reason}"),
+                Vec::new(),
+            )
+        }
+    };
+    match (base_bytes, head_bytes) {
+        (None, None) => RuleReport::pass(
+            "candidate-workflow-authority",
+            format!("{CANDIDATE_QUALIFICATION_WORKFLOW} is absent from base and head"),
+        ),
+        (Some(_), None) => RuleReport::fail(
+            "candidate-workflow-authority",
+            format!(
+                "{CANDIDATE_QUALIFICATION_WORKFLOW} was removed from audited head {head}; the base-owned qualification authority must remain present"
+            ),
+            Vec::new(),
+        ),
+        (None, Some(_)) => RuleReport::fail(
+            "candidate-workflow-authority",
+            format!(
+                "{CANDIDATE_QUALIFICATION_WORKFLOW} was added at audited head {head}; bootstrap authority changes require a separately reviewed base increment"
+            ),
+            Vec::new(),
+        ),
+        (Some(base_bytes), Some(head_bytes)) if base_bytes == head_bytes => RuleReport::pass(
+            "candidate-workflow-authority",
+            format!(
+                "{CANDIDATE_QUALIFICATION_WORKFLOW} is byte-identical between base {base} and head {head}"
+            ),
+        ),
+        (Some(base_bytes), Some(head_bytes)) => RuleReport::fail(
+            "candidate-workflow-authority",
+            format!(
+                "{CANDIDATE_QUALIFICATION_WORKFLOW} differs byte-for-byte between base {base} ({} bytes) and head {head} ({} bytes)",
+                base_bytes.len(),
+                head_bytes.len()
+            ),
+            Vec::new(),
+        ),
+    }
+}
+
+/// Read one exact workflow blob from a full commit. `git show` and
+/// `read_to_string` are intentionally avoided: policy must compare bytes,
+/// including a final newline and any non-UTF-8 refusal boundary.
+fn git_blob(root: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    if !commit_exists(root, revision) {
+        return Err(format!(
+            "commit {revision} is unavailable in the policy checkout"
+        ));
+    }
+    let object = format!("{revision}:{path}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "blob", &object])
+        .output()
+        .map_err(|error| format!("read {object}: {error}"))?;
+    if output.status.success() {
+        Ok(Some(output.stdout))
+    } else if output.status.code() == Some(128) {
+        Ok(None)
+    } else {
+        Err(format!(
+            "git cat-file failed for {object}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 /// D19 guard for `--check`: the generator the tree declares must render it

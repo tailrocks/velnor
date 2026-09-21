@@ -31,14 +31,24 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Validate activation input
         env:
           REVISION: ${{ inputs.revision }}
+          MAIN_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::revision must be a full lowercase commit SHA" >&2; exit 1; }
+          [[ "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::workflow SHA is not a full lowercase commit SHA" >&2; exit 1; }
+          [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::default branch contains unsafe characters" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "$MAIN_SHA" ]] || { echo "::error::checkout moved from the protected dispatch commit" >&2; exit 1; }
           git cat-file -e "$REVISION^{commit}" || { echo "::error::revision is not in the protected repository history" >&2; exit 1; }
+          git merge-base --is-ancestor "$REVISION" "$MAIN_SHA" || {
+            echo "::error::renderer revision $REVISION is not an ancestor of protected main $MAIN_SHA" >&2
+            exit 1
+          }
       - name: Set up declared renderer product
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
@@ -50,6 +60,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REVISION: ${{ inputs.revision }}
+          MAIN_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           CLOSURE: ${{ steps.runtime.outputs.closure }}
         run: |
           set -euo pipefail
@@ -57,12 +69,17 @@ jobs:
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir "$temporary"
-          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/${{ github.event.repository.default_branch }}"
           product_revision="$(jq -er '.revision | select(test("^[0-9a-f]{40}$"))' "$temporary/manifest.json")"
+          git cat-file -e "$product_revision^{commit}" || { echo "::error::published product revision $product_revision is not in protected repository history" >&2; exit 1; }
+          git merge-base --is-ancestor "$product_revision" "$MAIN_SHA" || {
+            echo "::error::published product revision $product_revision is not an ancestor of protected main $MAIN_SHA" >&2
+            exit 1
+          }
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/$DEFAULT_BRANCH" --source-digest "$product_revision"
           for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
             asset="velnor-workflow-$platform"
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$temporary"
-            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/${{ github.event.repository.default_branch }}"
+            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/$DEFAULT_BRANCH" --source-digest "$product_revision"
             actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
             expected="$(jq -er --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" 'select(.closure == $closure and .profile == "release" and .features == "" and .products[$platform].asset == $asset and (.products[$platform].binary | test("^[0-9a-f]{64}$"))) | .products[$platform].binary' "$temporary/manifest.json")"
             [[ "$actual" == "$expected" ]] || { echo "::error::published $platform product digest mismatch" >&2; exit 1; }
@@ -77,20 +94,57 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REVISION: ${{ inputs.revision }}
+          MAIN_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
+          protected_tip="$(git ls-remote --refs origin "refs/heads/$DEFAULT_BRANCH" | awk 'NR == 1 { print $1 }')"
+          [[ "$protected_tip" == "$MAIN_SHA" ]] || {
+            echo "::error::protected $DEFAULT_BRANCH advanced from $MAIN_SHA to ${protected_tip:-<missing>}; restart activation" >&2
+            exit 1
+          }
+          state_path=".github/ci/.github-actions-generator-state"
+          state="$GITHUB_WORKSPACE/$state_path"
+          base_state="$RUNNER_TEMP/activation-base-state"
+          git show "$MAIN_SHA:$state_path" > "$base_state" || {
+            echo "::error::protected main has no generated ownership state" >&2
+            exit 1
+          }
           branch="activate-renderer-${REVISION:0:12}"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
             git fetch --no-tags origin "$branch"
-            git switch "$branch"
+            branch_tip="$(git rev-parse "refs/remotes/origin/$branch")"
+            if [[ "$branch_tip" != "$MAIN_SHA" ]]; then
+              parent="$(git rev-parse "$branch_tip^")"
+              [[ "$parent" == "$MAIN_SHA" ]] || {
+                echo "::error::activation branch $branch is stale or contains more than one activation commit; refusing to reuse it" >&2
+                exit 1
+              }
+            fi
+            git switch --create "$branch" --track "origin/$branch"
           else
             git switch --create "$branch"
           fi
           git config user.name "velnor-workflow activation"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           velnor-workflow promote --rev "$REVISION" --publication-readiness "$RUNNER_TEMP/publication-readiness.json" --repo "$GITHUB_WORKSPACE" --generator-repo "$GITHUB_WORKSPACE"
+          test -s "$state" || { echo "::error::promotion did not leave generated ownership state" >&2; exit 1; }
+          unexpected=""
+          while IFS= read -r path; do
+            case "$path" in
+              .github-gen/velnor-workflow.toml|.github/ci/.github-actions-generator-state)
+                ;;
+              *)
+                grep -Fq "^$path	" "$state" || grep -Fq "^$path	" "$base_state" || unexpected+="$path\n"
+                ;;
+            esac
+          done < <(git diff --name-only "$MAIN_SHA" HEAD)
+          if [[ -n "$unexpected" ]]; then
+            printf '::error::activation branch contains changes outside the promoted generated surface:\n%b' "$unexpected" >&2
+            exit 1
+          fi
           gh auth setup-git
           git push --set-upstream origin "$branch"
-          if [[ "$(gh pr list --head "$branch" --base "${{ github.event.repository.default_branch }}" --state open --json number --jq 'length')" == 0 ]]; then
-            gh pr create --base "${{ github.event.repository.default_branch }}" --head "$branch" --title "chore(ci): activate renderer ${REVISION:0:12}" --body "Trusted activation: immutable runtime release, manifest, and all supported platform assets were attestation- and digest-verified before atomic pin/tree promotion."
+          if [[ "$(gh pr list --head "$branch" --base "$DEFAULT_BRANCH" --state open --json number --jq 'length')" == 0 ]]; then
+            gh pr create --base "$DEFAULT_BRANCH" --head "$branch" --title "chore(ci): activate renderer ${REVISION:0:12}" --body "Trusted activation: immutable runtime release, manifest, and all supported platform assets were attestation- and digest-verified before atomic pin/tree promotion."
           fi

@@ -8,10 +8,10 @@ generator	69
 .github/AGENTS.md	02ebb7198c435e9b
 .github/actionlint.yaml	85a2e7172b525ecb
 .github/actions/report-velnor-ci-outcomes/action.yml	3c9db68a0a158ce0
-.github/actions/setup-velnor-workflow/action.yml	263260b42f1c2c99
+.github/actions/setup-velnor-workflow/action.yml	fb307963640278fb
 .github/ci/project.toml	df8b7d0cc5dd57b0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/activate-renderer.yml	f703e9f6b36660d8
+.github/workflows/activate-renderer.yml	87cf4a016c0486c8
 .github/workflows/candidate-qualification.yml	1408488e32d3a135
 .github/workflows/ci-main.yml	aebf95760a86939e
 .github/workflows/ci-policy.yml	68826600ff5d5dff

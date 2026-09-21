@@ -1121,6 +1121,70 @@ fn generated_tree_report_rejects_candidate_render() {
     );
 }
 
+#[test]
+fn candidate_workflow_authority_requires_exact_base_bytes() {
+    let root = temporary_directory("candidate-workflow-authority");
+    git_ok(&root, &["init", "-q", "-b", "main"]);
+    write(&root.join("README.md"), "base\n");
+    let base_without_workflow = commit(&root, "base without candidate workflow");
+
+    write(
+        &root.join(CANDIDATE_QUALIFICATION_WORKFLOW),
+        "name: Candidate\non: pull_request\n",
+    );
+    let added = commit(&root, "add candidate workflow");
+    let added_report =
+        candidate_workflow_authority(&root, Some(&added), Some(&base_without_workflow));
+    assert!(!added_report.passed, "{}", added_report.reason);
+    assert!(
+        added_report.reason.contains("was added"),
+        "{added_report:?}"
+    );
+
+    write(&root.join("README.md"), "same workflow bytes\n");
+    let unchanged = commit(&root, "change unrelated file");
+    let unchanged_report = candidate_workflow_authority(&root, Some(&unchanged), Some(&added));
+    assert!(unchanged_report.passed, "{}", unchanged_report.reason);
+    assert!(
+        unchanged_report.reason.contains("byte-identical"),
+        "{}",
+        unchanged_report.reason
+    );
+
+    write(
+        &root.join(CANDIDATE_QUALIFICATION_WORKFLOW),
+        "name: Candidate\non: pull_request\n\n",
+    );
+    let changed = commit(&root, "change only a trailing byte");
+    let changed_report = candidate_workflow_authority(&root, Some(&changed), Some(&added));
+    assert!(!changed_report.passed, "{}", changed_report.reason);
+    assert!(
+        changed_report.reason.contains("differs byte-for-byte"),
+        "{}",
+        changed_report.reason
+    );
+
+    must(
+        fs::remove_file(root.join(CANDIDATE_QUALIFICATION_WORKFLOW)),
+        "remove candidate workflow",
+    );
+    let removed = commit(&root, "remove candidate workflow");
+    let removed_report = candidate_workflow_authority(&root, Some(&removed), Some(&added));
+    assert!(!removed_report.passed, "{}", removed_report.reason);
+    assert!(
+        removed_report.reason.contains("was removed"),
+        "{removed_report:?}"
+    );
+
+    let missing_base = candidate_workflow_authority(&root, Some(&removed), Some(PIN_A));
+    assert!(!missing_base.passed, "{}", missing_base.reason);
+    assert!(
+        missing_base.reason.contains("unavailable"),
+        "{missing_base:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 /// A base validator from before the product re-architecture scans the
 /// entrypoint for `--rev ` (space) and the revision env only. Every value it
 /// can see in a current entrypoint must equal the pin, or the transition
