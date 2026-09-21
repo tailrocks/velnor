@@ -669,6 +669,31 @@ jobs:
           cache_mbx_primary: ${{ steps.mbx-cache.outputs.cache-primary-key }}
           cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
           cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
+      - name: Record unit result
+        if: ${{ always() }}
+        env:
+          VELNOR_RESULT_UNIT: ${{ inputs.unit }}
+          VELNOR_RESULT_LANE: github-hosted
+          VELNOR_RESULT_OUTCOME: ${{ job.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$VELNOR_RESULT_OUTCOME" in
+            success) outcome=success ;;
+            cancelled) outcome=cancelled ;;
+            *) outcome=failure ;;
+          esac
+          mkdir -p .velnor-ci-results
+          jq -n --arg unit "$VELNOR_RESULT_UNIT" --arg lane "$VELNOR_RESULT_LANE" --arg outcome "$outcome" '{results: [{unit: $unit, lane: $lane, outcome: $outcome}]}' > ".velnor-ci-results/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json"
+      - name: Upload unit result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: velnor-result-${{ inputs.unit }}-github-hosted
+          path: .velnor-ci-results/result-${{ inputs.unit }}-github-hosted.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
 
   verify-velnor:
     name: velnor
@@ -913,4 +938,29 @@ jobs:
           job_label: ${{ inputs.unit }}
           ci_lane: velnor
           host_warm_layers: rustup,mold,mbx,cargo
+      - name: Record unit result
+        if: ${{ always() && inputs.unit_trust == 'untrusted-ok' }}
+        env:
+          VELNOR_RESULT_UNIT: ${{ inputs.unit }}
+          VELNOR_RESULT_LANE: velnor
+          VELNOR_RESULT_OUTCOME: ${{ job.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$VELNOR_RESULT_OUTCOME" in
+            success) outcome=success ;;
+            cancelled) outcome=cancelled ;;
+            *) outcome=failure ;;
+          esac
+          mkdir -p .velnor-ci-results
+          jq -n --arg unit "$VELNOR_RESULT_UNIT" --arg lane "$VELNOR_RESULT_LANE" --arg outcome "$outcome" '{results: [{unit: $unit, lane: $lane, outcome: $outcome}]}' > ".velnor-ci-results/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json"
+      - name: Upload unit result
+        if: ${{ always() && inputs.unit_trust == 'untrusted-ok' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: velnor-result-${{ inputs.unit }}-velnor
+          path: .velnor-ci-results/result-${{ inputs.unit }}-velnor.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
 

@@ -15125,9 +15125,13 @@ channel = "stable"
                 }),
             "large required-check block",
         );
+        // The aggregate steps precede the verdict step; anchor on the
+        // verdict step's name so the expression budget covers the shell
+        // verdict, not the constant-size collection scripts.
         let required_script = must_some(
             required_block
-                .split_once("        run: |\n")
+                .split_once("- name: Validate generated stack results")
+                .and_then(|(_, step)| step.split_once("        run: |\n"))
                 .map(|(_, script)| script),
             "large required-check script",
         );
