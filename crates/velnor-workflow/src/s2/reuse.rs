@@ -1894,6 +1894,56 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_root_doc_selects_nothing_in_affected_core(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Parity with the runtime planner: a change no watch owns selects
+        // nothing instead of falling back to the full set.
+        let units = vec![
+            watched(
+                "rust-alpha",
+                &[
+                    "Cargo.lock",
+                    "Cargo.toml",
+                    "crates/alpha/**/*.rs",
+                    "crates/alpha/Cargo.toml",
+                    "crates/alpha/src/**",
+                    "rust-toolchain.toml",
+                ],
+                &[],
+            ),
+            watched(
+                "bun-web",
+                &[
+                    "web/**/*.ts",
+                    "web/**/*.tsx",
+                    "web/bun.lock",
+                    "web/package.json",
+                ],
+                &[],
+            ),
+            watched("docker-construct", &["docker/construct/**"], &[]),
+            watched(
+                "swift-native",
+                &[
+                    "native/**/*.swift",
+                    "native/Package.swift",
+                    "native/Package.resolved",
+                ],
+                &[],
+            ),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.required.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(!selection.fallback_full);
+        Ok(())
+    }
+
+    #[test]
     fn dependency_closure_pulls_dependents_and_prerequisites_across_kinds(
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Edges carry no kind filter: the Node unit depends on the Rust unit

@@ -4838,6 +4838,75 @@ pub(crate) mod tests {
         }
     }
 
+    /// A polyglot consumer without a docs unit: rust, bun, docker, and swift
+    /// watches shaped like a real analyzed estate. A root-level contributor
+    /// document matches none of them.
+    fn polyglot_selection_config() -> CiConfig {
+        let unit = |id: &str, kind: &str, watch: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: kind.to_owned(),
+            root: ".".to_owned(),
+            watch: watch.iter().map(|value| (*value).to_owned()).collect(),
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
+            workspace_check: false,
+        };
+        CiConfig {
+            schema: 2,
+            repository: "example/repository".to_owned(),
+            profile: "polyglot-no-docs".to_owned(),
+            verified: true,
+            default_branch: "main".to_owned(),
+            providers: vec!["github-hosted".to_owned()],
+            automatic_providers: vec!["github-hosted".to_owned()],
+            default_dispatch_providers: vec!["github-hosted".to_owned()],
+            analysis: Analysis::default(),
+            workflow: Workflow::default(),
+            release: Release::default(),
+            unit: vec![
+                unit(
+                    "rust-alpha",
+                    "rust",
+                    &[
+                        "Cargo.lock",
+                        "Cargo.toml",
+                        "crates/alpha/**/*.rs",
+                        "crates/alpha/Cargo.toml",
+                        "crates/alpha/src/**",
+                        "rust-toolchain.toml",
+                    ],
+                ),
+                unit(
+                    "bun-web",
+                    "bun",
+                    &[
+                        "web/**/*.ts",
+                        "web/**/*.tsx",
+                        "web/bun.lock",
+                        "web/package.json",
+                    ],
+                ),
+                unit("docker-construct", "docker", &["docker/construct/**"]),
+                unit(
+                    "swift-native",
+                    "swift",
+                    &[
+                        "native/**/*.swift",
+                        "native/Package.swift",
+                        "native/Package.resolved",
+                    ],
+                ),
+            ],
+        }
+    }
+
     fn selection_git_fixture(
         name: &str,
         changed: &str,
@@ -5571,6 +5640,22 @@ workspace_check = true
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
         assert!(selection.units.is_empty());
         assert!(selection.full_units.is_empty());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_root_doc_selects_no_workload_units() -> Result<(), Box<dyn Error>> {
+        // A change no watch owns selects nothing: the planner records
+        // explicit no-work instead of running the estate.
+        let (root, base, head) = selection_git_fixture("polyglot-unmatched", "AGENTS.md")?;
+        let config = polyglot_selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(
+            selection.units.is_empty() && selection.full_units.is_empty(),
+            "an unmatched AGENTS.md must select no units, got {:?}",
+            selection.full_units,
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
