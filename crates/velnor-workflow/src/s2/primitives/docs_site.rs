@@ -19,7 +19,7 @@ use super::{Args, Primitive, RenderCtx, Rendered};
 use crate::s2::provider::{runs_on_for, ProviderId};
 use crate::s2::{
     runs_on_labels_yaml, yaml_scalar, ActionPin, DocsSpec, GeneratorError, ProjectConfig,
-    GENERATED_HEADER,
+    GENERATED_HEADER, TRUSTED_EVENT_EXPRESSION,
 };
 
 /// The workflow file the pipeline renders into.
@@ -117,7 +117,14 @@ fn render_file(
 /// GitHub-platform operations, but a repository without the hosted provider
 /// runs them on its local fleet instead.
 fn docs_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
-    let provider = ProviderId::ALL
+    let provider = docs_provider(config)?;
+    runs_on_for(&config.selectors, provider).map(runs_on_labels_yaml)
+}
+
+/// The pipeline provider: the first provider of the universe in canonical
+/// order — the visibility provider under the singleton policy.
+fn docs_provider(config: &ProjectConfig) -> Result<ProviderId, GeneratorError> {
+    ProviderId::ALL
         .iter()
         .find(|provider| config.providers.contains(provider))
         .copied()
@@ -125,8 +132,26 @@ fn docs_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
             GeneratorError::usage(
                 "`docs-site` renders a pipeline but [workflow] providers is empty; declare the provider universe",
             )
-        })?;
-    runs_on_for(&config.selectors, provider).map(runs_on_labels_yaml)
+        })
+}
+
+/// Whether the pipeline runs on a local provider. An empty universe
+/// reports false, but it renders no pipeline at all (`docs_runner` fails),
+/// so the value is never observed.
+fn docs_is_local(config: &ProjectConfig) -> bool {
+    docs_provider(config).is_ok_and(ProviderId::is_local)
+}
+
+/// Conjoin a docs job's functional `if:` with the trusted-event predicate
+/// on a local pipeline. The functional side stays inside its own
+/// parentheses so the gate matcher verifies the shape without parsing
+/// expressions. Hosted pipelines keep the condition as is.
+fn docs_gated_condition(config: &ProjectConfig, condition: &str) -> String {
+    if docs_is_local(config) {
+        format!("({condition}) && ({TRUSTED_EVENT_EXPRESSION})")
+    } else {
+        condition.to_owned()
+    }
 }
 
 /// The reuse-recipe contract version. It feeds the recipe fingerprint and the
@@ -309,9 +334,10 @@ fn render_gate_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> Str
     let hash_files = hash_files_call(&spec.docs_paths);
     let recipe = docs_reuse_recipe(spec);
     let branch = bash_escape(&config.default_branch);
+    let gate_condition = docs_gated_condition(config, "github.event_name != 'schedule'");
     format!(
         r#"  gate:
-    if: github.event_name != 'schedule'
+    if: {gate_condition}
     runs-on: {runner}
     timeout-minutes: 10
     outputs:
@@ -388,6 +414,7 @@ fn render_gate_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> Str
 /// One always-on local check job: source links catch renames the docs path
 /// filter would miss, and spelling covers prose the build never validates.
 fn render_local_check_job(
+    config: &ProjectConfig,
     runner: &str,
     job_id: &str,
     job_name: &str,
@@ -396,10 +423,14 @@ fn render_local_check_job(
 ) -> String {
     let checkout = ActionPin::Checkout.reference();
     let steps = command_steps(commands, label, None, None);
+    let gate_condition = docs_gated_condition(
+        config,
+        "github.event_name != 'schedule' && needs.gate.outputs.result-reuse != 'true'",
+    );
     format!(
         r"  {job_id}:
     name: {job_name}
-    if: github.event_name != 'schedule' && needs.gate.outputs.result-reuse != 'true'
+    if: {gate_condition}
     needs: gate
     runs-on: {runner}
     timeout-minutes: 15
@@ -514,6 +545,12 @@ fn render_site_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> Str
     );
     let deploy_gate = main_deploy_gate(&config.default_branch);
     let publish = publish_guard(&config.default_branch);
+    let gate_condition = docs_gated_condition(
+        config,
+        &format!(
+            "github.event_name != 'schedule' && (needs.gate.outputs.result-reuse != 'true' || ({deploy_gate}))"
+        ),
+    );
     let site_dir = yaml_scalar(&spec.site_dir);
     let escaped = bash_escape(&spec.site_dir);
     let recipe = docs_reuse_recipe(spec);
@@ -525,7 +562,7 @@ fn render_site_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> Str
     format!(
         r#"  site:
     name: Build and check the site
-    if: github.event_name != 'schedule' && (needs.gate.outputs.result-reuse != 'true' || ({deploy_gate}))
+    if: {gate_condition}
     needs: gate
     runs-on: {runner}
     timeout-minutes: 30
@@ -584,10 +621,12 @@ fn render_deploy_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
     }
     let needs = needs.join(", ");
     let checks = checks.join(" && ");
+    let gate_condition =
+        docs_gated_condition(config, &format!("always() && ({deploy_gate}) && {checks}"));
     format!(
         r#"  deploy:
     name: Deploy to GitHub Pages
-    if: always() && ({deploy_gate}) && {checks}
+    if: {gate_condition}
     needs: [{needs}]
     runs-on: {runner}
     timeout-minutes: 20
@@ -646,6 +685,10 @@ fn render_deploy_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
 fn render_verify_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> String {
     let checkout = ActionPin::Checkout.reference();
     let deploy_gate = main_deploy_gate(&config.default_branch);
+    let gate_condition = docs_gated_condition(
+        config,
+        &format!("always() && needs.deploy.result == 'success' && ({deploy_gate})"),
+    );
     let sitemap = bash_escape(&spec.sitemap_path);
     let env = "          DEPLOYED_URL: ${{ needs.deploy.outputs.page_url }}\n";
     let verify = command_steps(
@@ -657,7 +700,7 @@ fn render_verify_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
     format!(
         r#"  verify-deployed:
     name: Verify the deployed site
-    if: always() && needs.deploy.result == 'success' && ({deploy_gate})
+    if: {gate_condition}
     needs: deploy
     runs-on: {runner}
     timeout-minutes: 10
@@ -694,8 +737,9 @@ fn render_verify_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
 
 /// The scheduled-external live-link check: the only job that runs on schedule,
 /// against the deployed site rather than the checkout.
-fn render_live_job(runner: &str, spec: &DocsSpec) -> String {
+fn render_live_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> String {
     let checkout = ActionPin::Checkout.reference();
+    let gate_condition = docs_gated_condition(config, "github.event_name == 'schedule'");
     let steps = command_steps(
         &spec.external_link_commands,
         "Check live external links",
@@ -705,7 +749,7 @@ fn render_live_job(runner: &str, spec: &DocsSpec) -> String {
     format!(
         r"  check-live:
     name: Check the live site
-    if: github.event_name == 'schedule'
+    if: {gate_condition}
     runs-on: {runner}
     timeout-minutes: 15
     permissions:
@@ -740,10 +784,12 @@ fn render_required_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) ->
         .collect::<Vec<_>>()
         .join(" || ");
     let needs = needs.join(", ");
+    let gate_condition =
+        docs_gated_condition(config, "always() && github.event_name != 'schedule'");
     format!(
         r#"  docs-required:
     name: Docs required
-    if: always() && github.event_name != 'schedule'
+    if: {gate_condition}
     needs: [{needs}]
     runs-on: {runner}
     timeout-minutes: 5
@@ -788,14 +834,14 @@ fn render_docs_site(config: &ProjectConfig, spec: &DocsSpec, runner: &str) -> St
             _ => label,
         };
         output.push_str(&render_local_check_job(
-            runner, job_id, name, commands, label,
+            config, runner, job_id, name, commands, label,
         ));
     }
     output.push_str(&render_site_job(config, runner, spec));
     output.push_str(&render_deploy_job(config, runner, spec));
     output.push_str(&render_verify_job(config, runner, spec));
     if !spec.external_link_commands.is_empty() {
-        output.push_str(&render_live_job(runner, spec));
+        output.push_str(&render_live_job(config, runner, spec));
     }
     output.push_str(&render_required_job(config, runner, spec));
     output
@@ -877,9 +923,6 @@ mod tests {
                 crate::s2::provider::ProviderId::GithubHosted,
             ]),
             automatic_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::GithubHosted,
-            ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::GithubHosted,
             ]),
             selectors: std::collections::BTreeMap::from([(

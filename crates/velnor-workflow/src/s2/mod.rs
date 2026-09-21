@@ -1138,12 +1138,13 @@ pub struct ProjectConfig {
     pub(crate) default_branch: String,
     /// The provider universe for this repo. Non-empty.
     pub(crate) providers: provider::ProviderSet,
-    /// Providers that run on automatic events (PR/push/schedule). A subset
-    /// of `providers`; pure event-to-provider routing.
+    /// Providers that run on automatic events (PR/push/schedule). Under the
+    /// visibility-based runner policy this equals the visibility singleton;
+    /// pure event-to-provider routing.
     pub(crate) automatic_providers: provider::ProviderSet,
-    /// Default providers for the `workflow_dispatch` `providers:` input. A
-    /// subset of `providers`.
-    pub(crate) default_dispatch_providers: provider::ProviderSet,
+    // NOTE: no `default_dispatch_providers`. Manual dispatches select the
+    // static universe; the runtime contract still carries the key (rendered
+    // below from the automatic set) so pinned runtimes keep parsing it.
     /// Per-provider `runs-on` routing. The only place labels live.
     pub(crate) selectors: provider::SelectorMap,
     pub(crate) release_enabled: bool,
@@ -1258,11 +1259,14 @@ impl ProjectConfig {
                 .map(|provider| provider.as_str().to_owned())
                 .collect::<Vec<_>>(),
         );
+        // The dispatch default is the automatic set: dispatches select the
+        // static universe. The key stays so pinned runtimes keep parsing the
+        // contract they were built against.
         write_toml_array(
             &mut output,
             "default_dispatch_providers",
             &self
-                .default_dispatch_providers
+                .automatic_providers
                 .iter()
                 .map(|provider| provider.as_str().to_owned())
                 .collect::<Vec<_>>(),
@@ -1426,11 +1430,208 @@ struct ScannedTarget {
     inputs: GenerationInputs,
 }
 
+/// Enforce the visibility-based runner policy on the resolved provider
+/// selection: the universe and the automatic set must equal the visibility
+/// evidence's singleton, every declared selector must belong to that
+/// universe, and the selectors must carry the real provider identities —
+/// GitHub-owned labels for hosted, exactly the Velnor fleet identity for
+/// Velnor. Absent provider sets derive the singleton; anything declared
+/// that contradicts it is an explicit error naming the evidence.
+fn enforce_visibility_policy(
+    config: &mut ProjectConfig,
+    generation: Option<&config::RepoGenerationConfig>,
+    cli_providers: bool,
+    root: &Path,
+) -> Result<(), GeneratorError> {
+    // The evidence module speaks the crate-root error type; both carry a
+    // single message string, so the bridge maps across without losing
+    // context.
+    let evidence =
+        crate::visibility::load(root).map_err(|error| GeneratorError::usage(error.to_string()))?;
+    crate::visibility::check_slug_binding(
+        &evidence,
+        generation.and_then(config::RepoGenerationConfig::repository),
+    )
+    .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    let expected = provider::singleton_for_visibility(evidence.visibility);
+    let expected_name = expected
+        .iter()
+        .map(provider::ProviderId::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let evidence_note = format!(
+        "the repository visibility evidence ({}: {:?} for {}) requires [{expected_name}]",
+        crate::visibility::VISIBILITY_EVIDENCE_PATH,
+        evidence.visibility.as_str(),
+        evidence.repository,
+    );
+    let declared_source = if generation.is_some_and(|generation| generation.providers().is_some()) {
+        Some("[workflow] providers")
+    } else if cli_providers {
+        Some("--providers")
+    } else {
+        None
+    };
+    if let Some(source) = declared_source {
+        if config
+            .providers
+            .contains(&provider::ProviderId::GithubSelfHosted)
+        {
+            return Err(GeneratorError::usage(format!(
+                "unsupported provider `github-self-hosted` in {source}: the visibility-based runner policy admits only `github-hosted` (public repositories) and `velnor` (private repositories); {evidence_note}"
+            )));
+        }
+        if config.providers != expected {
+            let declared = config
+                .providers
+                .iter()
+                .map(provider::ProviderId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(GeneratorError::usage(format!(
+                "contradictory runner selection: {source} selects [{declared}], but {evidence_note} — public repositories run on GitHub-hosted runners only, private repositories on Velnor runners only"
+            )));
+        }
+    } else {
+        config.providers.clone_from(&expected);
+    }
+    let automatic_declared =
+        generation.is_some_and(|generation| generation.automatic_providers().is_some());
+    if automatic_declared {
+        if config.automatic_providers != expected {
+            let declared = config
+                .automatic_providers
+                .iter()
+                .map(provider::ProviderId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(GeneratorError::usage(format!(
+                "contradictory runner selection: [workflow] automatic_providers selects [{declared}], but {evidence_note}"
+            )));
+        }
+    } else {
+        config.automatic_providers.clone_from(&expected);
+    }
+    // Declared selectors must stay inside the visibility universe; the scan
+    // seeds defaults for every provider, so only declared tables are judged.
+    if let Some(generation) = generation {
+        for key in generation.selectors().keys() {
+            let provider = provider::ProviderId::parse(key).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "[workflow.selectors] has unknown provider `{key}`; expected one of: github-hosted, github-self-hosted, velnor"
+                ))
+            })?;
+            if !expected.contains(&provider) {
+                return Err(GeneratorError::usage(format!(
+                    "contradictory runner selection: [workflow.selectors.{provider}] declares routing for a provider no job can use, but {evidence_note}; remove the selector"
+                )));
+            }
+        }
+    }
+    validate_visibility_selector_identities(config, &expected, &evidence_note)?;
+    enforce_visibility_job_routing(config, evidence.visibility, &expected, &evidence_note)?;
+    Ok(())
+}
+
+/// Every named lane outside the CI aggregate follows the same visibility
+/// singleton: scheduled-check profiles, release verification sets, typed
+/// release jobs, and native release targets. macOS lanes are GitHub-hosted
+/// by construction, so they contradict private evidence; Velnor lanes
+/// contradict public evidence. Undeclared lanes default to `github`, which
+/// is itself a contradiction on a private repository — declare the lane.
+fn enforce_visibility_job_routing(
+    config: &ProjectConfig,
+    visibility: crate::visibility::Visibility,
+    expected: &provider::ProviderSet,
+    evidence_note: &str,
+) -> Result<(), GeneratorError> {
+    for profile in &config.check_profiles {
+        let is_velnor = profile.runner.as_str() == "velnor";
+        if is_velnor == visibility.is_public() {
+            return Err(GeneratorError::usage(format!(
+                "contradictory runner selection: [[check_profile]] `{}` runs on `{}` (macOS counts as GitHub-hosted), but {evidence_note}",
+                profile.id, profile.runner
+            )));
+        }
+    }
+    let Some(release) = config.release.as_ref() else {
+        return Ok(());
+    };
+    if let Some(verification) = release.verification_providers.as_ref()
+        && verification != expected
+    {
+        let declared = verification
+            .iter()
+            .map(provider::ProviderId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(GeneratorError::usage(format!(
+            "contradictory runner selection: [release] verification_providers selects [{declared}], but {evidence_note}"
+        )));
+    }
+    if !visibility.is_public() {
+        for target in &release.targets {
+            if target.ends_with("-apple-darwin") {
+                return Err(GeneratorError::usage(format!(
+                    "contradictory runner selection: [release] target `{target}` builds on the fixed macOS hosted image, but {evidence_note}; Velnor serves linux-x64 only"
+                )));
+            }
+        }
+    }
+    for job in &release.jobs {
+        let is_velnor = job.runner.as_str() == "velnor";
+        if is_velnor == visibility.is_public() {
+            return Err(GeneratorError::usage(format!(
+                "contradictory runner selection: [[release.job]] `{}` runs on `{}` (macOS counts as GitHub-hosted), but {evidence_note}",
+                job.id, job.runner
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The visibility provider's selector must carry the real provider
+/// identity: a bare `self-hosted` label proves nothing, and a hosted
+/// selector with caller-managed labels would route a hosted-only tree off
+/// GitHub-owned runners. The merged selector is judged, so the scan default
+/// applies when the repository declares nothing — and the Velnor default is
+/// deliberately not the fleet identity, so private repositories must declare
+/// their real routing.
+fn validate_visibility_selector_identities(
+    config: &ProjectConfig,
+    expected: &provider::ProviderSet,
+    evidence_note: &str,
+) -> Result<(), GeneratorError> {
+    if expected.contains(&provider::ProviderId::Velnor)
+        && let Some(selector) = config.selectors.get(&provider::ProviderId::Velnor)
+        && !estate::is_velnor_fleet_identity(&selector.runs_on)
+    {
+        return Err(GeneratorError::usage(format!(
+            "contradictory runner selection: [workflow.selectors.velnor] runs_on [{}] is not the Velnor fleet identity — a bare `self-hosted` label proves nothing; the selector must be exactly [{}], but {evidence_note}",
+            selector.runs_on.join(", "),
+            estate::VELNOR_FLEET_RUNS_ON.join(", ")
+        )));
+    }
+    if expected.contains(&provider::ProviderId::GithubHosted)
+        && let Some(selector) = config.selectors.get(&provider::ProviderId::GithubHosted)
+    {
+        for label in &selector.runs_on {
+            if !provider::is_github_owned_label(label) {
+                return Err(GeneratorError::usage(format!(
+                    "contradictory runner selection: [workflow.selectors.github-hosted] runs_on carries {label:?}, which is not a GitHub-owned label (ubuntu-*|macos-*|windows-*); hosted selectors must stay GitHub-owned so a hosted-only tree cannot route onto caller-managed runners, but {evidence_note}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn scan_target(
     root: &Path,
     providers: Option<provider::ProviderSet>,
     default_branch: &str,
 ) -> Result<ScannedTarget, GeneratorError> {
+    let cli_providers = providers.is_some();
     let generation = config::discover(root)?;
     let exclude = generation
         .as_ref()
@@ -1458,6 +1659,9 @@ fn scan_target(
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
     }
+    // The visibility policy pins the provider selection before anything
+    // downstream resolves placement: every later stage sees the singleton.
+    enforce_visibility_policy(&mut config, generation.as_ref(), cli_providers, root)?;
     // Prerequisites compile into the selection graph and prepare commands, and
     // placement is rejected before any byte renders, so every later stage —
     // mbxify, templates, validation — sees the resolved surface.
@@ -1471,12 +1675,6 @@ fn scan_target(
         &config.automatic_providers,
         &config.providers,
         "[workflow] automatic_providers",
-        "[workflow] providers",
-    )?;
-    provider::require_subset(
-        &config.default_dispatch_providers,
-        &config.providers,
-        "[workflow] default_dispatch_providers",
         "[workflow] providers",
     )?;
     // A repo-owned config can add Rust units the scan did not produce. They
@@ -1987,24 +2185,10 @@ fn apply_provider_generation_config(
         // The universe moved; the automatic set follows it unless declared.
         config.automatic_providers.clone_from(&config.providers);
     }
-    if let Some(dispatch) = generation.default_dispatch_providers() {
-        config.default_dispatch_providers =
-            provider::parse_provider_set(dispatch, "[workflow] default_dispatch_providers")?;
-    } else if generation.providers().is_some() {
-        config
-            .default_dispatch_providers
-            .clone_from(&config.providers);
-    }
     provider::require_subset(
         &config.automatic_providers,
         &config.providers,
         "[workflow] automatic_providers",
-        "[workflow] providers",
-    )?;
-    provider::require_subset(
-        &config.default_dispatch_providers,
-        &config.providers,
-        "[workflow] default_dispatch_providers",
         "[workflow] providers",
     )?;
     let selectors = provider::parse_selectors(generation.selectors())?;
@@ -5036,21 +5220,55 @@ fn validate_actionlint_pin_coherence(root: &Path) -> Result<(), GeneratorError> 
     )))
 }
 
-/// The hosted `runs-on:` value: every control-plane job renders through
-/// here. A missing hosted selector is a caller bug that fails here instead
-/// of rendering an empty `runs-on`.
-pub(crate) fn hosted_runs_on(config: &ProjectConfig) -> Result<String, GeneratorError> {
-    provider::runs_on_for(&config.selectors, provider::ProviderId::GithubHosted)
-        .map(runs_on_labels_yaml)
+/// The control-plane `runs-on:` value: every control-plane job renders
+/// through here. The provider derives from the universe (hosted when
+/// present, otherwise the canonical-first local provider); a missing
+/// selector is a caller bug that fails here instead of rendering an empty
+/// `runs-on` or a hardcoded fallback label.
+pub(crate) fn control_plane_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
+    provider::runs_on_for(
+        &config.selectors,
+        provider::control_plane_provider(&config.providers),
+    )
+    .map(runs_on_labels_yaml)
 }
 
-/// The control plane always runs on hosted, regardless of `[workflow]`
-/// providers.
-fn control_plane_runner(config: &ProjectConfig) -> String {
-    config
-        .selectors
-        .get(&provider::ProviderId::GithubHosted)
-        .map_or_else(|| yaml_scalar("ubuntu-24.04"), selector_runs_on_yaml)
+/// The canonical trusted-event predicate every local control-plane job
+/// conjoins onto its functional `if:` condition. One literal, shared by the
+/// IR and every standalone control-plane workflow, so the gate shape cannot
+/// drift between lanes.
+pub(crate) const TRUSTED_EVENT_EXPRESSION: &str = "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))";
+
+/// The control-plane admission gate for standalone workflow files: local
+/// control planes conjoin the trusted-event predicate, hosted ones keep the
+/// functional condition as is.
+pub(crate) struct ControlPlaneGate {
+    local: bool,
+}
+
+pub(crate) fn control_plane_gate(config: &ProjectConfig) -> ControlPlaneGate {
+    ControlPlaneGate {
+        local: provider::control_plane_provider(&config.providers).is_local(),
+    }
+}
+
+impl ControlPlaneGate {
+    /// Whether the control plane runs on local runners and gates jobs.
+    pub(crate) fn is_local(&self) -> bool {
+        self.local
+    }
+
+    /// Conjoin a job's functional `if:` condition with the trusted-event
+    /// predicate on a local control plane. The functional side stays inside
+    /// its own parentheses so the gate matcher verifies the shape without
+    /// parsing expressions. Hosted control planes keep the condition as is.
+    pub(crate) fn as_job_condition(&self, condition: &str) -> String {
+        if self.local {
+            format!("({condition}) && ({TRUSTED_EVENT_EXPRESSION})")
+        } else {
+            condition.to_owned()
+        }
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5060,16 +5278,18 @@ pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
     )
 }
 
-pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
-    let runner = control_plane_runner(config);
+pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> Result<String, GeneratorError> {
+    let runner = control_plane_runner(config)?;
+    let local = provider::control_plane_provider(&config.providers).is_local();
+    let gate = local.then(|| control_plane_trusted_gate(&config.default_branch));
     let declared_ruleset_contexts = declared_ruleset_contexts_literal(config);
     let policy_job = policy_job(&PolicyJobSpec {
         name: "Policy",
         revision: &config.workflow_revision,
         runner: &runner,
         repository: &config.repository,
-        cache_backend: "github",
-        trusted_gate: None,
+        cache_backend: if local { "local" } else { "github" },
+        trusted_gate: gate.as_deref(),
         default_branch: &config.default_branch,
         declared_ruleset_contexts: &declared_ruleset_contexts,
     });
@@ -5077,9 +5297,9 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
     // `workflow_dispatch` lets a maintainer prove the validator the base
     // branch carries passes on the base tree itself (head = base = the
     // dispatched commit), which is how a bootstrap is confirmed after merge.
-    format!(
+    Ok(format!(
         "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n  workflow_dispatch:\n\n{concurrency}permissions:\n  contents: read\n\njobs:\n{policy_job}"
-    )
+    ))
 }
 
 fn policy_concurrency_block(config: &ProjectConfig) -> String {
@@ -5133,7 +5353,7 @@ fn validate_unit_provider_coverage(config: &ProjectConfig) -> Result<(), Generat
             continue;
         }
         return Err(GeneratorError::usage(format!(
-            "unit `{}` ({}) is eligible on no provider of [{}]; narrow the universe or remove the unit",
+            "unit `{}` ({}) is eligible on no provider of [{}]; the runner universe follows the repository visibility evidence and cannot be widened, so remove the unit or move it to a platform the provider supports",
             unit.id,
             unit.kind.label(),
             config
@@ -5922,7 +6142,7 @@ fn generated_files_with_surface(
             None if config.adopted_workflow_surface => None,
             None => match workflow_file.as_str() {
                 "ci-pr.yml" | "ci-pull-request.yml" => Some(generated_ci_pr(&workflow)),
-                "ci-policy.yml" => Some(generated_ci_policy(&config)),
+                "ci-policy.yml" => Some(generated_ci_policy(&config)?),
                 "ci-release-package-signer.yml" => Some(generated_release_package_signer(&config)),
                 "ci-main.yml" => Some(generated_ci_main(&workflow)),
                 "nightly.yml" => Some(generated_nightly(&workflow)),
@@ -5930,7 +6150,9 @@ fn generated_files_with_surface(
                 "preview.yml" => Some(generated_preview(&config)),
                 "release.yml" => generated_release(&config),
                 "renovate.yml" => primitives::renovate::renovate_content(&config)?,
-                "renovate-validate.yml" => primitives::renovate::renovate_validate_content(&config),
+                "renovate-validate.yml" => {
+                    primitives::renovate::renovate_validate_content(&config)?
+                }
                 "docs.yml" => generated_docs_site(&config),
                 "ci-runtime-products.yml" => generated_runtime_products(&config)?,
                 _ => None,
@@ -6034,7 +6256,7 @@ fn legacy_plan(workflow: &WorkflowIr) -> Vec<crate::s2::primitives::GraphNode> {
     nodes
 }
 
-fn generated_ci_policy(config: &ProjectConfig) -> String {
+fn generated_ci_policy(config: &ProjectConfig) -> Result<String, GeneratorError> {
     render_policy_entrypoint(config)
 }
 
@@ -9471,17 +9693,40 @@ mod tests {
     /// a generation config declares none, so every fixture lane names its own.
     const FIXTURE_LABELS: &[&str] = &["self-hosted", "example-runner-label"];
 
+    /// The fleet-identity label for Velnor selectors in scan-path configs.
+    /// Spelled once in the estate module; interpolated here so the generic
+    /// engine never names it.
+    fn fleet_label() -> &'static str {
+        crate::s2::estate::VELNOR_FLEET_RUNS_ON[1]
+    }
+
     /// The `runs-on:` selector the fixture's Velnor lane renders.
     fn fixture_lane_selector() -> String {
         format!("runs-on: [{}]", FIXTURE_LABELS.join(", "))
     }
 
     /// Scan the checked-in fixture, declaring the labels its lanes render.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "every call site passes an owned temporary; borrowing would push `&` onto dozens of machinery tests"
+    )]
     fn scanned_fixture(providers: provider::ProviderSet) -> ProjectConfig {
+        // The fixture is policy-clean (public evidence, hosted routing), so
+        // the scan always runs the hosted singleton; the requested universe
+        // is forced afterward. Detection is provider-independent, so forcing
+        // is exactly what a pre-policy multi-provider scan produced — these
+        // are machinery tests, not scan-path tests. Scan-path provider
+        // selection is covered by the visibility-policy tests, which assert
+        // the singleton enforcement and its explicit rejections.
         let mut config = must(
-            scan_repository(&fixture_root(), Some(providers)),
+            scan_repository(
+                &fixture_root(),
+                Some(provider_set([provider::ProviderId::GithubHosted])),
+            ),
             "scan fixture repository",
         );
+        config.providers.clone_from(&providers);
+        config.automatic_providers.clone_from(&providers);
         config.selectors.insert(
             provider::ProviderId::Velnor,
             provider::ProviderSelector {
@@ -9504,12 +9749,50 @@ mod tests {
         provider::ProviderId::ALL.into_iter().collect()
     }
 
+    /// Write visibility evidence for a test repository: the scan path
+    /// requires evidence, and fixtures are public unless a test says
+    /// otherwise. The slug binds to the generation config when one is
+    /// written, so the binding check passes.
+    fn write_visibility_evidence(root: &Path, config: Option<&str>, visibility: &str) {
+        let slug = config
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.trim()
+                        .strip_prefix("repository")
+                        .and_then(|rest| rest.trim().strip_prefix('='))
+                        .map(|value| value.trim().trim_matches('"').to_owned())
+                })
+            })
+            .unwrap_or_else(|| "example/temporary".to_owned());
+        let directory = root.join(".github-gen");
+        must(fs::create_dir_all(&directory), "create evidence directory");
+        must(
+            fs::write(
+                directory.join("visibility.toml"),
+                format!("repository = \"{slug}\"\nvisibility = \"{visibility}\"\n"),
+            ),
+            "write visibility evidence",
+        );
+    }
+
+    /// Rebind visibility evidence to the generation config just written: a
+    /// test that declares `[generator] repository` must keep the evidence
+    /// slug in sync, or the scan's binding check fails closed.
+    fn rebind_visibility_evidence(root: &Path, visibility: &str) {
+        let config = must(
+            fs::read_to_string(root.join(".github-gen/velnor-workflow.toml")),
+            "read generation config for evidence rebinding",
+        );
+        write_visibility_evidence(root, Some(&config), visibility);
+    }
+
     fn temporary_repository(name: &str) -> PathBuf {
         let root = env::temp_dir().join(format!(
             "velnor-workflow-test-{name}-{}",
             crate::unique_suffix()
         ));
         must(fs::create_dir_all(&root), "create test repository");
+        write_visibility_evidence(&root, None, "public");
         // A Rust repository must pin its toolchain for the scan to accept it,
         // and most tests add Rust packages. The pin is inert where no Rust
         // package exists, so every repository can carry it.
@@ -9785,7 +10068,7 @@ mod tests {
             "PR planning must not bootstrap an unpublished generator revision: {pull_request}"
         );
 
-        let policy = generated_ci_policy(&config);
+        let policy = must(generated_ci_policy(&config), "render policy entrypoint");
         assert!(
             policy.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
             "policy must use the published base runtime: {policy}"
@@ -9899,37 +10182,90 @@ mod tests {
     }
 
     #[test]
-    fn plan_always_publishes_runtime_for_the_required_check_aggregate() {
+    fn hosted_plan_publishes_runtime_for_the_required_check_aggregate() {
         let config = must(
             scan_repository_with_default_branch(
                 &fixture_root(),
-                Some(provider_set([ProviderId::Velnor])),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
-            "scan fixture for Velnor runtime handoff",
+            "scan fixture for hosted runtime handoff",
         );
         let workflow = generated_ci_main(&WorkflowIr::from_config(&config));
         let plan = yaml_job(&workflow, "plan");
         assert!(
-            plan.contains("runs-on: ubuntu-24.04"),
-            "Planning is control plane, always hosted: {plan}"
-        );
-        // `ci-required` runs on the hosted control plane on every universe
-        // and downloads this artifact for its aggregate step, so the plan
-        // always publishes it — the artifact is never an orphan.
-        assert!(
             plan.contains("name: Prepare Velnor workflow runtime"),
-            "the plan prepares the runtime artifact on every universe: {plan}"
+            "a hosted plan prepares the runtime artifact: {plan}"
         );
         assert!(
             plan.contains("name: Publish Velnor workflow runtime"),
-            "the plan publishes the runtime artifact on every universe: {plan}"
+            "a hosted plan publishes the runtime artifact: {plan}"
         );
         let required = yaml_job(&workflow, "ci-required");
         assert!(
             required.contains("name: Download Velnor workflow runtime"),
-            "ci-required downloads the runtime for its aggregate step: {required}"
+            "a hosted ci-required downloads the runtime for its aggregate step: {required}"
         );
+    }
+
+    #[test]
+    fn velnor_runtime_does_not_publish_an_orphan_artifact() {
+        let mut config = must(
+            scan_repository_with_default_branch(
+                &fixture_root(),
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan fixture for Velnor runtime handoff",
+        );
+        // A machinery test: the public fixture scans hosted, then the
+        // universe is overridden to Velnor-only to render the local shape.
+        config.providers = provider_set([ProviderId::Velnor]);
+        config.automatic_providers = provider_set([ProviderId::Velnor]);
+        config.selectors.insert(
+            ProviderId::Velnor,
+            provider::ProviderSelector {
+                runs_on: FIXTURE_LABELS
+                    .iter()
+                    .map(|label| (*label).to_owned())
+                    .collect(),
+            },
+        );
+        let workflow = generated_ci_main(&WorkflowIr::from_config(&config));
+        let plan = yaml_job(&workflow, "plan");
+        assert!(
+            plan.contains(&fixture_lane_selector()),
+            "a Velnor-only universe plans on Velnor: {plan}"
+        );
+        assert!(
+            plan.contains("github.event.pull_request.head.repo.fork"),
+            "a local control plane carries the trusted-event gate: {plan}"
+        );
+        // `ci-required` scores with the ambient fleet runtime on a local
+        // control plane, like every other local job, so the plan publishes
+        // nothing — the artifact is never an orphan.
+        assert!(
+            !plan.contains("name: Set up Velnor workflow runtime"),
+            "Velnor Planning must use the ambient runtime: {plan}"
+        );
+        assert!(
+            !plan.contains("name: Prepare Velnor workflow runtime"),
+            "Velnor Planning must not prepare a runtime artifact: {plan}"
+        );
+        assert!(
+            !plan.contains("name: Publish Velnor workflow runtime"),
+            "Velnor Planning must not publish a runtime artifact: {plan}"
+        );
+        let required = yaml_job(&workflow, "ci-required");
+        assert!(
+            !required.contains("name: Download Velnor workflow runtime"),
+            "a local ci-required scores with the ambient runtime: {required}"
+        );
+        assert!(
+            required.contains("velnor-workflow aggregate --expected"),
+            "a local ci-required still scores expected work: {required}"
+        );
+        assert!(!workflow.contains("name: Download Velnor workflow runtime"));
         assert!(!workflow.contains("  github-hosted-"));
         assert!(workflow.contains("  velnor-"));
     }
@@ -10456,7 +10792,6 @@ mod tests {
             default_branch: "main".to_owned(),
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             automatic_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             release_enabled: false,
             release_reason: String::new(),
@@ -10520,7 +10855,7 @@ mod tests {
     }
 
     #[test]
-    fn omitted_providers_flag_keeps_the_config_universe() {
+    fn omitted_providers_flag_selects_the_visibility_singleton() {
         let cli = must(
             Cli::parse_args([OsString::from("generate"), OsString::from(".")]),
             "parse default provider selection",
@@ -10531,9 +10866,13 @@ mod tests {
             "scan fixture with default provider selection",
         )));
 
-        assert!(workflow.contains("  github-hosted-"));
-        assert!(workflow.contains("  velnor-"));
-        assert!(workflow.contains("default: github-hosted,github-self-hosted,velnor"));
+        // The public fixture resolves to the hosted-only singleton: hosted
+        // jobs render, Velnor jobs do not, and no dispatch input selects
+        // providers.
+        assert!(workflow.contains("\n  github-hosted-"));
+        assert!(!workflow.contains("\n  velnor-"));
+        assert!(!workflow.contains(concat!("inputs", ".lanes")));
+        assert!(!workflow.contains("default: github-hosted,github-self-hosted,velnor"));
     }
 
     #[test]
@@ -10882,7 +11221,6 @@ mod tests {
         let both_workflow = generated_ci_pr(&WorkflowIr::from_config(&ProjectConfig {
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             automatic_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             ..config
         }));
@@ -11256,16 +11594,17 @@ mod tests {
 
     #[test]
     fn generation_config_selectors_reach_provider_routing() {
-        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n";
-        let root = configured_repository("selector-config", Some(config));
+        // The singleton policy admits only the visibility provider's
+        // selector: a private repository routes Velnor jobs onto exactly
+        // the fleet identity.
+        let config = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n",
+            fleet_label()
+        );
+        let root = configured_repository("selector-config", Some(&config));
+        rebind_visibility_evidence(&root, "private");
         let scanned = must(
-            scan_target(
-                &root,
-                Some(std::collections::BTreeSet::from([
-                    crate::s2::provider::ProviderId::GithubHosted,
-                ])),
-                "main",
-            ),
+            scan_target(&root, Some(provider_set([ProviderId::Velnor])), "main"),
             "scan configured repository",
         );
         assert_eq!(
@@ -11274,7 +11613,7 @@ mod tests {
                 .selectors
                 .get(&ProviderId::Velnor)
                 .map(|selector| selector.runs_on.as_slice()),
-            Some(&["self-hosted".to_owned(), "example-runner".to_owned()][..])
+            Some(&["self-hosted".to_owned(), fleet_label().to_owned()][..])
         );
         assert!(
             !scanned.config.toml().contains("runs_on"),
@@ -11290,22 +11629,17 @@ mod tests {
         let id = scanned_rust_unit_id(&root);
         let directory = root.join(".github-gen");
         must(fs::create_dir_all(&directory), "create config directory");
+        // A private repository renders the trusted collapsed job on Velnor.
+        let config_text = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n",
+            fleet_label()
+        );
         must(
-            fs::write(
-                directory.join("velnor-workflow.toml"),
-                format!(
-                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n"
-                ),
-            ),
+            fs::write(directory.join("velnor-workflow.toml"), &config_text),
             "write generation config",
         );
-        let config = must(
-            scan_repository(
-                &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
-            ),
-            "rescan with trusted routing",
-        );
+        write_visibility_evidence(&root, Some(&config_text), "private");
+        let config = must(scan_repository(&root, None), "rescan with trusted routing");
         let unit = must_some(
             config.units.iter().find(|unit| unit.id == id).cloned(),
             "gated unit",
@@ -11328,8 +11662,12 @@ mod tests {
             "gated unit renders the trusted collapsed job: {kind}"
         );
         assert!(
-            kind.contains("runs-on: ubuntu-24.04"),
-            "hosted job keeps its selector: {kind}"
+            kind.contains(fleet_label()),
+            "trusted job keeps the Velnor fleet identity: {kind}"
+        );
+        assert!(
+            !kind.contains("ubuntu-"),
+            "a private tree carries no hosted runner: {kind}"
         );
         assert!(
             !config.toml().contains(concat!("requires", "_trusted"))
@@ -11517,24 +11855,33 @@ mod tests {
                 "{universe:?}/{automatic:?}: dispatch is not ref-gated: {velnor}"
             );
             assert!(
-                velnor.contains(
-                    "github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')"
-                ),
-                "{universe:?}/{automatic:?}: dispatch selecting the provider admits it: {velnor}"
+                velnor.contains("github.event.pull_request.head.repo.fork"),
+                "{universe:?}/{automatic:?}: a trusted-only class gates on the event: {velnor}"
+            );
+            assert!(
+                !velnor.contains("inputs.providers"),
+                "{universe:?}/{automatic:?}: no input selects providers: {velnor}"
             );
             let automatic_velnor = automatic.contains(&ProviderId::Velnor);
             assert_eq!(
-                velnor.contains("github.event_name != 'workflow_dispatch'"),
-                automatic_velnor,
-                "{universe:?}/{automatic:?}: an automatic provider runs automatic events, a manual one runs dispatch alone: {velnor}"
+                velnor.contains("github.event_name == 'workflow_dispatch'"),
+                !automatic_velnor,
+                "{universe:?}/{automatic:?}: an automatic provider runs every event, a manual one runs dispatch alone: {velnor}"
             );
             let hosted = workflow.provider_admission_expression(ProviderAdmission::Provider(
                 ProviderId::GithubHosted,
             ));
-            assert!(
-                hosted.contains("',github-hosted,')") && !hosted.contains("',velnor,')"),
-                "a velnor-only dispatch denies the hosted class: {hosted}"
-            );
+            if automatic.contains(&ProviderId::GithubHosted) {
+                assert_eq!(
+                    hosted, "true",
+                    "an automatic hosted class admits every event: {hosted}"
+                );
+            } else {
+                assert_eq!(
+                    hosted, "github.event_name == 'workflow_dispatch'",
+                    "a manual hosted class admits dispatches only: {hosted}"
+                );
+            }
         }
     }
 
@@ -11663,10 +12010,12 @@ mod tests {
 
     #[test]
     fn control_union_validator_refuses_an_uncarried_member() {
-        let files = must(
-            generated_files(&restricted_fixture_config()),
-            "render restricted fixture",
-        );
+        let mut config = restricted_fixture_config();
+        // Split the automatic set so the union has two distinct members:
+        // velnor admits trusted events, self-hosted admits trusted
+        // dispatches only.
+        config.automatic_providers = provider_set([ProviderId::GithubHosted, ProviderId::Velnor]);
+        let files = must(generated_files(&config), "render restricted fixture");
         let callee = PathBuf::from(".github/workflows/ci-unit-rust.yml");
         // Mislabeled control job: velnor-prepare selects as a velnor job, so
         // its gate still carries an evaluated admission and the per-job check
@@ -11674,21 +12023,22 @@ mod tests {
         // the union the caller evaluates is no longer enforced.
         let gate = job_gate(&files[&callee], "velnor-prepare-cargo-sources");
         assert!(gate.contains("inputs.provider == 'control'"), "{gate}");
-        let mut drifted = files.clone();
-        drifted.insert(
-            callee.clone(),
-            files[&callee].replace(
-                &format!("{gate}\n"),
-                &format!(
-                    "{}\n",
-                    gate.replacen(
-                        "inputs.provider == 'control'",
-                        "inputs.provider == 'velnor'",
-                        1
-                    )
-                ),
-            ),
+        let drifted_gate = format!(
+            "{}\n",
+            gate.replacen(
+                "inputs.provider == 'control'",
+                "inputs.provider == 'velnor'",
+                1
+            )
         );
+        // The drift anchors to the velnor job block so the self-hosted
+        // control job keeps carrying its own member.
+        let header = "  velnor-prepare-cargo-sources:\n";
+        let start = must_some(files[&callee].find(header), "velnor prepare block");
+        let (before, rest) = files[&callee].split_at(start + header.len());
+        let rest = rest.replacen(&format!("{gate}\n"), &drifted_gate, 1);
+        let mut drifted = files.clone();
+        drifted.insert(callee.clone(), format!("{before}{rest}"));
         let error = must_fail(
             validate_provider_admission_single_source(&drifted),
             "uncarried union member",
@@ -11714,16 +12064,16 @@ mod tests {
         );
         let pr = PathBuf::from(".github/workflows/ci-pr.yml");
         let callee = PathBuf::from(".github/workflows/ci-unit-rust.yml");
-        let dispatch = "(github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')";
-        let ref_gated = "(github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')";
+        let admission = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+        let ref_gated = "(github.ref == 'refs/heads/main' && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))))";
 
-        // The callee re-introduces the default-branch dispatch gate.
+        // The callee re-introduces a default-branch gate.
         let mut drifted = files.clone();
         let velnor_job = job_gate(&files[&callee], "verify-velnor");
-        assert!(velnor_job.contains(dispatch), "{velnor_job}");
+        assert!(velnor_job.contains(admission), "{velnor_job}");
         drifted.insert(
             callee.clone(),
-            files[&callee].replace(&velnor_job, &velnor_job.replace(dispatch, ref_gated)),
+            files[&callee].replace(&velnor_job, &velnor_job.replace(admission, ref_gated)),
         );
         let error = must_fail(
             validate_provider_admission_single_source(&drifted),
@@ -11740,11 +12090,15 @@ mod tests {
         // The caller drifts from the check.
         let mut drifted = files.clone();
         let caller_job = job_gate(&files[&pr], "velnor-rust-fixture");
-        assert!(caller_job.contains(dispatch), "{caller_job}");
-        drifted.insert(
-            pr.clone(),
-            files[&pr].replace(&caller_job, &caller_job.replace(dispatch, ref_gated)),
-        );
+        assert!(caller_job.contains(admission), "{caller_job}");
+        // Both local callers share one `if:` line spelling, so the drift
+        // anchors to the velnor job block instead of replacing globally.
+        let header = "  velnor-rust-fixture:\n";
+        let start = must_some(files[&pr].find(header), "velnor caller block");
+        let (before, rest) = files[&pr].split_at(start + header.len());
+        let drifted_gate = caller_job.replace(admission, ref_gated);
+        let rest = rest.replacen(&caller_job, &drifted_gate, 1);
+        drifted.insert(pr.clone(), format!("{before}{rest}"));
         let error = must_fail(
             validate_provider_admission_single_source(&drifted),
             "caller drift",
@@ -11851,11 +12205,16 @@ mod tests {
             gate.contains(&format!("({union})")),
             "the caller skips exactly when no local provider is admitted: {gate}"
         );
-        // The union admits velnor-only dispatches too: keying the caller to
-        // one local provider would skip warming on the other.
+        // The union admits trusted events for every local provider at once:
+        // with all providers automatic both members collapse to the one
+        // trusted-event conjunct, and no input match survives.
         assert!(
-            union.contains("',velnor,'") && union.contains("',github-self-hosted,'"),
-            "the union admission must name every local provider: {union}"
+            union.contains("github.event.pull_request.head.repo.fork"),
+            "the union admission gates on the trusted event: {union}"
+        );
+        assert!(
+            !union.contains("inputs.providers"),
+            "the union admission matches no input: {union}"
         );
     }
 
@@ -11865,22 +12224,15 @@ mod tests {
         let id = scanned_rust_unit_id(&root);
         let directory = root.join(".github-gen");
         must(fs::create_dir_all(&directory), "create config directory");
+        let config_text = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n"
+        );
         must(
-            fs::write(
-                directory.join("velnor-workflow.toml"),
-                format!(
-                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n"
-                ),
-            ),
+            fs::write(directory.join("velnor-workflow.toml"), &config_text),
             "write generation config",
         );
-        let config = must(
-            scan_repository(
-                &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
-            ),
-            "rescan with trusted routing",
-        );
+        write_visibility_evidence(&root, Some(&config_text), "public");
+        let config = must(scan_repository(&root, None), "rescan with trusted routing");
         assert!(
             config
                 .units
@@ -13289,15 +13641,14 @@ lockfile = true
     fn write_generation_config(root: &Path, unit: &str, tools: &str) {
         let directory = root.join(".github-gen");
         must(fs::create_dir_all(&directory), "create config directory");
+        let config = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [{tools}]\n"
+        );
         must(
-            fs::write(
-                directory.join("velnor-workflow.toml"),
-                format!(
-                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [{tools}]\n"
-                ),
-            ),
+            fs::write(directory.join("velnor-workflow.toml"), &config),
             "write generation config",
         );
+        write_visibility_evidence(root, Some(&config), "public");
     }
 
     #[test]
@@ -15140,10 +15491,9 @@ lockfile = true
             fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\
+                 [workflow]\nproviders = [\"github-hosted\"]\n\
                  files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\"]\n\n\
                  [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
-                 [workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-lane\"]\n\n\
                  [release]\nenabled = true\nkind = \"native\"\npackage = \"example\"\n\
                  binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
                  consumer_repository = \"example/consumer\"\n\n\
@@ -15151,10 +15501,11 @@ lockfile = true
             ),
             "write generation config",
         );
+        rebind_visibility_evidence(&root, "public");
         let scanned = must(
             scan_target(
                 &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan microvm repository",
@@ -15263,8 +15614,8 @@ lockfile = true
             "Rust kind reusable must keep a collapsed GitHub verify job: {ci_units}"
         );
         assert!(
-            ci_units.contains("  verify-velnor:"),
-            "Rust kind reusable must keep a collapsed Velnor verify job: {ci_units}"
+            !ci_units.contains("  verify-velnor:"),
+            "a hosted-only tree renders no Velnor verify job: {ci_units}"
         );
         assert!(
             !ci_units.contains("inputs.unit == '"),
@@ -15292,8 +15643,8 @@ lockfile = true
                 "native verification unit lost its GitHub lane caller: {id}: {ci_pr}"
             );
             assert!(
-                ci_pr.contains(&format!("  velnor-{id}:")),
-                "native verification unit lost its Velnor lane caller: {id}: {ci_pr}"
+                !ci_pr.contains(&format!("  velnor-{id}:")),
+                "a hosted-only tree renders no Velnor lane caller: {id}: {ci_pr}"
             );
         }
 
@@ -15345,7 +15696,7 @@ lockfile = true
         // The identity Debian lane also waits on the metadata export it
         // stages into the deb.
         assert!(
-            release.contains("needs: [admit-provider, verify, build, metadata, guest-payload]"),
+            release.contains("needs: [verify, build, metadata, guest-payload]"),
             "{release}"
         );
         assert!(
@@ -15805,6 +16156,7 @@ lockfile = true
             ),
             "write generation config",
         );
+        rebind_visibility_evidence(&root, "public");
         let config = must(
             scan_repository(
                 &root,
@@ -15932,7 +16284,7 @@ lockfile = true
         assert!(workflow.contains("  required:\n    name: \"Control / Required\""));
         assert!(workflow.contains("needs: [plan, policy]"));
         assert!(rust.contains("github.ref == 'refs/heads/main'"));
-        assert!(workflow.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(workflow.contains("  workflow_dispatch:\n    inputs:\n      scope:\n"));
         assert!(workflow.contains("BASE_SHA: ${{ github.event.pull_request.base.sha"));
         assert!(workflow.contains("HEAD_SHA: ${{ github.sha }}"));
         assert!(workflow.contains("persist-credentials: false"));
@@ -16418,7 +16770,7 @@ lockfile = true
     }
 
     #[test]
-    fn generated_planning_stays_hosted_and_publishes_the_aggregate_runtime() {
+    fn generated_planning_follows_a_velnor_only_universe_without_the_hosted_aggregate_runtime() {
         let config = scanned_fixture(provider_set([ProviderId::Velnor]));
         let files = must(generated_files(&config), "generate");
         let workflow = must_some(
@@ -16426,6 +16778,7 @@ lockfile = true
             "generated ci-main.yml",
         );
         let plan = yaml_job(workflow, "plan");
+        let lane = fixture_lane_selector();
         let plan_runs_on: Vec<&str> = plan
             .lines()
             .filter(|line| line.trim_start().starts_with("runs-on:"))
@@ -16433,16 +16786,20 @@ lockfile = true
             .collect();
         assert_eq!(
             plan_runs_on.as_slice(),
-            ["runs-on: ubuntu-24.04"],
-            "Planning is control plane, always hosted: {plan}"
+            [lane.as_str()],
+            "Planning follows a Velnor-only universe onto Velnor: {plan}"
         );
         assert!(
-            plan.contains("name: Prepare Velnor workflow runtime"),
-            "the plan prepares the runtime artifact ci-required aggregates with: {plan}"
+            plan.contains("github.event.pull_request.head.repo.fork"),
+            "a local control plane carries the trusted-event gate: {plan}"
         );
         assert!(
-            plan.contains("name: Publish Velnor workflow runtime"),
-            "the plan publishes the runtime artifact ci-required aggregates with: {plan}"
+            !plan.contains("name: Prepare Velnor workflow runtime"),
+            "a local plan prepares no runtime artifact: ci-required scores ambient: {plan}"
+        );
+        assert!(
+            !plan.contains("name: Publish Velnor workflow runtime"),
+            "a local plan publishes no runtime artifact: ci-required scores ambient: {plan}"
         );
         let all_runs_on: Vec<&str> = workflow
             .lines()
@@ -16451,8 +16808,8 @@ lockfile = true
             .collect();
         for runs_on in &all_runs_on {
             assert_eq!(
-                *runs_on, "runs-on: ubuntu-24.04",
-                "only control-plane jobs render runs-on, always hosted: {workflow}"
+                *runs_on, lane,
+                "only control-plane jobs render runs-on, on Velnor: {workflow}"
             );
         }
         for (path, content) in &files {
@@ -16756,9 +17113,14 @@ lockfile = true
         assert!(crate_workflow.contains("selected_units:\n        required: true"));
         assert!(crate_workflow.contains("BASE_SHA: ${{ inputs.base_sha }}"));
         assert!(crate_workflow.contains("HEAD_SHA: ${{ inputs.head_sha }}"));
-        assert!(crate_workflow.contains("github.event.inputs.providers"));
-        assert!(crate_workflow.contains("',velnor,')"));
-        assert!(crate_workflow.contains("',github-hosted,')"));
+        assert!(
+            !crate_workflow.contains("inputs.providers"),
+            "no dispatch input selects providers: {crate_workflow}"
+        );
+        assert!(
+            crate_workflow.contains("github.event.pull_request.head.repo.fork"),
+            "local jobs carry the trusted-event gate: {crate_workflow}"
+        );
     }
 
     #[test]
@@ -16828,12 +17190,16 @@ lockfile = true
         let scanned = must(
             scan_target(
                 &fixture_root(),
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan fixture for rust kind reusable sizing",
         );
         let mut config = scanned.config;
+        // A machinery test: the public fixture scans hosted, then the
+        // universe is overridden to all providers for the sizing shape.
+        config.providers = all_providers();
+        config.automatic_providers = all_providers();
         config.selectors.insert(
             ProviderId::Velnor,
             provider::ProviderSelector {
@@ -16920,38 +17286,43 @@ lockfile = true
     }
 
     #[test]
-    fn plan_consumes_the_dispatch_or_automatic_providers() {
+    fn plan_consumes_the_static_automatic_providers() {
         let config = scanned_fixture(all_providers());
         let generator = WorkflowIr::from_config(&config);
-        // The dispatch `providers` input carries the manual selection;
-        // automatic events fall back to the configured automatic set.
+        // Every event selects the static automatic set: no provider input
+        // survives to read.
         let automatic = config
             .automatic_providers
             .iter()
             .map(provider::ProviderId::as_str)
             .collect::<Vec<_>>()
             .join(",");
-        let consumer = format!(
-            "VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || '{automatic}' }}}}"
-        );
+        let consumer = format!("VELNOR_PROVIDERS: {automatic}");
         for aggregate in [
             generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
             generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
             generated_ci_main(&generator),
         ] {
             assert!(aggregate.contains(&consumer), "{aggregate}");
+            assert!(
+                !aggregate.contains("inputs.providers"),
+                "no dispatch input selects providers: {aggregate}"
+            );
             // The consumer sits in the plan step.
             let plan = must_some(aggregate.find("  plan:"), "plan job");
             let providers_env = must_some(aggregate.find(consumer.as_str()), "plan providers env");
             assert!(plan < providers_env, "{aggregate}");
         }
-        // Single-provider universes narrow the fallback to the one provider.
+        // Single-provider universes narrow the value to the one provider.
         for (providers, expected) in [
             (
                 provider_set([ProviderId::GithubHosted]),
-                "|| 'github-hosted'",
+                "VELNOR_PROVIDERS: github-hosted",
             ),
-            (provider_set([ProviderId::Velnor]), "|| 'velnor'"),
+            (
+                provider_set([ProviderId::Velnor]),
+                "VELNOR_PROVIDERS: velnor",
+            ),
         ] {
             let config = scanned_fixture(providers);
             let generator = WorkflowIr::from_config(&config);
@@ -16959,10 +17330,7 @@ lockfile = true
                 generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
                 generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
             ] {
-                assert!(
-                    aggregate.contains(&format!("VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers {expected} }}}}")),
-                    "{aggregate}"
-                );
+                assert!(aggregate.contains(expected), "{aggregate}");
             }
         }
     }
@@ -17129,9 +17497,6 @@ lockfile = true
                 crate::s2::provider::ProviderId::GithubHosted,
             ]),
             automatic_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::GithubHosted,
-            ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::GithubHosted,
             ]),
             selectors: crate::s2::scan::default_selectors(),
@@ -17871,7 +18236,10 @@ lockfile = true
 
     #[test]
     fn both_runner_policy_entrypoint_stays_on_hosted_runner() {
-        let policy = generated_ci_policy(&scanned_fixture(all_providers()));
+        let policy = must(
+            generated_ci_policy(&scanned_fixture(all_providers())),
+            "render policy entrypoint",
+        );
         assert!(policy.contains("runs-on: ubuntu-24.04"));
         assert!(policy.contains("fetch-depth: 0"));
         assert!(policy.contains("--ruleset-contexts"));
@@ -18102,11 +18470,14 @@ lockfile = true
         )
         .1;
         assert!(velnor_rust.contains(&fixture_lane_selector()));
-        assert!(velnor.contains(
-            "github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')"
-        ));
-        assert!(velnor.contains("default: velnor"));
-        assert!(!velnor.contains("default: github-hosted"));
+        assert!(
+            !velnor.contains("inputs.providers"),
+            "no dispatch input selects providers: {velnor}"
+        );
+        assert!(
+            velnor.contains("github.event.pull_request.head.repo.fork"),
+            "local jobs carry the trusted-event gate: {velnor}"
+        );
 
         let velnor_pr =
             generated_ci_pr(&WorkflowIr::from_config(&scanned_fixture(provider_set([
@@ -18117,12 +18488,14 @@ lockfile = true
             !velnor_pr.contains("merge_group:"),
             "a velnor-only surface has no hosted job to validate the merge queue: {velnor_pr}"
         );
-        assert!(velnor_pr.contains("github.event.inputs.providers"));
+        assert!(
+            !velnor_pr.contains("inputs.providers"),
+            "no dispatch input selects providers: {velnor_pr}"
+        );
         // Callers carry no runs-on; the Velnor routing lives in the kind
         // reusable (asserted above through `velnor_rust`) while callers pass
         // the provider input.
         assert!(velnor_pr.contains("provider: velnor"));
-        assert!(velnor_pr.contains("default: velnor"));
         assert!(velnor_pr.contains("default: affected"));
 
         let both = generated_ci_main(&WorkflowIr::from_config(&scanned_fixture(all_providers())));
@@ -18213,14 +18586,18 @@ lockfile = true
         config.automatic_providers = all_providers();
         let main = generated_ci_main(&WorkflowIr::from_config(&config));
         assert!(
-            main.contains("default: github-hosted,github-self-hosted,velnor"),
-            "{main}"
+            !main.contains("inputs.providers"),
+            "no dispatch input selects providers: {main}"
+        );
+        assert!(
+            !main.contains("default: github-hosted,github-self-hosted,velnor"),
+            "no dispatch default selects providers: {main}"
         );
         assert!(main.contains("  github-hosted-"), "{main}");
-        assert!(main.contains("  velnor-"), "{main}");
+        assert!(main.contains("\n  velnor-"), "{main}");
         assert!(
-            main.contains("github.event_name != 'workflow_dispatch'"),
-            "automatic providers run automatic events: {main}"
+            main.contains("github.event.pull_request.head.repo.fork"),
+            "local providers gate on the trusted event: {main}"
         );
         let pr = generated_ci_pr(&WorkflowIr::from_config(&config));
         assert!(
@@ -18263,7 +18640,6 @@ lockfile = true
         apt.selectors.remove(&ProviderId::Velnor);
         apt.providers = provider_set([ProviderId::GithubHosted]);
         apt.automatic_providers = provider_set([ProviderId::GithubHosted]);
-        apt.default_dispatch_providers = provider_set([ProviderId::GithubHosted]);
         let preserved = must(generated_files(&apt), "generate");
         let rendered = must_some(
             preserved.get(&PathBuf::from(".github/workflows/package-updater.yml")),
@@ -18433,10 +18809,13 @@ lockfile = true
                 "velnor" => {
                     assert!(!workflow.contains("  github-hosted-"));
                     assert!(workflow.contains("  velnor-"));
-                    assert!(workflow.contains("default: velnor"));
                     assert!(
-                        workflow.contains("github.event.inputs.providers"),
-                        "{workflow}"
+                        !workflow.contains("inputs.providers"),
+                        "no dispatch input selects providers: {workflow}"
+                    );
+                    assert!(
+                        workflow.contains("github.event.pull_request.head.repo.fork"),
+                        "local jobs carry the trusted-event gate: {workflow}"
                     );
                 }
                 "all" => {
@@ -18753,17 +19132,19 @@ lockfile = true
 
     #[test]
     fn cache_generation_config_does_not_change_github_lane_cache_keys() {
+        // The singleton policy renders one provider per repository: the
+        // public golden repo declares the hosted universe only.
         let root = configured_repository(
             "cache-config-golden",
             Some(
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"fixture-runner\"]\n",
+                 [workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n",
             ),
         );
         let baseline = must(
             scan_target(
                 &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan baseline repository",
@@ -18783,16 +19164,15 @@ lockfile = true
             fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"fixture-runner\"]\n\n\
-                 [cache.github]\nbudget_bytes = 8589934592\n\
-                 [cache.velnor]\nbudget_bytes = 53687091200\n",
+                 [workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
+                 [cache.github]\nbudget_bytes = 8589934592\n",
             ),
             "write cache generation config",
         );
         let with_cache = must(
             scan_target(
                 &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan with cache config",
@@ -18821,7 +19201,7 @@ lockfile = true
             "cache-config-runtime-roundtrip",
             Some(
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                 [workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
                  [cache.github]\nbudget_bytes = 8589934592\n\
                  [cache.velnor]\nbudget_bytes = 53687091200\n",
             ),
@@ -18829,7 +19209,7 @@ lockfile = true
         let scanned = must(
             scan_target(
                 &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan with cache config",
@@ -19093,12 +19473,17 @@ lockfile = true
         let scanned = must(
             scan_target(
                 &fixture_root(),
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan fixture",
         );
-        let ir = WorkflowIr::from_config(&scanned.config);
+        // A machinery test: the public fixture scans hosted, then the
+        // universe is overridden to all providers for the kind sweep.
+        let mut config = scanned.config.clone();
+        config.providers = all_providers();
+        config.automatic_providers = all_providers();
+        let ir = WorkflowIr::from_config(&config);
         let mut covered_kinds = std::collections::BTreeSet::new();
         for kind in scanned
             .config
@@ -19517,10 +19902,6 @@ lockfile = true
     }
 
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the workspace-member fixture literal spells the whole unit"
-    )]
     fn cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles() {
         let workspace_member = |id: &str, root: &str| Unit {
             id: id.to_owned(),
@@ -19579,9 +19960,6 @@ lockfile = true
         let config = ProjectConfig {
             providers: std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             automatic_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::Velnor,
-            ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::Velnor,
             ]),
             selectors: crate::s2::scan::default_selectors(),
@@ -19664,9 +20042,6 @@ lockfile = true
         let config = ProjectConfig {
             providers: std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             automatic_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::Velnor,
-            ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::Velnor,
             ]),
             selectors: crate::s2::scan::default_selectors(),
@@ -19772,7 +20147,6 @@ lockfile = true
         let config = ProjectConfig {
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             automatic_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             rust_needs: RustNeeds::DependencyClosure,
             units: vec![
@@ -19894,9 +20268,6 @@ lockfile = true
             automatic_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::Velnor,
             ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::Velnor,
-            ]),
             selectors: crate::s2::scan::default_selectors(),
             concurrency_group: Some("example-${{ github.repository }}".to_owned()),
             serial_stack_groups: true,
@@ -19979,7 +20350,10 @@ lockfile = true
             pr.contains("needs: [plan, velnor-bun-root]"),
             "serial stack groups must chain velnor lane callers after plan: {pr}"
         );
-        let policy = render_policy_entrypoint(&config);
+        let policy = must(
+            render_policy_entrypoint(&config),
+            "render policy entrypoint",
+        );
         assert!(
             policy.contains("group: example-${{ github.repository }}-policy"),
             "policy must use a derived Velnor policy concurrency group: {policy}"
@@ -19991,9 +20365,6 @@ lockfile = true
         let config = ProjectConfig {
             providers: std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             automatic_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::Velnor,
-            ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::Velnor,
             ]),
             selectors: crate::s2::scan::default_selectors(),
@@ -20038,7 +20409,10 @@ lockfile = true
             !nightly.contains("group: example-${{ github.repository }}-pr"),
             "nightly must not share the ci-pr concurrency group: {nightly}"
         );
-        let policy = render_policy_entrypoint(&config);
+        let policy = must(
+            render_policy_entrypoint(&config),
+            "render policy entrypoint",
+        );
         assert!(
             policy.contains("group: example-${{ github.repository }}-policy"),
             "policy must stay on the derived -policy group: {policy}"
@@ -20378,7 +20752,7 @@ lockfile = true
                     fs::read_to_string(&config_path),
                     "read the generation config",
                 )
-                .replace("example-lane\"]", "example-lane\", \"example-extra\"]"),
+                .replace("ubuntu-26.04\"]", "ubuntu-26.04\", \"ubuntu-24.04\"]"),
             ),
             "add a declared runner label",
         );
@@ -21528,9 +21902,7 @@ lockfile = true
              [workflow]\n\
              templates = \".github-gen/generated-templates\"\n\n\
              [workflow.selectors.github-hosted]\n\
-             runs_on = [\"ubuntu-26.04\"]\n\n\
-             [workflow.selectors.velnor]\n\
-             runs_on = [\"self-hosted\", \"example-lane\"]\n"
+             runs_on = [\"ubuntu-26.04\"]\n"
         );
         let self_hosted = format!(
             "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: {consumer}/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
@@ -21582,7 +21954,7 @@ lockfile = true
                 &must(
                     scan_target(
                         &root,
-                        Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                        Some(provider_set([ProviderId::GithubHosted])),
                         "main",
                     ),
                     "scan the owned static surface",
@@ -21840,6 +22212,9 @@ lockfile = true
             fs::write(root.join(config::GENERATION_CONFIG_PATH), config),
             "write the generation config",
         );
+        // Declared-surface repositories are public: bind the evidence slug
+        // to the generation config so the scan's binding check passes.
+        write_visibility_evidence(&root, Some(config), "public");
         root
     }
 
@@ -21849,9 +22224,7 @@ lockfile = true
          [workflow]\n\
          profile = \"example-profile\"\n\n\
          [workflow.selectors.github-hosted]\n\
-         runs_on = [\"ubuntu-26.04\"]\n\n\
-         [workflow.selectors.velnor]\n\
-         runs_on = [\"self-hosted\", \"example-lane\"]\n";
+         runs_on = [\"ubuntu-26.04\"]\n";
 
     const DECLARED_SURFACE_TEMPLATE: &str =
         "# Generated by velnor-workflow. Regenerate; do not hand-edit.\n\
@@ -21888,7 +22261,7 @@ lockfile = true
         let scanned = must(
             scan_target(
                 &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan the declared surface",
@@ -21901,9 +22274,9 @@ lockfile = true
         assert_eq!(
             config
                 .selectors
-                .get(&ProviderId::Velnor)
+                .get(&ProviderId::GithubHosted)
                 .map(|selector| selector.runs_on.as_slice()),
-            Some(&["self-hosted".to_owned(), "example-lane".to_owned()][..])
+            Some(&["ubuntu-26.04".to_owned()][..])
         );
         assert!(config.workflow_templates.is_empty());
         assert_eq!(config.static_files.len(), 1);
@@ -21930,7 +22303,7 @@ lockfile = true
         assert!(project.contains("repository = \"example/owned\""));
         assert!(project.contains("profile = \"example-profile\""));
         assert!(
-            project.contains("providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]"),
+            project.contains("providers = [\"github-hosted\"]"),
             "{project}"
         );
         assert!(!project.contains("runs_on"), "{project}");
@@ -21949,10 +22322,7 @@ lockfile = true
             )],
         );
         let config = must(
-            scan_repository(
-                &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
-            ),
+            scan_repository(&root, Some(provider_set([ProviderId::GithubHosted]))),
             "scan the declared surface",
         );
         let files = must(generated_files(&config), "generate");
@@ -21965,10 +22335,7 @@ lockfile = true
             "wipe the generated surface",
         );
         let rescan = must(
-            scan_repository(
-                &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
-            ),
+            scan_repository(&root, Some(provider_set([ProviderId::GithubHosted]))),
             "rescan the wiped surface",
         );
         let regenerated = must(generated_files(&rescan), "generate");
@@ -22178,24 +22545,29 @@ lockfile = true
         );
     }
 
-    const RENOVATE_GENERATION_CONFIG: &str = "schema = 2\n\n\
-         [generator]\n\
-         repository = \"example/fixture\"\n\n\
-         [workflow]\n\
-         providers = [\"velnor\"]\n\
-         automatic_providers = [\"velnor\"]\n\
-         files = [\"ci-pr.yml\", \"ci-policy.yml\", \"ci-main.yml\", \"nightly.yml\", \"maintenance.yml\", \"renovate.yml\", \"renovate-validate.yml\"]\n\n\
-         [workflow.selectors.velnor]\n\
-         runs_on = [\"self-hosted\", \"example-lane\"]\n\n\
-         [renovate]\n\
-         enabled = true\n\
-         reason = \"Self-hosted Renovate for repository dependencies.\"\n\n\
-         [[declare]]\n\
-         primitive = \"renovate\"\n\
-         file = \"renovate.yml\"\n\n\
-         [[declare]]\n\
-         primitive = \"renovate-validate\"\n\
-         file = \"renovate-validate.yml\"\n";
+    fn renovate_generation_config() -> String {
+        format!(
+            "schema = 2\n\n\
+             [generator]\n\
+             repository = \"example/fixture\"\n\n\
+             [workflow]\n\
+             providers = [\"velnor\"]\n\
+             automatic_providers = [\"velnor\"]\n\
+             files = [\"ci-pr.yml\", \"ci-policy.yml\", \"ci-main.yml\", \"nightly.yml\", \"maintenance.yml\", \"renovate.yml\", \"renovate-validate.yml\"]\n\n\
+             [workflow.selectors.velnor]\n\
+             runs_on = [\"self-hosted\", \"{}\"]\n\n\
+             [renovate]\n\
+             enabled = true\n\
+             reason = \"Self-hosted Renovate for repository dependencies.\"\n\n\
+             [[declare]]\n\
+             primitive = \"renovate\"\n\
+             file = \"renovate.yml\"\n\n\
+             [[declare]]\n\
+             primitive = \"renovate-validate\"\n\
+             file = \"renovate-validate.yml\"\n",
+            fleet_label()
+        )
+    }
 
     fn renovate_repository(name: &str, config: Option<&str>) -> PathBuf {
         let root = configured_repository(name, config);
@@ -22242,7 +22614,10 @@ lockfile = true
 
     #[test]
     fn declared_renovate_contract_generates_pinned_workflows() {
-        let root = renovate_repository("renovate-enabled", Some(RENOVATE_GENERATION_CONFIG));
+        let config = renovate_generation_config();
+        let root = renovate_repository("renovate-enabled", Some(&config));
+        // A Velnor universe requires a private repository.
+        rebind_visibility_evidence(&root, "private");
         let scanned = must(
             scan_target(
                 &root,
@@ -22269,7 +22644,7 @@ lockfile = true
         assert!(renovate.contains(ActionPin::Renovate.reference()));
         // Trust is a typed event gate, never a label: the job runs on the
         // plain Velnor selector and only on trusted events.
-        assert!(renovate.contains("runs-on: [self-hosted, example-lane]"));
+        assert!(renovate.contains(&format!("runs-on: [self-hosted, {}]", fleet_label())));
         assert!(!renovate.contains("example-trusted"));
         assert!(renovate.contains(
             "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
@@ -22290,7 +22665,7 @@ lockfile = true
 
     #[test]
     fn declared_renovate_contract_renders_targets_credentials_author_and_allowances() {
-        let config = RENOVATE_GENERATION_CONFIG.replace(
+        let config = renovate_generation_config().replace(
             "reason = \"Self-hosted Renovate for repository dependencies.\"\n",
             "reason = \"Self-hosted Renovate for repository dependencies.\"\n\
              schedules = [\"0 18 * * *\"]\n\
@@ -22301,6 +22676,8 @@ lockfile = true
              allowed_commands = [\"^npm install --package-lock-only$\"]\n",
         );
         let root = renovate_repository("renovate-full", Some(&config));
+        // A Velnor universe requires a private repository.
+        rebind_visibility_evidence(&root, "private");
         let scanned = must(
             scan_target(
                 &root,
@@ -22429,6 +22806,7 @@ lockfile = true
                 fs::write(directory.join("velnor-workflow.toml"), config),
                 "write generation config",
             );
+            write_visibility_evidence(&root, Some(config), "public");
         }
         root
     }
@@ -22443,12 +22821,15 @@ lockfile = true
 
     #[test]
     fn generation_config_supported_overrides_reach_rendered_output() {
-        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ndefault_branch = \"trunk\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-test\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"fixture-runner\"]\n\n[policy]\nci_required = false\nactionlint_config_variables_null = true\n";
+        // The singleton policy admits only the visibility provider's
+        // selector: a public repository overrides the hosted labels, and a
+        // Velnor selector here would be a contradictory rejection.
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ndefault_branch = \"trunk\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-test\"]\n\n[policy]\nci_required = false\nactionlint_config_variables_null = true\n";
         let root = configured_repository("generation-overrides", Some(config));
         let scanned = must(
             scan_target(
                 &root,
-                Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
+                Some(provider_set([ProviderId::GithubHosted])),
                 "main",
             ),
             "scan configured repository",
@@ -22467,7 +22848,8 @@ lockfile = true
                 .selectors
                 .get(&ProviderId::Velnor)
                 .map(|selector| selector.runs_on.as_slice()),
-            Some(&["self-hosted".to_owned(), "fixture-runner".to_owned()][..])
+            Some(&["velnor-native".to_owned()][..]),
+            "an undeclared selector keeps the scan default"
         );
         assert_eq!(scanned.config.default_branch, "trunk");
         assert!(!scanned.config.ci_required);
@@ -22491,7 +22873,7 @@ lockfile = true
             files.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
             "generated rust kind reusable",
         );
-        assert!(rust_kind.contains("runs-on: [self-hosted, fixture-runner]"));
+        assert!(!rust_kind.contains("runs-on: [self-hosted"));
         assert!(rust_kind.contains("runs-on: ubuntu-test"));
         assert!(!pull_request.contains("name: ci-required"));
         assert!(main.contains("branches: [trunk]"));

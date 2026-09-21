@@ -58,7 +58,6 @@ repository = "{repository}"
 [workflow]
 providers = ["github-hosted"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted"]
 default_branch = "main"
 
 [workflow.selectors.github-hosted]
@@ -93,6 +92,21 @@ updater_token_secret = "TAP_TOKEN"
 fn write_inputs(root: &Path, config: &str, include_verify_task: bool) {
     fs::create_dir_all(root.join(".github-gen")).unwrap();
     fs::write(root.join(".github-gen/velnor-workflow.toml"), config).unwrap();
+    // The scan path requires visibility evidence bound to the declared
+    // slug; the fixtures are public hosted-only repositories.
+    let slug = config
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("repository = \"")
+                .and_then(|tail| tail.strip_suffix('"'))
+        })
+        .expect("the fixture declares its repository slug");
+    fs::write(
+        root.join(".github-gen/visibility.toml"),
+        format!("repository = \"{slug}\"\nvisibility = \"public\"\n"),
+    )
+    .unwrap();
     let verify = if include_verify_task {
         "\n[tasks.verify-release]\nrun = \"echo verify\"\n"
     } else {

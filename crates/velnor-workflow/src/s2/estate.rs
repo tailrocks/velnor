@@ -14,6 +14,22 @@ use crate::s2::ProjectConfig;
 pub(crate) const LEGACY_VELNOR_RUNNER_SELECTOR: &str =
     "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
 
+/// The Velnor fleet identity: the exact `runs-on` labels a Velnor selector
+/// must carry. A bare `self-hosted` label proves nothing about which fleet
+/// claims the job, so the visibility policy admits exactly this pair. The
+/// labels are deployment facts of the adopting estate, spelled once at the
+/// schema-1 estate boundary and aliased here so the two pipelines cannot
+/// drift: [`crate::estate::APPROVED_VELNOR_RUNNER_LABELS`] is the single
+/// source, and this name keeps the s2 call sites reading as fleet identity.
+pub(crate) const VELNOR_FLEET_RUNS_ON: &[&str] = crate::estate::APPROVED_VELNOR_RUNNER_LABELS;
+
+/// Whether `labels` are exactly the fleet identity, in any order.
+pub(crate) fn is_velnor_fleet_identity(labels: &[String]) -> bool {
+    let mut sorted = labels.to_vec();
+    sorted.sort();
+    sorted == VELNOR_FLEET_RUNS_ON
+}
+
 /// The owners that mirror the `velnor-actions` fleet. A reusable workflow
 /// from a fleet mirror, pinned by full commit SHA, is content-addressed
 /// exactly like a SHA-pinned external action; anything else reusable stays

@@ -214,6 +214,9 @@ fn render_renovate_validate(config: &ProjectConfig, spec: &RenovateSpec) -> Stri
     crate::renovate_renderer::render_validate(&crate::renovate_renderer::ValidateInput {
         checkout: ActionPin::Checkout.reference(),
         runner: &runner,
+        // The v1 validate job always runs on the GitHub-hosted lane runner,
+        // which needs no trusted-event gate.
+        gate: None,
         default_branch: &default_branch,
         config_path: &spec.config_path,
     })

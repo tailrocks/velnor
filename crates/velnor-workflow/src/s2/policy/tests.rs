@@ -535,7 +535,10 @@ fn hosted_entrypoint(revision: &str) -> String {
     let _ = fs::remove_dir_all(fixture);
     let mut config = ProjectConfig::from(shape);
     revision.clone_into(&mut config.workflow_revision);
-    crate::s2::render_policy_entrypoint(&config)
+    must(
+        crate::s2::render_policy_entrypoint(&config),
+        "render policy entrypoint",
+    )
 }
 
 fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
@@ -737,7 +740,7 @@ fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
 /// trusted-event conjunct.
 fn gated_trusted_job() -> String {
     format!(
-        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
+        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
     )
 }
 
@@ -813,33 +816,72 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     let _ = fs::remove_dir_all(ungated);
 }
 
-/// The generated provider gate admits a provider-selecting dispatch on any
-/// ref — dispatch authorship is write-authorized — or the automatic events,
-/// with the trusted-event conjunct. A dispatch selecting another provider is
-/// not this provider's gate.
+/// The generated provider gate is the bare trusted-event conjunct for an
+/// automatic provider, conjoined with the dispatch predicate for a manual
+/// one: a dispatch selects the static universe on any ref — dispatch
+/// authorship is write-authorized — and no input match survives.
 #[test]
 fn provider_gate_admits_dispatch_on_any_ref() {
     let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
-    for automatic in ["(github.event_name != 'workflow_dispatch')", "(false)"] {
-        let gate = format!(
-            "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || {automatic}) && {trusted} }}}}",
-        );
-        assert!(
-            is_generated_provider_gate(&gate, "velnor"),
-            "provider gate admitted: {gate}"
-        );
-        assert!(
-            !is_generated_provider_gate(&gate, "github-hosted"),
-            "a dispatch selecting Velnor is not the hosted gate: {gate}"
-        );
-    }
-    let github_only = format!(
-        "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
+    // An automatic provider renders the bare trusted-event conjunct.
+    let automatic = format!("${{{{ {trusted} }}}}");
+    assert!(
+        is_generated_provider_gate(&automatic, "velnor"),
+        "provider gate admitted: {automatic}"
+    );
+    // A manual provider conjoins it with the dispatch predicate: dispatches
+    // select the static universe on any ref, with no input to match.
+    let manual = format!("${{{{ (github.event_name == 'workflow_dispatch') && {trusted} }}}}");
+    assert!(
+        is_generated_provider_gate(&manual, "velnor"),
+        "provider gate admitted: {manual}"
+    );
+    // An input-matching gate is not generated: no input selects providers.
+    let input_match = format!(
+        "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
     );
     assert!(
-        !is_generated_provider_gate(&github_only, "velnor"),
-        "a dispatch selecting only the hosted provider is not a Velnor gate",
+        !is_generated_provider_gate(&input_match, "velnor"),
+        "an input-matching gate is not generated: {input_match}"
     );
+}
+
+/// A top-level conjunction carrying the exact trusted-event predicate
+/// passes whatever the functional side narrows; near-misses fail: a
+/// top-level `||` widens past the conjunct, and an inexact predicate is
+/// not the predicate.
+#[test]
+fn trusted_conjunct_members_pass_and_near_misses_fail() {
+    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+    for gate in [
+        format!("${{{{ {trusted} }}}}"),
+        format!("${{{{ (needs.verify.outputs.mode == 'publish') && {trusted} }}}}"),
+        format!("${{{{ {trusted} && (needs.verify.outputs.mode == 'publish') }}}}"),
+        format!(
+            "${{{{ (github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) && {trusted} }}}}"
+        ),
+    ] {
+        assert!(
+            has_exact_trusted_conjunct(&gate),
+            "a conjunction carrying the predicate passes: {gate}"
+        );
+    }
+    for gate in [
+        // A top-level disjunction admits whatever the other side admits.
+        format!("${{{{ (needs.verify.outputs.mode == 'publish') || {trusted} }}}}"),
+        format!("${{{{ {trusted} && (needs.verify.outputs.mode == 'publish') || (github.event_name == 'push') }}}}"),
+        // Dropped Bot clause: not the predicate.
+        "${{ (!(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) }}".to_owned(),
+        // Double-wrapped: not the generated spelling.
+        format!("${{{{ (({trusted})) && (needs.verify.outputs.mode == 'publish') }}}}"),
+        // No trusted conjunct at all.
+        "${{ (needs.verify.outputs.mode == 'publish') }}".to_owned(),
+    ] {
+        assert!(
+            !has_exact_trusted_conjunct(&gate),
+            "a near-miss fails closed: {gate}"
+        );
+    }
 }
 
 #[test]

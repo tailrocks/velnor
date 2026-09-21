@@ -459,9 +459,43 @@ pub(crate) fn check_capabilities(
     )))
 }
 
+/// The visibility-based runner policy: a public repository runs on
+/// GitHub-hosted runners only, a private repository on Velnor runners only.
+/// The singleton universe for one visibility.
+#[must_use]
+pub(crate) fn singleton_for_visibility(visibility: crate::visibility::Visibility) -> ProviderSet {
+    ProviderSet::from([if visibility.is_public() {
+        ProviderId::GithubHosted
+    } else {
+        ProviderId::Velnor
+    }])
+}
+
 /// The control plane (planning, policy, recovery, required-result monitoring,
-/// watchdog) always runs on hosted, regardless of `[workflow]` providers.
-pub(crate) const CONTROL_PLANE_PROVIDER: ProviderId = ProviderId::GithubHosted;
+/// watchdog) runs on hosted when the universe contains it, otherwise on the
+/// canonical-first local provider — so no hosted `runs-on` leaks into a
+/// local-only surface. Under the visibility policy the universe is always a
+/// singleton, which makes this exactly the visibility provider.
+#[must_use]
+pub(crate) fn control_plane_provider(universe: &ProviderSet) -> ProviderId {
+    if universe.contains(&ProviderId::GithubHosted) {
+        ProviderId::GithubHosted
+    } else {
+        universe
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(ProviderId::GithubHosted)
+    }
+}
+
+/// A GitHub-owned execution label: inherently hosted, never a trust fact.
+/// Hosted selectors must use these exclusively; anything else in a hosted
+/// selector could route a hosted-only tree onto caller-managed runners.
+#[must_use]
+pub(crate) fn is_github_owned_label(label: &str) -> bool {
+    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+}
 
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
 /// declarations × command/profile/features/fixture digests.

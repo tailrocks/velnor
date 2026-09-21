@@ -33,9 +33,9 @@ use crate::s2::closure::{
     product_tag, CI_FEATURES, CLOSURE_PATHS, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
 };
 use crate::s2::{
-    config_rust_toolchain, workflow_setup_action_repository, yaml_scalar, ActionPin,
-    GeneratorError, ProjectConfig, RustToolchain, GENERATED_HEADER, HOSTED_WORKFLOW_RUNTIME_HOME,
-    MACOS_HOSTED_RUNS_ON,
+    config_rust_toolchain, control_plane_gate, workflow_setup_action_repository, yaml_scalar,
+    ActionPin, GeneratorError, ProjectConfig, RustToolchain, GENERATED_HEADER,
+    HOSTED_WORKFLOW_RUNTIME_HOME, MACOS_HOSTED_RUNS_ON,
 };
 
 /// The workflow file the producer renders into. Consumers pin this path in
@@ -171,7 +171,18 @@ pub(crate) fn runtime_products_content(
     if config.repository != workflow_setup_action_repository() {
         return Ok(None);
     }
-    let hosted_runs_on = crate::s2::hosted_runs_on(config)?;
+    let control_plane_runs_on = crate::s2::control_plane_runner(config)?;
+    let gate = control_plane_gate(config);
+    // The closure job has no functional condition of its own: a local
+    // control plane gates it on trusted events, a hosted one renders no
+    // `if:` line at all rather than a vacuous `if: true`.
+    let closure_gate = gate
+        .is_local()
+        .then(|| gate.as_job_condition("true"))
+        .map(|condition| format!("    if: {condition}\n"))
+        .unwrap_or_default();
+    let build_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
+    let publish_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
     let repository = workflow_setup_action_repository();
     let owner = product_owner(repository);
     // The toolchain install is file-driven: the checkout's own
@@ -293,7 +304,7 @@ permissions:
 jobs:
   closure:
     name: Resolve runtime closure
-    runs-on: {closure_runner}
+{closure_gate}    runs-on: {closure_runner}
     timeout-minutes: 10
     outputs:
       closure: ${{{{ steps.closure.outputs.value }}}}
@@ -347,7 +358,7 @@ jobs:
   build:
     name: Build runtime (${{{{ matrix.os }}}}-${{{{ matrix.arch }}}})
     needs: closure
-    if: needs.closure.outputs.exists != 'true'
+    if: {build_gate}
     strategy:
       fail-fast: false
       matrix:
@@ -427,7 +438,7 @@ jobs:
   publish:
     name: Publish runtime products
     needs: [closure, build]
-    if: needs.closure.outputs.exists != 'true'
+    if: {publish_gate}
     runs-on: {publish_runner}
     timeout-minutes: 20
     permissions:
@@ -537,8 +548,11 @@ jobs:
         example_tag = example_tag(),
         default_branch = yaml_scalar(&config.default_branch),
         branch_ref = format!("refs/heads/{}", config.default_branch),
-        closure_runner = hosted_runs_on,
-        publish_runner = hosted_runs_on,
+        closure_runner = control_plane_runs_on,
+        publish_runner = control_plane_runs_on,
+        closure_gate = closure_gate,
+        build_gate = build_gate,
+        publish_gate = publish_gate,
         checkout = ActionPin::Checkout.reference(),
         attest = ActionPin::Attest.reference(),
         upload = ActionPin::UploadArtifact.reference(),
@@ -715,7 +729,6 @@ mod tests {
             default_branch: "main".to_owned(),
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             automatic_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             release_enabled: false,
             release_reason: String::new(),
@@ -1798,5 +1811,38 @@ mod tests {
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
+    }
+
+    /// A local control plane gates every producer job on trusted events:
+    /// the closure job gains its only `if:`, and the build and publish jobs
+    /// conjoin the trusted predicate onto their existence check.
+    #[test]
+    fn local_control_plane_gates_every_producer_job() {
+        let mut config = owner_config(&["maintenance.yml"]);
+        config.providers =
+            std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
+        config.automatic_providers = config.providers.clone();
+        let content = must_some(
+            must(
+                runtime_products_content(&config),
+                "the owner renders the producer",
+            ),
+            "the owner renders the producer",
+        );
+        assert!(
+            content.contains("    if: (true) && ("),
+            "the closure job gains its only `if:` from the gate: {content}"
+        );
+        assert_eq!(
+            content
+                .matches("(needs.closure.outputs.exists != 'true') && (")
+                .count(),
+            2,
+            "build and publish conjoin the gate onto the existence check: {content}"
+        );
+        assert!(
+            !content.contains("if: true\n"),
+            "no vacuous gate renders: {content}"
+        );
     }
 }

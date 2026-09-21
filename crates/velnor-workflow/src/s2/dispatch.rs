@@ -47,6 +47,15 @@ pub(crate) fn run_if_s2() -> Option<Result<(), crate::GeneratorError>> {
 }
 
 fn wants_s2(arguments: &[OsString]) -> bool {
+    // `visibility` is schema-agnostic evidence plumbing; it always stays on
+    // the schema-1 path, which owns the subcommand for both pipelines.
+    if arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .is_some_and(|command| command == "visibility")
+    {
+        return false;
+    }
     if has_providers_flag(arguments) {
         return true;
     }

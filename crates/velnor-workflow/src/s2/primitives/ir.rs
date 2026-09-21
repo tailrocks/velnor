@@ -18,7 +18,7 @@ use super::{
     CacheBackend, GraphNode, Pins, ProviderJob, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
     MUTABLE_MOUNT_HOST_DIR,
 };
-use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap, CONTROL_PLANE_PROVIDER};
+use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap};
 use crate::s2::reuse::REQUIRED_CHECK;
 use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
@@ -180,24 +180,29 @@ mod tests {
     };
 
     #[test]
-    fn dispatch_admission_matches_each_provider_by_comma_boundary() {
-        let ir = owner_test_ir("example/owner", Vec::new());
-        for provider in ProviderId::ALL {
+    fn dispatch_admission_selects_the_static_universe_without_an_input() {
+        let mut ir = owner_test_ir("example/owner", Vec::new());
+        ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
+        // A manual provider admits dispatches only, with no provider input
+        // to match: the comma boundary the old matcher needed is gone with
+        // the input.
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
             let expression =
                 ir.provider_admission_expression(ProviderAdmission::Provider(provider));
+            assert_eq!(
+                expression, "github.event_name == 'workflow_dispatch'",
+                "{provider:?} admits dispatches only: {expression}"
+            );
             assert!(
-                expression.contains(&format!(
-                    "contains(format(',{{0}},', github.event.inputs.providers), ',{},')",
-                    provider.as_str()
-                )),
-                "{provider:?} dispatch matches by comma boundary: {expression}"
+                !expression.contains("inputs.providers"),
+                "{provider:?} matches no input: {expression}"
             );
         }
         let hosted =
             ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::GithubHosted));
-        assert!(
-            !hosted.contains(",github-self-hosted,)"),
-            "github-hosted must not match inside github-self-hosted: {hosted}"
+        assert_eq!(
+            hosted, "true",
+            "an automatic provider admits every event: {hosted}"
         );
     }
 
@@ -240,14 +245,14 @@ mod tests {
         ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
         let hosted =
             ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::GithubHosted));
-        assert!(
-            hosted.contains("github.event_name != 'workflow_dispatch'"),
-            "an automatic provider runs automatic events: {hosted}"
+        assert_eq!(
+            hosted, "true",
+            "an automatic provider runs every event: {hosted}"
         );
         let velnor =
             ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::Velnor));
-        assert!(
-            velnor.contains("|| (false)"),
+        assert_eq!(
+            velnor, "github.event_name == 'workflow_dispatch'",
             "a manual provider skips automatic events: {velnor}"
         );
         let trusted = ir
@@ -255,6 +260,10 @@ mod tests {
         assert!(
             trusted.contains("github.event.pull_request.head.repo.fork"),
             "a trusted-only class gates on the event: {trusted}"
+        );
+        assert!(
+            trusted.contains("github.event_name == 'workflow_dispatch'"),
+            "a manual trusted-only class still admits dispatches only: {trusted}"
         );
     }
 
@@ -313,7 +322,6 @@ mod tests {
             default_branch: "main".to_owned(),
             providers: ProviderId::ALL.into_iter().collect(),
             automatic_providers: ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             ci_required: true,
             repository: repository.to_owned(),
@@ -1677,9 +1685,10 @@ mod tests {
         // The plan scope must equal the scheduled provider scope: a narrowed
         // universe that plans unfiltered writes phantom entries for
         // unscheduled providers, and the aggregate fails closed on records
-        // no job can report. The dispatch `providers` input narrows the
-        // scope at runtime; automatic events fall back to the configured
-        // automatic set.
+        // no job can report. There is no `providers` dispatch input —
+        // manual dispatches select the static universe — so the plan
+        // carries the static automatic set, which under the singleton
+        // visibility policy is exactly the scheduled universe.
         let mut ir = owner_test_ir(
             "example/s4-plan-providers",
             vec![rust_unit("rust", "crates/rust")],
@@ -1689,14 +1698,12 @@ mod tests {
         let mut plan = String::new();
         ir.render_plan(&mut plan);
         assert!(
-            plan.contains(
-                "VELNOR_PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || 'github-hosted' }}"
-            ),
+            plan.contains("VELNOR_PROVIDERS: github-hosted\n"),
             "a single-provider universe plans only its provider: {plan}"
         );
         assert!(
-            !plan.contains("|| 'github-hosted,"),
-            "the fallback names no unscheduled provider: {plan}"
+            !plan.contains("inputs.providers"),
+            "no dispatch provider input exists to narrow by: {plan}"
         );
     }
 
@@ -3512,7 +3519,8 @@ pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) providers: ProviderSet,
     pub(crate) automatic_providers: ProviderSet,
-    pub(crate) default_dispatch_providers: ProviderSet,
+    // NOTE: no `default_dispatch_providers`. Manual dispatches select the
+    // static universe; there is no dispatch-side provider input to default.
     pub(crate) selectors: SelectorMap,
     pub(crate) ci_required: bool,
     pub(crate) repository: String,
@@ -3700,25 +3708,16 @@ fn aggregate_selected_unit_selector(unit_id: &str) -> String {
     )
 }
 
+/// The `workflow_dispatch` inputs: scope and base ref only. There is
+/// deliberately no provider input — manual dispatches select the static
+/// universe, so no alternate-provider dispatch input can exist.
 fn workflow_dispatch_inputs(
     default_scope: &str,
     default_branch: &str,
     extra_inputs: &str,
-    providers: &ProviderSet,
-    default_dispatch_providers: &ProviderSet,
 ) -> String {
-    let universe = providers
-        .iter()
-        .map(ProviderId::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let default_providers = default_dispatch_providers
-        .iter()
-        .map(ProviderId::as_str)
-        .collect::<Vec<_>>()
-        .join(",");
     format!(
-        "  workflow_dispatch:\n    inputs:\n      providers:\n        description: Comma-separated provider subset of [{universe}]\n        required: false\n        default: {default_providers}\n        type: string\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
+        "  workflow_dispatch:\n    inputs:\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
     )
 }
 
@@ -3780,8 +3779,6 @@ fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
 fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
-    providers: &ProviderSet,
-    default_dispatch_providers: &ProviderSet,
 ) -> (&'static str, &'static str, String, bool) {
     match kind {
         WorkflowKind::PullRequest => (
@@ -3789,13 +3786,7 @@ fn aggregate_triggers(
             "CI / PR",
             format!(
                 "on:\n  pull_request:\n{}",
-                workflow_dispatch_inputs(
-                    "affected",
-                    default_branch,
-                    "",
-                    providers,
-                    default_dispatch_providers,
-                )
+                workflow_dispatch_inputs("affected", default_branch, "",)
             ),
             true,
         ),
@@ -3805,13 +3796,7 @@ fn aggregate_triggers(
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
                 yaml_scalar(default_branch),
-                workflow_dispatch_inputs(
-                    "full",
-                    default_branch,
-                    "",
-                    providers,
-                    default_dispatch_providers,
-                )
+                workflow_dispatch_inputs("full", default_branch, "",)
             ),
             false,
         ),
@@ -3824,8 +3809,6 @@ fn aggregate_triggers(
                     "full",
                     default_branch,
                     "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
-                    providers,
-                    default_dispatch_providers,
                 )
             ),
             false,
@@ -4420,7 +4403,6 @@ impl WorkflowIr {
             default_branch: config.default_branch.clone(),
             providers: config.providers.clone(),
             automatic_providers: config.automatic_providers.clone(),
-            default_dispatch_providers: config.default_dispatch_providers.clone(),
             selectors: config.selectors.clone(),
             ci_required: config.ci_required,
             repository: config.repository.clone(),
@@ -4460,18 +4442,14 @@ impl WorkflowIr {
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
-            kind,
-            &self.default_branch,
-            &self.providers,
-            &self.default_dispatch_providers,
-        );
+        let (workflow_name, run_name, triggers, cancel_in_progress) =
+            aggregate_triggers(kind, &self.default_branch);
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
         );
-        // Planning and policy are control plane: always hosted.
+        // Planning and policy are control plane.
         let mut plan = String::new();
         self.render_plan(&mut plan);
         output.push_str(&plan);
@@ -4517,30 +4495,24 @@ impl WorkflowIr {
     /// `workflow_dispatch` on ci-main is trusted for mbx saves; schedule alone is not.
     pub(crate) fn render_nightly_dispatcher(&self) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, _) = aggregate_triggers(
-            WorkflowKind::Nightly,
-            &self.default_branch,
-            &self.providers,
-            &self.default_dispatch_providers,
-        );
+        let (workflow_name, run_name, triggers, _) =
+            aggregate_triggers(WorkflowKind::Nightly, &self.default_branch);
         let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
-        let default_providers = self
-            .default_dispatch_providers
-            .iter()
-            .map(ProviderId::as_str)
-            .collect::<Vec<_>>()
-            .join(",");
-        let runner = self.runs_on_yaml(CONTROL_PLANE_PROVIDER);
-        let dispatch_if = "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure";
-        let simulate_if = "github.event_name == 'workflow_dispatch' && inputs.simulate_failure";
+        let runner = self.runs_on_yaml(self.control_plane_provider());
+        let dispatch_if = self.control_plane_gated_condition(
+            "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure",
+        );
+        let simulate_if = self.control_plane_gated_condition(
+            "github.event_name == 'workflow_dispatch' && inputs.simulate_failure",
+        );
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
         );
         let _ = writeln!(
             output,
-            "  dispatch-ci-main:\n    name: {}\n    if: ${{{{ {dispatch_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    permissions:\n      actions: write\n      contents: read\n    steps:\n      - name: Dispatch ci-main on default branch\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          GITHUB_REPOSITORY: ${{{{ github.repository }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DISPATCH_PROVIDERS: ${{{{ github.event.inputs.providers || '{default_providers}' }}}}\n          DISPATCH_SCOPE: ${{{{ github.event.inputs.scope || 'full' }}}}\n          DISPATCH_BASE_SHA: ${{{{ github.event.inputs.base_sha || format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          gh workflow run ci-main.yml \\\n            -R \"$GITHUB_REPOSITORY\" \\\n            --ref \"$DEFAULT_BRANCH\" \\\n            -f providers=\"$DISPATCH_PROVIDERS\" \\\n            -f scope=\"$DISPATCH_SCOPE\" \\\n            -f base_sha=\"$DISPATCH_BASE_SHA\"",
+            "  dispatch-ci-main:\n    name: {}\n    if: ${{{{ {dispatch_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    permissions:\n      actions: write\n      contents: read\n    steps:\n      - name: Dispatch ci-main on default branch\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          GITHUB_REPOSITORY: ${{{{ github.repository }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DISPATCH_SCOPE: ${{{{ github.event.inputs.scope || 'full' }}}}\n          DISPATCH_BASE_SHA: ${{{{ github.event.inputs.base_sha || format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          gh workflow run ci-main.yml \\\n            -R \"$GITHUB_REPOSITORY\" \\\n            --ref \"$DEFAULT_BRANCH\" \\\n            -f scope=\"$DISPATCH_SCOPE\" \\\n            -f base_sha=\"$DISPATCH_BASE_SHA\"",
             crate::s2::control_job_name("Dispatch ci-main"),
         );
         let _ = writeln!(
@@ -4623,7 +4595,7 @@ impl WorkflowIr {
             .iter()
             .copied()
             .find(|provider| provider.is_local())
-            .unwrap_or(CONTROL_PLANE_PROVIDER);
+            .unwrap_or_else(|| self.control_plane_provider());
         let selected_by = self.prepare_cargo_selected_by(file);
         RequiredCaller {
             job_id: prepare_cargo_caller_job_id().to_owned(),
@@ -4864,16 +4836,17 @@ impl WorkflowIr {
         let _ = write!(
             output,
             "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n",
-            aggregate_job_guard(cancel_in_progress),
+            self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
             needs.join(", "),
-            self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            self.runs_on_yaml(self.control_plane_provider()),
         );
         // The aggregate scores first, the shell verdict re-confirms after:
-        // conjunction, so either side failing fails the check. The control
-        // plane is always hosted, so the verified plan-artifact runtime is
-        // always published for this download.
+        // conjunction, so either side failing fails the check. A hosted
+        // control plane downloads the verified plan-artifact runtime the
+        // plan publishes for this download; a local control plane scores
+        // with the ambient fleet runtime, like every other local job.
         let runtime_steps =
-            workflow_runtime_download(CONTROL_PLANE_PROVIDER, &self.workflow_revision);
+            workflow_runtime_download(self.control_plane_provider(), &self.workflow_revision);
         output.push_str(&render_aggregate_score_steps(
             &runtime_steps,
             self.pins.download_artifact,
@@ -4931,8 +4904,8 @@ impl WorkflowIr {
                 output,
                 "  required:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
                 crate::s2::control_job_name("Required"),
-                aggregate_job_guard(cancel_in_progress),
-                self.runs_on_yaml(CONTROL_PLANE_PROVIDER)
+                self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
+                self.runs_on_yaml(self.control_plane_provider())
             );
         }
     }
@@ -4944,11 +4917,12 @@ impl WorkflowIr {
         if_override: Option<&str>,
     ) {
         let if_condition = if_override.map_or_else(|| "always()".to_owned(), str::to_owned);
+        let if_condition = self.control_plane_gated_condition(&if_condition);
         let _ = writeln!(
             output,
             "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
             crate::s2::control_job_name("Nightly red-to-signal"),
-            self.runs_on_yaml(CONTROL_PLANE_PROVIDER)
+            self.runs_on_yaml(self.control_plane_provider())
         );
         let bad_body = format!(
             r#"          body="{needs_job} result: $NIGHTLY_RESULT
@@ -6102,6 +6076,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
+    /// The control-plane provider for this surface: hosted when the universe
+    /// contains it, otherwise the canonical-first local provider. Under the
+    /// visibility policy the universe is a singleton, so this is exactly the
+    /// visibility provider.
+    pub(crate) fn control_plane_provider(&self) -> ProviderId {
+        crate::s2::provider::control_plane_provider(&self.providers)
+    }
+
     /// The `runs-on:` YAML value routing one provider to its selector. Pure
     /// selector lookup: routing only, never authorization, never a fanout
     /// instruction.
@@ -6113,26 +6095,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn render_plan(&self, output: &mut String) {
-        // Planning is control plane: always hosted. GitHub planning pins
-        // `uses:` to SOURCE_REV. `rev:` uses a context-gated `${{ github.sha }}`
+        // Planning is control plane. Hosted planning pins `uses:` to
+        // SOURCE_REV. `rev:` uses a context-gated `${{ github.sha }}`
         // with a static fallback when this repository owns the setup action.
+        let control_plane = self.control_plane_provider();
         let runtime_setup = crate::s2::workflow_runtime_setup_with_install_rev(
-            ProviderId::GithubHosted,
+            control_plane,
             &self.repository,
             &self.workflow_revision,
             &crate::s2::workflow_setup_install_rev(&self.repository, &self.workflow_revision),
         );
         let base_sha = self.base_sha_expression();
-        // The dispatch `providers` input carries the manual selection (a
-        // comma-separated subset of the universe); automatic events fall back
-        // to the configured automatic set. An omitted or empty dispatch input
-        // is falsy, so it falls back to the automatic set too.
+        // Every event selects the static automatic set: there is no provider
+        // input to read.
         let automatic = self
             .automatic_providers
             .iter()
             .map(ProviderId::as_str)
             .collect::<Vec<_>>()
             .join(",");
+        // A local control plane never plans untrusted events: fork and bot
+        // pull requests skip planning (and therefore the whole aggregate),
+        // exactly like any other local job without a trusted event.
+        let gate = self.control_plane_event_gate();
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
             "      base_sha: ${{ steps.plan.outputs.base_sha }}".to_owned(),
@@ -6166,9 +6151,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
         let _ = writeln!(
             output,
-            "  plan:\n    name: {}\n    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || '{automatic}' }}}}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::s2::control_job_name("Planning"),
-            self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            self.runs_on_yaml(self.control_plane_provider()),
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
@@ -6178,20 +6163,27 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             expected_work_dir = EXPECTED_WORK_DIR,
         );
         output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
-        // `ci-required` runs on the hosted control plane on every universe
-        // and downloads this artifact for its aggregate step, so the plan
-        // always publishes it — even where no hosted unit job consumes it.
-        output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
+        // The runtime artifact feeds hosted consumers only: hosted unit
+        // jobs and the hosted aggregate download it for their verified
+        // runtime. A local control plane plans ambient — no setup step, so
+        // no `steps.runtime` closure for Prepare to check — and every
+        // local job runs the fleet binary, so the plan publishes only for
+        // a hosted control plane and never orphans an artifact.
+        if control_plane == ProviderId::GithubHosted {
+            output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
+        }
     }
 
     pub(crate) fn render_policy(&self, output: &mut String) {
+        let local = self.control_plane_provider().is_local();
+        let gate = local.then(|| crate::s2::control_plane_trusted_gate(&self.default_branch));
         output.push_str(&crate::s2::policy_job(&crate::s2::PolicyJobSpec {
             name: "Policy",
             revision: &self.workflow_revision,
-            runner: &self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            runner: &self.runs_on_yaml(self.control_plane_provider()),
             repository: &self.repository,
-            cache_backend: "github",
-            trusted_gate: None,
+            cache_backend: if local { "local" } else { "github" },
+            trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
             declared_ruleset_contexts: &self.declared_ruleset_contexts,
         }));
@@ -6203,34 +6195,45 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// trusted. The plan step renders the same predicate into
     /// `VELNOR_EVENT_TRUSTED`, so the planner and the gates agree by
     /// construction.
-    fn trusted_event_expression() -> String {
-        "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))"
-            .to_owned()
+    pub(crate) fn trusted_event_expression() -> String {
+        crate::s2::TRUSTED_EVENT_EXPRESSION.to_owned()
     }
 
-    /// A `workflow_dispatch` that selects `provider`, on any ref.
+    /// The `if:` line a local control-plane job carries: the trusted-event
+    /// predicate, parenthesized exactly as the policy gate matcher expects.
+    /// Hosted control planes need no gate and render nothing.
+    fn control_plane_event_gate(&self) -> String {
+        if self.control_plane_provider().is_local() {
+            format!(
+                "    if: ${{{{ ({}) }}}}\n",
+                Self::trusted_event_expression()
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    /// Conjoin a job's functional `if:` condition with the trusted-event
+    /// predicate on a local control plane. The functional side stays inside
+    /// its own parentheses so the gate matcher verifies the shape without
+    /// parsing expressions. Hosted control planes keep the condition as is.
+    fn control_plane_gated_condition(&self, condition: &str) -> String {
+        if self.control_plane_provider().is_local() {
+            format!("({condition}) && ({})", Self::trusted_event_expression())
+        } else {
+            condition.to_owned()
+        }
+    }
+
+    /// A `workflow_dispatch` selecting `provider`, on any ref.
     ///
     /// Dispatch is not ref-gated: GitHub only accepts a dispatch from an
     /// actor with write access and only onto a ref of this repository, which
     /// is the same authorship a same-repository pull-request head carries.
-    /// The comma-boundary match keeps `github-hosted` from matching inside
-    /// `github-self-hosted` and accepts any subset string the planner's
-    /// strict parse would accept.
-    fn dispatch_provider_expression(provider: ProviderId) -> String {
-        format!(
-            "github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',{},')",
-            provider.as_str()
-        )
-    }
-
-    /// An automatic event (anything but dispatch) selecting `provider` when
-    /// the automatic set includes it.
-    fn automatic_provider_expression(&self, provider: ProviderId) -> String {
-        if self.automatic_providers.contains(&provider) {
-            "github.event_name != 'workflow_dispatch'".to_owned()
-        } else {
-            "false".to_owned()
-        }
+    /// There is no provider input to match: dispatches select the static
+    /// universe.
+    fn dispatch_provider_expression() -> &'static str {
+        "github.event_name == 'workflow_dispatch'"
     }
 
     fn base_sha_expression(&self) -> String {
@@ -6267,17 +6270,28 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     return "false".to_owned();
                 }
                 locals.sort();
+                locals.dedup();
+                if locals.len() == 1 {
+                    return locals.swap_remove(0);
+                }
                 format!("({})", locals.join(") || ("))
             }
             ProviderAdmission::Provider(provider)
             | ProviderAdmission::ProviderTrusted(provider) => {
-                let event = format!(
-                    "({}) || ({})",
-                    Self::dispatch_provider_expression(provider),
-                    self.automatic_provider_expression(provider)
-                );
+                // Dispatches select the static universe, so the event side is
+                // a tautology for automatic providers and dispatch-only
+                // otherwise. Render the collapsed form, never `(A) || (!A)`.
+                let event = if self.automatic_providers.contains(&provider) {
+                    "true".to_owned()
+                } else {
+                    Self::dispatch_provider_expression().to_owned()
+                };
                 if admission.trusted_only() {
-                    format!("({event}) && ({})", Self::trusted_event_expression())
+                    if event == "true" {
+                        format!("({})", Self::trusted_event_expression())
+                    } else {
+                        format!("({event}) && ({})", Self::trusted_event_expression())
+                    }
                 } else {
                     event
                 }
@@ -6291,6 +6305,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .iter()
             .map(|unit| unit.kind)
             .collect::<BTreeSet<_>>();
+        let gate = self.control_plane_event_gate();
         for kind in kinds {
             let group_id = stack_group_job_id(kind);
             let group_name = crate::s2::control_job_name(crate::s2::provider_kind_label(kind));
@@ -6302,8 +6317,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             };
             let _ = writeln!(
                 output,
-                "    needs: {needs}\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
-                self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+                "    needs: {needs}\n{gate}    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
+                self.runs_on_yaml(self.control_plane_provider()),
                 unit_group(kind),
             );
             for unit in self.units.iter().filter(|unit| unit.kind == kind) {
@@ -6316,8 +6331,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 let child_name = yaml_scalar(child_label);
                 let _ = writeln!(
                     output,
-                    "  {child_id}:\n    name: {child_name}\n    needs: [{group_id}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit runner jobs\n        run: echo 'crate group ready'\n",
-                    self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+                    "  {child_id}:\n    name: {child_name}\n    needs: [{group_id}]\n{gate}    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit runner jobs\n        run: echo 'crate group ready'\n",
+                    self.runs_on_yaml(self.control_plane_provider()),
                 );
             }
         }

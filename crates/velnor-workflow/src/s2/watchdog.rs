@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
-use crate::s2::provider::{ProviderId, CONTROL_PLANE_PROVIDER};
+use crate::s2::provider::{ProviderId, ProviderSet};
 use crate::s2::GeneratorError;
 
 /// The one generated hosted watchdog job.
@@ -70,7 +70,7 @@ impl WatchdogOrdering {
     }
 }
 
-/// The watchdog authority: one job, always on the hosted control plane.
+/// The watchdog authority: one job, always on the control plane.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WatchdogAuthority {
     pub(crate) job_id: String,
@@ -78,13 +78,14 @@ pub(crate) struct WatchdogAuthority {
 }
 
 impl WatchdogAuthority {
-    /// The single authority. Any other provider is a hard error at
-    /// construction time, not a runtime fallback.
+    /// The single authority for one universe: the control-plane provider.
+    /// Any other provider is a hard error at construction time, not a
+    /// runtime fallback.
     #[must_use]
-    pub(crate) fn spec() -> Self {
+    pub(crate) fn for_universe(universe: &ProviderSet) -> Self {
         Self {
             job_id: WATCHDOG_JOB_ID.to_owned(),
-            provider: CONTROL_PLANE_PROVIDER,
+            provider: crate::s2::provider::control_plane_provider(universe),
         }
     }
 }
@@ -679,10 +680,15 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_authority_is_the_one_hosted_job() {
-        let authority = WatchdogAuthority::spec();
+    fn watchdog_authority_is_the_one_control_plane_job() {
+        let hosted = ProviderSet::from([ProviderId::GithubHosted]);
+        let authority = WatchdogAuthority::for_universe(&hosted);
         assert_eq!(authority.job_id, WATCHDOG_JOB_ID);
         assert_eq!(authority.provider, ProviderId::GithubHosted);
+        let local = ProviderSet::from([ProviderId::Velnor]);
+        let authority = WatchdogAuthority::for_universe(&local);
+        assert_eq!(authority.job_id, WATCHDOG_JOB_ID);
+        assert_eq!(authority.provider, ProviderId::Velnor);
     }
 
     #[test]

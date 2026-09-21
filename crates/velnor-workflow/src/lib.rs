@@ -39,6 +39,7 @@ mod scan;
 mod template_memory;
 #[cfg(feature = "tui")]
 mod tui;
+pub(crate) mod visibility;
 
 use crate::primitives::prepared_tools::PreparedToolNeed;
 use crate::primitives::{WorkflowIr, WorkflowKind};
@@ -404,6 +405,13 @@ pub(crate) const DEFAULT_DISPATCH_RUNNER: &str = "github";
 pub(crate) const DEFAULT_AUTOMATIC_LANES: &str = "github";
 
 /// Which generated runner lanes are enabled.
+///
+/// FREEZE (inc3 scope ruling): the schema-1 `Both` lane path is frozen, not
+/// governed — the visibility-based singleton policy enforces on the schema-2
+/// provider pipeline only (`s2::enforce_visibility_policy`, pre-render). A
+/// follow-up must explicitly enforce-or-remove `Both` here; until that
+/// ruling lands, this variant keeps its current dual-lane rendering
+/// unchanged and no new `both` surface may be added.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum RunnerMode {
     Github,

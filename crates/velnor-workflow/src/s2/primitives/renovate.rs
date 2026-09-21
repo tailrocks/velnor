@@ -1,11 +1,9 @@
-//! Self-hosted Renovate workflows: scheduled dependency updates and optional
+//! Control-plane Renovate workflows: scheduled dependency updates and optional
 //! configuration validation.
 
 use super::{Args, Primitive, RenderCtx, Rendered};
-use crate::s2::provider::ProviderId;
 use crate::s2::{
-    selector_runs_on_yaml, yaml_scalar, ActionPin, GeneratorError, ProjectConfig, RenovateSpec,
-    GENERATED_HEADER,
+    yaml_scalar, ActionPin, GeneratorError, ProjectConfig, RenovateSpec, GENERATED_HEADER,
 };
 
 /// The pinned Renovate OSS version rendered into `renovate-version`.
@@ -45,17 +43,18 @@ pub(crate) fn renovate_content(config: &ProjectConfig) -> Result<Option<String>,
 }
 
 /// The `renovate-validate.yml` content, or `None` when validation is disabled.
-pub(crate) fn renovate_validate_content(config: &ProjectConfig) -> Option<String> {
+pub(crate) fn renovate_validate_content(
+    config: &ProjectConfig,
+) -> Result<Option<String>, GeneratorError> {
     config
         .renovate
         .as_ref()
         .filter(|spec| spec.validate)
         .map(|spec| {
-            format!(
-                "{GENERATED_HEADER}{}",
-                render_renovate_validate(config, spec)
-            )
+            render_renovate_validate(config, spec)
+                .map(|content| format!("{GENERATED_HEADER}{content}"))
         })
+        .transpose()
 }
 
 /// The declared `renovate.yml` writer workflow.
@@ -99,7 +98,7 @@ impl Primitive for RenovateValidate {
         }
         let content = format!(
             "{GENERATED_HEADER}{}",
-            render_renovate_validate(ctx.config, &spec)
+            render_renovate_validate(ctx.config, &spec)?
         );
         render_file(ctx, "renovate-validate.yml", content)
     }
@@ -140,8 +139,7 @@ fn render_file(
 }
 
 fn renovate_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
-    crate::s2::provider::runs_on_for(&config.selectors, ProviderId::Velnor)
-        .map(crate::s2::runs_on_labels_yaml)
+    crate::s2::control_plane_runner(config)
 }
 
 fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> Result<String, GeneratorError> {
@@ -169,19 +167,23 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> Result<String
     ))
 }
 
-fn render_renovate_validate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
-    let runner = config
-        .selectors
-        .get(&ProviderId::GithubHosted)
-        .map(selector_runs_on_yaml)
-        .unwrap_or_default();
+fn render_renovate_validate(
+    config: &ProjectConfig,
+    spec: &RenovateSpec,
+) -> Result<String, GeneratorError> {
+    let runner = crate::s2::control_plane_runner(config)?;
+    let local = crate::s2::provider::control_plane_provider(&config.providers).is_local();
+    let gate = local.then(super::ir::WorkflowIr::trusted_event_expression);
     let default_branch = yaml_scalar(&config.default_branch);
-    crate::renovate_renderer::render_validate(&crate::renovate_renderer::ValidateInput {
-        checkout: ActionPin::Checkout.reference(),
-        runner: &runner,
-        default_branch: &default_branch,
-        config_path: &spec.config_path,
-    })
+    Ok(crate::renovate_renderer::render_validate(
+        &crate::renovate_renderer::ValidateInput {
+            checkout: ActionPin::Checkout.reference(),
+            runner: &runner,
+            gate: gate.as_deref(),
+            default_branch: &default_branch,
+            config_path: &spec.config_path,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -252,7 +254,6 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             rust_needs: crate::s2::RustNeeds::Parallel,
             concurrency_group: None,
             serial_stack_groups: false,
@@ -372,7 +373,10 @@ mod tests {
             config.renovate.as_ref(),
             "renovate_config must include a renovate spec",
         );
-        let workflow = render_renovate_validate(&config, spec);
+        let workflow = must(
+            render_renovate_validate(&config, spec),
+            "render renovate validator",
+        );
         assert!(workflow.contains("renovate-config-validator --strict --no-global renovate.json"));
         assert!(workflow.contains("ghcr.io/renovatebot/renovate:44.93.6"));
         assert!(!workflow.contains("GH_RENOVATE_TOKEN"));
@@ -464,7 +468,10 @@ mod tests {
             render_renovate(&config, &full_spec()),
             "render renovate workflow",
         );
-        let validator = render_renovate_validate(&config, &full_spec());
+        let validator = must(
+            render_renovate_validate(&config, &full_spec()),
+            "render renovate validator",
+        );
         assert!(
             writer.contains(&format!("renovate-version: \"{RENOVATE_OSS_VERSION}\"")),
             "{writer}"
@@ -511,7 +518,10 @@ mod tests {
             render_renovate(&config, &full_spec()),
             "render renovate workflow",
         );
-        let validator = render_renovate_validate(&config, &full_spec());
+        let validator = must(
+            render_renovate_validate(&config, &full_spec()),
+            "render renovate validator",
+        );
         let root = audited_tree(
             "audit",
             &[

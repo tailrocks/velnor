@@ -2827,7 +2827,6 @@ repository = "example/project"
 [workflow]
 providers = ["github-hosted"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted"]
 default_branch = "main"
 
 [workflow.selectors.github-hosted]
@@ -3515,7 +3514,6 @@ test "$publication_lock_retain" -eq 1
             default_branch: "main".to_owned(),
             providers: BTreeSet::from([ProviderId::GithubHosted]),
             automatic_providers: BTreeSet::from([ProviderId::GithubHosted]),
-            default_dispatch_providers: BTreeSet::from([ProviderId::GithubHosted]),
             selectors: BTreeMap::from([(
                 ProviderId::GithubHosted,
                 crate::s2::provider::ProviderSelector {
