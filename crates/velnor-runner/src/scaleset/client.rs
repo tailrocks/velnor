@@ -800,6 +800,8 @@ impl ScaleSetClient {
         build: impl Fn(&Client, Method, Url) -> reqwest::RequestBuilder,
     ) -> Result<RawResponse, ScaleSetError> {
         let mut attempt: u32 = 0;
+        let use_curl = std::env::var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV).as_deref() == Ok("curl");
+        let timeout = self.inner.retry.timeout;
         loop {
             let request = build(&self.inner.http, method.clone(), url.clone())
                 .build()
@@ -810,46 +812,72 @@ impl ScaleSetClient {
                 })?;
             let method_name = request.method().to_string();
             let url_text = request.url().to_string();
-            match self.inner.http.execute(request).await {
-                Ok(response) => {
-                    let status = response.status();
-                    let headers = response.headers().clone();
-                    let body = response.bytes().await.map_err(|error| {
-                        ScaleSetError::Transport(format!(
-                            "failed to read the response body: {error}"
-                        ))
-                    })?;
-                    if RetryPolicy::retryable_status(status, admin_handshake)
-                        && self.inner.retry.may_retry(attempt)
-                    {
-                        let delay = self.retry_delay(status, &headers, attempt).await;
+
+            if use_curl {
+                match tokio::task::spawn_blocking(move || run_curl_raw_request(&request, timeout)).await {
+                    Ok(Ok(response)) => {
+                        if RetryPolicy::retryable_status(response.status, admin_handshake)
+                            && self.inner.retry.may_retry(attempt)
+                        {
+                            let delay = self.retry_delay(response.status, &response.headers, attempt).await;
+                            attempt += 1;
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        return Ok(response);
+                    }
+                    Ok(Err(_error)) if self.inner.retry.may_retry(attempt) => {
+                        let delay = self.inner.retry.delay_for_attempt(attempt);
                         attempt += 1;
                         tokio::time::sleep(delay).await;
-                        continue;
                     }
-                    return Ok(RawResponse {
-                        method: method_name,
-                        url: url_text,
-                        status,
-                        headers,
-                        body: trim_byte_order_mark(&body).to_vec(),
-                    });
+                    Ok(Err(error)) => return Err(error),
+                    Err(join_err) => {
+                        return Err(ScaleSetError::Transport(format!("curl join error: {join_err}")));
+                    }
                 }
-                // Mirror `DefaultRetryPolicy`: retry transient transport
-                // failures, but not deadlines, malformed requests, redirect
-                // loops, or TLS certificate validation errors.
-                Err(error)
-                    if self.inner.retry.may_retry(attempt)
-                        && RetryPolicy::retryable_transport_error(&error) =>
-                {
-                    let delay = self.inner.retry.delay_for_attempt(attempt);
-                    attempt += 1;
-                    tokio::time::sleep(delay).await;
-                }
-                Err(error) => {
-                    return Err(ScaleSetError::Transport(format!(
-                        "failed to send request: {error}"
-                    )));
+            } else {
+                match self.inner.http.execute(request).await {
+                    Ok(response) => {
+                        let status = response.status();
+                        let headers = response.headers().clone();
+                        let body = response.bytes().await.map_err(|error| {
+                            ScaleSetError::Transport(format!(
+                                "failed to read the response body: {error}"
+                            ))
+                        })?;
+                        if RetryPolicy::retryable_status(status, admin_handshake)
+                            && self.inner.retry.may_retry(attempt)
+                        {
+                            let delay = self.retry_delay(status, &headers, attempt).await;
+                            attempt += 1;
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        return Ok(RawResponse {
+                            method: method_name,
+                            url: url_text,
+                            status,
+                            headers,
+                            body: trim_byte_order_mark(&body).to_vec(),
+                        });
+                    }
+                    // Mirror `DefaultRetryPolicy`: retry transient transport
+                    // failures, but not deadlines, malformed requests, redirect
+                    // loops, or TLS certificate validation errors.
+                    Err(error)
+                        if self.inner.retry.may_retry(attempt)
+                            && RetryPolicy::retryable_transport_error(&error) =>
+                    {
+                        let delay = self.inner.retry.delay_for_attempt(attempt);
+                        attempt += 1;
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(error) => {
+                        return Err(ScaleSetError::Transport(format!(
+                            "failed to send request: {error}"
+                        )));
+                    }
                 }
             }
         }
@@ -864,6 +892,152 @@ impl ScaleSetClient {
         let backoff = self.inner.retry.delay_for_attempt(attempt);
         RetryPolicy::retry_after_delay(status, headers, SystemTime::now()).unwrap_or(backoff)
     }
+}
+
+fn run_curl_raw_request(
+    request: &reqwest::Request,
+    timeout: std::time::Duration,
+) -> Result<RawResponse, ScaleSetError> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let temp_dir = std::env::temp_dir();
+    let id = uuid::Uuid::new_v4();
+    let header_in_path = temp_dir.join(format!("velnor-req-hdr-{id}.tmp"));
+    let header_out_path = temp_dir.join(format!("velnor-resp-hdr-{id}.tmp"));
+
+    let write_res = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&header_in_path)?;
+        for (name, val) in request.headers() {
+            if let Ok(v) = val.to_str() {
+                writeln!(file, "{}: {}", name.as_str(), v)?;
+            }
+        }
+        file.flush()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&header_in_path);
+        return Err(ScaleSetError::Local(format!("failed to write curl header file: {e}")));
+    }
+
+    let method_str = request.method().as_str();
+    let url_str = request.url().as_str();
+    let max_time_secs = timeout.as_secs().max(1);
+
+    let mut cmd = Command::new("curl");
+    cmd.arg("--disable")
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--request")
+        .arg(method_str)
+        .arg("--url")
+        .arg(url_str)
+        .arg("-H")
+        .arg(format!("@{}", header_in_path.display()))
+        .arg("--dump-header")
+        .arg(&header_out_path)
+        .arg("--max-time")
+        .arg(max_time_secs.to_string())
+        .arg("--retry")
+        .arg("0");
+
+    let body_bytes = request.body().and_then(|b| b.as_bytes());
+    if body_bytes.is_some() {
+        cmd.arg("--data-binary").arg("@-");
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let spawn_res = cmd.spawn();
+    let mut child = match spawn_res {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = std::fs::remove_file(&header_in_path);
+            let _ = std::fs::remove_file(&header_out_path);
+            return Err(ScaleSetError::Transport(format!("spawn curl: {e}")));
+        }
+    };
+
+    if let Some(bytes) = body_bytes {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(bytes);
+        }
+    }
+
+    let output_res = child.wait_with_output();
+    let _ = std::fs::remove_file(&header_in_path);
+
+    let output = match output_res {
+        Ok(output) => output,
+        Err(e) => {
+            let _ = std::fs::remove_file(&header_out_path);
+            return Err(ScaleSetError::Transport(format!("wait curl: {e}")));
+        }
+    };
+
+    let resp_headers_bytes = std::fs::read(&header_out_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&header_out_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ScaleSetError::Transport(format!(
+            "curl request {method_str} {url_str} exited with {}: {stderr}",
+            output.status
+        )));
+    }
+
+    let (status, headers) = parse_curl_headers(&resp_headers_bytes)?;
+
+    Ok(RawResponse {
+        method: method_str.to_string(),
+        url: url_str.to_string(),
+        status,
+        headers,
+        body: trim_byte_order_mark(&output.stdout).to_vec(),
+    })
+}
+
+fn parse_curl_headers(bytes: &[u8]) -> Result<(StatusCode, HeaderMap), ScaleSetError> {
+    let mut status = StatusCode::OK;
+    let mut headers = HeaderMap::new();
+
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("HTTP/") {
+            headers.clear();
+            let mut parts = line.split_whitespace();
+            parts.next(); // skip HTTP version
+            if let Some(code_str) = parts.next() {
+                if let Ok(code) = code_str.parse::<u16>() {
+                    if let Ok(sc) = StatusCode::from_u16(code) {
+                        status = sc;
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim();
+            let v = v.trim();
+            if let (Ok(hname), Ok(hval)) = (
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                reqwest::header::HeaderValue::from_str(v),
+            ) {
+                headers.append(hname, hval);
+            }
+        }
+    }
+
+    Ok((status, headers))
 }
 
 /// Mirror of `setUserAgent`: the UA is JSON, `kind` is always `scaleset`.

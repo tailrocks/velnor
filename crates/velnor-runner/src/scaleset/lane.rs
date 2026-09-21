@@ -1454,7 +1454,7 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_assigned(&mut self, assigned: &ScaleSetJobAssigned) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = assigned.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&assigned.base);
         let Some(intent) = self
             .intents
             .get_by_request(self.config.scale_set_id, request_id)
@@ -1479,7 +1479,7 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_started(&mut self, started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = started.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
         let Some(intent) = self
             .intents
             .get_by_request(self.config.scale_set_id, request_id)
@@ -1532,7 +1532,8 @@ impl WorkerLane for DaemonWorkerLane {
     }
 
     fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
-        self.note_terminal_request(completed.base.runner_request_id)
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
+        self.note_terminal_request(request_id)
     }
 
     fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {

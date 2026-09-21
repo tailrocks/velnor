@@ -655,6 +655,9 @@ impl RunnerSpec {
         args.extend(self.identity.label_args(ROLE_RUNNER));
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
+        args.push("sh".to_string());
+        args.push("-c".to_string());
+        args.push("sudo mkdir -p /home/runner/_work /opt/hostedtoolcache && sudo chown -R runner:runner /home/runner/_work /opt/hostedtoolcache && sudo chmod 0777 /home/runner/_work /opt/hostedtoolcache && (command -v gh >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && gh_arch=\"arm64\" || gh_arch=\"amd64\"; curl -fsSL \"https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_${gh_arch}.tar.gz\" | sudo tar -xz -C /usr/local/bin --strip-components=2 \"gh_2.101.0_linux_${gh_arch}/bin/gh\" 2>/dev/null || true)) && exec /home/runner/run.sh".to_string());
         args
     }
 }
