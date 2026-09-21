@@ -95,3 +95,14 @@ Adjacent open PRs (avoid conflicts): #990 (generator-owned AGENTS.md),
   update pinning tests in the same slice.
 - Unknown impact keeps a conservative fallback, but smallest sound scope +
   explicit reason + missing-contract report — never silent full selection.
+- S2 design accepted (read-only designer, 2026-09-21): per-repo
+  `classify(path) -> Owned{units,reasons} | Unknown{consulted}` in the
+  reuse core (mirrored S1+S2); sources = declared contracts > watch globs
+  > sound command read-glob extractors (no extension inference, no shell
+  parsing); `Unknown` keeps fail-closed full selection. Declared
+  `reads` table is generation-time only, compiles into `unit.watch`
+  (no runtime schema-3 bump). `.github/`: 4 global classes stay full,
+  kind reusables narrow by kind, release/maintenance narrow by PR scope.
+  `REUSE_VERSION` bumps. Rebase onto #978 node-watch hunks first; seam
+  is the final `unit.watch` vec. Full design in session record
+  (S2 read-proof ownership design).
