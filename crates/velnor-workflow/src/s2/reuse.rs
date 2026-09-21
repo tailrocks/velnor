@@ -244,19 +244,24 @@ pub(crate) struct WatchedUnit {
 /// stability), and `prereq_inputs` records the transitive prerequisites of
 /// the verify set outside it — build inputs the verify jobs compile,
 /// restore, and consume in-job, which earn no verification of their own.
-/// `explanations` names the reason per selected unit and per recorded
-/// input. `fallback_full` marks a full set chosen by fallback rather than
-/// by matching: an empty diff selects nothing with the flag clear, and the
-/// planner records that as explicit no-work. `fallback_reason` carries the
-/// fallback's auditable reason (the consulted sources for an unprovable
-/// path); it is `None` for proven-narrow and empty selections, `Some` for
-/// full fallbacks and for opaque-narrowed selections, and serializes only
-/// when present.
+/// `closed_excluded` names the opaque units an unmatched path skipped only
+/// because their owner's `complete` contract asserts the path unreadable;
+/// a false claim skips verification silently nowhere else, so the verdict
+/// carries the excluded ids. `explanations` names the reason per selected
+/// unit and per recorded input. `fallback_full` marks a full set chosen by
+/// fallback rather than by matching: an empty diff selects nothing with the
+/// flag clear, and the planner records that as explicit no-work.
+/// `fallback_reason` carries the fallback's auditable reason (the consulted
+/// sources for an unprovable path); it is `None` for proven-narrow and empty
+/// selections, `Some` for full fallbacks and for opaque-narrowed selections,
+/// and serializes only when present.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct AffectedSelection {
     pub(crate) required: BTreeSet<String>,
     pub(crate) full_units: BTreeSet<String>,
     pub(crate) prereq_inputs: BTreeSet<String>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) closed_excluded: BTreeSet<String>,
     pub(crate) fallback_full: bool,
     pub(crate) explanations: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,6 +310,7 @@ pub(crate) fn select_affected(
             required: BTreeSet::new(),
             full_units: BTreeSet::new(),
             prereq_inputs: BTreeSet::new(),
+            closed_excluded: BTreeSet::new(),
             fallback_full: false,
             explanations: BTreeMap::new(),
             fallback_reason: None,
@@ -326,6 +332,7 @@ pub(crate) fn select_affected(
     let mut hits: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut kind_hits: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut opaque_reasons: Vec<String> = Vec::new();
+    let mut closed_excluded: BTreeSet<String> = BTreeSet::new();
     for candidate in &candidates {
         if let Some(verdict) = github_verdict(candidate.path) {
             match verdict {
@@ -365,15 +372,19 @@ pub(crate) fn select_affected(
                 );
                 record_path_hits(&compiled, &mut hits, &opaque_units, &item);
                 opaque_reasons.push(reason);
+                closed_excluded.extend(closed_excluded_units(&compiled, candidate.path));
             }
             PathVerdict::Unknown { reason } => {
                 return Ok(fallback_selection(units, &reason));
             }
-            PathVerdict::Irrelevant => {}
+            PathVerdict::Irrelevant => {
+                closed_excluded.extend(closed_excluded_units(&compiled, candidate.path));
+            }
         }
     }
     let mut selection = finish_selection(units, &hits, &kind_hits);
     selection.fallback_reason = join_opaque_reasons(opaque_reasons);
+    selection.closed_excluded = closed_excluded;
     Ok(selection)
 }
 
@@ -469,6 +480,7 @@ fn finish_selection(
         required: closure.required.clone(),
         full_units: closure.required,
         prereq_inputs: closure.prereq_inputs,
+        closed_excluded: BTreeSet::new(),
         fallback_full: false,
         explanations,
         fallback_reason: None,
@@ -668,6 +680,30 @@ pub(crate) enum PathVerdict {
     Irrelevant,
 }
 
+/// Whether one compiled unit owns a changed path: its watch (which
+/// includes generation-time declared reads) or its extracted command
+/// read-globs match. The one ownership seam [`classify_path`] and
+/// [`closed_excluded_units`] share, so the verdict and the exclusion record
+/// can never disagree about who owns what.
+fn owns_path(unit: &CompiledUnit<'_>, path: &str) -> bool {
+    unit.watch.is_match(path) || extraction_owns(unit, path)
+}
+
+/// The closed-world units one changed path provably excludes: opaque units
+/// whose owner's `complete` contract asserts the watch plus the declared
+/// reads are the unit's entire read set, and which own nothing on this
+/// path — so the opaque fallback the path would otherwise have selected
+/// skipped them. Callers union this over unmatched paths only
+/// ([`PathVerdict::Opaque`] and [`PathVerdict::Irrelevant`]): an owned path
+/// fires no fallback, and a full fallback excludes nothing.
+pub(crate) fn closed_excluded_units(compiled: &[CompiledUnit<'_>], path: &str) -> BTreeSet<String> {
+    compiled
+        .iter()
+        .filter(|unit| unit.opaque && unit.reads_closed && !owns_path(unit, path))
+        .map(|unit| unit.unit.id.clone())
+        .collect()
+}
+
 /// Classify one changed path against the compiled units: owned when any
 /// unit's watch or read-globs match, opaque when no unit owns it but some
 /// (not every) unit is openly opaque, unknown when the path itself resists
@@ -698,7 +734,7 @@ pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVe
     let mut opaque = BTreeSet::new();
     let mut causes = Vec::new();
     for unit in compiled {
-        if unit.watch.is_match(path) || extraction_owns(unit, path) {
+        if owns_path(unit, path) {
             owners.insert(unit.unit.id.clone());
         } else if unit.opaque && !unit.reads_closed {
             opaque.insert(unit.unit.id.clone());
@@ -1209,6 +1245,7 @@ pub(crate) fn fallback_selection(units: &[WatchedUnit], reason: &str) -> Affecte
         required: units.iter().map(|unit| unit.id.clone()).collect(),
         full_units: units.iter().map(|unit| unit.id.clone()).collect(),
         prereq_inputs: BTreeSet::new(),
+        closed_excluded: BTreeSet::new(),
         fallback_full: true,
         explanations: units
             .iter()
@@ -2923,6 +2960,110 @@ mod tests {
         assert!(
             !reason.contains("bun-web"),
             "the closed unit needs no contract for an excluded path: {reason:?}"
+        );
+        Ok(())
+    }
+
+    /// Closed-world exclusion is visible beside an unchanged irrelevant
+    /// verdict: the selection still proves no-work with no fallback flag
+    /// and no reason, while the verdict names the excluded units in sorted
+    /// order for the audit trail.
+    #[test]
+    fn closed_exclusion_is_visible_beside_an_unchanged_irrelevant_verdict(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_closed("node-api", &["api/**"], &[], "node", &["node server.js"]),
+            watched_closed("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.required.is_empty());
+        assert!(selection.prereq_inputs.is_empty());
+        assert!(!selection.fallback_full);
+        assert!(selection.fallback_reason.is_none());
+        assert_eq!(
+            selection.closed_excluded,
+            BTreeSet::from(["bun-web".to_owned(), "node-api".to_owned()]),
+            "both closed units excluded the unmatched path"
+        );
+        let json = serde_json::to_string(&selection).map_err(|error| error.to_string())?;
+        let shape: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        assert_eq!(
+            shape["closed_excluded"],
+            serde_json::json!(["bun-web", "node-api"]),
+            "the serialized record names the excluded units in sorted order: {json}"
+        );
+        Ok(())
+    }
+
+    /// A mixed estate records its closed exclusion beside the open
+    /// selection: the required set and the fallback reason are unchanged,
+    /// and the verdict separately names the unit the contract excluded.
+    #[test]
+    fn mixed_opaque_records_closed_exclusion_beside_open_selection(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_closed("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["node-api".to_owned()]),
+            "the open opaque unit alone; the closed unit is excluded"
+        );
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("selects only opaque units") && reason.contains("node-api"),
+            "the reason names the open opaque unit: {reason:?}"
+        );
+        assert_eq!(
+            selection.closed_excluded,
+            BTreeSet::from(["bun-web".to_owned()]),
+            "the verdict names the excluded closed unit"
+        );
+        Ok(())
+    }
+
+    /// An owned path records no exclusion: the fallback never fires, so
+    /// nothing is skipped — and the empty record serializes away, keeping
+    /// exclusion-free selections byte-identical.
+    #[test]
+    fn owned_paths_record_no_exclusion() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_closed(
+                "bun-web",
+                &["web/**", "docs/**"],
+                &[],
+                "bun",
+                &["bun run build"],
+            ),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("docs/guide.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["bun-web".to_owned()]),
+            "the closed owner alone, not the open opaque unit"
+        );
+        assert!(selection.closed_excluded.is_empty());
+        let json = serde_json::to_string(&selection).map_err(|error| error.to_string())?;
+        assert!(
+            !json.contains("closed_excluded"),
+            "an empty record serializes away: {json}"
         );
         Ok(())
     }

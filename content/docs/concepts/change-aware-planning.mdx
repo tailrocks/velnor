@@ -42,16 +42,16 @@ flowchart TD
 ```
 
 The diff is always the three-dot range `base...head`
-(`crates/velnor-workflow/src/runtime.rs:2968-2984`), and the plan job checks
+(`crates/velnor-workflow/src/runtime.rs:3026-3042`), and the plan job checks
 out with `fetch-depth: 0`, so no truncation can hide a change
 (`crates/velnor-workflow/src/primitives/ir.rs:6451`). The sibling schema-2
 runtime mirrors the same pipeline
-(`crates/velnor-workflow/src/s2/runtime.rs:2757-2847`).
+(`crates/velnor-workflow/src/s2/runtime.rs:2774-2906`).
 
 ## Owned, Opaque, Unknown, Irrelevant
 
 `CURRENT`: each changed path gets exactly one verdict from `classify_path`
-(`crates/velnor-workflow/src/reuse.rs:671-736`):
+(`crates/velnor-workflow/src/reuse.rs:707-772`):
 
 - `OWNED` — some unit's watch globs or extracted command read-globs match the
   path. The owners are selected.
@@ -70,11 +70,11 @@ runtime mirrors the same pipeline
   contract; an unmatchable path (empty, quoted) carries no contract hint
   because no contract can cover a path the matcher cannot spell.
 
-Owned wins over opaque (`crates/velnor-workflow/src/reuse.rs:710-712`): a
+Owned wins over opaque (`crates/velnor-workflow/src/reuse.rs:746-748`): a
 proven owner selects its units even when another unit's commands resist proof.
 Opacity is per unit, never per path. An empty changed path and a quoted diff
 path are `UNKNOWN` by construction
-(`crates/velnor-workflow/src/reuse.rs:681-695`).
+(`crates/velnor-workflow/src/reuse.rs:717-731`).
 
 A rename contributes both sides — target as renamed, source as deleted — so
 the old and new owners both match; a delete keeps its path so its owner still
@@ -86,7 +86,7 @@ the contract table below instead.
 ## Dependency semantics
 
 `CURRENT`: direct path hits expand across `depends_on` edges in one direction
-(`crates/velnor-workflow/src/reuse.rs:1123-1129`):
+(`crates/velnor-workflow/src/reuse.rs:1159-1165`):
 
 - Dependents of a changed unit join the verify set — changed inputs flow
   downstream, so downstream verdicts need re-proving.
@@ -98,27 +98,27 @@ the contract table below instead.
 
 Edges are followed across unit kinds: a cross-language dependency invalidates
 exactly like a same-language one
-(`crates/velnor-workflow/src/reuse.rs:275-277`). Every selected unit carries an
+(`crates/velnor-workflow/src/reuse.rs:280-282`). Every selected unit carries an
 explanation naming its paths or the edge that pulled it in, and every recorded
 input names its consumer
-(`crates/velnor-workflow/src/reuse.rs:413-476`).
+(`crates/velnor-workflow/src/reuse.rs:424-488`).
 
 Three narrower rules run around the classifier, in order. `CURRENT`:
 
 1. A version-bump-only change selects the configured allowlist plus the
    matching workspace checks, before irrelevant-skip is considered
-   (`crates/velnor-workflow/src/runtime.rs:2760-2782`).
+   (`crates/velnor-workflow/src/runtime.rs:2798-2823`).
 2. Workspace checks join only when they share a Cargo lockfile root with a
    directly selected Rust unit, so independent Cargo projects stay
-   affected-only (`crates/velnor-workflow/src/runtime.rs:2849-2874`).
+   affected-only (`crates/velnor-workflow/src/runtime.rs:2907-2932`).
 3. Lane admission narrows the selection to units the admitted lanes can run;
    units of an unknown kind are kept, never silently dropped
-   (`crates/velnor-workflow/src/runtime.rs:1955-2013`).
+   (`crates/velnor-workflow/src/runtime.rs:1967-2025`).
 
 ## Event behavior
 
 `CURRENT`: the event decides the scope before any diff runs
-(`crates/velnor-workflow/src/runtime.rs:1899-1930`).
+(`crates/velnor-workflow/src/runtime.rs:1911-1942`).
 
 | Event | Scope | Override |
 | --- | --- | --- |
@@ -139,7 +139,7 @@ verdict, next section), and the event table above admits no release event.
 
 `CURRENT`: CI-contract paths under `.github/` classify through
 `github_verdict`, not a blanket rule
-(`crates/velnor-workflow/src/reuse.rs:1052-1108`):
+(`crates/velnor-workflow/src/reuse.rs:1088-1144`):
 
 - Four global classes stay full with a reason: the scheduling aggregates
   (`workflows/ci-pr.yml`, `workflows/ci-main.yml`, `workflows/nightly.yml`,
@@ -185,16 +185,23 @@ helper scripts, dynamic includes) are declared in a typed generation-time
 
 Declared coverage composes with opacity: a declared path still narrows to its
 owners even when other units stay opaque
-(`crates/velnor-workflow/src/reuse.rs:794-797`), so a changed script under a
+(`crates/velnor-workflow/src/reuse.rs:830-833`), so a changed script under a
 `script` contract selects exactly its unit instead of every opaque unit. A
 uniform `complete = true` claim closes the unit — the trusted owner
 assertion that the declared paths plus the scan watch are the unit's entire
 read set — so unmatched paths provably exclude it; completeness is
-unit-wide (mixed claims fail) and contradicts `unresolved`. Without
+unit-wide (mixed claims fail) and contradicts `unresolved`. The claim is
+trusted, not proven: generation validates its shape, never its truth, so a
+false `complete` silently skips verification for paths the unit actually
+reads. Declare `complete` only for mechanically-enumerable read sets — an
+exact glob closure the scan plus the contract spells in full, with no
+dynamic includes, glob expansion, or runner-resolved inputs outside it.
+Every exclusion stays auditable: the verdict names the skipped units in
+`closed_excluded`, on the plan log and in the `select` JSON alike. Without
 `complete`, no contract type narrows beyond the paths it covers: uncovered
 paths keep the conservative fallback, and the fallback reason names the
 missing contract, so unknown impact reports the exact `reads` keys that
-would narrow it (`crates/velnor-workflow/src/reuse.rs:738-755`).
+would narrow it (`crates/velnor-workflow/src/reuse.rs:774-791`).
 
 ## Plan outputs and how to inspect a plan
 
@@ -202,7 +209,7 @@ would narrow it (`crates/velnor-workflow/src/reuse.rs:738-755`).
 inputs from the environment — `EVENT_NAME`, `CI_SCOPE_OVERRIDE`, `BASE_SHA`,
 `HEAD_SHA`, `VELNOR_LANES`, `VELNOR_SELECTION_FILE`,
 `VELNOR_EXPECTED_WORK_FILE`, `GITHUB_OUTPUT`
-(`crates/velnor-workflow/src/runtime.rs:1741-1757`) — and publishes the
+(`crates/velnor-workflow/src/runtime.rs:1742-1758`) — and publishes the
 selection to stdout, `$GITHUB_OUTPUT`, the selection file, and the
 expected-work file. The full output-field reference is in the
 [interface reference](/reference/interface#workflow-generation-and-monitoring);
@@ -214,12 +221,15 @@ Three commands inspect a plan without running it. `CURRENT`:
 
 - `velnor-workflow select --config PATH --base BASE --head HEAD [--scope SCOPE]`
   prints the affected selection as JSON: `required`, `full_units`,
-  `prereq_inputs`, `fallback_full`, per-unit `explanations`, and
-  `fallback_reason` only on fallback
+  `prereq_inputs`, `fallback_full`, per-unit `explanations`,
+  `fallback_reason` only on fallback, and `closed_excluded` only when a
+  closed-world contract excluded units
   (`crates/velnor-workflow/src/runtime.rs:649-663`,
-  `crates/velnor-workflow/src/runtime.rs:1347-1352`). This is the why-run /
+  `crates/velnor-workflow/src/runtime.rs:1348-1353`,
+  `crates/velnor-workflow/src/reuse.rs:263-264`). This is the why-run /
   why-skipped oracle: every unit names its matched paths or its pulling edge,
-  and every recorded input names its consumer.
+  every recorded input names its consumer, and every closed-world skip
+  names its excluded units.
 - `velnor-workflow fingerprint --config PATH [--unit ID] [--rev REV] [--live IDS]`
   prints the canonical per-unit artifact identities at one revision
   (`crates/velnor-workflow/src/runtime.rs:665-681`).
@@ -245,16 +255,16 @@ no-work, never a silent pass:
   (`crates/velnor-workflow/src/primitives/ir.rs:6437-6448`).
 - An unproven empty selection fails before any artifact escapes: no marker is
   ever written for an empty plan without a reason
-  (`crates/velnor-workflow/src/runtime.rs:1805-1807`).
+  (`crates/velnor-workflow/src/runtime.rs:1816-1818`).
 - `run --scope affected` against a validated empty selection reports
   `no_work_reason=CI selection artifact selects zero workload units; nothing
   to run` and exits successfully
-  (`crates/velnor-workflow/src/runtime.rs:2431-2438`).
+  (`crates/velnor-workflow/src/runtime.rs:2443-2450`).
 - The aggregate passes explicit no-work only when the marker is set and zero
   units are listed; a marker beside listed units, or emptiness without the
   marker, fails closed
-  (`crates/velnor-workflow/src/reuse.rs:1883-1895`,
-  `crates/velnor-workflow/src/reuse.rs:4315-4346`).
+  (`crates/velnor-workflow/src/reuse.rs:1920-1932`,
+  `crates/velnor-workflow/src/reuse.rs:4456-4487`).
 
 `CURRENT`: the stable aggregate check every repository ruleset gates on is
 `ci-required`, read from one constant so the name cannot drift between
@@ -282,17 +292,17 @@ auditable model (`crates/velnor-workflow/src/reuse.rs:1-37`):
   holds: full (never truncated) fingerprint equality, recipe equality, a
   passing producing aggregate, producing check-set coverage of the current
   expected set, satisfying trust, and explicit freshness for live-state
-  checks (`crates/velnor-workflow/src/reuse.rs:1613-1682`). Artifact presence
+  checks (`crates/velnor-workflow/src/reuse.rs:1650-1719`). Artifact presence
   alone never reuses: `Evidence` has no name field to match
-  (`crates/velnor-workflow/src/reuse.rs:1563-1577`).
+  (`crates/velnor-workflow/src/reuse.rs:1600-1614`).
 - The aggregate scores a `reused_from` result against its producing evidence
   and explains it as `reused`; reports outside the plan are noted as extra
   and ignored — unplanned work never greens or reds planned work
-  (`crates/velnor-workflow/src/reuse.rs:1842-1853`). Prerequisites outside
+  (`crates/velnor-workflow/src/reuse.rs:1879-1890`). Prerequisites outside
   the plan are noted as `build input` instead of scored — the verify jobs
   provided them in-job, so no verdict is expected — and only an in-plan
   prerequisite that did not pass fails its dependents
-  (`crates/velnor-workflow/src/reuse.rs:2101-2147`).
+  (`crates/velnor-workflow/src/reuse.rs:2138-2184`).
 
 `FUTURE`: rendered pipelines emit no reused results today — the aggregate
 collection step fails a record carrying `reused_from` without a
@@ -308,19 +318,19 @@ decisions into generated unit jobs is not.
 - Trusted events (`push`, `schedule`, `merge_group`) require full scope at
   plan time, and unit jobs re-check the verdict at run time so a narrowed job
   scope can never execute under a trusted event
-  (`crates/velnor-workflow/src/runtime.rs:2381-2404`).
+  (`crates/velnor-workflow/src/runtime.rs:2393-2416`).
 - The selection artifact is bound to its plan: version-checked, SHA-bound
   (`validate_selection_sha`), scope-matched against the job, and rejected
   when it names unknown units or marks an unselected unit as full
-  (`crates/velnor-workflow/src/runtime.rs:2405-2428`).
+  (`crates/velnor-workflow/src/runtime.rs:2417-2440`).
 - The expected-work file carries the plan's `base_sha`/`head_sha`; the
   aggregate refuses an unbound file and any file whose SHAs do not match its
   own checkout, so a stale upload, a mis-threaded artifact, or a forged
   identity never scores
-  (`crates/velnor-workflow/src/reuse.rs:2280-2304`).
+  (`crates/velnor-workflow/src/reuse.rs:2317-2341`).
 - Reuse carries trust: producing evidence has a trust class, and reuse
   requires it to satisfy the request
-  (`crates/velnor-workflow/src/reuse.rs:1670-1677`). Units declare their own
+  (`crates/velnor-workflow/src/reuse.rs:1707-1714`). Units declare their own
   lane trust (`trusted-only` versus `untrusted-ok` in
   `.github/ci/project.toml`).
 
@@ -335,7 +345,7 @@ overrides the terminal result — GitHub remains authoritative for both, as in
 A `no_work_reason` of `no selected workload unit runs on the admitted
 lanes` means lane admission narrowed a real selection to zero: the diff
 selected units, but none run on the lanes this plan admits
-(`crates/velnor-workflow/src/runtime.rs:1994-2002`). `select` takes no
+(`crates/velnor-workflow/src/runtime.rs:2006-2014`). `select` takes no
 lanes input and still shows those units selected, so compare its output
 against the plan's `units`, not against the verdict.
 
@@ -344,7 +354,9 @@ against the plan's `units`, not against the verdict.
    `no_work_reason` (field reference in
    [interface](/reference/interface#workflow-generation-and-monitoring)).
    The plan log's `prereq_inputs=` line names the recorded build inputs
-   behind the verify set.
+   behind the verify set, and its `closed_excluded=` line names the
+   closed-world units an unmatched path skipped
+   (`crates/velnor-workflow/src/runtime.rs:1853-1857`).
 2. Read the `select` JSON `explanations`: a run unit names its matched
    changed paths (`matched changed path ...`), a kind-narrowed unit names
    the reusable (`via ...`), a dependent names its edge (`dependent of
@@ -360,16 +372,22 @@ against the plan's `units`, not against the verdict.
 4. A skipped unit under a no-work plan is proven irrelevant: re-run `select`
    on the same base/head and confirm the path classifies `Irrelevant` — no
    watcher, no consumer, no openly-opaque unit: closed units provably
-   exclude the path.
+   exclude the path. That proof is only as true as the `complete` claim
+   behind it — a false claim silently skips verification for paths the
+   unit actually reads — so confirm the skip in the plan log's
+   `closed_excluded=` line (or the `select` JSON's `closed_excluded`
+   field) and re-check the contract against a mechanically-enumerable
+   read set before trusting it
+   (`crates/velnor-workflow/src/reuse.rs:683-705`).
 5. Opacity suspects, in likelihood order: a `node`/`bun` unit running package
-   commands (`crates/velnor-workflow/src/reuse.rs:483-485`); an opaque-runner
+   commands (`crates/velnor-workflow/src/reuse.rs:495-497`); an opaque-runner
    token (`bun`, `npm`, `node`, `npx`, `python`, `mise`, `make`, shells, and
-   the rest of `crates/velnor-workflow/src/reuse.rs:492-522`); expansion or
+   the rest of `crates/velnor-workflow/src/reuse.rs:504-534`); expansion or
    escape syntax the extractor refuses to parse; a `cargo`/`mbx` subcommand
    outside the audited vocabulary (`fmt`, `clippy`, `test`, `nextest`,
    `check`, `deny`, `audit`); a bare repo-relative script path; a root
    escape (`..`); an unquoted or unbalanced glob token
-   (`crates/velnor-workflow/src/reuse.rs:798-891`).
+   (`crates/velnor-workflow/src/reuse.rs:834-927`).
 
 ## Contributor review criteria and regression expectations
 
@@ -381,10 +399,10 @@ for unknown impact, tests plus updated product docs for every change):
 - Prove the fix on the live `plan` path (`selection_for_diff`), not only on
   `select`: unmatched-no-consumer changes must select zero workload units
   (regression shape:
-  `crates/velnor-workflow/src/runtime.rs:6764-6777`).
+  `crates/velnor-workflow/src/runtime.rs:6822-6835`).
 - Keep the command-vocabulary conformance table green: every emitted command
   shape must classify transparent or opaque with its documented cause
-  (`crates/velnor-workflow/src/reuse.rs:3730-3830`).
+  (`crates/velnor-workflow/src/reuse.rs:3871-3971`).
 - Update behavior-pinning tests in the same change; never leave a test
   asserting the old fallback. Keep output byte-stable for identical inputs.
 - No repository-specific knowledge in the generator: no hardcoded paths,
@@ -400,7 +418,8 @@ for unknown impact, tests plus updated product docs for every change):
 
 `CURRENT` on this branch: the Owned/Opaque/Unknown/Irrelevant classifier over watch
 globs, command read-globs, and typed declared reads with missing-contract
-reporting; closed-world contracts that exclude provably-unread paths;
+reporting; closed-world contracts that exclude provably-unread paths and
+name the excluded units;
 verify-set scheduling with prerequisites recorded as in-job build inputs;
 the `.github/` contract table;
 the `fallback_reason` / `planned_no_work` / `no_work_reason` channels; the
@@ -412,12 +431,12 @@ and the trusted-event guards at plan and run time.
 
 - `node`/`bun` units stay opaque (paths they do not own conservatively select the opaque units)
   until the scan proves whole-root ownership for those units
-  (`crates/velnor-workflow/src/reuse.rs:478-485`); urgent gaps go through
+  (`crates/velnor-workflow/src/reuse.rs:490-497`); urgent gaps go through
   typed `reads` contracts meanwhile, and a `complete` contract closes a unit
   whose owner can bound its whole read set.
 - The `select` CLI still parses a non-NUL `git diff --name-status` stream
-  (`crates/velnor-workflow/src/runtime.rs:1362-1384`); `-z` parity with the
-  plan path (`crates/velnor-workflow/src/runtime.rs:2968-2984`) is a
+  (`crates/velnor-workflow/src/runtime.rs:1363-1385`); `-z` parity with the
+  plan path (`crates/velnor-workflow/src/runtime.rs:3026-3042`) is a
   follow-up.
 - Rendered pipelines emit no reused results yet (above); live result reuse
   across runs is future work.
