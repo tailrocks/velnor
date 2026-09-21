@@ -244,18 +244,16 @@ fn generation_refuses_an_unpinned_xcodegen() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn install_subset_closes_over_configured_binstall() -> Result<(), Box<dyn Error>> {
-    let (scratch, root) = fixture_root("binstall")?;
-    let config = fs::read_to_string(root.join("mise.toml"))?;
-    fs::write(
-        root.join("mise.toml"),
-        format!("{config}\n[settings]\ncargo.binstall = true\n"),
-    )?;
+fn install_subset_closes_over_backend_helpers() -> Result<(), Box<dyn Error>> {
+    // mise enforces the `cargo:` backend's helpers with no settings flag
+    // and no `depends` entry, so the subset closes over every helper the
+    // lock pins: the toolchain plus the binstall and sccache helpers.
+    let (scratch, root) = fixture_root("backend-helpers")?;
     let lock = fs::read_to_string(root.join("mise.lock"))?;
     fs::write(
         root.join("mise.lock"),
         format!(
-            "{lock}\n[[tools.cargo-binstall]]\nversion = \"1.21.1\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n"
+            "{lock}\n[[tools.cargo-binstall]]\nversion = \"1.21.1\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n\n[[tools.\"cargo:sccache\"]]\nversion = \"0.16.0\"\nbackend = \"cargo:sccache\"\n\n[[tools.rust]]\nversion = \"1.89.0\"\nbackend = \"core:rust\"\n"
         ),
     )?;
     let out = scratch.join("out");
@@ -264,8 +262,8 @@ fn install_subset_closes_over_configured_binstall() -> Result<(), Box<dyn Error>
     for id in [PRODUCER, CONSUMER] {
         let caller = caller_block(&ci_pr, id)?;
         assert!(
-            caller.contains("mise_tools: \"cargo:boltffi_cli cargo-binstall\""),
-            "the {id} caller installs the configured dependency beside the cargo tool:\n{caller}"
+            caller.contains("mise_tools: \"cargo:boltffi_cli rust cargo-binstall cargo:sccache\""),
+            "the {id} caller installs every backend helper beside the cargo tool:\n{caller}"
         );
     }
     let app_caller = caller_block(&ci_pr, APP)?;
@@ -278,12 +276,11 @@ fn install_subset_closes_over_configured_binstall() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn generation_refuses_cargo_subset_without_binstall_provider() -> Result<(), Box<dyn Error>> {
-    let (scratch, root) = fixture_root("binstall-missing")?;
-    let config = fs::read_to_string(root.join("mise.toml"))?;
+fn generation_refuses_dangling_depends_edge() -> Result<(), Box<dyn Error>> {
+    let (scratch, root) = fixture_root("depends-dangling")?;
     fs::write(
         root.join("mise.toml"),
-        format!("{config}\n[settings]\ncargo.binstall = true\n"),
+        "[tools]\n\"cargo:boltffi_cli\" = { version = \"0.30.1\", depends = [\"example-ghost\"] }\n",
     )?;
     let out = scratch.join("out");
     let result = generate(&root, &out);
@@ -295,7 +292,7 @@ fn generation_refuses_cargo_subset_without_binstall_provider() -> Result<(), Box
         result.is_err()
             && message.contains(PRODUCER)
             && message.contains("cargo:boltffi_cli")
-            && message.contains("cargo.binstall"),
+            && message.contains("example-ghost"),
         "generation refuses naming the unit, the cargo tool, and the missing edge: {message}"
     );
     fs::remove_dir_all(&scratch)?;

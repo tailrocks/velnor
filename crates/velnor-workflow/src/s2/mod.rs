@@ -1301,6 +1301,11 @@ pub struct ProjectConfig {
     /// lock, in which case identity checking is skipped. Never serialized:
     /// the lock itself is the source of truth.
     pub(crate) mise_lock_keys: BTreeSet<String>,
+    /// Recorded backends by tool key from the root `mise.lock`, read at
+    /// scan time. Bare `install_args` members attribute their backend
+    /// through these. Never serialized: the lock itself is the source of
+    /// truth.
+    pub(crate) mise_lock_backends: BTreeMap<String, String>,
     /// Install dependencies the root `mise.toml` declares, over which
     /// derived `install_args` subsets close. Empty when the scan root has
     /// no mise configuration. Never serialized: the config itself is the
@@ -1857,6 +1862,8 @@ fn scan_target(
     // `config::mise_lock_keys_for_root` for the per-unit-lock gap.
     let mise_lock_keys = config::mise_lock_keys_for_root(root)?;
     config.mise_lock_keys.clone_from(&mise_lock_keys);
+    let mise_lock_backends = config::mise_lock_backends_for_root(root)?;
+    config.mise_lock_backends.clone_from(&mise_lock_backends);
     // The root config's install edges close every derived subset: a subset
     // that omits a configured dependency fails at install time on the
     // runner, so both validation and rendering resolve against these.
@@ -1896,6 +1903,15 @@ fn scan_target(
     crate::s2::primitives::validate_mise_install_deps_are_closed(
         &config.units,
         &mise_lock_keys,
+        &mise_lock_backends,
+        &mise_install_deps,
+    )?;
+    // Check profiles render their own locked installs from their own tool
+    // lists; the same unprovable subset fails here with the profile id.
+    crate::s2::primitives::check_profiles::validate_profile_install_deps_are_closed(
+        &config.check_profiles,
+        &mise_lock_keys,
+        &mise_lock_backends,
         &mise_install_deps,
     )?;
     // Every surface that renders a self-hosted lane must name its labels,
@@ -11231,6 +11247,7 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_lock_backends: BTreeMap::new(),
             mise_install_deps: config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
@@ -14991,7 +15008,7 @@ lockfile = true
         must(
             fs::write(
                 root.join("mise.lock"),
-                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\n",
+                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\nbackend = \"aqua:nextest-rs/nextest/cargo-nextest\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\nbackend = \"github:open-telemetry/weaver\"\n",
             ),
             "write mixed lock",
         );
@@ -15029,7 +15046,7 @@ lockfile = true
 
     #[test]
     fn emitted_install_args_pass_the_runner_lock_gate() {
-        const LOCK: &str = "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\n";
+        const LOCK: &str = "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\nbackend = \"aqua:nextest-rs/nextest/cargo-nextest\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\nbackend = \"github:open-telemetry/weaver\"\n";
         let root = nextest_fixture_repository("mise-runner-contract");
         must(fs::write(root.join("mise.lock"), LOCK), "write mixed lock");
         let id = scanned_rust_unit_id(&root);
@@ -19090,6 +19107,7 @@ lockfile = true
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_lock_backends: BTreeMap::new(),
             mise_install_deps: config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
