@@ -30,7 +30,9 @@
 - Source branch / checkpoint: `goal-handoff/velnor-rollout-20260921-e3119d71`, base
   `origin/main@45ef1ebe` ("chore(ci): bump D19 pin to eed474c4 (#1062)"). Local worktree:
   `/tmp/velnor-handoff-e3119d71` (linked to `…/all-repo/tailrocks_velnor/.git`).
-- PR: (URL filled after creation). Base `main@45ef1ebe` (observed at freeze; re-check at resume).
+- PR: https://github.com/tailrocks/velnor/pull/1068 (DRAFT, auto-merge off). Base
+  `main@45ef1ebe` (observed at freeze; re-check at resume). Published head SHA: see PR body
+  / final receipt (commit after this metadata update).
 - Remote-portable? PARTIALLY. All merged code, open PR heads (except one), ruleset edits, and the
   termcomp preservation ref are on GitHub. LOCAL-ONLY dependencies (explicit): `/tmp` scratch
   (ledgers `/tmp/audit-*.md`, `/tmp/report-*.md`, `/tmp/final-table.md` NOT built, `/tmp/cq-*`
