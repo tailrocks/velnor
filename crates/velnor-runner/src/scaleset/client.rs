@@ -912,6 +912,7 @@ fn run_curl_raw_request(
     let id = uuid::Uuid::new_v4();
     let header_in_path = temp_dir.join(format!("velnor-req-hdr-{id}.tmp"));
     let header_out_path = temp_dir.join(format!("velnor-resp-hdr-{id}.tmp"));
+    let body_in_path = temp_dir.join(format!("velnor-req-body-{id}.tmp"));
 
     let write_res = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&header_in_path)?;
@@ -953,31 +954,43 @@ fn run_curl_raw_request(
         .arg("0");
 
     let body_bytes = request.body().and_then(|b| b.as_bytes());
-    if body_bytes.is_some() {
-        cmd.arg("--data-binary").arg("@-");
-        cmd.stdin(Stdio::piped());
+    let has_body = if let Some(bytes) = body_bytes {
+        if let Err(e) = std::fs::write(&body_in_path, bytes) {
+            let _ = std::fs::remove_file(&header_in_path);
+            let _ = std::fs::remove_file(&body_in_path);
+            return Err(ScaleSetError::Local(format!(
+                "failed to write curl body file: {e}"
+            )));
+        }
+        cmd.arg("--data-binary")
+            .arg(format!("@{}", body_in_path.display()));
+        true
     } else {
-        cmd.stdin(Stdio::null());
-    }
+        false
+    };
+
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
     let spawn_res = cmd.spawn();
-    let mut child = match spawn_res {
+    let child = match spawn_res {
         Ok(child) => child,
         Err(e) => {
             let _ = std::fs::remove_file(&header_in_path);
             let _ = std::fs::remove_file(&header_out_path);
+            if has_body {
+                let _ = std::fs::remove_file(&body_in_path);
+            }
             return Err(ScaleSetError::Transport(format!("spawn curl: {e}")));
         }
     };
 
-    if let (Some(bytes), Some(mut stdin)) = (body_bytes, child.stdin.take()) {
-        let _ = stdin.write_all(bytes);
-    }
-
     let output_res = child.wait_with_output();
     let _ = std::fs::remove_file(&header_in_path);
+    if has_body {
+        let _ = std::fs::remove_file(&body_in_path);
+    }
 
     let output = match output_res {
         Ok(output) => output,
