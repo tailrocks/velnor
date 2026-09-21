@@ -1479,7 +1479,9 @@ mod tests {
             .unwrap();
         assert_eq!(req.body().and_then(|b| b.as_bytes()), Some(&[1, 2, 3][..]));
         assert_eq!(
-            req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            req.headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
             Some("application/json")
         );
     }
