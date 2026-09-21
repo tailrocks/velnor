@@ -225,8 +225,8 @@ Resume command (explicit user message required):
 
 ## K. Publication receipt (filled by publisher)
 
-- Handoff commit: (SHA after commit)
+- Handoff commit: `084b6c34e076ae6b550d15cbb7e20373fc5090bf` (+ receipt follow-up)
 - Handoff branch push: `handoff/change-aware-minimal-work-20260921` → `origin`
-- Draft PR: (URL after creation; base `main`, do-not-merge)
+- Draft PR: https://github.com/tailrocks/velnor/pull/1067 (base `main`, do-not-merge)
 - Jackin side: no commit needed (clean, pushed @ `909a9f54`)
 - Merging and local cleanup: documented in §I, NOT performed during handoff.
