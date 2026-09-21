@@ -110,6 +110,33 @@ fn own_closure() -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn readiness(root: &Path, closure: &str, revision: &str) -> PathBuf {
+    let path = root.join("publication-readiness.json");
+    let products = ["Linux-X64", "Linux-ARM64", "macOS-ARM64"]
+        .into_iter()
+        .map(|platform| {
+            serde_json::json!({
+                "platform": platform,
+                "digest": "d".repeat(64),
+                "revoked": false,
+                "expires_at": 4_102_444_800_u64,
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "velnor-workflow.publication-readiness.v1",
+            "closure": closure,
+            "revision": revision,
+            "products": products,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
 const OLD_PIN: &str = "0000000000000000000000000000000000000000";
 
 #[test]
@@ -118,12 +145,15 @@ fn promote_commits_pin_metadata_and_tree_atomically() {
     let repo = promotable_tree(&root, OLD_PIN);
     let revision = own_revision();
     let closure = own_closure();
+    let readiness = readiness(&root, &closure, &revision);
 
     let outcome = binary()
         .args([
             "promote",
             "--rev",
             &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
             "--repo",
             repo.to_str().unwrap(),
             "--generator-repo",
@@ -188,6 +218,8 @@ fn promote_commits_pin_metadata_and_tree_atomically() {
             "promote",
             "--rev",
             &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
             "--repo",
             repo.to_str().unwrap(),
             "--generator-repo",
@@ -240,12 +272,15 @@ fn promote_advances_a_committed_prior_render() {
         "the prior render commits generated workflows"
     );
     let revision = own_revision();
+    let readiness = readiness(&root, &own_closure(), &revision);
 
     let outcome = binary()
         .args([
             "promote",
             "--rev",
             &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
             "--repo",
             repo.to_str().unwrap(),
             "--generator-repo",
@@ -299,12 +334,15 @@ fn promote_refuses_a_pin_its_source_cannot_render() {
     git(&generator, &["add", "-A"]);
     git(&generator, &["commit", "--quiet", "--message", "foreign"]);
     let foreign = git(&generator, &["rev-parse", "HEAD"]);
+    let readiness = readiness(&root, &"c".repeat(64), &foreign);
 
     let outcome = binary()
         .args([
             "promote",
             "--rev",
             &foreign,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
             "--repo",
             repo.to_str().unwrap(),
             "--generator-repo",
@@ -338,10 +376,106 @@ fn promote_refuses_a_pin_its_source_cannot_render() {
 }
 
 #[test]
+fn promote_refuses_invalid_publication_readiness_before_mutation() {
+    let root = temporary_root("invalid-readiness");
+    let repo = promotable_tree(&root, OLD_PIN);
+    let revision = own_revision();
+    let readiness = readiness(&root, &own_closure(), &revision);
+    let mut manifest = fs::read_to_string(&readiness).unwrap();
+    manifest = manifest.replacen("\"revoked\":false", "\"revoked\":true", 1);
+    fs::write(&readiness, manifest).unwrap();
+
+    let outcome = binary()
+        .args([
+            "promote",
+            "--rev",
+            &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--generator-repo",
+            workspace_root().to_str().unwrap(),
+            "--default-branch",
+            "main",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(!outcome.status.success(), "revoked product is refused");
+    assert!(
+        stderr.contains("publication readiness product") && stderr.contains("revoked"),
+        "the refusal names the invalid readiness evidence: {stderr}"
+    );
+    let pin = fs::read_to_string(repo.join(".github-gen/velnor-workflow.toml")).unwrap();
+    assert!(
+        pin.contains(&format!("revision = \"{OLD_PIN}\"")),
+        "the pin is untouched: {pin}"
+    );
+    assert_eq!(
+        git(&repo, &["rev-list", "--count", "HEAD"]).trim(),
+        "1",
+        "no commit lands"
+    );
+    assert!(
+        git(&repo, &["status", "--porcelain"]).is_empty(),
+        "the tree is untouched"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn promote_refuses_missing_publication_readiness_before_mutation() {
+    let root = temporary_root("missing-readiness");
+    let repo = promotable_tree(&root, OLD_PIN);
+    let revision = own_revision();
+    let missing = root.join("missing-publication-readiness.json");
+
+    let outcome = binary()
+        .args([
+            "promote",
+            "--rev",
+            &revision,
+            "--publication-readiness",
+            missing.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--generator-repo",
+            workspace_root().to_str().unwrap(),
+            "--default-branch",
+            "main",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(!outcome.status.success(), "missing readiness is refused");
+    assert!(
+        stderr.contains("read publication readiness manifest"),
+        "the refusal names the missing evidence: {stderr}"
+    );
+    let pin = fs::read_to_string(repo.join(".github-gen/velnor-workflow.toml")).unwrap();
+    assert!(
+        pin.contains(&format!("revision = \"{OLD_PIN}\"")),
+        "the pin is untouched: {pin}"
+    );
+    assert_eq!(
+        git(&repo, &["rev-list", "--count", "HEAD"]).trim(),
+        "1",
+        "no commit lands"
+    );
+    assert!(
+        git(&repo, &["status", "--porcelain"]).is_empty(),
+        "the tree is untouched"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn promote_dry_run_verifies_without_writing() {
     let root = temporary_root("dry-run");
     let repo = promotable_tree(&root, OLD_PIN);
     let revision = own_revision();
+    let readiness = readiness(&root, &own_closure(), &revision);
 
     let outcome = binary()
         .args([
@@ -349,6 +483,8 @@ fn promote_dry_run_verifies_without_writing() {
             "--dry-run",
             "--rev",
             &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
             "--repo",
             repo.to_str().unwrap(),
             "--generator-repo",
@@ -407,12 +543,15 @@ fn promote_refuses_a_symlinked_generation_config() {
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "--quiet", "--message", "symlink config"]);
     let revision = own_revision();
+    let readiness = readiness(&root, &own_closure(), &revision);
 
     let outcome = binary()
         .args([
             "promote",
             "--rev",
             &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
             "--repo",
             repo.to_str().unwrap(),
             "--generator-repo",
