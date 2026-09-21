@@ -164,7 +164,81 @@ fn native_graph_renders_product_edge_probe_and_macos_placement() -> Result<(), B
         rust.contains("runs-on: macos-26"),
         "the producer job runs on macOS:\n{rust}"
     );
+    assert!(
+        rust.contains("setup-velnor-workflow")
+            && !rust.contains("name: Download Velnor workflow runtime"),
+        "the Apple producer job bootstraps the runtime instead of downloading the Linux plan artifact:\n{rust}"
+    );
+    assert!(
+        !swift.contains("ls -d ") && !swift.contains("| grep"),
+        "the Xcode probe selects through globs, never ls pipelines:\n{swift}"
+    );
+    assert!(
+        swift.contains("- name: Set up Mise tools")
+            && swift.contains("install_args: ${{ inputs.mise_tools }}"),
+        "the Swift job provisions declared tools through the mise action:\n{swift}"
+    );
+    let ci_pr = fs::read_to_string(out.join(".github/workflows/ci-pr.yml"))?;
+    let app_caller = caller_block(&ci_pr, APP)?;
+    assert!(
+        app_caller.contains("mise_tools: xcodegen"),
+        "the XcodeGen app caller passes its generator CLI:\n{app_caller}"
+    );
+    let consumer_caller = caller_block(&ci_pr, CONSUMER)?;
+    assert!(
+        consumer_caller.contains("mise_tools: \"cargo:boltffi_cli\""),
+        "the Swift consumer caller passes its guarded-rebuild tool:\n{consumer_caller}"
+    );
 
+    fs::remove_dir_all(&scratch)?;
+    Ok(())
+}
+
+/// The caller `with:` block for one unit: from its `unit:` line through
+/// the next job header, so per-caller inputs stay attributed to the unit
+/// that carries them.
+fn caller_block(ci_pr: &str, id: &str) -> Result<String, Box<dyn Error>> {
+    let marker = format!("      unit: {id}\n");
+    let start = ci_pr
+        .find(&marker)
+        .ok_or_else(|| format!("ci-pr.yml calls no unit {id}"))?;
+    let rest = &ci_pr[start..];
+    let mut end = ci_pr.len();
+    let mut search = marker.len();
+    while let Some(found) = rest[search..].find("\n  ") {
+        let candidate = search + found + 3;
+        if rest[candidate..]
+            .chars()
+            .next()
+            .is_some_and(|next| next != ' ')
+        {
+            end = start + search + found;
+            break;
+        }
+        search = candidate;
+    }
+    Ok(ci_pr[start..end].to_owned())
+}
+
+#[test]
+fn generation_refuses_an_unpinned_xcodegen() -> Result<(), Box<dyn Error>> {
+    let (scratch, root) = fixture_root("unpinned")?;
+    fs::write(
+        root.join("mise.lock"),
+        "lockfile_version = 2\n\n[[tools.\"cargo:boltffi_cli\"]]\nversion = \"0.30.1\"\nbackend = \"cargo:boltffi_cli\"\nspecifiers = [\"0.30.1\"]\n",
+    )?;
+    let out = scratch.join("out");
+    let result = generate(&root, &out);
+    let message = match &result {
+        Ok(()) => String::new(),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        result.is_err()
+            && message.contains("mise.lock does not pin xcodegen")
+            && message.contains(APP),
+        "generation refuses naming the unit and the missing key: {message}"
+    );
     fs::remove_dir_all(&scratch)?;
     Ok(())
 }

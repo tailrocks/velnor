@@ -20,6 +20,7 @@ use super::{
 };
 use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap};
 use crate::s2::reuse::REQUIRED_CHECK;
+use crate::s2::scan::swift::XCODEGEN_TOOL;
 use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
@@ -369,6 +370,177 @@ mod tests {
         assert!(message.contains("rust-producer"), "{message}");
         assert!(message.contains(super::BOLTFFI_TOOL), "{message}");
         assert!(message.contains("rust"), "{message}");
+    }
+
+    /// One hand-built `XcodeGen` unit: the generate command the scan emits,
+    /// with the stamped tool id the scan derives for it.
+    fn xcodegen_unit(id: &str) -> Unit {
+        let mut unit = rust_unit(id, "client");
+        unit.kind = UnitKind::Swift;
+        unit.label = format!("Apple app ({id}, XcodeGen)");
+        unit.platform = crate::s2::provider::Platform::MacosArm64;
+        unit.pr_commands =
+            vec!["cd -- 'client' && xcodegen generate --spec 'project.yml'".to_owned()];
+        unit.full_commands.clone_from(&unit.pr_commands);
+        unit.mise_tools = vec![super::XCODEGEN_TOOL.to_owned()];
+        unit
+    }
+
+    #[test]
+    fn xcodegen_need_installs_the_locked_tool_id() {
+        let unit = xcodegen_unit("swift-xcodegen-app");
+        assert!(super::needs_xcodegen(&unit));
+        assert!(!super::needs_xcodegen(&rust_unit("rust-plain", ".")));
+        let mut qualified = rust_unit("rust-path", ".");
+        qualified.pr_commands = vec!["/opt/mise/shims/xcodegen generate".to_owned()];
+        assert!(super::needs_xcodegen(&qualified));
+        let lock = BTreeSet::from([super::XCODEGEN_TOOL.to_owned()]);
+        assert_eq!(
+            super::mise_tool_ids(&unit, &lock),
+            vec![super::XCODEGEN_TOOL.to_owned()]
+        );
+        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock).is_empty());
+        // A generation-config override that replaces the stamped tools
+        // cannot drop the install: detection re-adds the id.
+        let mut overridden = unit;
+        overridden.mise_tools = vec!["cargo-binstall".to_owned()];
+        assert_eq!(
+            super::mise_tool_ids(&overridden, &lock),
+            vec![super::XCODEGEN_TOOL.to_owned(), "cargo-binstall".to_owned()]
+        );
+    }
+
+    #[test]
+    fn xcodegen_validation_refuses_an_unpinned_generate() {
+        let unit = xcodegen_unit("swift-xcodegen-app");
+        let pinned = BTreeSet::from([super::XCODEGEN_TOOL.to_owned()]);
+        assert!(
+            super::validate_xcodegen_tools_are_locked(std::slice::from_ref(&unit), &pinned).is_ok()
+        );
+        let plain = rust_unit("rust-plain", ".");
+        assert!(super::validate_xcodegen_tools_are_locked(
+            std::slice::from_ref(&plain),
+            &BTreeSet::new()
+        )
+        .is_ok());
+        let missing = BTreeSet::from(["rust".to_owned()]);
+        let error = must_err(
+            super::validate_xcodegen_tools_are_locked(std::slice::from_ref(&unit), &missing),
+            "unpinned generate must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("swift-xcodegen-app"), "{message}");
+        assert!(message.contains(super::XCODEGEN_TOOL), "{message}");
+        assert!(message.contains("rust"), "{message}");
+    }
+
+    /// The rendered `Set up Mise tools` step block: the step header through
+    /// the last `with:` line, for cross-kind equality.
+    fn mise_step_block(workflow: &str) -> &str {
+        let start = must_some(
+            workflow.find("      - name: Set up Mise tools\n"),
+            "workflow carries the mise step",
+        );
+        let tail = &workflow[start..];
+        let end = tail
+            .find("\n      - name: ")
+            .map_or(tail.len(), |offset| offset + 1);
+        &tail[..end]
+    }
+
+    #[test]
+    fn swift_kind_renders_the_mise_step_exactly_when_tools_are_declared() {
+        let mut ir = owner_test_ir("example/fixture", vec![xcodegen_unit("swift-xcodegen-app")]);
+        ir.mise_lock_keys = BTreeSet::from([super::XCODEGEN_TOOL.to_owned()]);
+        let swift = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            swift.contains("install_args: ${{ inputs.mise_tools }}"),
+            "the Swift job installs the caller's tool list: {swift}"
+        );
+        // Rust parity: one Swift member with tools renders the same step
+        // block one Rust member with tools renders.
+        let mut rust = rust_unit("rust-widget", "crates/widget");
+        rust.mise_tools = vec!["cargo-binstall".to_owned()];
+        let mut rust_ir = owner_test_ir("example/fixture", vec![rust]);
+        rust_ir.mise_present = true;
+        let rust_workflow = must_some(
+            must_ok(
+                rust_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "rust kind reusable renders",
+            ),
+            "rust kind has members",
+        )
+        .1;
+        assert_eq!(
+            mise_step_block(&swift),
+            mise_step_block(&rust_workflow),
+            "rust and swift provision tools through the identical step"
+        );
+        // Iff: a Swift member without tools renders no mise step at all.
+        let mut bare = rust_unit("swift-package-native", "native");
+        bare.kind = UnitKind::Swift;
+        bare.platform = crate::s2::provider::Platform::MacosArm64;
+        let bare_ir = owner_test_ir("example/fixture", vec![bare]);
+        let bare_workflow = must_some(
+            must_ok(
+                bare_ir.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            !bare_workflow.contains("name: Set up Mise"),
+            "a Swift job without tools provisions nothing: {bare_workflow}"
+        );
+    }
+
+    #[test]
+    fn swift_consumer_provisions_its_guarded_rebuild_tools() {
+        // The join prepends the producer's pack recipe to the consumer's
+        // commands behind the transport-ready marker; the consumer job must
+        // install what that recipe needs even though the consumer declares
+        // no tools itself.
+        let rebuild = "MACOSX_DEPLOYMENT_TARGET='16.0' boltffi -v pack apple".to_owned();
+        let guarded = crate::s2::platform::guarded_rebuild_command(
+            "VELNOR_PRODUCT_RUST_BRIDGE_FFI__BRIDGECORE_READY",
+            std::slice::from_ref(&rebuild),
+        );
+        let mut consumer = rust_unit("swift-package-app", "native");
+        consumer.kind = UnitKind::Swift;
+        consumer.label = "Swift package (native)".to_owned();
+        consumer.platform = crate::s2::provider::Platform::MacosArm64;
+        consumer.pr_commands.insert(0, guarded.clone());
+        consumer.full_commands.insert(0, guarded);
+        assert!(super::needs_boltffi(&consumer));
+        let ir = owner_test_ir("example/fixture", vec![consumer]);
+        let unit = &ir.units[0];
+        let contract = ir.contract_for(unit, None);
+        let facts = ir.unit_provider_facts(unit, &contract, ProviderId::GithubHosted);
+        assert_eq!(
+            facts.mise_tools,
+            vec![super::BOLTFFI_TOOL.to_owned()],
+            "the rebuild recipe's tool rides the caller's mise inputs"
+        );
+        let workflow = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            workflow.contains("- name: Set up Mise tools"),
+            "the Swift consumer job installs its rebuild tools: {workflow}"
+        );
     }
 
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
@@ -3967,10 +4139,27 @@ pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<St
     if needs_boltffi(unit) {
         push_mise_tool(&mut tools, BOLTFFI_TOOL.to_owned());
     }
+    if needs_xcodegen(unit) {
+        push_mise_tool(&mut tools, XCODEGEN_TOOL.to_owned());
+    }
     for declared in &unit.mise_tools {
         push_mise_tool(&mut tools, declared.clone());
     }
     tools
+}
+
+/// Whether any of the unit's commands drive `XcodeGen` project generation.
+/// The scan stamps the id onto `XcodeGen` units directly; detection keeps
+/// the install list correct when a generation-config override replaces the
+/// stamped tools without it. One predicate feeds both the mise install
+/// list and the lock validation, so the two can never disagree about
+/// what a unit needs.
+pub(crate) fn needs_xcodegen(unit: &Unit) -> bool {
+    unit_commands(unit).any(|command| {
+        command
+            .split_whitespace()
+            .any(|token| token == "xcodegen" || token.ends_with("/xcodegen"))
+    })
 }
 
 /// Whether any of the unit's commands drive the `BoltFFI` pack the native join
@@ -4121,6 +4310,33 @@ pub(crate) fn validate_boltffi_tools_are_locked(
             let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
             return Err(GeneratorError::usage(format!(
                 "unit {} runs boltffi pack but mise.lock does not pin {BOLTFFI_TOOL}; pin it and re-lock so install_args match the lock, known keys: {known}",
+                unit.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a unit that runs `XcodeGen` while the root lock does not pin its
+/// tool id: rendering anything else would emit `install_args` the runner's
+/// own lock check rejects, and like `BoltFFI` there is no fallback, so an
+/// absent lock fails here rather than at install time on the runner.
+///
+/// # Errors
+/// Returns a usage error naming the first unit whose `XcodeGen` need the lock
+/// does not pin, with every key the lock does pin.
+pub(crate) fn validate_xcodegen_tools_are_locked(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if lock_keys.contains(XCODEGEN_TOOL) {
+        return Ok(());
+    }
+    for unit in units {
+        if needs_xcodegen(unit) {
+            let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(GeneratorError::usage(format!(
+                "unit {} runs xcodegen generate but mise.lock does not pin {XCODEGEN_TOOL}; pin it and re-lock so install_args match the lock, known keys: {known}",
                 unit.id
             )));
         }
@@ -7810,7 +8026,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // the repository declares them and the job installs them. This path
         // must not depend on the Rust-scoped `mise_present` flag — docs,
         // Homebrew, and other non-Rust units carry their own `mise_tools`.
-        if !unit.mise_tools.is_empty() || commands_invoke_mise(unit) {
+        // Detected recipe needs provision the same way: a consumer whose
+        // guarded rebuild packs `BoltFFI`, or a unit whose commands drive
+        // `XcodeGen` past a generation-config override that replaced the
+        // stamped tools, needs the mise step even with empty `mise_tools`.
+        // (`nextest` stays out: without `mise_present` its Rust units fall
+        // back to the cargo-bin install instead of mise.)
+        if !unit.mise_tools.is_empty()
+            || commands_invoke_mise(unit)
+            || needs_boltffi(unit)
+            || needs_xcodegen(unit)
+        {
             tools.insert(ToolRequirement::Mise);
         }
         tools
