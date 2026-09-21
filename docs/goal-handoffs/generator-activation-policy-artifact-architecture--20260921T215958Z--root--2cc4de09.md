@@ -169,3 +169,7 @@ Additional related clean separate clone/worktrees found by the verification audi
 | W7 | `/private/tmp/velnor-1044-repair` | `codex/activation-foundation-repair` / `82935880` | variant bootstrap-fixture retirement work; REVIEW_SHARED. |
 
 `60bb9326` deletes `crates/velnor-workflow/tests/bootstrap_transport.rs` and changes `selection_plan_handoff.rs` and `verify_set_build_inputs.rs`. It is not in local `d97645d9` and must be diffed/reviewed, not assumed safe. The current generated policy/main workflows still contain `Acquire candidate generator product`, `ci-pr.yml` lookup, `deadline +900`, and `sleep 15`; source removal is staged only. `actionlint 1.7.12` is installed now, but no final local actionlint run occurred.
+
+## Publication receipt
+
+Published preservation branch: `codex/goal-handoff-2cc4de09`. Draft PR: [#1064](https://github.com/tailrocks/velnor/pull/1064). Initial handoff commit: `a965d357cec42c9d5e6833083294489931060c01`. The final branch SHA is reported in the PR body and final response, rather than self-embedded here. Auto-merge was not enabled and no queue/merge action was performed.
