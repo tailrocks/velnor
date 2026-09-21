@@ -7,9 +7,9 @@ repository = "tailrocks/velnor"
 # requires a byte-identical result; bump it in a single pin commit after the
 # last generator change (see the plan ledger).
 # The branch changes the generator, so keep Stage 0 on the published base
-# product until the generator change is merged and published. The policy
-# Candidate qualification is a separate restricted lifecycle; active policy
-# always verifies this checked-in tree with the declared published renderer.
+# product until the generator change is merged and published. Candidate
+# qualification renders only disposable output; active policy always verifies
+# this checked-in tree with the declared published renderer.
 revision = "6737cdb3b90d5c2c039b2694b5862e3b163420d2"
 
 [scan]
@@ -208,14 +208,15 @@ docker_closure = [
 "rust-velnor-model" = ["schemas/**"]
 
 # Regeneration gate: the workflow crate owns the generated surface, so its
-# verification starts by checking that the checked-in output is current.
+# verification renders candidate output into two disposable trees. Active
+# tree conformance belongs to the independently pinned policy validator.
 
 [[declare]]
 primitive = "regen-gate"
 units = ["rust-velnor-workflow"]
 
 [declare.args]
-command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."
+command = "cd -- 'crates/velnor-workflow' && candidate_root="$(mktemp -d)" && env -u GITHUB_TOKEN -u GH_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN mbx run --locked --manifest-path 'Cargo.toml' -- --plain --force --output "$candidate_root/one" ../.. && env -u GITHUB_TOKEN -u GH_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN mbx run --locked --manifest-path 'Cargo.toml' -- --plain --force --output "$candidate_root/two" ../.. && diff -ru "$candidate_root/one" "$candidate_root/two""
 
 # Release-side surface: typed native release, rolling preview, and signer.
 
