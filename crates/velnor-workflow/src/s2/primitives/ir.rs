@@ -36,6 +36,101 @@ use crate::s2::{
 /// GitHub rejects reusable workflow files above this size.
 pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
 
+/// The plan job's expected-work artifact, by exact name. Same-run threading:
+/// the plan job uploads it, `ci-required` downloads it by this exact name
+/// from the same run, and the aggregate's SHA binding proves it is this
+/// plan's file before scoring anything.
+pub(crate) const EXPECTED_WORK_ARTIFACT: &str = "velnor-expected-work";
+
+/// The workspace-relative expected-work directory: the plan step creates it
+/// before invoking `plan`, so the runtime's write never needs a
+/// pre-existing dir — including under the pinned older product.
+pub(crate) const EXPECTED_WORK_DIR: &str = ".velnor-ci-expected-work";
+
+/// The workspace-relative expected-work file: the plan step writes it here
+/// (via [`EXPECTED_WORK_FILE_ENV`]) and the upload step publishes this path.
+/// It always lives directly inside [`EXPECTED_WORK_DIR`].
+pub(crate) const EXPECTED_WORK_FILE: &str = ".velnor-ci-expected-work/expected-work.json";
+
+/// The env var binding `plan` to its expected-work file. Spelled identically
+/// to the runtime's read; an older runtime ignores it and the upload step
+/// then fails the plan job loudly via `if-no-files-found`.
+pub(crate) const EXPECTED_WORK_FILE_ENV: &str = "VELNOR_EXPECTED_WORK_FILE";
+
+/// The per-record result artifact prefix. One artifact per concluded
+/// `(unit, provider)`: `{RESULT_ARTIFACT_PREFIX}{unit}-{provider}`.
+pub(crate) const RESULT_ARTIFACT_PREFIX: &str = "velnor-result-";
+
+/// The workspace-relative directory holding one record file per concluded
+/// `(unit, provider)` — in unit jobs the single file this job wrote, in
+/// `ci-required` the merged download of every record.
+pub(crate) const RESULT_DIR: &str = ".velnor-ci-results";
+
+/// The workspace-relative collected results file the aggregate scores: the
+/// merge of every downloaded record, or the empty set when no unit ran.
+pub(crate) const COLLECTED_RESULTS_FILE: &str = ".velnor-ci-results.json";
+
+/// The plan job's expected-work upload: the aggregate's half of the
+/// plan/aggregate cut. `if-no-files-found: error` keeps a plan that wrote no
+/// file (an older runtime, a truncated step) red instead of silently
+/// unbound.
+fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
+    format!(
+        "      - name: Publish expected work\n        uses: {upload_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_FILE}\n          if-no-files-found: error\n          retention-days: 7\n"
+    )
+}
+
+/// The `ci-required` aggregate steps, rendered before the shell verdict step.
+///
+/// Conjunction, never replacement: the aggregate verdict AND the shell
+/// verdict must both pass. The shell reasons over `needs.*.result` plus the
+/// admission predicates and guards the controls the aggregate cannot see
+/// (plan/policy/admission prerequisites, malformed plan outputs, the
+/// expected-callers contract); the aggregate reasons over SHA-bound expected
+/// work plus per-record evidence the shell cannot see (duplicates, matrix
+/// completeness, prerequisite gating). Either side failing fails the check,
+/// so no previously-failing case newly passes.
+///
+/// `runtime_steps` provisions the `velnor-workflow` binary via the verified
+/// plan-artifact download. The results download tolerates zero artifacts — a
+/// no-work plan runs no unit jobs — because the aggregate fails a real-work
+/// plan with zero records anyway; every other step fails the check.
+fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
+    format!(
+        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+    )
+}
+
+/// The record tail of one collapsed provider verify job: exactly one result
+/// record per concluded `(unit, provider)`.
+///
+/// Collection discipline (exactly-once across retries, providers, and
+/// splits): the record step runs `always()` on the job's own class gate only
+/// (`record_gate`: the dispatched unit's trust partition when local
+/// providers split one), so exactly one provider job of the kind records
+/// each dispatch; the upload overwrites its exact-name artifact, so a
+/// retried job replaces its one record instead of doubling it; and the
+/// aggregate still rejects duplicate keys, so a second producer of the same
+/// record fails closed instead of merging silently.
+///
+/// The outcome derives from `job.status`, which unit code cannot fake: the
+/// checks steps `exit` nonzero on failure, every live checks path runs at
+/// least one checks step for the dispatched unit, and anything but an
+/// all-green job records `failure` (`cancelled` stays `cancelled`). A
+/// skipped job records nothing, and the aggregate fails the missing record
+/// unless the plan expected no work. Records carry no `matrix` (the planner
+/// writes empty matrices: one unmatrixed verdict per provider) and no
+/// `reused_from` (no live reuse path; collection rejects any).
+fn render_unit_result_steps(
+    upload_artifact_pin: &str,
+    provider: &str,
+    record_gate: &str,
+) -> String {
+    format!(
+        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          mkdir -p {RESULT_DIR}\n          jq -n --arg unit \"$VELNOR_RESULT_UNIT\" --arg lane \"$VELNOR_RESULT_LANE\" --arg outcome \"$outcome\" '{{results: [{{unit: $unit, lane: $lane, outcome: $outcome}}]}}' > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
+    )
+}
+
 /// The snapshot namespace the unit-provider compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
 /// The snapshot namespace the Docker mutable-mount seed bundle lives in. Kept
@@ -605,9 +700,13 @@ mod tests {
             false,
             false,
         );
+        // The aggregate steps precede the verdict step; anchor on the
+        // verdict step's name so the fixture executes the shell verdict, not
+        // the collection script.
         let script = must_some(
             rendered
-                .split_once("        run: |\n")
+                .split_once("- name: Validate generated stack results")
+                .and_then(|(_, step)| step.split_once("        run: |\n"))
                 .map(|(_, body)| body.split("\n  required:\n").next().unwrap_or(body)),
             "required gate script",
         );
@@ -1541,6 +1640,335 @@ mod tests {
         assert!(
             candidate_flagged_callers(&ir).is_empty(),
             "no caller passes the flag"
+        );
+    }
+
+    #[test]
+    fn plan_job_threads_expected_work_and_maps_no_work_outputs() {
+        let ir = owner_test_ir("example/s4-plan", vec![rust_unit("rust", "crates/rust")]);
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        assert!(
+            plan.contains("VELNOR_EXPECTED_WORK_FILE: .velnor-ci-expected-work/expected-work.json"),
+            "the plan step binds the expected-work file path: {plan}"
+        );
+        assert!(
+            plan.contains("name: velnor-expected-work\n"),
+            "the plan job publishes the expected-work artifact under its exact name: {plan}"
+        );
+        assert!(
+            plan.contains(
+                "path: .velnor-ci-expected-work/expected-work.json\n          if-no-files-found: error"
+            ),
+            "a missing expected-work file fails the plan job loudly, never silently: {plan}"
+        );
+        assert!(
+            plan.contains("planned_no_work: ${{ steps.plan.outputs.planned_no_work }}"),
+            "the plan job maps the no-work marker output: {plan}"
+        );
+        assert!(
+            plan.contains("no_work_reason: ${{ steps.plan.outputs.no_work_reason }}"),
+            "the plan job maps the no-work reason output: {plan}"
+        );
+    }
+
+    #[test]
+    fn plan_step_creates_expected_work_dir_before_invoking_plan() {
+        // The pinned product predates the runtime's own parent creation, so
+        // the branch-controlled render prepares the dir for the old binary.
+        let ir = owner_test_ir(
+            "example/s4-plan-mkdir",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        let mkdir = must_some(
+            plan.find(&format!("mkdir -p {}\n", super::EXPECTED_WORK_DIR)),
+            "expected-work dir creation",
+        );
+        let invoke = must_some(
+            plan.find("velnor-workflow plan --config"),
+            "plan invocation",
+        );
+        assert!(
+            mkdir < invoke,
+            "the plan step creates the expected-work dir before invoking plan: {plan}"
+        );
+        assert_eq!(
+            super::EXPECTED_WORK_FILE,
+            format!("{}/expected-work.json", super::EXPECTED_WORK_DIR),
+            "the env-bound file stays inside the created dir",
+        );
+    }
+
+    #[test]
+    fn no_work_branch_contract_is_presence_only() {
+        let ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
+            let surface = ir.render_nested(kind, &nodes, None);
+            assert!(
+                surface.contains("never `false`"),
+                "{kind:?} documents the presence-only marker contract: {surface}"
+            );
+            // The contract comment itself names the legal comparison; only
+            // code lines count as branches.
+            let code = surface
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.contains("planned_no_work == 'false'"),
+                "{kind:?} never branches on the impossible `false` value: {surface}"
+            );
+            assert!(
+                !code.contains("planned_no_work ==") && !code.contains("planned_no_work !="),
+                "{kind:?} branches nowhere on the marker: the aggregate tolerates no-work itself: {surface}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_check_scores_aggregate_before_the_shell_verdict() {
+        let ir = owner_test_ir(
+            "example/s4-required",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains("name: velnor-expected-work\n"),
+            "ci-required downloads the expected-work artifact by exact name: {rendered}"
+        );
+        assert!(
+            rendered.contains("pattern: velnor-result-*"),
+            "ci-required collects every per-unit result artifact: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "velnor-workflow aggregate --expected .velnor-ci-expected-work/expected-work.json --results .velnor-ci-results.json"
+            ),
+            "ci-required scores collected results against expected work: {rendered}"
+        );
+        assert!(
+            rendered.contains("BASE_SHA: ${{ needs.plan.outputs.base_sha }}")
+                && rendered.contains("HEAD_SHA: ${{ needs.plan.outputs.head_sha }}"),
+            "the aggregate binds the plan identity from this run's plan outputs: {rendered}"
+        );
+        let aggregate = must_some(
+            rendered.find("velnor-workflow aggregate"),
+            "aggregate invocation",
+        );
+        let verdict = must_some(
+            rendered.find("Validate generated stack results"),
+            "shell verdict step",
+        );
+        assert!(
+            aggregate < verdict,
+            "the aggregate scores before the shell verdict re-confirms: {rendered}"
+        );
+        assert!(
+            rendered.contains("plan_expects"),
+            "the shell verdict still evaluates every caller against the plan: {rendered}"
+        );
+    }
+
+    #[test]
+    fn record_step_creates_result_dir_before_first_write() {
+        let steps = super::render_unit_result_steps(
+            "actions/upload-artifact@pinned",
+            "github-hosted",
+            "always()",
+        );
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let write = must_some(
+            steps.find("> \".velnor-ci-results/result-"),
+            "first result write",
+        );
+        assert!(
+            mkdir < write,
+            "the record step creates the result dir before writing: {steps}"
+        );
+        assert!(
+            steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github-hosted.json"),
+            "the upload publishes exactly what the record step wrote: {steps}"
+        );
+    }
+
+    #[test]
+    fn collect_step_creates_result_dir_before_first_read() {
+        let steps = super::render_aggregate_score_steps("", "actions/download-artifact@pinned");
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let glob = must_some(
+            steps.find("files=(.velnor-ci-results/result-*.json)"),
+            "result glob",
+        );
+        assert!(
+            mkdir < glob,
+            "the collect step creates the result dir before globbing: {steps}"
+        );
+    }
+
+    #[test]
+    fn aggregate_wiring_leaves_the_shell_verdict_verbatim() {
+        let ir = owner_test_ir(
+            "example/s4-verbatim",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let mut verdicts = String::new();
+        super::render_required_caller_verdicts(&mut verdicts, &callers);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains(&verdicts),
+            "the per-caller verdict block renders byte-for-byte beside the aggregate: {rendered}"
+        );
+    }
+
+    #[test]
+    fn aggregate_failure_can_fail_the_required_check() {
+        let ir = owner_test_ir("example/s4-fail", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let rendered = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let check = job_block(&rendered, REQUIRED_CHECK);
+        for step in [
+            "Download expected work",
+            "Collect reported unit results",
+            "Score expected work against reported results",
+        ] {
+            let start = must_some(check.find(step), step);
+            let block = &check[start..];
+            let end = block.find("\n      - name: ").unwrap_or(block.len());
+            let block = &block[..end];
+            assert!(
+                !block.contains("continue-on-error"),
+                "{step} must fail the check, never tolerate: {block}"
+            );
+        }
+        let aggregate = must_some(check.find("velnor-workflow aggregate"), "aggregate script");
+        assert!(
+            check[..aggregate].contains("set -euo pipefail"),
+            "the aggregate step runs under fail-fast shell options: {check}"
+        );
+        assert!(
+            !check.contains("aggregate --expected") || !check.contains("|| true"),
+            "nothing swallows the aggregate exit status: {check}"
+        );
+    }
+
+    #[test]
+    fn result_collection_rejects_reused_evidence_without_a_decision() {
+        let ir = owner_test_ir("example/s4-reuse", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains("reused_from"),
+            "collection names the refused reused-evidence field: {rendered}"
+        );
+        let kind = must_render_kind(&ir);
+        assert!(
+            !kind.contains("reused_from"),
+            "no rendered producer emits reused results: {kind}"
+        );
+    }
+
+    #[test]
+    fn unit_jobs_emit_exactly_one_result_record_per_provider() {
+        let ir = owner_test_ir("example/s4-record", vec![rust_unit("rust", "crates/rust")]);
+        let kind = must_render_kind(&ir);
+        for (job, provider) in [
+            ("verify-github-hosted", "github-hosted"),
+            ("verify-github-self-hosted", "github-self-hosted"),
+            ("verify-velnor", "velnor"),
+        ] {
+            let block = job_block(&kind, job);
+            assert_eq!(
+                block.matches("- name: Record unit result").count(),
+                1,
+                "{job} records exactly one result: {block}"
+            );
+            assert_eq!(
+                block.matches("- name: Upload unit result").count(),
+                1,
+                "{job} uploads exactly one result: {block}"
+            );
+            assert!(
+                block.contains("always()"),
+                "{job} records even when the checks fail: {block}"
+            );
+            assert!(
+                block.contains(&format!("VELNOR_RESULT_LANE: {provider}")),
+                "{job} pins the schema-3 provider vocabulary: {block}"
+            );
+            assert!(
+                block.contains("overwrite: true"),
+                "{job} retries overwrite the one record: {block}"
+            );
+            assert!(
+                block.contains("job.status"),
+                "{job} derives the outcome from the job status PR code cannot fake: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_split_providers_record_exactly_once() {
+        let mut trusted = rust_unit("rust-trusted", "crates/trusted");
+        trusted.trust = crate::s2::provider::TrustReq::TrustedOnly;
+        let ir = owner_test_ir(
+            "example/s4-split",
+            vec![rust_unit("rust-plain", "crates/plain"), trusted],
+        );
+        let kind = must_render_kind(&ir);
+        let plain = job_block(&kind, "verify-velnor");
+        let gated = job_block(&kind, "verify-velnor-trusted");
+        assert!(
+            plain.contains("inputs.unit_trust == 'untrusted-ok'"),
+            "the plain job records only plain dispatches: {plain}"
+        );
+        assert!(
+            gated.contains("inputs.unit_trust == 'trusted-only'"),
+            "the trusted job records only trusted dispatches: {gated}"
+        );
+        assert_eq!(
+            kind.matches("- name: Record unit result").count(),
+            5,
+            "one record step per provider job across the split: {kind}"
         );
     }
 }
@@ -4407,10 +4835,24 @@ impl WorkflowIr {
         let expected_callers = required_execution_contract(&callers);
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n",
             aggregate_job_guard(cancel_in_progress),
             needs.join(", "),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+        );
+        // The aggregate scores first, the shell verdict re-confirms after:
+        // conjunction, so either side failing fails the check. The control
+        // plane is always hosted, so the verified plan-artifact runtime is
+        // always published for this download.
+        let runtime_steps =
+            workflow_runtime_download(CONTROL_PLANE_PROVIDER, &self.workflow_revision);
+        output.push_str(&render_aggregate_score_steps(
+            &runtime_steps,
+            self.pins.download_artifact,
+        ));
+        let _ = write!(
+            output,
+            "      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
             yaml_scalar(&expected_callers),
             render_required_admission_env(self, &callers),
         );
@@ -4804,6 +5246,25 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ));
         render_ci_selection_end_marker(output);
         self.render_collapsed_provider_steps(output, provider, members, contracts)?;
+        // Exactly one record per dispatch: hosted providers never split, so
+        // the one job records every dispatch; local providers split by
+        // trust, so each job records only dispatches of its own partition.
+        // The `==` form fails closed on a missing input (no record, and the
+        // aggregate fails the missing record) instead of recording for an
+        // unknown dispatch.
+        let record_gate = if provider.is_local() {
+            format!(
+                "always() && inputs.unit_trust == '{}'",
+                members[0].trust.as_str()
+            )
+        } else {
+            "always()".to_owned()
+        };
+        output.push_str(&render_unit_result_steps(
+            self.pins.upload_artifact,
+            provider.as_str(),
+            &record_gate,
+        ));
         output.push('\n');
         Ok(())
     }
@@ -5663,22 +6124,36 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
             ));
         }
+        // Presence-only no-work marker: `planned_no_work` is `true` or
+        // absent, never `false`. Consumers MUST branch
+        // `needs.plan.outputs.planned_no_work == 'true'` for the no-work
+        // path; any other value (including absent) means the plan selected
+        // work. Nothing branches yet: the aggregate tolerates explicit
+        // no-work itself, so the marker is proof, not control flow.
+        outputs.push(
+            "      # Presence-only no-work marker: `planned_no_work` is `true` or absent,\n      # never `false`. Consumers MUST branch\n      # `needs.plan.outputs.planned_no_work == 'true'` for the no-work path;\n      # any other value (including absent) means the plan selected work."
+                .to_owned(),
+        );
+        outputs.push("      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned());
+        outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
         let _ = writeln!(
             output,
-            "  plan:\n    name: {}\n    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || '{automatic}' }}}}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || '{automatic}' }}}}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::s2::control_job_name("Planning"),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
             trusted = Self::trusted_event_expression(),
+            expected_work_env = EXPECTED_WORK_FILE_ENV,
+            expected_work_file = EXPECTED_WORK_FILE,
+            expected_work_dir = EXPECTED_WORK_DIR,
         );
-        // Only hosted unit jobs download the Planning artifact; a universe
-        // without the hosted provider would publish an orphan nobody
-        // consumes.
-        if self.providers.contains(&ProviderId::GithubHosted) {
-            output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
-        }
+        output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
+        // `ci-required` runs on the hosted control plane on every universe
+        // and downloads this artifact for its aggregate step, so the plan
+        // always publishes it — even where no hosted unit job consumes it.
+        output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
     }
 
     pub(crate) fn render_policy(&self, output: &mut String) {
