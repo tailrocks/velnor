@@ -1228,6 +1228,7 @@ fn select_command(
             required: watched.iter().map(|unit| unit.id.clone()).collect(),
             full_units: watched.iter().map(|unit| unit.id.clone()).collect(),
             prereq_inputs: BTreeSet::new(),
+            closed_excluded: BTreeSet::new(),
             fallback_full: false,
             explanations: watched
                 .iter()
@@ -1719,7 +1720,16 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     let universe = parse_provider_set(&config.providers, "providers")?;
     let effective = plan_providers_for_value(&inputs.providers, &universe)?;
     let event_trusted = event_trusted_for_value(&inputs.event_trusted);
-    let selection = selection_for_diff(&inputs.root, &config, scope, &inputs.base, &inputs.head)?;
+    // The exclusion record flows past provider planning untouched: excluded
+    // units were never selected, so gating cannot change who the fallback
+    // skipped.
+    let (selection, closed_excluded) = selection_for_diff_with_closed_excluded(
+        &inputs.root,
+        &config,
+        scope,
+        &inputs.base,
+        &inputs.head,
+    )?;
     let selected: BTreeSet<&str> = selection
         .units
         .iter()
@@ -1851,6 +1861,11 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     .into_iter()
     .collect::<Vec<_>>()
     .join(",");
+    // The closed-world exclusions behind the verdict, for the log audit
+    // trail: opaque units an unmatched path skipped only because their
+    // owner's `complete` contract asserts the path unreadable. The set is
+    // sorted, like every recorded set; empty when no contract fired.
+    let closed_excluded = closed_excluded.into_iter().collect::<Vec<_>>().join(",");
     // A non-empty selection always plans something or fails above ("selected
     // but eligible on no provider"), so the selection's no-work reason is
     // exactly the plan's. Checked before any artifact escapes: an unproven
@@ -1910,6 +1925,7 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     println!("unit_ids={unit_ids}");
     println!("full_units={full_units}");
     println!("prereq_inputs={prereq_inputs}");
+    println!("closed_excluded={closed_excluded}");
     println!("plan_digest={digest}");
     println!("excluded={excluded_json}");
     if let Some(reason) = &selection.fallback_reason {
@@ -2754,6 +2770,7 @@ fn empty_selection_no_work_reason(selected: &BTreeSet<String>) -> Option<String>
         .then_some("no changed path selected a workload unit".to_owned())
 }
 
+#[cfg(test)]
 fn selection_for_diff<'a>(
     root: &Path,
     config: &'a CiConfig,
@@ -2761,25 +2778,54 @@ fn selection_for_diff<'a>(
     base: &str,
     head: &str,
 ) -> Result<UnitSelection<'a>, GeneratorError> {
+    // The exclusion-blind face: every existing caller keeps its shape; only
+    // `plan` needs the closed-world exclusion record for its log line.
+    Ok(selection_for_diff_with_closed_excluded(root, config, scope, base, head)?.0)
+}
+
+/// Select the affected units and record the closed-world exclusions behind
+/// the verdict: the opaque units an unmatched path skipped only because
+/// their owner's `complete` contract asserts the path unreadable. Every
+/// degenerate arm returns an empty record — requested-full, unusable
+/// inputs, an empty diff, and the version-bump allowlist classify nothing,
+/// and a full fallback excludes nothing — so only the classified loop
+/// below accumulates.
+#[allow(
+    clippy::too_many_lines,
+    reason = "selection dispatch carries the no-work reason channel on every arm"
+)]
+fn selection_for_diff_with_closed_excluded<'a>(
+    root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<(UnitSelection<'a>, BTreeSet<String>), GeneratorError> {
     if scope == Scope::Full {
-        return full_selection(config, None);
+        return full_selection(config, None).map(|selection| (selection, BTreeSet::new()));
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
-        return full_selection(config, Some("no affected base; fell back to full"));
+        return full_selection(config, Some("no affected base; fell back to full"))
+            .map(|selection| (selection, BTreeSet::new()));
     }
     let Some(raw) = git_name_status_nul(root, base, head)? else {
-        return full_selection(config, Some("git diff unavailable; fell back to full"));
+        return full_selection(config, Some("git diff unavailable; fell back to full"))
+            .map(|selection| (selection, BTreeSet::new()));
     };
     let Some(changed) = parse_name_status_nul(&raw) else {
-        return full_selection(config, Some("unparseable change entry; fell back to full"));
+        return full_selection(config, Some("unparseable change entry; fell back to full"))
+            .map(|selection| (selection, BTreeSet::new()));
     };
     if changed.is_empty() {
-        return Ok(UnitSelection {
-            units: Vec::new(),
-            full_units: BTreeSet::new(),
-            fallback_reason: None,
-            no_work_reason: Some("empty diff selects no workload units".to_owned()),
-        });
+        return Ok((
+            UnitSelection {
+                units: Vec::new(),
+                full_units: BTreeSet::new(),
+                fallback_reason: None,
+                no_work_reason: Some("empty diff selects no workload units".to_owned()),
+            },
+            BTreeSet::new(),
+        ));
     }
     if version_bump_matches(
         root,
@@ -2797,23 +2843,28 @@ fn selection_for_diff<'a>(
             .collect::<BTreeSet<_>>();
         let mut selected = allowlist.clone();
         extend_workspace_checks_for_cargo_roots(config, &mut selected);
-        return Ok(UnitSelection {
-            units: ordered_units(&config.unit, Some(&selected))?,
-            full_units: selected,
-            fallback_reason: None,
-            no_work_reason: None,
-        });
+        return Ok((
+            UnitSelection {
+                units: ordered_units(&config.unit, Some(&selected))?,
+                full_units: selected,
+                fallback_reason: None,
+                no_work_reason: None,
+            },
+            BTreeSet::new(),
+        ));
     }
     let watched = watched_units(&config.unit);
     let compiled = crate::s2::reuse::compile_ownership(&watched)?;
     let mut selected = BTreeSet::new();
     let mut opaque_reasons: Vec<String> = Vec::new();
+    let mut closed_excluded: BTreeSet<String> = BTreeSet::new();
     for file in &changed {
         if let Some(verdict) = crate::s2::reuse::github_verdict(file) {
             match verdict {
                 crate::s2::reuse::GithubVerdict::Global { reason }
                 | crate::s2::reuse::GithubVerdict::Unknown { reason } => {
-                    return full_selection(config, Some(&reason));
+                    return full_selection(config, Some(&reason))
+                        .map(|selection| (selection, BTreeSet::new()));
                 }
                 crate::s2::reuse::GithubVerdict::Kind { kind } => {
                     selected.extend(
@@ -2828,32 +2879,43 @@ fn selection_for_diff<'a>(
             }
             continue;
         }
-        if let Some(reason) =
-            fold_affected_file(&compiled, file, &mut selected, &mut opaque_reasons)
-        {
-            return full_selection(config, Some(&reason));
+        if let Some(reason) = fold_affected_file(
+            &compiled,
+            file,
+            &mut selected,
+            &mut opaque_reasons,
+            &mut closed_excluded,
+        ) {
+            return full_selection(config, Some(&reason))
+                .map(|selection| (selection, BTreeSet::new()));
         }
     }
     extend_workspace_checks_for_cargo_roots(config, &mut selected);
     let closure = crate::s2::reuse::expand_selection_closure(&watched, &selected);
     let (selected, full_units) = (closure.required.clone(), closure.required);
     let no_work_reason = empty_selection_no_work_reason(&selected);
-    Ok(UnitSelection {
-        units: ordered_units(&config.unit, Some(&selected))?,
-        full_units,
-        fallback_reason: crate::s2::reuse::join_opaque_reasons(opaque_reasons),
-        no_work_reason,
-    })
+    Ok((
+        UnitSelection {
+            units: ordered_units(&config.unit, Some(&selected))?,
+            full_units,
+            fallback_reason: crate::s2::reuse::join_opaque_reasons(opaque_reasons),
+            no_work_reason,
+        },
+        closed_excluded,
+    ))
 }
 
 /// Fold one non-contract changed file into the affected set: owned units join
 /// directly, opaque-narrowed units join with their reason recorded, and an
 /// unprovable path returns its full-fallback reason for the caller to honor.
+/// Unmatched paths also record the closed-world units they excluded, so the
+/// plan log names what the fallback skipped.
 fn fold_affected_file(
     compiled: &[crate::s2::reuse::CompiledUnit<'_>],
     file: &str,
     selected: &mut BTreeSet<String>,
     opaque_reasons: &mut Vec<String>,
+    closed_excluded: &mut BTreeSet<String>,
 ) -> Option<String> {
     match crate::s2::reuse::classify_path(compiled, file) {
         crate::s2::reuse::PathVerdict::Owned { units } => {
@@ -2863,10 +2925,14 @@ fn fold_affected_file(
         crate::s2::reuse::PathVerdict::Opaque { units, reason } => {
             selected.extend(units);
             opaque_reasons.push(reason);
+            closed_excluded.extend(crate::s2::reuse::closed_excluded_units(compiled, file));
             None
         }
         crate::s2::reuse::PathVerdict::Unknown { reason } => Some(reason),
-        crate::s2::reuse::PathVerdict::Irrelevant => None,
+        crate::s2::reuse::PathVerdict::Irrelevant => {
+            closed_excluded.extend(crate::s2::reuse::closed_excluded_units(compiled, file));
+            None
+        }
     }
 }
 
@@ -7231,6 +7297,110 @@ workspace_check = true
             "an unmatched AGENTS.md must select no units, got {:?}",
             selection.full_units,
         );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn closed_exclusion_surfaces_on_the_plan_path_beside_unchanged_no_work(
+    ) -> Result<(), Box<dyn Error>> {
+        // The plan path records what the fallback skipped: a closed opaque
+        // unit an unmatched path excludes names itself in the exclusion
+        // record, while the selection still proves explicit no-work — and
+        // the exclusion-blind wrapper agrees on every channel.
+        let (root, base, head) = selection_git_fixture("closed-excluded", "AGENTS.md")?;
+        let mut config = polyglot_selection_config();
+        let bun = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "bun-web")
+            .ok_or("the fixture must carry the bun-web unit")?;
+        bun.pr_commands = vec!["bun run build".to_owned()];
+        bun.reads_closed = true;
+        let (selection, closed_excluded) =
+            selection_for_diff_with_closed_excluded(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(
+            selection.units.is_empty() && selection.full_units.is_empty(),
+            "an unmatched AGENTS.md must select no units, got {:?}",
+            selection.full_units,
+        );
+        assert!(selection.fallback_reason.is_none());
+        assert_eq!(
+            selection.no_work_reason.as_deref(),
+            Some("no changed path selected a workload unit"),
+        );
+        assert_eq!(
+            closed_excluded,
+            BTreeSet::from(["bun-web".to_owned()]),
+            "the record names the closed unit the fallback skipped"
+        );
+        let blind = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(blind.units.clone()),
+            selected_ids(selection.units.clone())
+        );
+        assert_eq!(blind.full_units, selection.full_units);
+        assert_eq!(blind.fallback_reason, selection.fallback_reason);
+        assert_eq!(blind.no_work_reason, selection.no_work_reason);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plan_path_records_closed_exclusion_beside_opaque_narrowing() -> Result<(), Box<dyn Error>> {
+        // A mixed plan narrows to the openly opaque while recording the
+        // closed exclusion beside it: `app` verifies with its dependent,
+        // and the record names the closed unit the fallback skipped.
+        let (root, base, head) = selection_git_fixture("closed-narrowed", "AGENTS.md")?;
+        let mut config = selection_config();
+        let app = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "app")
+            .ok_or("the fixture must carry the app unit")?;
+        app.kind = "bun".to_owned();
+        app.pr_commands = vec!["bun run build".to_owned()];
+        let docs = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "docs")
+            .ok_or("the fixture must carry the docs unit")?;
+        docs.kind = "bun".to_owned();
+        docs.pr_commands = vec!["bun run build".to_owned()];
+        docs.reads_closed = true;
+        let (selection, closed_excluded) =
+            selection_for_diff_with_closed_excluded(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units.clone()),
+            vec!["app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            BTreeSet::from(["app".to_owned(), "consumer".to_owned()]),
+            "the verify set runs full scope"
+        );
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("selects only opaque units") && reason.contains("app"),
+            "the reason names the open opaque unit: {reason:?}"
+        );
+        assert!(
+            !reason.contains("docs"),
+            "the closed unit needs no contract for an excluded path: {reason:?}"
+        );
+        assert_eq!(
+            closed_excluded,
+            BTreeSet::from(["docs".to_owned()]),
+            "the record names the excluded closed unit"
+        );
+        let blind = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(blind.units.clone()),
+            selected_ids(selection.units.clone())
+        );
+        assert_eq!(blind.full_units, selection.full_units);
+        assert_eq!(blind.fallback_reason, selection.fallback_reason);
+        assert_eq!(blind.no_work_reason, selection.no_work_reason);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
