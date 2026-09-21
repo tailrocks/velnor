@@ -141,6 +141,17 @@ fn candidate_qualification_is_unprivileged_and_deterministic() {
             "candidate qualification does not trigger for `{path}`: {events}"
         );
     }
+    let concurrency = top_level_block_text(&source, "concurrency");
+    assert!(
+        concurrency.contains(
+            "group: candidate-qualification-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
+        ),
+        "candidate qualification must isolate cancellation by pull request: {concurrency}"
+    );
+    assert!(
+        concurrency.contains("cancel-in-progress: true"),
+        "candidate qualification must cancel superseded commits: {concurrency}"
+    );
     assert!(!source.contains("pull_request_target"), "{source}");
     assert!(!source.contains("workflow_run:"), "{source}");
 

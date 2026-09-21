@@ -12,7 +12,7 @@ generator	70
 .github/ci/project.toml	df8b7d0cc5dd57b0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/activate-renderer.yml	87cf4a016c0486c8
-.github/workflows/candidate-qualification.yml	1408488e32d3a135
+.github/workflows/candidate-qualification.yml	de0104a6a773505b
 .github/workflows/ci-main.yml	904f473dd9d69398
 .github/workflows/ci-policy.yml	c5fa616c60074090
 .github/workflows/ci-pr.yml	070786b81fba79dc
