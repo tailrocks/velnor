@@ -9,7 +9,7 @@
 - Handoff ID: `generic-macos-swift-ci-velnor-jackin--20260921T220231Z--almond-ara--1402ca52`
 - Created (UTC): 2026-09-21T22:02:31Z. Last update (UTC): 2026-09-21T23:05:00Z (review corrections + publication).
 - Original goal status: `PAUSED_BY_USER` (requested disposition; not proof of runtime stop).
-- Handoff status: `PREPARING` → set `READY` after PR publication + review (see §K).
+- Handoff status: `READY` (preservation + publication + review verified §7).
 - Worker stop status (verified via terminal subagent results, not mere Markdown):
   - `main/repin3-merge-1044/59` — TERMINAL before pause with STOP report (re-pin-3 done,
     #1044 merge blocked by mold defect). No further action from it.
@@ -33,7 +33,8 @@
 - Observed remote heads at audit: velnor `origin/main` = `45ef1ebe` (M4 #1062);
   jackin `origin/main` = `df4671e4`.
 - Preservation branch: `goal-handoff/generic-macos-swift-ci--1402ca52` (velnor, from
-  `origin/main` @ `45ef1ebe`). Handoff PR: TBD (draft, created during finalization).
+  `origin/main` @ `45ef1ebe`). Handoff PR: https://github.com/tailrocks/velnor/pull/1066
+  (DRAFT, auto-merge off; final head SHA in PR body).
 - Recovery: fully remote-portable for all goal-owned Git work (preservation branches pushed,
   §E). Session logs are local-only conveniences, not required for resume (§K).
 - Resume authorization: explicit later user request only.
