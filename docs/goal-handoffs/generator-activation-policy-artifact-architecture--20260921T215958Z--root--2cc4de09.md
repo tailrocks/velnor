@@ -310,3 +310,26 @@ The following supplements G-001..G-026. `MISSING` means engineering/documentatio
 ## F. Audit-only requirement status
 
 G remains paused. Handoff repair is `PARTIAL`, not `VERIFIED`: source fidelity and task mapping are now materially expanded, but exact exhaustive resource enumeration and per-resource cleanup mapping remain unavailable in the canonical document. This is an administrative quality limitation, not an engineering-completion claim.
+
+## G. Post-pause audit observations (2026-09-21T22:16:16Z; do not rewrite the pause snapshot)
+
+Current observations supersede only current-state claims, not the historical C snapshot:
+
+* W1 is now `codex/goal-handoff-2cc4de09`; prior source checkpoint B1 remains local `codex/activation-foundation@d97645d9`. The observed handoff head at this audit was `958a3e6b`; later documentation commits are recorded in PR body/final receipt.
+* Current audit counts were 105 local heads, 20 origin-tracking refs, 25 server heads and 0 stashes. Earlier 104/19 counts are historical.
+* B2/PR #1044 is not an anonymous artifact: `60bb9326e6303c577bd15e952558f0dc02fd78f2` is a post-checkpoint goal-related GitHub commit authored/committed by `donbeave` (metadata email `alexey@zhokhov.com`). It is remotely preserved only, deletes `crates/velnor-workflow/tests/bootstrap_transport.rs`, and modifies `selection_plan_handoff.rs` and `verify_set_build_inputs.rs`. Preserve and review it before integration; it is not in this handoff branch.
+* #1044 terminal evidence: candidate `35660441660` passed; Policy `35660437293` failed after 11m39s in old candidate acquisition after generated-state scan drift; CI `35660442225` failed because the declared `eed474c4` pin rendered a different tree and because `velnor-tools` test `cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it` failed at `github_raw_store.rs:1038`. `ci-required` and `Control / Required` consequently failed. These failures do not prove the redesign complete or invalid; they are required resume investigation evidence.
+* #1064 at that observation remained draft/no reviews/no auto-merge. Candidate `35661464652` passed (job `106537561857`, 1m45s); Policy `35661462744` and CI `35661464904` were not terminal. The documentation and workflow jobs had failures; the handoff PR is not green evidence.
+* #1065 is a separate draft paused-handoff PR/branch (`53bc9f1e`) for another branch-consolidation goal. It is a parallel shared repository resource, explicitly excluded from this goal's integration/cleanup scope.
+
+### Audit repair tasks
+
+| Task | Outcome | Completion evidence |
+|---|---|---|
+| T-AUDIT-001 | On resume, preserve historical snapshot and append terminal/live run evidence for #1044/#1064. | Run URLs/jobs/conclusions recorded against exact SHA. |
+| T-AUDIT-002 | Fetch/review/preserve `60bb` separately from B1; map its 3-file fixture-retirement diff to P1. | Exact diff/review disposition and durable ref. |
+| T-AUDIT-003 | Reconcile active-renderer generated-state drift caused by fixture retirement only after explicit resume. | Pinned renderer clean second pass plus policy/contract outcome. |
+| T-AUDIT-004 | Diagnose `velnor-tools` temporary-name test failure deterministically; do not assume it is infrastructure. | Reproduction/root cause/fix or classified external proof. |
+| T-AUDIT-005 | Re-observe #1064 checks after final documentation publication; record terminal result without repair loop. | Exact head/run status. |
+| T-AUDIT-006 | Complete the blocked per-resource worktree/branch/PR/stash cleanup ledger; classify #1065 shared/excluded. | Every in-scope resource has exact mapping/disposition. |
+| T-AUDIT-007 | Verify remote handoff file/branch/PR body/head after final update. | `git ls-remote`, `gh pr view`, branch-qualified file retrieval agree. |
