@@ -1,0 +1,151 @@
+---
+# ==============================================================================
+# Velnor Bastion Gate G6 Deployment Playbook
+# Target: root@37.27.110.241 (Debian 13 trixie x86_64, AMD EPYC 9454P)
+#
+# MANDATORY INVARIANTS:
+# 1. Hardware Safeguard: Secondary NVMe (/dev/nvme1n1, 3.5 TB) is strictly UNTOUCHED.
+# 2. Commits must ALWAYS and EXCLUSIVELY be with Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>
+# 3. GPG signing key fingerprint: 7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801
+# ==============================================================================
+
+- name: Gate G6 - Docker + APT-only Velnor on Bastion
+  hosts: bastion
+  become: yes
+  vars:
+    velnor_gpg_fingerprint: "7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801"
+    velnor_apt_url: "https://velnor-apt.tailrocks.com"
+    velnor_package_version: "0.1.274"
+
+  tasks:
+    - name: Invariant 1 - Verify secondary NVMe is untouched and not mounted
+      shell: |
+        set -euo pipefail
+        lsblk -no NAME,SIZE /dev/nvme1n1 | grep -q "3.5T"
+        ! grep -q "nvme1n1" /proc/mounts
+      changed_when: false
+
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - util-linux
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Ensure /etc/apt/keyrings exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download and install Docker GPG key
+      get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker official repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable"
+        state: present
+        filename: docker
+
+    - name: Download Velnor GPG key to temp location
+      get_url:
+        url: "{{ velnor_apt_url }}/velnor.gpg"
+        dest: /tmp/velnor.gpg
+        mode: "0600"
+
+    - name: Invariant 3 - Verify Velnor GPG key fingerprint
+      shell: |
+        set -euo pipefail
+        FPR=$(gpg --with-colons --show-keys /tmp/velnor.gpg | awk -F: '/^fpr:/ {print $10; exit}')
+        [ "$FPR" = "{{ velnor_gpg_fingerprint }}" ]
+      changed_when: false
+
+    - name: Install verified Velnor GPG key
+      copy:
+        src: /tmp/velnor.gpg
+        dest: /etc/apt/keyrings/velnor.gpg
+        remote_src: yes
+        mode: "0644"
+
+    - name: Remove temporary GPG key file
+      file:
+        path: /tmp/velnor.gpg
+        state: absent
+
+    - name: Add Velnor APT repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/velnor.gpg] {{ velnor_apt_url }} stable main"
+        state: present
+        filename: velnor
+
+    - name: Update APT cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker CE packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Ensure Docker service is running and enabled
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Configure Docker daemon.json
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-opts": {
+              "max-size": "10m"
+            },
+            "default-address-pools": [
+              {
+                "base": "172.30.0.0/16",
+                "size": 24
+              }
+            ]
+          }
+        mode: "0644"
+      notify: restart docker
+
+    - name: Ensure /run/velnor directory exists for lock
+      file:
+        path: /run/velnor
+        state: directory
+        mode: "0750"
+
+    - name: Locked APT install of velnor-runner holding package-transaction.lock
+      shell: |
+        /usr/bin/flock --exclusive --nonblock --no-fork /run/velnor/package-transaction.lock \
+          apt-get install -y --no-install-recommends "velnor-runner={{ velnor_package_version }}"
+      register: apt_install
+      changed_when: "'Setting up velnor-runner' in apt_install.stdout"
+
+    - name: Verify installed package version
+      command: dpkg-query -W velnor-runner
+      register: dpkg_ver
+      changed_when: false
+
+    - debug:
+        var: dpkg_ver.stdout
+
+  handlers:
+    - name: restart docker
+      service:
+        name: docker
+        state: restarted
