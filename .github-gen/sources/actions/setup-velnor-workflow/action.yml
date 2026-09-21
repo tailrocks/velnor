@@ -99,8 +99,7 @@ runs:
         path: ~/.cache/velnor/workflow-runtime
         key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.closure.outputs.value }}
 
-    - name: Download runtime product
-      if: steps.cache.outputs.cache-hit != 'true'
+    - name: Acquire and attest runtime manifest
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -116,14 +115,10 @@ runs:
         asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
         temporary="$(mktemp -d)"
         trap 'rm -rf "$temporary"' EXIT
-        if ! gh release download "$tag" --repo "$PRODUCT_REPOSITORY" --pattern "$asset" --pattern manifest.json --dir "$temporary"; then
+        if ! gh release download "$tag" --repo "$PRODUCT_REPOSITORY" --pattern manifest.json --dir "$temporary"; then
           echo "::error::no runtime product for revision $INSTALL_REV (closure ${CLOSURE:0:16}); the mainline runtime-product publisher builds it after merge" >&2
           exit 1
         fi
-        gh attestation verify "$temporary/$asset" \
-          --owner tailrocks \
-          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
-          --source-ref refs/heads/main
         gh attestation verify "$temporary/manifest.json" \
           --owner tailrocks \
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
@@ -134,19 +129,41 @@ runs:
           --arg asset "$asset" \
           '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
           "$temporary/manifest.json" >/dev/null
+        runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
+        mkdir -p "$runtime"
+        cp "$temporary/manifest.json" "$runtime/manifest.json"
+        chmod 0644 "$runtime/manifest.json"
+
+    - name: Download runtime product
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INSTALL_REV: ${{ inputs.rev }}
+        CLOSURE: ${{ steps.closure.outputs.value }}
+        PRODUCT_REPOSITORY: tailrocks/velnor
+      run: |
+        set -euo pipefail
+        tag="velnor-workflow-runtime-v1-${CLOSURE:0:16}"
+        asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+        temporary="$(mktemp -d)"
+        trap 'rm -rf "$temporary"' EXIT
+        gh release download "$tag" --repo "$PRODUCT_REPOSITORY" --pattern "$asset" --dir "$temporary"
+        gh attestation verify "$temporary/$asset" \
+          --owner tailrocks \
+          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
+          --source-ref refs/heads/main
         if command -v sha256sum >/dev/null 2>&1; then
           actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
         else
           actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
         fi
-        expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
-        [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
+        expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"
+        [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
         mkdir -p "$runtime/bin"
         cp "$temporary/$asset" "$runtime/bin/velnor-workflow"
         chmod 0755 "$runtime/bin/velnor-workflow"
-        cp "$temporary/manifest.json" "$runtime/manifest.json"
-        chmod 0644 "$runtime/manifest.json"
 
     - name: Verify runtime product
       shell: bash

@@ -732,7 +732,7 @@ impl ConsumerFixture {
 
     fn run_setup_download(&self, closure: &str, extra: &[(&str, &str)]) -> Output {
         let action = setup_action_source();
-        let script = composite_step_body(&action, "Download runtime product", 8);
+        let manifest = composite_step_body(&action, "Acquire and attest runtime manifest", 8);
         let mut env: Vec<(&str, &str)> = vec![
             ("INSTALL_REV", self.revision.as_str()),
             ("CLOSURE", closure),
@@ -742,6 +742,11 @@ impl ConsumerFixture {
             ),
         ];
         env.extend_from_slice(extra);
+        let manifest = self.run_script("manifest", &manifest, &env, None);
+        if !manifest.status.success() {
+            return manifest;
+        }
+        let script = composite_step_body(&action, "Download runtime product", 8);
         self.run_script("download", &script, &env, None)
     }
 
@@ -1330,6 +1335,11 @@ fn velnor_provisioner_reuses_slot_only_on_digest_match() {
 fn cold_consumer_verifies_everything_with_zero_waivers() {
     let fixture = ConsumerFixture::open("cold");
     let action = setup_action_source();
+    let manifest_block = composite_step_block(&action, "Acquire and attest runtime manifest");
+    assert!(
+        !manifest_block.contains("\n      if:"),
+        "manifest provenance must refresh even on a cache hit: {manifest_block}"
+    );
     let download_block = composite_step_block(&action, "Download runtime product");
     assert!(
         download_block.contains("if: steps.cache.outputs.cache-hit != 'true'"),
