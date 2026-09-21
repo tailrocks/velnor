@@ -8799,6 +8799,55 @@ workspace_check = true
         Ok((root, expected, results))
     }
 
+    /// Plan one provider-scoped diff end to end through `plan_with`: the
+    /// `VELNOR_PROVIDERS` value the render emits for `providers` (the
+    /// automatic set, or the dispatch-narrowed subset), over the
+    /// `S4_PLAN_CONFIG_TOML` estate widened to a two-provider universe with
+    /// `changed` as the diff. Returns the fixture root, the scratch dir,
+    /// and the written expected-work JSON.
+    fn s4_providers_plan(
+        name: &str,
+        providers: &str,
+        changed: &str,
+    ) -> Result<(std::path::PathBuf, std::path::PathBuf, String), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture(name, changed)?;
+        let dir = s4_dir(name);
+        let config_path = dir.join("project.toml");
+        let config = S4_PLAN_CONFIG_TOML.replace(
+            "\nproviders = [\"github-hosted\"]",
+            "\nproviders = [\"github-hosted\", \"velnor\"]",
+        );
+        assert!(
+            config.contains("automatic_providers = [\"github-hosted\"]"),
+            "only the universe line widens; the automatic set stays narrowed"
+        );
+        must(std::fs::write(&config_path, config), "write s4 plan config");
+        let expected_path = dir.join("expected.json");
+        must(
+            plan_with(
+                &config_path,
+                &PlanInputs {
+                    root: root.clone(),
+                    event: "pull_request".to_owned(),
+                    scope_override: None,
+                    base,
+                    head,
+                    providers: providers.to_owned(),
+                    event_trusted: String::new(),
+                    selection_file: None,
+                    expected_file: Some(expected_path.clone()),
+                    github_output: None,
+                },
+            ),
+            "plan the provider-scoped diff",
+        );
+        let expected = must(
+            std::fs::read_to_string(&expected_path),
+            "read expected work",
+        );
+        Ok((root, dir, expected))
+    }
+
     const S4_RUN_CONFIG_TOML: &str = r#"schema = 3
 repository = "example/s4"
 profile = "s4-no-work"
@@ -9209,6 +9258,39 @@ trust = "untrusted-ok"
             verdict.failures,
         );
         assert!(exit.is_err(), "a missing result must fail the aggregate");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn provider_scoped_expected_work_passes_with_matching_provider_only_results(
+    ) -> Result<(), Box<dyn Error>> {
+        // A narrowed universe plans only its providers and runs only its
+        // providers: provider-scoped expected work plus the matching
+        // provider-only results passes, with no phantom entries for
+        // unscheduled providers.
+        let (root, expected, results) = s4_owned_binding("s4-provider-scope")?;
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        let units = must_some(
+            document.get("units").and_then(serde_json::Value::as_array),
+            "expected units array",
+        );
+        assert!(!units.is_empty(), "a real-work plan expects units");
+        for unit in units {
+            assert_eq!(
+                unit.get("lanes"),
+                Some(&serde_json::json!(["github-hosted"])),
+                "a narrowed plan names no unscheduled provider: {expected}"
+            );
+        }
+        let dir = s4_dir("provider-scope");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            exit.is_ok(),
+            "matching provider-only results pass: {exit:?}"
+        );
         std::fs::remove_dir_all(dir)?;
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -9779,6 +9861,43 @@ trust = "untrusted-ok"
         );
         std::fs::remove_dir_all(dir)?;
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn provider_scoped_plan_writes_only_scheduled_providers() -> Result<(), Box<dyn Error>> {
+        // The planner honors the `VELNOR_PROVIDERS` value the render emits —
+        // the automatic set, or the dispatch-narrowed subset: over a wider
+        // universe, real work plans exactly the scheduled providers, never
+        // the unscheduled ones.
+        for (providers, other) in [("github-hosted", "velnor"), ("velnor", "github-hosted")] {
+            let (root, dir, expected) =
+                s4_providers_plan("s4-providers-plan", providers, "crates/alpha/src/lib.rs")?;
+            let document: serde_json::Value = serde_json::from_str(&expected)?;
+            assert_eq!(
+                document
+                    .get("planned_no_work")
+                    .and_then(serde_json::Value::as_bool),
+                Some(false),
+                "{providers}: the fixture diff is real work"
+            );
+            let units = must_some(
+                document.get("units").and_then(serde_json::Value::as_array),
+                "expected units array",
+            );
+            assert_eq!(units.len(), 1, "{providers}: one unit selected: {expected}");
+            assert_eq!(
+                units[0].get("lanes"),
+                Some(&serde_json::json!([providers])),
+                "{providers}: a provider-scoped plan names only its providers: {expected}"
+            );
+            assert!(
+                !expected.contains(&format!("\"{other}\"")),
+                "{providers}: the unscheduled provider appears nowhere: {expected}"
+            );
+            std::fs::remove_dir_all(dir)?;
+            std::fs::remove_dir_all(root)?;
+        }
         Ok(())
     }
 }
