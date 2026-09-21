@@ -86,16 +86,79 @@ pub(crate) struct PackageFacts {
     pub(crate) binary_targets: Vec<BinaryTarget>,
 }
 
-/// One local-path binary target awaiting the native-producer join: the
-/// detector records it, and `super::join_native_producers` matches it
-/// against `BoltFFI` producers after every detector has run.
+/// Which manifest recorded a binary consumer: a `Package.swift`
+/// `.binaryTarget` stanza or an `XcodeGen` spec's linked framework. Both
+/// flow through the same native-producer join; the source only tunes the
+/// diagnostics so each names the manifest it came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SwiftBinarySource {
+    SwiftPackage,
+    XcodeGenSpec,
+}
+
+impl SwiftBinarySource {
+    /// The manifest noun the join diagnostics use for this source.
+    pub(crate) fn manifest_noun(self) -> &'static str {
+        match self {
+            SwiftBinarySource::SwiftPackage => "Swift package",
+            SwiftBinarySource::XcodeGenSpec => "XcodeGen spec",
+        }
+    }
+
+    /// The reference noun the join diagnostics use for this source.
+    pub(crate) fn reference_noun(self) -> &'static str {
+        match self {
+            SwiftBinarySource::SwiftPackage => "binary target",
+            SwiftBinarySource::XcodeGenSpec => "linked framework",
+        }
+    }
+
+    /// The consumer-side build the materialization diagnostic names: the
+    /// command that fails when the producer step did not materialize the
+    /// framework first.
+    pub(crate) fn materialization_clause(self) -> &'static str {
+        match self {
+            SwiftBinarySource::SwiftPackage => "before `swift build` consumes the package",
+            SwiftBinarySource::XcodeGenSpec => "before `xcodebuild` consumes the generated project",
+        }
+    }
+}
+
+/// One local-path binary awaiting the native-producer join: the detector
+/// records it, and `super::join_native_producers` matches it against
+/// `BoltFFI` producers after every detector has run. An `XcodeGen` consumer
+/// carries no module name — the spec links a bare framework path — so the
+/// join matches it on the resolved path alone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SwiftBinaryConsumer {
     pub(crate) manifest: String,
-    pub(crate) package_root: String,
+    pub(crate) consumer_root: String,
     pub(crate) unit: String,
     pub(crate) name: Option<String>,
     pub(crate) path: String,
+    pub(crate) source: SwiftBinarySource,
+}
+
+impl SwiftBinaryConsumer {
+    /// The name the join diagnostics use for this reference: the stanza
+    /// name when one was declared, the linked bundle stem for an
+    /// `XcodeGen` framework, `<unnamed>` otherwise.
+    pub(crate) fn display_name(&self) -> &str {
+        if let Some(name) = &self.name {
+            return name;
+        }
+        if self.source == SwiftBinarySource::XcodeGenSpec
+            && let Some(stem) = self
+                .path
+                .rsplit('/')
+                .next()
+                .map(|base| base.strip_suffix(".xcframework").unwrap_or(base))
+            && !stem.is_empty()
+        {
+            return stem;
+        }
+        "<unnamed>"
+    }
 }
 
 impl Default for PackageFacts {
@@ -332,6 +395,7 @@ struct XcodeGenTarget {
     name: String,
     target_type: Option<String>,
     platform: Option<String>,
+    frameworks: Vec<String>,
 }
 
 /// One declared `XcodeGen` scheme: which targets its build and test actions
@@ -350,6 +414,25 @@ struct XcodeGenSpec {
     files: Vec<String>,
     targets: Vec<XcodeGenTarget>,
     schemes: Vec<XcodeGenScheme>,
+}
+
+impl XcodeGenSpec {
+    /// Every `*.xcframework` path the merged targets link, deduplicated:
+    /// targets sort by name from the merge, so the collection is
+    /// deterministic. One consumer record per path keeps the native join
+    /// from wiring the same product edge twice when two targets link one
+    /// framework.
+    fn xcframeworks(&self) -> Vec<String> {
+        let mut frameworks = Vec::new();
+        for target in &self.targets {
+            for framework in &target.frameworks {
+                if !frameworks.contains(framework) {
+                    frameworks.push(framework.clone());
+                }
+            }
+        }
+        frameworks
+    }
 }
 
 /// Bounds for include following: deep or broad chains report a limitation
@@ -524,6 +607,32 @@ fn scheme_test_targets(detail: &Mapping) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The `framework:` paths one target links, in declaration order: only
+/// `*.xcframework` bundle roots can join a native producer, so system
+/// frameworks, plain `.framework` bundles, and non-mapping dependency
+/// entries are not collected. A trailing slash is trimmed so the stored
+/// path equals the producer output it may join.
+fn target_frameworks(detail: &Mapping) -> Vec<String> {
+    let Some(dependencies) = mapping_value(detail, "dependencies").and_then(Value::as_sequence)
+    else {
+        return Vec::new();
+    };
+    let mut frameworks = Vec::new();
+    for dependency in dependencies {
+        let Some(entry) = dependency.as_mapping() else {
+            continue;
+        };
+        let Some(path) = mapping_text(entry, "framework") else {
+            continue;
+        };
+        let path = path.trim_end_matches('/').to_owned();
+        if path.ends_with(".xcframework") && !frameworks.contains(&path) {
+            frameworks.push(path);
+        }
+    }
+    frameworks
+}
+
 fn spec_minimum_version(mapping: &Mapping) -> Option<String> {
     if let Some(version) = mapping_text(mapping, "minimumXcodeGenVersion") {
         return Some(version);
@@ -532,13 +641,16 @@ fn spec_minimum_version(mapping: &Mapping) -> Option<String> {
     mapping_text(options, "minimumXcodeGenVersion")
 }
 
+/// One merged target row: type, platform, and linked `*.xcframework` paths.
+type MergedTargetRow = (Option<String>, Option<String>, Vec<String>);
+
 /// Merge the closure into one spec. Later documents win, so the entry file
 /// overrides its includes. Targets and schemes sort by name for a
 /// deterministic shape.
 fn merge_spec(entry: &str, ordered: &[(String, Mapping)]) -> Option<XcodeGenSpec> {
     let mut name: Option<String> = None;
     let mut minimum_version: Option<String> = None;
-    let mut targets: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    let mut targets: BTreeMap<String, MergedTargetRow> = BTreeMap::new();
     let mut schemes: BTreeMap<String, XcodeGenScheme> = BTreeMap::new();
     let mut files = Vec::new();
     for (path, mapping) in ordered {
@@ -563,6 +675,7 @@ fn merge_spec(entry: &str, ordered: &[(String, Mapping)]) -> Option<XcodeGenSpec
                     (
                         mapping_text(detail, "type"),
                         mapping_text(detail, "platform"),
+                        target_frameworks(detail),
                     ),
                 );
             }
@@ -596,11 +709,14 @@ fn merge_spec(entry: &str, ordered: &[(String, Mapping)]) -> Option<XcodeGenSpec
         files,
         targets: targets
             .into_iter()
-            .map(|(name, (target_type, platform))| XcodeGenTarget {
-                name,
-                target_type,
-                platform,
-            })
+            .map(
+                |(name, (target_type, platform, frameworks))| XcodeGenTarget {
+                    name,
+                    target_type,
+                    platform,
+                    frameworks,
+                },
+            )
             .collect(),
         schemes: schemes.into_values().collect(),
     })
@@ -1143,10 +1259,11 @@ pub(crate) fn detect(
                     unit.capabilities.native_macos_arm64 = true;
                     shape.swift_consumers.push(SwiftBinaryConsumer {
                         manifest: manifest.clone(),
-                        package_root: package_root.clone(),
+                        consumer_root: package_root.clone(),
                         unit: unit.id.clone(),
                         name: target.name.clone(),
                         path: path.clone(),
+                        source: SwiftBinarySource::SwiftPackage,
                     });
                 }
                 (None, Some(_)) => {
@@ -1234,7 +1351,25 @@ fn detect_xcodegen_specs(
         shape.limitations.extend(unit_notes);
         if let Some(mut unit) = unit {
             unit.xcode = xcode.cloned();
+            let unit_id = unit.id.clone();
             shape.units.push(unit);
+            // A linked `*.xcframework` joins the same native-producer edge
+            // a `.binaryTarget` path does: without a consumer record the
+            // unit renders with no prerequisite, no transport edge, and no
+            // diagnostic, and `xcodebuild` fails on the missing bundle.
+            // Paths resolve against the spec's own directory, like package
+            // roots do for `Package.swift` stanzas.
+            let consumer_root = parent_path(&merged.path);
+            for framework in merged.xcframeworks() {
+                shape.swift_consumers.push(SwiftBinaryConsumer {
+                    manifest: merged.path.clone(),
+                    consumer_root: consumer_root.clone(),
+                    unit: unit_id.clone(),
+                    name: None,
+                    path: framework,
+                    source: SwiftBinarySource::XcodeGenSpec,
+                });
+            }
         }
     }
 }
@@ -1758,6 +1893,176 @@ mod tests {
         must_ok(
             crate::s2::platform::resolve(&mut config),
             "product graph accepts the joined edge",
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn merged_spec_collects_linked_xcframeworks() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ntargets:\n  WidgetLib:\n    type: library.static\n    platform: macOS\n    dependencies:\n      - framework: ../target/xcframework/Widget.xcframework\n      - framework: ../target/xcframework/Widget.xcframework/\n      - framework: StoreKit\n      - framework: Vendor/Plain.framework\n      - target: WidgetApp\n      - just-a-string\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+        )]);
+        let (spec, notes) = load_merged("app/project.yml", &files);
+        assert!(notes.is_empty(), "{notes:?}");
+        let spec = must_some(spec, "spec merges");
+        let lib = must_some(
+            spec.targets
+                .iter()
+                .find(|target| target.name == "WidgetLib"),
+            "library target survives",
+        );
+        assert_eq!(
+            lib.frameworks,
+            vec!["../target/xcframework/Widget.xcframework".to_owned()],
+            "only the xcframework bundle root is collected, once, without the trailing slash: {:?}",
+            lib.frameworks
+        );
+        assert_eq!(spec.xcframeworks(), lib.frameworks);
+    }
+
+    #[test]
+    fn framework_links_follow_entry_wins_merge() {
+        let files = spec_files(&[
+            (
+                "app/project.yml",
+                "name: Widget\ninclude: base.yml\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+            ),
+            (
+                "app/base.yml",
+                "targets:\n  WidgetApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: ../target/xcframework/Base.xcframework\n  WidgetLib:\n    type: library.static\n    platform: macOS\n    dependencies:\n      - framework: ../target/xcframework/Lib.xcframework\n",
+            ),
+        ]);
+        let (spec, notes) = load_merged("app/project.yml", &files);
+        assert!(notes.is_empty(), "{notes:?}");
+        let spec = must_some(spec, "spec merges");
+        let app = must_some(
+            spec.targets
+                .iter()
+                .find(|target| target.name == "WidgetApp"),
+            "app target survives",
+        );
+        assert!(
+            app.frameworks.is_empty(),
+            "the entry redefinition drops the included link: {:?}",
+            app.frameworks
+        );
+        let lib = must_some(
+            spec.targets
+                .iter()
+                .find(|target| target.name == "WidgetLib"),
+            "included-only target survives",
+        );
+        assert_eq!(
+            lib.frameworks,
+            vec!["../target/xcframework/Lib.xcframework".to_owned()]
+        );
+    }
+
+    const NATIVE_XCODEGEN_APP: &str = "name: Desktop\ntargets:\n  DesktopApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: ../../target/xcframework/BridgeCore.xcframework\n";
+
+    #[test]
+    fn native_join_wires_xcodegen_consumer_edge() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            ("clients/desktop/project.yml", NATIVE_XCODEGEN_APP),
+        ]);
+        let shape = scan_native(&root);
+        let producer = must_some(
+            shape.units.iter().find(|unit| {
+                unit.kind == crate::s2::UnitKind::Rust && unit.root == "libs/bridge-ffi"
+            }),
+            "rust producer unit",
+        );
+        assert_eq!(producer.products.len(), 1);
+        assert_eq!(producer.products[0].name, "xcframework-bridgecore");
+        let app = must_some(
+            shape.units.iter().find(|unit| {
+                unit.kind == crate::s2::UnitKind::Swift && unit.root == "clients/desktop"
+            }),
+            "xcodegen app unit",
+        );
+        assert_eq!(app.prerequisites.len(), 1, "{app:?}");
+        assert_eq!(app.prerequisites[0].producer, producer.id);
+        assert_eq!(app.prerequisites[0].product, "xcframework-bridgecore");
+        assert_eq!(app.prerequisites[0].task, None);
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation.contains(
+                "XcodeGen spec clients/desktop/project.yml consumes linked framework `BridgeCore` from BoltFFI manifest libs/bridge-ffi/boltffi.toml"
+            )),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation.contains(
+                "the producer step must materialize `target/xcframework/BridgeCore.xcframework` before `xcodebuild` consumes the generated project"
+            )),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(
+            !shape
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("no tracked file provides")),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(shape.swift_consumers.is_empty());
+        let mut config = crate::s2::ProjectConfig::from(shape);
+        must_ok(
+            crate::s2::platform::resolve(&mut config),
+            "product graph accepts the joined edge",
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_reports_an_unmatched_xcodegen_framework() {
+        let root = native_fixture(&[
+            (
+                "clients/desktop/project.yml",
+                "name: Desktop\ntargets:\n  DesktopApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: ../../target/xcframework/Missing.xcframework\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let app = must_some(
+            shape.units.iter().find(|unit| {
+                unit.kind == crate::s2::UnitKind::Swift && unit.root == "clients/desktop"
+            }),
+            "xcodegen app unit",
+        );
+        assert!(
+            app.prerequisites.is_empty(),
+            "no producer, no edge: {app:?}"
+        );
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation.contains(
+                "XcodeGen spec clients/desktop/project.yml references linked framework `Missing` at `../../target/xcframework/Missing.xcframework`, which no tracked file provides"
+            )),
+            "the unmatched link is loud, never silent: {:?}",
+            shape.limitations
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_reports_an_escaping_xcodegen_framework() {
+        let root = native_fixture(&[
+            (
+                "clients/desktop/project.yml",
+                "name: Desktop\ntargets:\n  DesktopApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: /opt/elsewhere/Escaped.xcframework\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation.contains(
+                "XcodeGen spec clients/desktop/project.yml declares linked framework `Escaped` at `/opt/elsewhere/Escaped.xcframework`, which is absolute or escapes the repository"
+            )),
+            "the unresolvable link is loud, never silent: {:?}",
+            shape.limitations
         );
         let _ = std::fs::remove_dir_all(root);
     }

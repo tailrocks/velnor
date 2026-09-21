@@ -518,17 +518,26 @@ fn render_checkout_step(output: &mut String, full_history: bool) {
 /// installing.
 fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &CheckProfileSpec) {
     let mise = ActionPin::Mise.reference();
+    // The declared subset closes over the root config's install edges like
+    // every derived subset: mise refuses a locked install that omits a
+    // configured dependency.
+    let mut tools = profile.tools.clone();
+    super::close_mise_tool_subset(
+        &mut tools,
+        &config.mise_lock_keys,
+        &config.mise_install_deps,
+    );
     if profile.runner == "velnor" {
-        if !profile.tools.is_empty() {
+        if !tools.is_empty() {
             let _ = writeln!(
                 output,
                 "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes --locked install \"${{tools[@]}}\"",
-                yaml_scalar(&profile.tools.join(" "))
+                yaml_scalar(&tools.join(" "))
             );
         }
         return;
     }
-    if profile.tools.is_empty() {
+    if tools.is_empty() {
         let _ = writeln!(
             output,
             "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false"
@@ -538,7 +547,7 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
         let _ = writeln!(
             output,
             "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
-            yaml_scalar(&profile.tools.join(" "))
+            yaml_scalar(&tools.join(" "))
         );
     }
 }
@@ -664,6 +673,7 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: true,
             mise_lock_keys: std::collections::BTreeSet::new(),
+            mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         }

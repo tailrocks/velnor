@@ -2403,6 +2403,113 @@ pub(crate) fn mise_lock_keys_for_root(root: &Path) -> Result<BTreeSet<String>, G
         .map_err(|error| GeneratorError::usage(format!("{}: {error}", path.display())))
 }
 
+/// Location of the mise configuration, relative to the repository root.
+pub(crate) const MISE_CONFIG_PATH: &str = "mise.toml";
+
+/// The machine-readable install dependencies the root `mise.toml` declares:
+/// the `[settings] cargo.binstall` flag, which makes every `cargo:`-backend
+/// install require the `cargo-binstall` tool, plus each tool entry's
+/// `depends` list. Derived `install_args` subsets close over these so every
+/// rendered subset installs with `mise --locked`: mise refuses an explicit
+/// install whose configured dependency is not installed rather than
+/// installing it implicitly.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MiseInstallDeps {
+    /// Whether `[settings] cargo.binstall` is true.
+    pub(crate) cargo_binstall: bool,
+    /// Tool key to the dependency names its entry's `depends` lists.
+    pub(crate) depends: BTreeMap<String, Vec<String>>,
+}
+
+/// Collect the install dependencies from `mise.toml` text: the
+/// `[settings] cargo.binstall` flag and every tool entry's `depends` list.
+/// Strict TOML parsing (never hand-splitting), like the lock readers; only
+/// these two shapes are consulted and everything else is ignored.
+///
+/// # Errors
+/// Returns a usage error when the text is not valid TOML, when
+/// `cargo.binstall` is present but not a boolean, or when a tool's
+/// `depends` is present but not a list of names.
+pub(crate) fn parse_mise_install_deps(
+    config_toml: &str,
+) -> Result<MiseInstallDeps, GeneratorError> {
+    let table: toml::Table = config_toml.parse().map_err(|error| {
+        GeneratorError::usage(format!("parse mise.toml for install dependencies: {error}"))
+    })?;
+    let cargo_binstall = table
+        .get("settings")
+        .and_then(toml::Value::as_table)
+        .and_then(|settings| settings.get("cargo"))
+        .and_then(toml::Value::as_table)
+        .and_then(|cargo| cargo.get("binstall"))
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                GeneratorError::usage(
+                    "parse mise.toml for install dependencies: `[settings] cargo.binstall` must be a boolean",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let mut depends = BTreeMap::new();
+    if let Some(tools) = table.get("tools").and_then(toml::Value::as_table) {
+        for (key, entry) in tools {
+            let Some(options) = entry.as_table() else {
+                continue;
+            };
+            let Some(deps) = options.get("depends") else {
+                continue;
+            };
+            let Some(names) = deps.as_array().and_then(|rows| {
+                rows.iter()
+                    .map(toml::Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+            }) else {
+                return Err(GeneratorError::usage(format!(
+                    "parse mise.toml for install dependencies: tool `{key}` declares `depends`, which must be a list of tool names"
+                )));
+            };
+            let names = names
+                .into_iter()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !names.is_empty() {
+                depends.insert(key.clone(), names);
+            }
+        }
+    }
+    Ok(MiseInstallDeps {
+        cargo_binstall,
+        depends,
+    })
+}
+
+/// Read the install dependencies from the root `mise.toml`.
+///
+/// A missing file is a valid outcome — the repository declares no mise
+/// configuration, so subsets close over nothing. Only the root file is
+/// consulted, matching the root-lock rule in [`mise_lock_keys_for_root`].
+///
+/// # Errors
+/// Returns an I/O error when the file cannot be read, and a usage error when
+/// it is not valid UTF-8 TOML or declares malformed install dependencies.
+pub(crate) fn mise_install_deps_for_root(root: &Path) -> Result<MiseInstallDeps, GeneratorError> {
+    let path = root.join(MISE_CONFIG_PATH);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MiseInstallDeps::default())
+        }
+        Err(error) => return Err(GeneratorError::io("read mise.toml", &path, &error)),
+    };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!("parse mise.toml {}: {error}", path.display()))
+    })?;
+    parse_mise_install_deps(&text)
+        .map_err(|error| GeneratorError::usage(format!("{}: {error}", path.display())))
+}
+
 /// Unit rows either override a scanned unit by id or add one. Two rows for one
 /// id would make the effective contract depend on which one the reader trusts,
 /// so the second row is refused instead of merged.
@@ -5944,6 +6051,102 @@ mod tests {
             error.to_string().contains("mise.lock"),
             "error names the lock file: {error}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_deps_parse_settings_flag_and_tool_depends() {
+        let deps = must(
+            parse_mise_install_deps(
+                "[tools]\n\"cargo:example-cli\" = \"1.2.3\"\n\"pipx:example-lint\" = { version = \"4.5.6\", depends = [\"python\", \"uv\"] }\n\n[settings]\ncargo.binstall = true\n",
+            ),
+            "parse install dependencies",
+        );
+        assert!(deps.cargo_binstall, "the settings flag is read");
+        assert_eq!(
+            deps.depends.get("pipx:example-lint"),
+            Some(&vec!["python".to_owned(), "uv".to_owned()]),
+            "the tool entry keeps its dependency names: {:?}",
+            deps.depends
+        );
+        assert!(
+            !deps.depends.contains_key("cargo:example-cli"),
+            "a version-only entry declares no dependencies: {:?}",
+            deps.depends
+        );
+    }
+
+    #[test]
+    fn install_deps_default_to_no_edges() {
+        let deps = must(
+            parse_mise_install_deps("[tools]\nripgrep = \"15.2.0\"\n"),
+            "parse plain config",
+        );
+        assert!(
+            !deps.cargo_binstall,
+            "an absent flag installs nothing extra"
+        );
+        assert!(deps.depends.is_empty(), "no depends entries, no edges");
+        let deps = must(
+            parse_mise_install_deps("[settings]\nlockfile = true\n"),
+            "parse settings-only config",
+        );
+        assert!(!deps.cargo_binstall, "other settings do not imply the flag");
+        assert!(deps.depends.is_empty(), "no tools table, no edges");
+    }
+
+    #[test]
+    fn install_deps_refuse_malformed_edges() {
+        let error = must_fail(
+            parse_mise_install_deps("[settings]\ncargo.binstall = \"yes\"\n"),
+            "a non-boolean flag must fail",
+        );
+        assert!(
+            error.to_string().contains("cargo.binstall"),
+            "error names the flag: {error}"
+        );
+        let error = must_fail(
+            parse_mise_install_deps(
+                "[tools]\nripgrep = { version = \"15.2.0\", depends = \"python\" }\n",
+            ),
+            "a non-list depends must fail",
+        );
+        assert!(
+            error.to_string().contains("ripgrep") && error.to_string().contains("depends"),
+            "error names the tool and key: {error}"
+        );
+        let error = must_fail(
+            parse_mise_install_deps("[tools.unclosed\n"),
+            "broken TOML must fail",
+        );
+        assert!(
+            error.to_string().contains("mise.toml"),
+            "error names the file: {error}"
+        );
+    }
+
+    #[test]
+    fn install_deps_reader_treats_a_missing_config_as_edgeless() {
+        let root = scanned_root("mise-install-deps-missing");
+        let deps = must(mise_install_deps_for_root(&root), "read missing config");
+        assert_eq!(
+            deps,
+            MiseInstallDeps::default(),
+            "a missing file declares no edges"
+        );
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[tools]\nnode = \"24.0.0\"\n\n[settings]\ncargo.binstall = true\n",
+            ),
+            "write config",
+        );
+        let deps = must(mise_install_deps_for_root(&root), "read present config");
+        assert!(
+            deps.cargo_binstall,
+            "the settings flag survives the round trip"
+        );
+        assert!(deps.depends.is_empty(), "no depends entries were declared");
         let _ = fs::remove_dir_all(root);
     }
 
