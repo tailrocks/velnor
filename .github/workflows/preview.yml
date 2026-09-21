@@ -111,6 +111,15 @@ on:
       - "crates/velnor-tools/debian/velnor-fleet-policy-audit.timer"
       - "crates/velnor-tools/examples/**"
       - "crates/velnor-tools/src/**"
+      - "crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/checks/jackin-project_jackin-agent-smith/pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0/check-runs/page-0001.body.base64"
+      - "crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/runs/tailrocks_holla-apt/run-35079189599/attempt-1/jobs/page-0001.body.base64"
+      - "crates/velnor-tools/src/testdata/g0/real-api-fixture-corpus-20260920-080318/corpus.zip.base64"
+      - "crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/dco-2.body.base64"
+      - "crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/github-actions.body.base64"
+      - "crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/sonarqubecloud.body.base64"
+      - "crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/homebrew-96059348318.body.base64"
+      - "crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108219979.body.base64"
+      - "crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108227551.body.base64"
       - "crates/velnor-tools/tests/**"
       - "crates/velnor-workflow-contract/**/*.rs"
       - "crates/velnor-workflow-contract/Cargo.lock"
@@ -1598,7 +1607,7 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.12.0
-          cache-key: velnor-mbx-v3-ed56b5dcf3d7-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/src/manifest.rs', 'crates/velnor-tools/**/*.rs', 'crates/velnor-tools/benches/**', 'crates/velnor-tools/examples/**', 'crates/velnor-tools/src/**', 'crates/velnor-tools/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          cache-key: velnor-mbx-v3-ed56b5dcf3d7-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/src/manifest.rs', 'crates/velnor-tools/**/*.rs', 'crates/velnor-tools/benches/**', 'crates/velnor-tools/examples/**', 'crates/velnor-tools/src/**', 'crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/checks/jackin-project_jackin-agent-smith/pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0/check-runs/page-0001.body.base64', 'crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/runs/tailrocks_holla-apt/run-35079189599/attempt-1/jobs/page-0001.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-corpus-20260920-080318/corpus.zip.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/dco-2.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/github-actions.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/sonarqubecloud.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/homebrew-96059348318.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108219979.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108227551.body.base64', 'crates/velnor-tools/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
             velnor-mbx-v3-ed56b5dcf3d7-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
             velnor-mbx-v3-ed56b5dcf3d7-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-
