@@ -856,7 +856,10 @@ mod tests {
         }
     }
 
-    fn selected(config: &crate::ProjectConfig, path: &str) -> BTreeSet<String> {
+    fn selected_change(
+        config: &crate::ProjectConfig,
+        change: crate::reuse::ChangedPath,
+    ) -> BTreeSet<String> {
         let units = config
             .units
             .iter()
@@ -875,18 +878,21 @@ mod tests {
             })
             .collect::<Vec<_>>();
         must_ok(
-            crate::reuse::select_affected(
-                &units,
-                &[crate::reuse::ChangedPath {
-                    path: path.to_owned(),
-                    previous: None,
-                    status: crate::reuse::ChangeKind::Modified,
-                }],
-                &[],
-            ),
+            crate::reuse::select_affected(&units, &[change], &[]),
             "product input selection",
         )
         .required
+    }
+
+    fn selected(config: &crate::ProjectConfig, path: &str) -> BTreeSet<String> {
+        selected_change(
+            config,
+            crate::reuse::ChangedPath {
+                path: path.to_owned(),
+                previous: None,
+                status: crate::reuse::ChangeKind::Modified,
+            },
+        )
     }
 
     #[test]
@@ -1038,7 +1044,9 @@ mod tests {
         )];
         let mut consumer = unit("swift-app", UnitKind::Swift);
         consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
-        let mut config = project_config(vec![producer, consumer]);
+        let mut unrelated = unit("unrelated", UnitKind::Rust);
+        unrelated.watch = vec!["tools/unrelated/**".to_owned()];
+        let mut config = project_config(vec![producer, consumer, unrelated]);
         must_ok(resolve(&mut config), "schema-one product graph resolves");
         let expected = BTreeSet::from(["rust-ffi".to_owned(), "swift-app".to_owned()]);
         for input in [
@@ -1048,6 +1056,35 @@ mod tests {
         ] {
             assert_eq!(selected(&config, input), expected, "selection for {input}");
         }
+        assert_eq!(
+            selected(&config, "tools/unrelated/src/lib.rs"),
+            BTreeSet::from(["unrelated".to_owned()]),
+            "an unrelated input selects only its owner"
+        );
+        assert_eq!(
+            selected_change(
+                &config,
+                crate::reuse::ChangedPath {
+                    path: "libs/bridge-ffi/boltffi.toml.moved".to_owned(),
+                    previous: Some("libs/bridge-ffi/boltffi.toml".to_owned()),
+                    status: crate::reuse::ChangeKind::Renamed,
+                },
+            ),
+            expected,
+            "renaming a product input keeps old ownership"
+        );
+        assert_eq!(
+            selected_change(
+                &config,
+                crate::reuse::ChangedPath {
+                    path: "libs/bridge-ffi/boltffi.toml".to_owned(),
+                    previous: None,
+                    status: crate::reuse::ChangeKind::Deleted,
+                },
+            ),
+            expected,
+            "deleting a product input selects its producer and dependent"
+        );
         assert_eq!(
             config.units[0].watch,
             vec![
@@ -1066,7 +1103,9 @@ mod tests {
         producer.products = vec![ffi];
         let mut consumer = unit("swift-app", UnitKind::Swift);
         consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
-        let mut config = project_config(vec![producer, consumer]);
+        let mut unrelated = unit("unrelated", UnitKind::Rust);
+        unrelated.watch = vec!["tools/unrelated/**".to_owned()];
+        let mut config = project_config(vec![producer, consumer, unrelated]);
         must_ok(resolve(&mut config), "unknown schema-one graph resolves");
         assert!(config.units[0].watch.contains(&"**".to_owned()));
         assert_eq!(
