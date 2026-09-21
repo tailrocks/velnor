@@ -31,8 +31,8 @@ use super::s2::{
     ownership_state_content, render_tree, write_generated_with_options, OWNERSHIP_STATE,
 };
 use super::{
-    is_full_revision, resolve_default_branch, GeneratorError, RunnerMode, SOURCE_CLOSURE,
-    SOURCE_FEATURES, SOURCE_PROFILE,
+    create_generator_symlink, is_full_revision, resolve_default_branch, GeneratorError, RunnerMode,
+    SOURCE_CLOSURE, SOURCE_FEATURES, SOURCE_PROFILE,
 };
 
 /// Promotion intent, separated from the CLI surface for testing.
@@ -165,6 +165,7 @@ fn promote_rendered_tree(
         rendered
             .files()
             .keys()
+            .chain(rendered.symlinks().keys())
             .cloned()
             .chain([PathBuf::from(OWNERSHIP_STATE)]),
     )?;
@@ -177,7 +178,13 @@ fn promote_rendered_tree(
     // still rejects manually modified files, and adopt stays false so unowned
     // workflows are never deleted.
     rendered.write(repo)?;
-    verify_promoted_tree(repo, rendered.files(), options.runners, default_branch)?;
+    verify_promoted_tree(
+        repo,
+        rendered.files(),
+        rendered.symlinks(),
+        options.runners,
+        default_branch,
+    )?;
     let expected_state = rendered.expected_ownership_state();
     let state_path = repo.join(OWNERSHIP_STATE);
     let state_disk = std::fs::read_to_string(&state_path)
@@ -191,6 +198,7 @@ fn promote_rendered_tree(
     let owned: BTreeSet<PathBuf> = rendered
         .files()
         .keys()
+        .chain(rendered.symlinks().keys())
         .cloned()
         .chain([
             PathBuf::from(GENERATION_CONFIG),
@@ -313,6 +321,13 @@ impl PromotedRender {
         }
     }
 
+    fn symlinks(&self) -> &BTreeMap<PathBuf, PathBuf> {
+        match self {
+            Self::V1(rendered) => &rendered.symlinks,
+            Self::V2(rendered) => &rendered.symlinks,
+        }
+    }
+
     /// Write the render with promotion (force) semantics.
     fn write(&self, repo: &Path) -> Result<(), GeneratorError> {
         match self {
@@ -320,6 +335,7 @@ impl PromotedRender {
                 super::write_generated_with_options(
                     repo,
                     &rendered.files,
+                    &rendered.symlinks,
                     &rendered.inputs,
                     false,
                     false,
@@ -332,6 +348,7 @@ impl PromotedRender {
                 write_generated_with_options(
                     repo,
                     &rendered.files,
+                    &rendered.symlinks,
                     &rendered.inputs,
                     false,
                     false,
@@ -347,8 +364,14 @@ impl PromotedRender {
     /// The ownership metadata the write must have produced.
     fn expected_ownership_state(&self) -> String {
         match self {
-            Self::V1(rendered) => super::ownership_state_content(&rendered.files, &rendered.inputs),
-            Self::V2(rendered) => ownership_state_content(&rendered.files, &rendered.inputs),
+            Self::V1(rendered) => super::ownership_state_content(
+                &rendered.files,
+                &rendered.symlinks,
+                &rendered.inputs,
+            ),
+            Self::V2(rendered) => {
+                ownership_state_content(&rendered.files, &rendered.symlinks, &rendered.inputs)
+            }
         }
     }
 }
@@ -371,18 +394,19 @@ fn runners_to_providers(runners: RunnerMode) -> Option<ProviderSet> {
 fn verify_promoted_tree(
     repo: &Path,
     rendered: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
     runners: RunnerMode,
     default_branch: &str,
 ) -> Result<(), GeneratorError> {
     let again = PromotedRender::render(repo, runners, default_branch)?;
-    let again = again.files();
-    if again != rendered {
+    let again_files = again.files();
+    if again_files != rendered {
         let divergent: Vec<String> = rendered
             .keys()
-            .chain(again.keys())
+            .chain(again_files.keys())
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .filter(|path| rendered.get(*path) != again.get(*path))
+            .filter(|path| rendered.get(*path) != again_files.get(*path))
             .map(|path| path.display().to_string())
             .collect();
         return Err(GeneratorError::usage(format!(
@@ -390,11 +414,28 @@ fn verify_promoted_tree(
             divergent.join(", ")
         )));
     }
+    if again.symlinks() != symlinks {
+        return Err(GeneratorError::usage(
+            "the stamped tree does not render symlinks deterministically; refusing to promote"
+                .to_owned(),
+        ));
+    }
     for (relative, wanted) in rendered {
         let path = repo.join(relative);
         let disk = std::fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read promoted file", &path, &error))?;
         if disk != *wanted {
+            return Err(GeneratorError::usage(format!(
+                "the written tree differs from the render at {}; refusing to promote",
+                relative.display()
+            )));
+        }
+    }
+    for (relative, wanted) in symlinks {
+        let path = repo.join(relative);
+        let target = std::fs::read_link(&path)
+            .map_err(|error| GeneratorError::io("read promoted symlink", &path, &error))?;
+        if &target != wanted {
             return Err(GeneratorError::usage(format!(
                 "the written tree differs from the render at {}; refusing to promote",
                 relative.display()
@@ -592,10 +633,17 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, GeneratorError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Recorded pre-promotion bytes for every path the promotion may write, so a
-/// failure restores the tree instead of leaving it half-rendered.
+/// Recorded pre-promotion content for every path the promotion may write, so
+/// a failure restores the tree instead of leaving it half-rendered. Links
+/// record their target: reading through a link would restore a symlink as a
+/// regular file holding its target's bytes.
+enum SnapshotPreimage {
+    Bytes(Vec<u8>),
+    Symlink(PathBuf),
+}
+
 struct Snapshot {
-    entries: Vec<(PathBuf, Option<Vec<u8>>)>,
+    entries: Vec<(PathBuf, Option<SnapshotPreimage>)>,
     seen: BTreeSet<PathBuf>,
 }
 
@@ -622,8 +670,18 @@ impl Snapshot {
                 continue;
             }
             let path = repo.join(&relative);
-            let preimage = match std::fs::read(&path) {
-                Ok(bytes) => Some(bytes),
+            let preimage = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let target = std::fs::read_link(&path)
+                        .map_err(|error| GeneratorError::io("read preimage", &path, &error))?;
+                    Some(SnapshotPreimage::Symlink(target))
+                }
+                Ok(_) => match std::fs::read(&path) {
+                    Ok(bytes) => Some(SnapshotPreimage::Bytes(bytes)),
+                    Err(error) => {
+                        return Err(GeneratorError::io("read preimage", &path, &error));
+                    }
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(GeneratorError::io("read preimage", &path, &error)),
             };
@@ -633,17 +691,19 @@ impl Snapshot {
     }
 
     /// Best-effort restore of every recorded preimage: overwritten files get
-    /// their bytes back, created files are removed, and emptied directories
-    /// are pruned. Every entry is attempted even when one fails.
+    /// their bytes back, overwritten links are relinked, created paths are
+    /// removed, and emptied directories are pruned. Every entry is attempted
+    /// even when one fails.
     fn restore(&mut self, repo: &Path) -> Result<(), GeneratorError> {
         let mut failures = Vec::new();
         for (relative, preimage) in &self.entries {
             let path = repo.join(relative);
             let result = match preimage {
-                Some(bytes) => std::fs::write(&path, bytes)
+                Some(SnapshotPreimage::Bytes(bytes)) => std::fs::write(&path, bytes)
                     .map_err(|error| format!("restore {}: {error}", path.display())),
+                Some(SnapshotPreimage::Symlink(target)) => restore_symlink(&path, target),
                 None => {
-                    if path.exists() {
+                    if std::fs::symlink_metadata(&path).is_ok() {
                         std::fs::remove_file(&path)
                             .map_err(|error| format!("remove {}: {error}", path.display()))
                     } else {
@@ -667,6 +727,21 @@ impl Snapshot {
             )))
         }
     }
+}
+
+/// Relink a snapshot link preimage: remove whatever the promotion wrote at
+/// the path, then recreate the recorded link.
+fn restore_symlink(path: &Path, target: &Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("remove {}: {error}", path.display()))?;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("restore parent of {}: {error}", path.display()))?;
+    }
+    create_generator_symlink(target, path)
+        .map_err(|error| format!("restore {}: {error}", path.display()))
 }
 
 /// Remove directories the promotion created, stopping at the first
