@@ -1106,6 +1106,9 @@ pub(crate) struct CheckProfileSpec {
     /// `continue-on-error`.
     pub(crate) advisory: bool,
     pub(crate) env: BTreeMap<String, String>,
+    /// Job-level read-only GitHub token capabilities requested by the profile.
+    /// Generation-time only: profiles never enter the runtime `project.toml`.
+    pub(crate) permissions: BTreeMap<String, String>,
 }
 
 /// The documentation-site contract the `docs-site` primitive renders. Every
@@ -2643,6 +2646,7 @@ fn apply_check_profiles(
             artifacts: row.artifacts().unwrap_or_default().to_vec(),
             advisory: row.status().is_some_and(|status| status == "advisory"),
             env: row.env().clone(),
+            permissions: row.permissions().clone(),
         });
     }
     config.check_profiles = profiles;

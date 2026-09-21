@@ -377,6 +377,13 @@ pub(crate) struct CheckProfileSection {
     status: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
+    /// Job-level read-only GitHub token capabilities. The scheduled-check
+    /// renderer keeps the workflow default at `contents: read`; a profile may
+    /// request the Actions history read capability for collectors that query
+    /// the Actions API. Other scopes and levels are rejected below so a
+    /// scheduled profile cannot silently become a write-capable job.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    permissions: BTreeMap<String, String>,
     /// Whether the profile's checkout clones full history (`fetch-depth: 0`).
     /// Diff-aware gates (merge-base against the base SHA) need ancestry the
     /// default shallow checkout does not carry. Absent keeps the shallow
@@ -1259,6 +1266,10 @@ impl CheckProfileSection {
 
     pub(crate) fn env(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+
+    pub(crate) fn permissions(&self) -> &BTreeMap<String, String> {
+        &self.permissions
     }
 
     pub(crate) fn full_history(&self) -> bool {
@@ -3042,6 +3053,13 @@ pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
 /// Permission levels accepted by a typed release job.
 pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
 
+/// The only extra token capability a scheduled-check profile may request.
+/// `contents: read` is supplied by the workflow default and is added to any
+/// job-level override by the renderer because GitHub replaces, rather than
+/// merges, a job's permissions map.
+pub(crate) const CHECK_PROFILE_PERMISSIONS: &[&str] = &["actions"];
+pub(crate) const CHECK_PROFILE_PERMISSION_LEVELS: &[&str] = &["read"];
+
 // Keep this in lockstep with the Velnor runner's
 // `actions/attest-build-provenance` capability contract.
 const VELNOR_ATTESTATION_SUBJECTS: &[&str] = &["dist/*.tar.gz", "dist/l2-subject.json"];
@@ -3970,6 +3988,18 @@ fn validate_check_profile_result(
         if value.contains(['\n', '\r']) {
             return Err(GeneratorError::usage(format!(
                 "[[check_profile]] {id} env `{key}` must be one line"
+            )));
+        }
+    }
+    for (scope, level) in &row.permissions {
+        if !CHECK_PROFILE_PERMISSIONS.contains(&scope.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} permissions names `{scope}`, which is not an allowed scheduled-check capability; use `actions = \"read\"`"
+            )));
+        }
+        if !CHECK_PROFILE_PERMISSION_LEVELS.contains(&level.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} permissions `{scope}` must be `read`, found `{level}`"
             )));
         }
     }
@@ -4907,6 +4937,48 @@ mod tests {
             toml::from_str::<RepoGenerationConfig>(text),
             "parse config under test",
         )
+    }
+
+    #[test]
+    fn check_profile_actions_read_permission_is_typed() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[check_profile]]\nid = \"collector\"\ntasks = [\"collect\"]\n\n\
+             [check_profile.permissions]\nactions = \"read\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate the Actions history capability",
+        );
+        assert_eq!(
+            config.check_profiles()[0].permissions().get("actions"),
+            Some(&"read".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_profile_permissions_reject_write_and_unknown_scopes() {
+        for (declaration, expected) in [
+            ("actions = \"write\"", "must be `read`"),
+            (
+                "contents = \"read\"",
+                "not an allowed scheduled-check capability",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[check_profile]]\nid = \"collector\"\ntasks = [\"collect\"]\n\n\
+                 [check_profile.permissions]\n{declaration}\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "unsafe check-profile capability must fail closed",
+            );
+            assert!(
+                error.to_string().contains(expected),
+                "{declaration}: {error}"
+            );
+        }
     }
 
     fn tasks_release_config(workflow: &str, jobs: &str) -> RepoGenerationConfig {
