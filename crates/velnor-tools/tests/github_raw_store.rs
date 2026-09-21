@@ -448,6 +448,52 @@ fn recovers_legacy_full_sidecar_transaction_journal() {
 
 #[cfg(unix)]
 #[test]
+fn sweeps_oversized_compact_transaction_journal_without_bricking_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("transaction-recovery-oversized");
+    let mut store = must(
+        RawObjectFileStore::new(&root),
+        "open oversized transaction store",
+    );
+    let reference = must(
+        store.store(capture("recover-oversized", b"source", b"safe")),
+        "store oversized recoverable bundle",
+    );
+    let sidecar = sidecar_path(&root, &reference);
+    let transaction = root.join("refs").join("recover-oversized.txn");
+    must(
+        fs::remove_file(&sidecar),
+        "remove sidecar before journaling",
+    );
+    // A pathological compact-shaped journal past the 64 KiB bound: padded
+    // metadata that would otherwise complete and abort reconcile on publish.
+    let mut journal = transaction_journal_bytes(&reference);
+    journal.resize(65 * 1024, b' ');
+    must(
+        fs::write(&transaction, journal),
+        "write oversized compact transaction journal",
+    );
+    must(
+        fs::set_permissions(&transaction, fs::Permissions::from_mode(0o400)),
+        "restrict oversized transaction journal",
+    );
+    drop(store);
+
+    // Open succeeds and sweeps the journal instead of completing it: the
+    // sidecar stays absent (without the bound the padded journal would parse
+    // and complete, recreating the sidecar).
+    let _reopened = must(
+        RawObjectFileStore::new(&root),
+        "open store with oversized journal",
+    );
+    assert!(!transaction.exists());
+    assert!(!sidecar.exists());
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn recovers_private_temporary_files_but_leaves_replaced_public_entry() {
     use std::os::unix::fs::PermissionsExt;
 

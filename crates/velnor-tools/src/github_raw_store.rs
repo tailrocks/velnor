@@ -361,6 +361,13 @@ fn transaction_bytes(reference: &RawObjectRef) -> Result<Vec<u8>, RawStorageErro
 
 #[cfg(unix)]
 fn parse_transaction(raw_id: &str, bytes: &[u8]) -> Option<RawTransaction> {
+    // Legit compact journals are metadata-only (<4 KiB in practice). Bound the
+    // shape so a pathological over-cap journal is swept as debris instead of
+    // aborting reconcile on post-completion publish and bricking open().
+    // Legacy full-sidecar journals safely fall through to parse_reference.
+    if bytes.len() > 64 * 1024 {
+        return None;
+    }
     let transaction = serde_json::from_slice::<RawTransaction>(bytes).ok()?;
     if transaction.raw_id != raw_id
         || transaction.byte_length > MAX_RAW_OBJECT_BYTES as u64
@@ -991,6 +998,9 @@ fn reconcile_namespace(
             continue;
         };
         let sidecar_name = raw_id_name(raw_id)?;
+        // Belt-and-suspenders: complete_transaction_reference already hashed
+        // both CAS objects; this re-read re-verifies the bundle before the
+        // sidecar is published. Recovery-path only.
         if object_bundle_matches(objects, originals, &reference) {
             // Complete the public sidecar from descriptor-verified CAS bytes;
             // the compact journal itself is intentionally never copied as a
