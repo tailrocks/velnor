@@ -65,6 +65,14 @@ pub(crate) struct NamedProduct {
     pub(crate) inputs_unknown: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) inputs_digest: Option<String>,
+    /// Shell commands that rebuild the product from a clean checkout, in
+    /// order. The scanner records the producer recipe here so a consumer
+    /// whose producer did not run in this workflow can still materialize
+    /// the product locally; the transport guard skips the rebuild once the
+    /// verified artifact is installed. Empty when the product has no
+    /// local rebuild (a task-carrying product rebuilds through its task).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) rebuild: Vec<String>,
 }
 
 /// One prerequisite edge: `producer` builds `product` for this consumer.
@@ -216,6 +224,47 @@ pub(crate) fn prepare_command(task: &str, env: &BTreeMap<String, String>) -> Str
     command
 }
 
+/// The ready-marker variable one transported edge exports: set only by the
+/// consumer's verify step after the artifact's manifest and digests check
+/// out. Sanitized to the env-name alphabet so any producer/product pair
+/// maps to a valid variable.
+pub(crate) fn transport_marker(producer: &str, product: &str) -> String {
+    fn side(value: &str) -> String {
+        value
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+    format!("VELNOR_PRODUCT_{}__{}_READY", side(producer), side(product))
+}
+
+/// One prepare command that rebuilds a task-less product from `commands`
+/// unless the transport already installed it: the marker is set only in a
+/// consumer job whose verify step accepted the artifact, so local runs and
+/// transport misses always rebuild. The compound runs under the runtime's
+/// `bash -euo pipefail -c`; a failing rebuild command aborts the compound.
+pub(crate) fn guarded_rebuild_command(marker: &str, commands: &[String]) -> String {
+    let mut command = format!("if [[ -z \"${{{marker}:-}}\" ]]; then\n");
+    let mut first = true;
+    for rebuild in commands {
+        if first {
+            first = false;
+        } else {
+            command.push_str(" &&\n");
+        }
+        command.push_str("  ");
+        command.push_str(rebuild);
+    }
+    command.push_str("\nfi");
+    command
+}
+
 /// Resolve the platform surface over `config`: validate every prerequisite
 /// edge and object-transport toggle, compile edges into the selection graph
 /// and prepare commands, merge product outputs into consumer env, and reject
@@ -315,6 +364,26 @@ fn validate_bindings(unit: &Unit, product: &NamedProduct) -> Result<(), Generato
     Ok(())
 }
 
+/// Validate one product's local rebuild: every command is non-empty
+/// printable shell without NUL bytes, so the guarded compound the consumer
+/// prepends cannot silently collapse or inject a second command.
+fn validate_rebuild(unit: &Unit, product: &NamedProduct) -> Result<(), GeneratorError> {
+    for command in &product.rebuild {
+        if command.is_empty()
+            || command.bytes().any(|byte| byte == 0)
+            || command
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with an empty or non-printable rebuild command; rebuild commands are shell lines without NUL or control characters",
+                unit.id, product.name,
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate the product graph before compilation: every declared output is a
 /// normal-form repo-relative path claimed by exactly one product, every
 /// expected output file is a duplicate-free normal-form path under a claimed
@@ -391,6 +460,7 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
             }
             validate_output_files(unit, product)?;
             validate_bindings(unit, product)?;
+            validate_rebuild(unit, product)?;
         }
         for prerequisite in &unit.prerequisites {
             if prerequisite.producer == unit.id {
@@ -552,6 +622,15 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
                     .entry(unit.id.clone())
                     .or_default()
                     .push(prepare_command(task, &prerequisite.env));
+            } else if !product.rebuild.is_empty() {
+                // A task-less product with a recorded recipe: the consumer
+                // rebuilds locally unless the verified artifact already
+                // landed — the transport-miss and local-run fallback.
+                let marker = transport_marker(&prerequisite.producer, &prerequisite.product);
+                prepared
+                    .entry(unit.id.clone())
+                    .or_default()
+                    .push(guarded_rebuild_command(&marker, &product.rebuild));
             }
         }
     }
@@ -622,9 +701,9 @@ pub(crate) fn agreed_env(
 #[cfg(test)]
 mod tests {
     use super::{
-        agreed_env, is_ffi_crate_type, prepare_command, resolve, valid_env_name, valid_env_value,
-        valid_product_input, valid_product_name, valid_product_output, valid_task_name,
-        NamedProduct, Prerequisite,
+        agreed_env, guarded_rebuild_command, is_ffi_crate_type, prepare_command, resolve,
+        transport_marker, valid_env_name, valid_env_value, valid_product_input, valid_product_name,
+        valid_product_output, valid_task_name, NamedProduct, Prerequisite,
     };
     use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
     use crate::s2::scan::default_selectors;
@@ -750,6 +829,7 @@ mod tests {
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
             inputs_digest: None,
+            rebuild: Vec::new(),
         };
         let plain = Prerequisite {
             producer: "rust-ffi".to_owned(),
@@ -803,6 +883,7 @@ mod tests {
             bindings_dir: String::new(),
             bindings_file: String::new(),
             deployment_target: String::new(),
+            rebuild: Vec::new(),
         }
     }
 
@@ -1255,5 +1336,137 @@ mod tests {
             error.to_string().contains("it declares: xcframework"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn transport_marker_is_a_valid_env_name() {
+        assert_eq!(
+            transport_marker("rust-ffi", "xcframework"),
+            "VELNOR_PRODUCT_RUST_FFI__XCFRAMEWORK_READY"
+        );
+        let marker = transport_marker("rust-ffi", "sys-headers_v2");
+        assert!(valid_env_name(&marker), "{marker}");
+    }
+
+    #[test]
+    fn resolve_prepends_guarded_rebuild_for_taskless_products() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.task = None;
+        ffi.rebuild = vec!["make pack".to_owned(), "make verify".to_owned()];
+        producer.products = vec![ffi];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.pr_commands = vec!["swift test".to_owned()];
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut config = project_config(vec![producer, consumer]);
+        must_ok(resolve(&mut config), "task-less rebuild resolves");
+        let prepared = &config.units[1].pr_commands;
+        assert_eq!(2, prepared.len(), "{prepared:?}");
+        assert!(
+            prepared[0].contains("VELNOR_PRODUCT_RUST_FFI__XCFRAMEWORK_READY"),
+            "{}",
+            prepared[0]
+        );
+        assert!(prepared[0].contains("make pack"), "{}", prepared[0]);
+        assert!(prepared[0].contains("make verify"), "{}", prepared[0]);
+        assert_eq!("swift test", prepared[1]);
+    }
+
+    #[test]
+    fn resolve_keeps_task_prepare_ahead_of_guarded_rebuild() {
+        // A product with a task rebuilds through mise; its recorded recipe,
+        // if any, stays dormant.
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.rebuild = vec!["make pack".to_owned()];
+        producer.products = vec![ffi];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut config = project_config(vec![producer, consumer]);
+        must_ok(resolve(&mut config), "task product resolves");
+        let prepared = &config.units[1].pr_commands;
+        assert_eq!(1, prepared.len(), "{prepared:?}");
+        assert!(
+            prepared[0].starts_with("mise run build-xcframework"),
+            "{}",
+            prepared[0]
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_empty_and_nonprintable_rebuild() {
+        for rebuild in [vec![String::new()], vec!["make pack\0".to_owned()]] {
+            let mut producer = unit("rust-ffi", UnitKind::Rust);
+            let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+            ffi.task = None;
+            ffi.rebuild = rebuild;
+            producer.products = vec![ffi];
+            let error = must_err(
+                resolve(&mut project_config(vec![producer])),
+                "bad rebuild fails closed",
+            );
+            assert!(
+                error.to_string().contains("rebuild command"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    /// Run one prepare command exactly as the runtime would: `bash -euo
+    /// pipefail -c` with an optional ready marker in the environment.
+    fn run_prepare(command: &str, dir: &std::path::Path, marker: Option<(&str, &str)>) -> bool {
+        let mut spawned = std::process::Command::new("bash");
+        spawned
+            .args(["-euo", "pipefail", "-c", command])
+            .current_dir(dir);
+        if let Some((name, value)) = marker {
+            spawned.env(name, value);
+        }
+        must_ok(spawned.output(), "run prepare command")
+            .status
+            .success()
+    }
+
+    fn prepare_scratch(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-prepare-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        must_ok(std::fs::create_dir_all(&root), "create scratch directory");
+        root
+    }
+
+    #[test]
+    fn guarded_rebuild_runs_without_marker_and_skips_with_it() {
+        let marker = transport_marker("rust-ffi", "xcframework");
+        let command = guarded_rebuild_command(
+            &marker,
+            &["touch rebuilt".to_owned(), "touch verified".to_owned()],
+        );
+        let cold = prepare_scratch("cold");
+        assert!(run_prepare(&command, &cold, None), "cold rebuild runs");
+        assert!(cold.join("rebuilt").exists(), "first command ran");
+        assert!(cold.join("verified").exists(), "chained command ran");
+
+        let warm = prepare_scratch("warm");
+        assert!(
+            run_prepare(&command, &warm, Some((&marker, "1"))),
+            "marked rebuild skips"
+        );
+        assert!(!warm.join("rebuilt").exists(), "nothing runs when marked");
+    }
+
+    #[test]
+    fn guarded_rebuild_propagates_failure() {
+        let marker = transport_marker("rust-ffi", "xcframework");
+        let command =
+            guarded_rebuild_command(&marker, &["touch first".to_owned(), "exit 3".to_owned()]);
+        let dir = prepare_scratch("failing");
+        assert!(!run_prepare(&command, &dir, None), "failure propagates");
+        assert!(dir.join("first").exists(), "earlier commands ran");
     }
 }

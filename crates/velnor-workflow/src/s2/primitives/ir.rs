@@ -24,9 +24,9 @@ use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
     kind_unit_workflow_file, nested_unit_workflow_file, prepare_cargo_caller_job_id,
-    provider_supports_unit, render_mr_boxington_store_budget_step, rendered_cache_values,
-    rust_dependency_needs, stack_group_job_id, unit_group, unit_group_job_id,
-    unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
+    product_dependency_needs, provider_supports_unit, render_mr_boxington_store_budget_step,
+    rendered_cache_values, rust_dependency_needs, stack_group_job_id, unit_group,
+    unit_group_job_id, unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
     yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RustNeeds, RustToolchain,
     SelectionFieldSources, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
@@ -79,6 +79,7 @@ mod tests {
         ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
         REQUIRED_CHECK,
     };
+    use crate::s2::platform::{NamedProduct, Prerequisite};
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
@@ -463,6 +464,156 @@ mod tests {
         assert!(
             !kind.contains("prepared_tool"),
             "an undeclared kind mentions no prepared tools"
+        );
+    }
+
+    fn transport_product(name: &str, outputs: &[&str]) -> NamedProduct {
+        NamedProduct {
+            name: name.to_owned(),
+            outputs: outputs.iter().map(ToString::to_string).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn transport_edge(producer: &str, product: &str) -> Prerequisite {
+        Prerequisite {
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Producer with one transportable product and one output-less product,
+    /// plus a consumer that needs both. The output-less edge always rebuilds
+    /// locally; only the declared-outputs edge rides the artifact transport.
+    fn transport_fixture() -> (Unit, Unit) {
+        let mut producer = rust_unit("rust-ffi", "crates/ffi");
+        producer.products = vec![
+            transport_product("xcframework", &["native/out/lib.xcframework"]),
+            transport_product("sourceless", &[]),
+        ];
+        let mut consumer = rust_unit("rust-app", "crates/app");
+        consumer.prerequisites = vec![
+            transport_edge("rust-ffi", "xcframework"),
+            transport_edge("rust-ffi", "sourceless"),
+        ];
+        (producer, consumer)
+    }
+
+    #[test]
+    fn kind_reusable_transports_eligible_products_between_members() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            kind.contains("product_provides:"),
+            "the kind header declares the provides input"
+        );
+        assert!(
+            kind.contains("product_transport_ready:"),
+            "the kind header declares the readiness input"
+        );
+        assert!(
+            kind.contains("Download product velnor-product-rust-ffi--xcframework"),
+            "the consumer downloads the eligible product"
+        );
+        assert!(
+            kind.contains("Verify product velnor-product-rust-ffi--xcframework"),
+            "the consumer verifies the downloaded product"
+        );
+        assert!(
+            kind.contains("Stage product velnor-product-rust-ffi--xcframework"),
+            "the producer stages the eligible product"
+        );
+        assert!(
+            kind.contains("Upload product velnor-product-rust-ffi--xcframework"),
+            "the producer uploads the staged product"
+        );
+        assert!(
+            kind.contains("rust-ffi/xcframework:true"),
+            "the consumer block gates on the caller-evaluated verdict"
+        );
+        assert!(
+            !kind.contains("velnor-product-rust-ffi--sourceless"),
+            "an output-less product rides no artifact"
+        );
+    }
+
+    #[test]
+    fn transport_facts_pass_records_only_on_hosted() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer.clone()]);
+        let hosted = ir.unit_provider_facts(
+            &consumer,
+            &ir.default_unit_contract(&consumer, true),
+            ProviderId::GithubHosted,
+        );
+        let values = hosted.input_values();
+        let (_, verdicts) = must_some(
+            values
+                .iter()
+                .find(|(name, _)| *name == provider_input::PRODUCT_TRANSPORT_READY),
+            &format!("the hosted caller passes readiness verdicts: {values:?}"),
+        );
+        assert!(
+            verdicts.contains("rust-ffi/xcframework:${{ needs.")
+                && verdicts.contains(".result == 'success' }}"),
+            "the verdict names the edge and the producer job result: {verdicts}"
+        );
+        assert!(
+            !verdicts.contains("sourceless"),
+            "an output-less edge carries no verdict: {verdicts}"
+        );
+        let consumer_provides = values
+            .iter()
+            .find(|(name, _)| *name == provider_input::PRODUCT_PROVIDES);
+        assert!(
+            consumer_provides.is_none(),
+            "a pure consumer provides no products: {values:?}"
+        );
+        let maker_facts = ir.unit_provider_facts(
+            &ir.units[0],
+            &ir.default_unit_contract(&ir.units[0], true),
+            ProviderId::GithubHosted,
+        );
+        let maker_values = maker_facts.input_values();
+        let record = maker_values
+            .iter()
+            .find(|(name, _)| *name == provider_input::PRODUCT_PROVIDES);
+        assert_eq!(
+            record.map(|(_, value)| value.as_str()),
+            Some("rust-ffi/xcframework"),
+            "the hosted caller passes the producer record: {maker_values:?}"
+        );
+        // Local providers share the workspace: no records, no readiness.
+        for provider in [ProviderId::Velnor, ProviderId::GithubSelfHosted] {
+            let local = ir.unit_provider_facts(
+                &consumer,
+                &ir.default_unit_contract(&consumer, true),
+                provider,
+            );
+            let local_values = local.input_values();
+            assert!(
+                !local_values
+                    .iter()
+                    .any(|(name, _)| *name == provider_input::PRODUCT_PROVIDES
+                        || *name == provider_input::PRODUCT_TRANSPORT_READY),
+                "{provider:?} passes no transport records: {local_values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_reusable_without_products_declares_no_transport_inputs() {
+        let ir = owner_test_ir("example/no-transport", vec![rust_unit("rust", ".")]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            !kind.contains("product_provides") && !kind.contains("product_transport_ready"),
+            "a product-less kind declares no transport inputs"
+        );
+        assert!(
+            !kind.contains("velnor-product-"),
+            "a product-less kind renders no transport steps"
         );
     }
 
@@ -3661,6 +3812,13 @@ pub(crate) mod provider_input {
     /// Comma-separated prepared-tool need records (`tool:digest:producers`)
     /// the provider restores for the unit; empty when it needs none.
     pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
+    /// Comma-separated transport records (`producer/product`) the unit
+    /// publishes as artifacts; empty when it produces nothing.
+    pub(crate) const PRODUCT_PROVIDES: &str = "product_provides";
+    /// Comma-separated `{record}:{verdict}` pairs, one per transportable
+    /// prerequisite edge; the caller evaluates each producer job's result
+    /// inline because the callee cannot read the caller's `needs`.
+    pub(crate) const PRODUCT_TRANSPORT_READY: &str = "product_transport_ready";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -3689,6 +3847,8 @@ pub(crate) mod provider_input {
         UNIT_DEPENDENCIES,
         UNIT_ADMISSION,
         PREPARED_TOOLS,
+        PRODUCT_PROVIDES,
+        PRODUCT_TRANSPORT_READY,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -3789,6 +3949,10 @@ pub(crate) struct ProviderStepFacts {
     pub(crate) unit_admission: ProviderAdmission,
     /// Prepared-tool need records the provider restores for the unit.
     pub(crate) prepared_tools: Vec<String>,
+    /// Transport records (`producer/product`) the unit publishes; hosted only.
+    pub(crate) product_provides: Vec<String>,
+    /// Caller-evaluated readiness verdicts, one per transportable edge.
+    pub(crate) product_transport_ready: Option<String>,
 }
 
 impl ProviderStepFacts {
@@ -3887,7 +4051,22 @@ impl ProviderStepFacts {
                 self.prepared_tools.join(","),
             ));
         }
+        self.push_transport_values(&mut values);
         values
+    }
+
+    /// The transport `with:` values: the records this unit publishes, plus
+    /// the caller-evaluated readiness verdicts when it consumes any.
+    fn push_transport_values(&self, values: &mut Vec<(&'static str, String)>) {
+        if !self.product_provides.is_empty() {
+            values.push((
+                provider_input::PRODUCT_PROVIDES,
+                self.product_provides.join(","),
+            ));
+        }
+        if let Some(ready) = &self.product_transport_ready {
+            values.push((provider_input::PRODUCT_TRANSPORT_READY, ready.clone()));
+        }
     }
 }
 
@@ -4397,6 +4576,10 @@ impl WorkflowIr {
             &mut needs,
             rust_dependency_needs(provider, unit, self.rust_needs, &self.units),
         );
+        append_unique_needs(
+            &mut needs,
+            product_dependency_needs(provider, unit, &self.units),
+        );
         let mut conditions = vec![
             aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
@@ -4411,6 +4594,13 @@ impl WorkflowIr {
             );
         }
         for dependency in rust_dependency_needs(provider, unit, self.rust_needs, &self.units) {
+            conditions.push(format!(
+                "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
+            ));
+        }
+        // A skipped or failed producer means no artifact: the consumer's
+        // guarded rebuild covers it, so the caller still runs.
+        for dependency in product_dependency_needs(provider, unit, &self.units) {
             conditions.push(format!(
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
@@ -4707,6 +4897,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 continue;
             }
+            // The transport inputs likewise stay out of headers whose
+            // members neither produce nor consume build products.
+            if *name == provider_input::PRODUCT_PROVIDES
+                && !members.iter().any(|unit| {
+                    unit.products
+                        .iter()
+                        .any(super::product_transport::transport_eligible)
+                })
+            {
+                continue;
+            }
+            if *name == provider_input::PRODUCT_TRANSPORT_READY
+                && !members.iter().any(|unit| !unit.prerequisites.is_empty())
+            {
+                continue;
+            }
             let _ = writeln!(output, "{}", provider_input::declaration(name));
         }
         if !env.is_empty() {
@@ -4963,17 +5169,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     ) -> ProviderStepFacts {
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mise_tools = if hosted {
-            if tools.contains(&ToolRequirement::Mise) {
-                mise_tool_ids(unit, &self.mise_lock_keys)
-            } else {
-                Vec::new()
-            }
-        } else if tools.contains(&ToolRequirement::Mise) {
-            velnor_mise_install_tool_ids(unit, &self.mise_lock_keys)
-        } else {
-            Vec::new()
-        };
+        let mise_tools =
+            Self::mise_tool_ids_for_provider(hosted, &tools, unit, &self.mise_lock_keys);
         let mise_runner = hosted
             && tools.contains(&ToolRequirement::Mise)
             && mise_tools.is_empty()
@@ -5060,7 +5257,75 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             unit_dependencies: unit.depends_on.clone(),
             unit_admission: ProviderAdmission::for_unit(provider, unit),
             prepared_tools: super::prepared_tools::need_records(&unit.prepared_tools),
+            product_provides: Self::transport_provides(unit, provider),
+            product_transport_ready: Self::transport_ready(&self.units, unit, provider),
         }
+    }
+
+    /// The mise tool ids one unit installs on `hosted`: the hosted spell
+    /// for GitHub runners, the Velnor install spell for local lanes.
+    fn mise_tool_ids_for_provider(
+        hosted: bool,
+        tools: &BTreeSet<ToolRequirement>,
+        unit: &Unit,
+        lock_keys: &BTreeSet<String>,
+    ) -> Vec<String> {
+        if hosted {
+            if tools.contains(&ToolRequirement::Mise) {
+                mise_tool_ids(unit, lock_keys)
+            } else {
+                Vec::new()
+            }
+        } else if tools.contains(&ToolRequirement::Mise) {
+            velnor_mise_install_tool_ids(unit, lock_keys)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The transport records one unit publishes on `provider`: its eligible
+    /// products. Hosted only; local providers share the workspace.
+    fn transport_provides(unit: &Unit, provider: ProviderId) -> Vec<String> {
+        if provider != ProviderId::GithubHosted {
+            return Vec::new();
+        }
+        unit.products
+            .iter()
+            .filter(|product| super::product_transport::transport_eligible(product))
+            .map(|product| super::product_transport::transport_record(&unit.id, &product.name))
+            .collect()
+    }
+
+    /// The caller-evaluated readiness verdicts for one unit's transportable
+    /// prerequisite edges on `provider`, or `None` when no edge can ride
+    /// the transport and the consumer always rebuilds.
+    fn transport_ready(units: &[Unit], unit: &Unit, provider: ProviderId) -> Option<String> {
+        if provider != ProviderId::GithubHosted {
+            return None;
+        }
+        let mut edges = Vec::new();
+        for prerequisite in &unit.prerequisites {
+            let Some(producer) = units
+                .iter()
+                .find(|candidate| candidate.id == prerequisite.producer)
+            else {
+                continue;
+            };
+            let eligible = producer.products.iter().any(|product| {
+                product.name == prerequisite.product
+                    && super::product_transport::transport_eligible(product)
+            });
+            if eligible && provider_supports_unit(provider, producer) {
+                edges.push((
+                    super::product_transport::transport_record(
+                        &prerequisite.producer,
+                        &prerequisite.product,
+                    ),
+                    unit_job_id(provider, &prerequisite.producer),
+                ));
+            }
+        }
+        super::product_transport::ready_records(&edges)
     }
 
     /// Whether the collapsed provider job renders the cargo-fetch phase at all:
@@ -5116,6 +5381,103 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &mut block,
                 self.pins.cache_restore,
                 std::slice::from_ref(need),
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+    }
+
+    /// The union of product-consumer steps across the collapsed provider's
+    /// members: one download+verify block per distinct transportable
+    /// prerequisite edge, gated on the caller-evaluated `{record}:true`
+    /// verdict. The verdict varies per run, so every block carries its
+    /// gate; members whose producer did not run skip the block and their
+    /// guarded rebuild covers the product. Hosted only.
+    fn render_collapsed_product_consumer_steps(&self, output: &mut String, members: &[&Unit]) {
+        let mut union: BTreeMap<String, (String, &crate::s2::platform::NamedProduct)> =
+            BTreeMap::new();
+        for member in members {
+            for prerequisite in &member.prerequisites {
+                let Some(product) = self.units.iter().find_map(|unit| {
+                    if unit.id != prerequisite.producer {
+                        return None;
+                    }
+                    unit.products
+                        .iter()
+                        .find(|product| product.name == prerequisite.product)
+                }) else {
+                    continue;
+                };
+                if !super::product_transport::transport_eligible(product) {
+                    continue;
+                }
+                let record = super::product_transport::transport_record(
+                    &prerequisite.producer,
+                    &prerequisite.product,
+                );
+                union
+                    .entry(record)
+                    .or_insert_with(|| (prerequisite.producer.clone(), product));
+            }
+        }
+        for (record, (producer, product)) in &union {
+            let gate = provider_input::contains_gate(
+                provider_input::PRODUCT_TRANSPORT_READY,
+                &format!("{record}:true"),
+            );
+            let marker = crate::s2::platform::transport_marker(producer, &product.name);
+            let block = super::product_transport::render_consumer_block(
+                self.pins.download_artifact,
+                producer,
+                product,
+                &marker,
+            );
+            output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
+        }
+    }
+
+    /// The union of product-producer steps across the collapsed provider's
+    /// members: one stage+upload block per distinct eligible product, after
+    /// the checks that build it. A failed check skips the upload, so no
+    /// artifact ever certifies a red producer. Hosted only.
+    fn render_collapsed_product_producer_steps(&self, output: &mut String, members: &[&Unit]) {
+        let mut union: BTreeMap<String, (String, &crate::s2::platform::NamedProduct)> =
+            BTreeMap::new();
+        for member in members {
+            for product in &member.products {
+                if !super::product_transport::transport_eligible(product) {
+                    continue;
+                }
+                let record = super::product_transport::transport_record(&member.id, &product.name);
+                union
+                    .entry(record)
+                    .or_insert_with(|| (member.id.clone(), product));
+            }
+        }
+        if union.is_empty() {
+            return;
+        }
+        let member_records: Vec<BTreeSet<String>> = members
+            .iter()
+            .map(|unit| {
+                unit.products
+                    .iter()
+                    .filter(|product| super::product_transport::transport_eligible(product))
+                    .map(|product| {
+                        super::product_transport::transport_record(&unit.id, &product.name)
+                    })
+                    .collect()
+            })
+            .collect();
+        for (record, (producer, product)) in &union {
+            let shared = member_records
+                .iter()
+                .all(|records| records.contains(record));
+            let gate = (!shared)
+                .then(|| provider_input::contains_gate(provider_input::PRODUCT_PROVIDES, record));
+            let block = super::product_transport::render_producer_block(
+                self.pins.upload_artifact,
+                producer,
+                product,
             );
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
@@ -5453,6 +5815,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
 
+        // Verified product transport: download and install the producer's
+        // artifact before the checks consume it. The verify step exports
+        // the ready marker the guarded rebuild reads.
+        if hosted {
+            self.render_collapsed_product_consumer_steps(output, members);
+        }
+
         // Verification.
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
@@ -5473,6 +5842,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 candidate,
                 provider_input::CANDIDATE_PUBLISH,
             ));
+        }
+
+        // Product publication: stage and upload the built products after
+        // the checks that produced them.
+        if hosted {
+            self.render_collapsed_product_producer_steps(output, members);
         }
 
         // Cache collection.

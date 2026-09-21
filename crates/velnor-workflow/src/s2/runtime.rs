@@ -416,6 +416,18 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             prepared_tool_install(&arguments[1..])?;
             Ok(true)
         }
+        "stage-product" => {
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            crate::s2::primitives::product_transport::stage_product_cli(&root, &arguments[1..])?;
+            Ok(true)
+        }
+        "verify-product" => {
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            crate::s2::primitives::product_transport::verify_product_cli(&root, &arguments[1..])?;
+            Ok(true)
+        }
         "cache-plan" => {
             let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
             let mode = options.get("mode").map_or("plan", String::as_str);
@@ -1311,7 +1323,7 @@ fn parse_pinned_epoch(pinned: &str) -> Result<i64, GeneratorError> {
     })
 }
 
-fn parse_options(
+pub(crate) fn parse_options(
     arguments: &[OsString],
     allowed: &[&str],
 ) -> Result<BTreeMap<String, String>, GeneratorError> {
@@ -7023,5 +7035,33 @@ workspace_check = true
         assert_eq!(response.status, 403);
         assert!(split_curl_response("no trailer here").is_none());
         assert!(split_curl_response("body\n__PREPARED_TOOL_STATUS:banana\n").is_none());
+    }
+
+    #[test]
+    fn try_run_dispatches_the_product_transport_subcommands() {
+        // Bare invocations fail inside the transport CLIs for their missing
+        // options: the arms match instead of falling through to the
+        // generator CLI.
+        for (command, option) in [
+            ("stage-product", "--producer"),
+            ("verify-product", "--producer"),
+        ] {
+            let error = must_fail(
+                try_run(&[OsString::from(command)]),
+                "a bare transport subcommand names its missing option",
+            )
+            .to_string();
+            assert!(
+                error.contains(&format!("{command} needs {option}")),
+                "unexpected error: {error}"
+            );
+        }
+        assert!(
+            !must(
+                try_run(&[OsString::from("definitely-not-a-runtime-command")]),
+                "an unknown command falls through",
+            ),
+            "unknown commands belong to the generator CLI"
+        );
     }
 }

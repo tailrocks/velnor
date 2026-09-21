@@ -19,6 +19,7 @@ mod package_release;
 mod pipeline;
 mod plan;
 pub(crate) mod prepared_tools;
+pub(crate) mod product_transport;
 mod providers;
 mod regen;
 pub(crate) mod release;

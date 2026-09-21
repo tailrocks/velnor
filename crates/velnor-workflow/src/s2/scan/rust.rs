@@ -1481,7 +1481,7 @@ fn join_sorted_arches(arches: &[String]) -> String {
 /// The expected structural files of the pack: the framework manifest plus,
 /// per slice, the static library and header modulemap. Cargo names a
 /// staticlib `lib{crate}.a` with `-` folded to `_`; these are the paths
-/// Jackin's `desktop xcframework` verification asserts. Generated headers
+/// a consumer's framework verification asserts. Generated headers
 /// beyond the modulemap and per-file digests are build-time facts the
 /// producer manifest records, not plan facts.
 fn boltffi_expected_files(output: &str, crate_name: &str, slices: &[String]) -> Vec<String> {
@@ -2555,7 +2555,7 @@ mod tests {
     #[test]
     fn boltffi_slice_dirs_honors_explicit_lists() {
         use super::{boltffi_slice_dirs, parse_boltffi_manifest};
-        // Jackin shape: macOS-only arm64, iOS and simulator disabled.
+        // macOS-only arm64 shape: iOS and simulator disabled.
         let parsed = parse_boltffi_manifest(
             "[package]\nname = \"x\"\n\n\
              [targets.apple]\ninclude_macos = true\nios_architectures = []\n\

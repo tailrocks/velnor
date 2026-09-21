@@ -1203,6 +1203,9 @@ impl UnitSection {
                 // Declared rows cannot claim a digest: only the scanner
                 // computes one, over bytes it actually read.
                 inputs_digest: None,
+                // Declared rows rebuild through their task; a recorded
+                // recipe arrives only from the scanner's adapter.
+                rebuild: Vec::new(),
             });
         }
         Ok(products)
@@ -6162,6 +6165,10 @@ mod tests {
         assert_eq!(
             products[0].outputs,
             vec!["native/out/lib.xcframework".to_owned()]
+        );
+        assert!(
+            products[0].rebuild.is_empty(),
+            "declared rows rebuild through their task; only the scanner records a recipe"
         );
     }
 

@@ -191,6 +191,20 @@ fn wire_native_edge(
         .iter()
         .any(|product| product.name == product_name)
     {
+        // The pack runs Apple tooling, so the producing unit inherits the
+        // macOS requirement and carries the typed recipe commands after
+        // its own checks. A second consumer of the same product reuses
+        // the materialized output instead of appending a second pack.
+        // The product records the same recipe as its local rebuild, so a
+        // consumer whose producer did not run can materialize it.
+        let surface = rust::BoltffiDriftSurface {
+            bindings_dir: &producer.bindings_dir,
+            package_swift: producer.package_swift.as_deref(),
+            framework: &producer.framework,
+        };
+        let recipe_commands = producer
+            .recipe
+            .commands(&producer.root, &producer.output, &surface);
         shape.units[producer_index]
             .products
             .push(crate::s2::platform::NamedProduct {
@@ -205,22 +219,11 @@ fn wire_native_edge(
                 inputs: producer.inputs.clone(),
                 inputs_unknown: producer.inputs_unknown.clone(),
                 inputs_digest: producer.inputs_digest.clone(),
+                rebuild: recipe_commands.clone(),
             });
-        // The pack runs Apple tooling, so the producing unit inherits the
-        // macOS requirement and carries the typed recipe commands after
-        // its own checks. A second consumer of the same product reuses
-        // the materialized output instead of appending a second pack.
         let unit = &mut shape.units[producer_index];
         unit.platform = crate::s2::provider::Platform::MacosArm64;
         unit.capabilities.native_macos_arm64 = true;
-        let surface = rust::BoltffiDriftSurface {
-            bindings_dir: &producer.bindings_dir,
-            package_swift: producer.package_swift.as_deref(),
-            framework: &producer.framework,
-        };
-        let recipe_commands = producer
-            .recipe
-            .commands(&producer.root, &producer.output, &surface);
         unit.pr_commands.extend(recipe_commands.clone());
         unit.full_commands.extend(recipe_commands);
     }
@@ -524,7 +527,7 @@ impl From<RepositoryShape> for ProjectConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::native_product_name;
+    use super::{native_product_name, RepositoryShape};
 
     #[test]
     fn native_product_name_sanitizes_frameworks() {
@@ -550,5 +553,184 @@ mod tests {
         assert!(name.len() <= 100, "{name}");
         assert!(crate::s2::platform::valid_product_name(&name), "{name}");
         assert!(name.starts_with("xcframework-ffff"));
+    }
+
+    #[test]
+    fn wired_native_product_records_the_pack_recipe_as_its_rebuild() {
+        let rust = super::unit(
+            crate::s2::UnitKind::Rust,
+            "crates/ffi",
+            Vec::new(),
+            vec!["cargo test --locked".to_owned()],
+            None,
+        );
+        let swift = super::unit(
+            crate::s2::UnitKind::Swift,
+            "native",
+            Vec::new(),
+            vec!["swift test".to_owned()],
+            None,
+        );
+        let mut shape = RepositoryShape {
+            files: Vec::new(),
+            units: vec![rust, swift],
+            boltffi_producers: Vec::new(),
+            swift_consumers: Vec::new(),
+            detected: Vec::new(),
+            limitations: Vec::new(),
+            default_branch: "main".to_owned(),
+            providers: crate::s2::provider::ProviderSet::default(),
+        };
+        let producer_id = shape.units[0].id.clone();
+        let consumer_id = shape.units[1].id.clone();
+        let producer = super::rust::BoltffiProducer {
+            manifest: "crates/ffi/boltffi.toml".to_owned(),
+            root: "crates/ffi".to_owned(),
+            package: "ffi".to_owned(),
+            crate_name: "ffi".to_owned(),
+            framework: "BridgeCore".to_owned(),
+            ffi_module: "BridgeCore".to_owned(),
+            output: "native/out/BridgeCore.xcframework".to_owned(),
+            bindings_dir: "native/Sources/BridgeCore".to_owned(),
+            bindings_file: "FfiBoltFFI.swift".to_owned(),
+            deployment_target: "26.0".to_owned(),
+            package_swift: None,
+            recipe: super::rust::BoltffiRecipe {
+                profile: Some("desktop-release".to_owned()),
+                locked: true,
+                verbose: false,
+            },
+            unit: Some(producer_id.clone()),
+            output_files: vec!["Info.plist".to_owned()],
+            inputs: vec!["crates/ffi/src/**".to_owned()],
+            inputs_unknown: Vec::new(),
+            inputs_digest: None,
+        };
+        let consumer = super::swift::SwiftBinaryConsumer {
+            manifest: "native/Package.swift".to_owned(),
+            package_root: "native".to_owned(),
+            unit: consumer_id,
+            name: Some("BridgeCore".to_owned()),
+            path: "out/BridgeCore.xcframework".to_owned(),
+        };
+        super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore");
+        let unit = &shape.units[0];
+        assert_eq!(1, unit.products.len(), "{unit:?}");
+        let product = &unit.products[0];
+        assert_eq!("xcframework-bridgecore", product.name);
+        assert_eq!(vec!["native/out/BridgeCore.xcframework"], product.outputs);
+        assert!(
+            !product.rebuild.is_empty(),
+            "the joined product records its local rebuild"
+        );
+        assert_eq!(
+            product.rebuild,
+            unit.pr_commands[1..],
+            "the rebuild is the recipe the producer itself runs"
+        );
+        assert_eq!(
+            product.rebuild,
+            unit.full_commands[1..],
+            "both command vectors carry the same recipe"
+        );
+        assert!(
+            product
+                .rebuild
+                .iter()
+                .any(|command| command.contains("pack apple")),
+            "the rebuild packs: {:?}",
+            product.rebuild
+        );
+        assert_eq!(
+            crate::s2::provider::Platform::MacosArm64,
+            unit.platform,
+            "the pack inherits the macOS requirement"
+        );
+        let prerequisite = &shape.units[1].prerequisites;
+        assert_eq!(1, prerequisite.len(), "{prerequisite:?}");
+        assert_eq!(producer_id, prerequisite[0].producer);
+        assert_eq!("xcframework-bridgecore", prerequisite[0].product);
+    }
+
+    #[test]
+    fn second_consumer_of_a_wired_product_appends_no_second_pack() {
+        let rust = super::unit(
+            crate::s2::UnitKind::Rust,
+            "crates/ffi",
+            Vec::new(),
+            vec!["cargo test --locked".to_owned()],
+            None,
+        );
+        let first = super::unit(
+            crate::s2::UnitKind::Swift,
+            "native",
+            Vec::new(),
+            vec!["swift test".to_owned()],
+            None,
+        );
+        let second = super::unit(
+            crate::s2::UnitKind::Swift,
+            "tools",
+            Vec::new(),
+            vec!["swift test".to_owned()],
+            None,
+        );
+        let mut shape = RepositoryShape {
+            files: Vec::new(),
+            units: vec![rust, first, second],
+            boltffi_producers: Vec::new(),
+            swift_consumers: Vec::new(),
+            detected: Vec::new(),
+            limitations: Vec::new(),
+            default_branch: "main".to_owned(),
+            providers: crate::s2::provider::ProviderSet::default(),
+        };
+        let producer = super::rust::BoltffiProducer {
+            manifest: "crates/ffi/boltffi.toml".to_owned(),
+            root: "crates/ffi".to_owned(),
+            package: "ffi".to_owned(),
+            crate_name: "ffi".to_owned(),
+            framework: "BridgeCore".to_owned(),
+            ffi_module: "BridgeCore".to_owned(),
+            output: "native/out/BridgeCore.xcframework".to_owned(),
+            bindings_dir: "native/Sources/BridgeCore".to_owned(),
+            bindings_file: "FfiBoltFFI.swift".to_owned(),
+            deployment_target: "26.0".to_owned(),
+            package_swift: None,
+            recipe: super::rust::BoltffiRecipe {
+                profile: None,
+                locked: true,
+                verbose: false,
+            },
+            unit: Some(shape.units[0].id.clone()),
+            output_files: Vec::new(),
+            inputs: Vec::new(),
+            inputs_unknown: Vec::new(),
+            inputs_digest: None,
+        };
+        for index in [1, 2] {
+            let consumer = super::swift::SwiftBinaryConsumer {
+                manifest: format!("{}/Package.swift", shape.units[index].root),
+                package_root: shape.units[index].root.clone(),
+                unit: shape.units[index].id.clone(),
+                name: Some("BridgeCore".to_owned()),
+                path: "out/BridgeCore.xcframework".to_owned(),
+            };
+            super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore");
+        }
+        let unit = &shape.units[0];
+        assert_eq!(1, unit.products.len(), "{unit:?}");
+        let packs = unit
+            .pr_commands
+            .iter()
+            .filter(|command| command.contains("pack apple"))
+            .count();
+        assert_eq!(
+            1, packs,
+            "one pack serves both consumers: {:?}",
+            unit.pr_commands
+        );
+        assert_eq!(1, shape.units[1].prerequisites.len());
+        assert_eq!(1, shape.units[2].prerequisites.len());
     }
 }

@@ -5100,6 +5100,42 @@ pub(crate) fn rust_dependency_needs(
         .collect()
 }
 
+/// The caller-level `needs` edges for verified product transport: one
+/// producer caller job per prerequisite edge whose product can ride an
+/// artifact on `provider`. Hosted only — local providers share the
+/// workspace, so their consumers rebuild or reuse in place. An edge whose
+/// producer cannot run here, or whose product declares no outputs, yields
+/// no edge: the consumer's guarded rebuild covers it.
+pub(crate) fn product_dependency_needs(
+    provider: provider::ProviderId,
+    unit: &Unit,
+    units: &[Unit],
+) -> Vec<String> {
+    if !matches!(provider, provider::ProviderId::GithubHosted) {
+        return Vec::new();
+    }
+    let mut needs = Vec::new();
+    for prerequisite in &unit.prerequisites {
+        let Some(producer) = units
+            .iter()
+            .find(|candidate| candidate.id == prerequisite.producer)
+        else {
+            continue;
+        };
+        let transportable = producer.products.iter().any(|product| {
+            product.name == prerequisite.product
+                && crate::s2::primitives::product_transport::transport_eligible(product)
+        });
+        if transportable && provider_supports_unit(provider, producer) {
+            let job = unit_job_id(provider, &prerequisite.producer);
+            if !needs.contains(&job) {
+                needs.push(job);
+            }
+        }
+    }
+    needs
+}
+
 /// The GitHub-owned macOS image jobs with `platform = "macos-arm64"` run on.
 /// Hosted selectors carry Linux labels; Apple execution needs the macOS
 /// image, which only exists on the hosted provider.
@@ -21610,5 +21646,68 @@ lockfile = true
             "a rejected config must not leave a state file"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn product_dependency_needs_names_transportable_producer_jobs_on_hosted() {
+        let unit = |id: &str| Unit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            pr_commands: vec!["cargo test --locked".to_owned()],
+            full_commands: vec!["cargo test --locked".to_owned()],
+            depends_on: Vec::new(),
+            pinned_lockfile: false,
+            cache: None,
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            trust: provider::TrustReq::UntrustedOk,
+            capabilities: provider::Capabilities::default(),
+            workspace_check: false,
+            platform: provider::Platform::LinuxX64,
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            docker_contexts: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
+        };
+        let product = |name: &str, outputs: &[&str]| platform::NamedProduct {
+            name: name.to_owned(),
+            outputs: outputs.iter().map(ToString::to_string).collect(),
+            ..Default::default()
+        };
+        let edge = |producer: &str, product: &str| platform::Prerequisite {
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            ..Default::default()
+        };
+        let mut producer = unit("rust-ffi");
+        producer.products = vec![
+            product("xcframework", &["native/out/lib.xcframework"]),
+            product("sourceless", &[]),
+        ];
+        let mut consumer = unit("rust-app");
+        consumer.prerequisites = vec![
+            edge("rust-ffi", "xcframework"),
+            edge("rust-ffi", "sourceless"),
+            edge("rust-missing", "xcframework"),
+        ];
+        let units = vec![producer, consumer.clone()];
+        assert_eq!(
+            product_dependency_needs(ProviderId::GithubHosted, &consumer, &units),
+            vec![unit_job_id(ProviderId::GithubHosted, "rust-ffi")],
+            "only the output-declaring edge becomes a caller need"
+        );
+        for provider in [ProviderId::Velnor, ProviderId::GithubSelfHosted] {
+            assert!(
+                product_dependency_needs(provider, &consumer, &units).is_empty(),
+                "{provider:?} shares the workspace, so it needs no producer edge"
+            );
+        }
     }
 }
