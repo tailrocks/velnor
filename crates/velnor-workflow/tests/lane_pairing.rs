@@ -382,8 +382,9 @@ fn automatic_both_gates_pair_except_fork_pr_admission() {
         "Velnor verify job must require the velnor lane: {velnor_if}"
     );
     for event in [
-        "github.event_name == 'push'",
-        "github.event_name == 'schedule'",
+        "github.event_name=='push'",
+        "github.event_name=='schedule'",
+        "github.event_name=='merge_group'",
     ] {
         assert!(
             github_if.contains(event),
@@ -395,12 +396,12 @@ fn automatic_both_gates_pair_except_fork_pr_admission() {
         );
     }
     assert!(
-        github_if.contains("github.event_name == 'pull_request'"),
+        github_if.contains("github.event_name=='pull_request'"),
         "GitHub admits pull_request: {github_if}"
     );
     assert!(
         velnor_if.contains(
-            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"
+            "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository"
         ),
         "Velnor admits same-repo pull_request only: {velnor_if}"
     );
