@@ -11,9 +11,9 @@ generator	69
 .github/actions/setup-velnor-workflow/action.yml	da8fae1bb9e2226b
 .github/ci/project.toml	5509fbccad39e09c
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	592aa2fa3ca060fe
+.github/workflows/ci-main.yml	9af70fd9b3fa8719
 .github/workflows/ci-policy.yml	e5648f15fc431087
-.github/workflows/ci-pr.yml	a39e45f7d17df338
+.github/workflows/ci-pr.yml	b2c2aae648973239
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-runtime-products.yml	935480b6badebe29
 .github/workflows/ci-unit-bun.yml	1f970d85e0c2b49b
@@ -23,7 +23,7 @@ generator	69
 .github/workflows/ci-unit-rust.yml	46d967ae3eaf7598
 .github/workflows/maintenance.yml	400ebdb274543e2d
 .github/workflows/nightly.yml	913eb126100f9b56
-.github/workflows/preview.yml	6bbbe977c9d75939
-.github/workflows/release.yml	69ed189aed8e5fa8
+.github/workflows/preview.yml	deccfd835c5a9776
+.github/workflows/release.yml	be8dc085a3366415
 config/fleet/velnor-host.env	d14b419216449423
 .github/CLAUDE.md	78a740c6ccf6937a

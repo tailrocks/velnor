@@ -338,7 +338,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       cache_paths: ".velnor-docker-cache"
-      seed_compat: "525e6da16aca"
+      seed_compat: "7e67216c9e23"
       seed_dependency_files: |
         Cargo.lock
         Dockerfile
@@ -481,7 +481,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mbx_enabled: true
-      mbx_compat: "77c723e46664"
+      mbx_compat: fe8982552e68
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -542,7 +542,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "52f44effac62"
+      mbx_compat: "42873ff80729"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -612,7 +612,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "0d4e48f5280a"
+      mbx_compat: "9204e859dced"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -736,7 +736,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: e7f11b9f4864
+      mbx_compat: c0e76007e2ac
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -812,7 +812,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "29d049b3b0e5"
+      mbx_compat: b3f51a63e390
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -888,7 +888,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "14a12df2830d"
+      mbx_compat: ac0e80cc51da
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -957,7 +957,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "5f19806b17c5"
+      mbx_compat: "627bcc53ad13"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1033,7 +1033,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "0c257ec5e79c"
+      mbx_compat: "8ec7f343ea18"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1152,7 +1152,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: ab6a31f904c7
+      mbx_compat: ed56b5dcf3d7
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1244,7 +1244,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: a6f22cde7624
+      mbx_compat: "8ca12b20166c"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1376,7 +1376,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: fef1361d5eab
+      mbx_compat: "6af73ff64799"
       mbx_dependency_files: |
         .cargo/**
         crates/velnor-workflow-contract/Cargo.lock
@@ -1444,7 +1444,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "74f7ea0cab95"
+      mbx_compat: "6a1deaf2af9c"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1579,7 +1579,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_runner: true
       mbx_enabled: true
-      mbx_compat: "5ed2feda951e"
+      mbx_compat: "4f81dcee4c93"
       mbx_dependency_files: |
         Cargo.lock
         Cargo.toml
