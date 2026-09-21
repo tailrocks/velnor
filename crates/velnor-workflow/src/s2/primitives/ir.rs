@@ -5266,10 +5266,8 @@ pub(crate) struct ProviderStepFacts {
 
 impl ProviderStepFacts {
     /// The `with:` values a caller passes: one entry per non-empty fact.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one branch per workflow_call input, in declaration order"
-    )]
+    /// Tailed groups (transport, verification selectors) live in their own
+    /// push helpers so this list stays under the line budget.
     pub(crate) fn input_values(&self) -> Vec<(&'static str, String)> {
         let mut values = Vec::new();
         if !self.mise_tools.is_empty() {
