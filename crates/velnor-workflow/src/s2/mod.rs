@@ -736,6 +736,12 @@ pub struct Unit {
     /// runtimes reject unknown unit fields, and the emitted command list
     /// carries the contract.
     pub(crate) workspace_check: bool,
+    /// Whether the unit's checkout clones full history. Generation-time
+    /// only, like [`Unit::services`]: pinned Planning runtimes reject
+    /// unknown unit fields, so the flag is skipped from serialization and
+    /// never emitted into `toml()`; the rendered `fetch-depth` carries it.
+    #[serde(skip_serializing)]
+    pub(crate) full_history: bool,
     /// Named build products this unit produces for consumers, each rebuilt
     /// through its named task. Generation-time only: edges compile into
     /// `depends_on` and prepare commands, which the runtime contract carries.
@@ -978,6 +984,9 @@ pub(crate) struct CheckProfileSpec {
     /// `continue-on-error`.
     pub(crate) advisory: bool,
     pub(crate) env: BTreeMap<String, String>,
+    /// Whether the profile's checkout clones full history (`fetch-depth: 0`).
+    /// Generation-time only: profiles never enter the runtime `project.toml`.
+    pub(crate) full_history: bool,
 }
 
 /// The documentation-site contract the `docs-site` primitive renders. Every
@@ -1122,6 +1131,25 @@ pub(crate) struct ReleaseSpec {
     /// Named-task jobs the tasks publisher renders. Empty for every other
     /// publisher, whose job graph is fixed.
     pub(crate) jobs: Vec<ReleaseJobSpec>,
+    /// One `[[release.image]]` row per published image of a multi-image
+    /// docker contract. Empty keeps the scalar contract. Generation-time
+    /// only, like the scalar docker build inputs.
+    pub(crate) images: Vec<ReleaseImageSpec>,
+}
+
+/// One published image of a multi-image docker contract: the published
+/// reference, its build inputs, and the sibling images whose tags must
+/// exist before it inspects or builds. Empty `dockerfile`/`context`
+/// select the scalar conventions; empty `platforms` selects both Linux
+/// architectures.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReleaseImageSpec {
+    pub(crate) name: String,
+    pub(crate) image: String,
+    pub(crate) dockerfile: String,
+    pub(crate) context: String,
+    pub(crate) platforms: Vec<String>,
+    pub(crate) needs: Vec<String>,
 }
 
 /// One typed named-task release job. Product build, sign, and publication
@@ -1393,7 +1421,9 @@ impl ProjectConfig {
             // it as an unknown field before Planning can start. The `docker`
             // publisher's `dockerfile`, `context`, and `platforms` stay
             // generation-time only for the same reason: no runtime command
-            // consumes them.
+            // consumes them. The `[[release.image]]` rows stay with them:
+            // `images` renders into the workflow graph and is never carried
+            // to a pinned runtime.
         }
         for unit in &self.units {
             output.push_str("\n[[unit]]\n");
@@ -2603,6 +2633,7 @@ fn apply_check_profiles(
             artifacts: row.artifacts().unwrap_or_default().to_vec(),
             advisory: row.status().is_some_and(|status| status == "advisory"),
             env: row.env().clone(),
+            full_history: row.full_history(),
         });
     }
     config.check_profiles = profiles;
@@ -2692,7 +2723,8 @@ fn apply_release(
         || release.registry().is_some()
         || release.registry_username_secret().is_some()
         || release.registry_password_secret().is_some()
-        || !release.jobs().is_empty();
+        || !release.jobs().is_empty()
+        || !release.images().is_empty();
     if !declared {
         return Ok(());
     }
@@ -2857,6 +2889,20 @@ fn apply_release(
         }
         spec.jobs = jobs;
     }
+    if !release.images().is_empty() {
+        spec.images = release
+            .images()
+            .iter()
+            .map(|row| ReleaseImageSpec {
+                name: row.name().unwrap_or_default().to_owned(),
+                image: row.image().unwrap_or_default().to_owned(),
+                dockerfile: row.dockerfile().unwrap_or_default().to_owned(),
+                context: row.context().unwrap_or_default().to_owned(),
+                platforms: row.platforms().to_vec(),
+                needs: row.needs().unwrap_or_default().to_vec(),
+            })
+            .collect();
+    }
     // A declared apt contract is validated now, not at render time: malformed
     // values fail generation loudly instead of rendering a broken feed.
     if spec.kind == "apt" && primitives::release::release_contract_complete(&spec) {
@@ -2970,6 +3016,7 @@ fn apply_unit_row(
                 .unwrap_or(provider::Platform::LinuxX64),
             capabilities: provider::Capabilities::default(),
             workspace_check: row.workspace_check(),
+            full_history: row.full_history(),
             products,
             prerequisites,
             docker_contexts,
@@ -2996,6 +3043,12 @@ fn apply_unit_row(
         unit.pr_commands = vec!["cargo check --workspace --all-targets --locked".to_owned()];
         unit.full_commands.clone_from(&unit.pr_commands);
         unit.clear_phases();
+    }
+    // One-way latch, like `workspace_check` above: an override row opts a
+    // scanned unit into full history, but nothing opts one back out, so a
+    // silent shallow fallback can never make a diff-aware gate vacuous.
+    if row.full_history() {
+        unit.full_history = true;
     }
     for task in row.ci_tasks() {
         let command = format!("mise run {task}");
@@ -10967,6 +11020,7 @@ mod tests {
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             platform,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -12155,6 +12209,46 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// `[[release.image]]` rows travel the config-to-spec path: names,
+    /// references, build inputs, platforms, and needs edges land on the
+    /// spec, undeclared build inputs stay empty for the render
+    /// conventions, and the scalar image stays cleared.
+    #[test]
+    fn release_image_rows_map_onto_the_spec() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            [release]\nenabled = true\nkind = \"docker\"\n\n\
+            [[release.image]]\nname = \"base\"\nimage = \"example/base\"\n\n\
+            [[release.image]]\nname = \"node\"\nimage = \"example/node\"\n\
+            dockerfile = \"images/node/Dockerfile\"\ncontext = \"images/node\"\n\
+            platforms = [\"linux/amd64\"]\nneeds = [\"base\"]\n";
+        let root = configured_repository("release-image-rows", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        let release = must_some(scanned.config.release.as_ref(), "release contract");
+        assert!(release.image.is_empty());
+        assert_eq!(release.images.len(), 2);
+        assert_eq!(release.images[0].name, "base");
+        assert_eq!(release.images[0].image, "example/base");
+        assert!(release.images[0].dockerfile.is_empty());
+        assert!(release.images[0].context.is_empty());
+        assert!(release.images[0].platforms.is_empty());
+        assert!(release.images[0].needs.is_empty());
+        assert_eq!(release.images[1].name, "node");
+        assert_eq!(release.images[1].dockerfile, "images/node/Dockerfile");
+        assert_eq!(release.images[1].context, "images/node");
+        assert_eq!(release.images[1].platforms, vec!["linux/amd64".to_owned()]);
+        assert_eq!(release.images[1].needs, vec!["base".to_owned()]);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn workspace_check_metadata_round_trips_through_runtime_config() {
         let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nworkspace_check = true\n";
@@ -12187,6 +12281,167 @@ mod tests {
         must(
             runtime::read_config_for_test(&path),
             "emitted workspace metadata must parse through the runtime contract",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scanned_units_default_to_shallow_checkouts() {
+        let config = scanned_fixture(provider_set([provider::ProviderId::GithubHosted]));
+        assert!(
+            !config.units.is_empty(),
+            "the fixture scans at least one unit"
+        );
+        for unit in &config.units {
+            assert!(
+                !unit.full_history,
+                "scanned unit {} defaults to a shallow checkout",
+                unit.id
+            );
+        }
+    }
+
+    #[test]
+    fn full_history_override_row_latches_a_scanned_unit_deep() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nfull_history = true\n";
+        let root = configured_repository("full-history-override", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        let unit = must_some(
+            scanned
+                .config
+                .units
+                .iter()
+                .find(|unit| unit.id == "rust-fixture"),
+            "scanned unit",
+        );
+        assert!(
+            unit.full_history,
+            "the override row latches the scanned unit into full history"
+        );
+        for other in scanned
+            .config
+            .units
+            .iter()
+            .filter(|unit| unit.id != "rust-fixture")
+        {
+            assert!(
+                !other.full_history,
+                "unlabeled unit {} stays shallow",
+                other.id
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_history_declared_unit_carries_the_flag_on_the_add_arm() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"extra-docs\"\nkind = \"docs\"\nroot = \".\"\nfull_history = true\n";
+        let root = configured_repository("full-history-add", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        let unit = must_some(
+            scanned
+                .config
+                .units
+                .iter()
+                .find(|unit| unit.id == "extra-docs"),
+            "declared unit",
+        );
+        assert!(
+            unit.full_history,
+            "the add arm carries full_history onto the declared unit"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn emitted_runtime_contract_omits_full_history() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nfull_history = true\n";
+        let root = configured_repository("full-history-omitted", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        assert!(
+            scanned
+                .config
+                .units
+                .iter()
+                .any(|unit| unit.id == "rust-fixture" && unit.full_history),
+            "the fixture carries a deep unit"
+        );
+        let emitted = scanned.config.toml();
+        assert!(
+            !emitted.contains("full_history"),
+            "the generation-time flag never enters the runtime contract: {emitted}"
+        );
+        let path = root.join(".github/ci/project.toml");
+        must(
+            fs::create_dir_all(must_some(path.parent(), "runtime config parent")),
+            "create runtime config directory",
+        );
+        must(fs::write(&path, &emitted), "write emitted runtime config");
+        must(
+            runtime::read_config_for_test(&path),
+            "the emitted contract parses through the runtime parser",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn check_profile_rows_carry_full_history_into_specs() {
+        let root = temporary_repository("check-profile-full-history");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[tasks.check-perf]\nrun = \"true\"\n",
+            ),
+            "write mise tasks",
+        );
+        let parsed = must(
+            toml::from_str::<config::RepoGenerationConfig>(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[check_profile]]\nid = \"perf\"\nname = \"Perf probe\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-perf\"]\nfull_history = true\n\n\
+                 [[check_profile]]\nid = \"perf-strict\"\nname = \"Perf strict probe\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-perf\"]\n",
+            ),
+            "parse check profile rows",
+        );
+        let mut project = scanned_fixture(provider_set([provider::ProviderId::GithubHosted]));
+        must(
+            apply_check_profiles(&mut project, parsed.check_profiles(), &root),
+            "apply check profile rows",
+        );
+        assert_eq!(project.check_profiles.len(), 2, "both rows map");
+        assert!(
+            project.check_profiles[0].full_history,
+            "the perf row maps full_history into its spec"
+        );
+        assert!(
+            !project.check_profiles[1].full_history,
+            "the perf-strict row keeps the shallow default"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -13631,6 +13886,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -13660,6 +13916,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -13689,6 +13946,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -14071,6 +14329,7 @@ channel = "stable"
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             platform: provider::Platform::LinuxX64,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -18374,6 +18633,7 @@ lockfile = true
                 platform: provider::Platform::LinuxX64,
                 capabilities: provider::Capabilities::default(),
                 workspace_check: false,
+                full_history: false,
                 products: Vec::new(),
                 prerequisites: Vec::new(),
                 docker_contexts: Vec::new(),
@@ -18464,6 +18724,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20366,6 +20627,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20701,6 +20963,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20791,6 +21054,10 @@ lockfile = true
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test pins one explicit unit per tool-union combination"
+    )]
     fn kind_reusable_unions_member_tools_and_covers_every_fetch_unit() {
         let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
         let rust_index = must_some(
@@ -20824,6 +21091,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -20927,6 +21195,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -21030,6 +21299,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -21136,6 +21406,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -21293,6 +21564,7 @@ lockfile = true
                     platform: crate::s2::provider::Platform::LinuxX64,
                     capabilities: crate::s2::provider::Capabilities::default(),
                     workspace_check: false,
+                    full_history: false,
                     products: Vec::new(),
                     prerequisites: Vec::new(),
                     docker_contexts: Vec::new(),
@@ -21322,6 +21594,7 @@ lockfile = true
                     platform: crate::s2::provider::Platform::LinuxX64,
                     capabilities: crate::s2::provider::Capabilities::default(),
                     workspace_check: false,
+                    full_history: false,
                     products: Vec::new(),
                     prerequisites: Vec::new(),
                     docker_contexts: Vec::new(),
@@ -24510,6 +24783,7 @@ lockfile = true
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             platform: provider::Platform::LinuxX64,
             products: Vec::new(),
             prerequisites: Vec::new(),
