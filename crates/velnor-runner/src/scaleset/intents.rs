@@ -71,6 +71,19 @@ pub fn runner_name(scale_set_id: i32, request_id: i64) -> String {
     format!("velnor-{scale_set_id}-{request_id}")
 }
 
+/// Parse `(scale_set_id, request_id)` from a runner name formatted like `velnor-{scale_set_id}-{request_id}`.
+#[must_use]
+pub fn parse_runner_name(name: &str) -> Option<(i32, i64)> {
+    let parts: Vec<&str> = name.split('-').collect();
+    if parts.len() == 3 && parts[0] == "velnor" {
+        let set_id = parts[1].parse::<i32>().ok()?;
+        let req_id = parts[2].parse::<i64>().ok()?;
+        Some((set_id, req_id))
+    } else {
+        None
+    }
+}
+
 /// Provision operation idempotency key: stable per attempt, distinct across
 /// attempts so a failed attempt never aliases its retry.
 #[must_use]
