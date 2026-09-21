@@ -392,3 +392,65 @@ fn promote_dry_run_verifies_without_writing() {
     );
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+#[cfg(unix)]
+fn promote_refuses_a_symlinked_generation_config() {
+    let root = temporary_root("symlinked-config");
+    let repo = promotable_tree(&root, OLD_PIN);
+    // The config moves outside the tree and a committed link takes its
+    // place: the tree is clean, but rollback could not restore a stamp
+    // written through the link.
+    let outside = root.join("outside.toml");
+    fs::rename(repo.join(".github-gen/velnor-workflow.toml"), &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join(".github-gen/velnor-workflow.toml")).unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "--message", "symlink config"]);
+    let revision = own_revision();
+
+    let outcome = binary()
+        .args([
+            "promote",
+            "--rev",
+            &revision,
+            "--repo",
+            repo.to_str().unwrap(),
+            "--generator-repo",
+            workspace_root().to_str().unwrap(),
+            "--default-branch",
+            "main",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(
+        !outcome.status.success(),
+        "promotion through a symlinked config must fail"
+    );
+    assert!(
+        stderr.contains("symlinked generation config"),
+        "the refusal names the link: {stderr}"
+    );
+    let pin = fs::read_to_string(&outside).unwrap();
+    assert!(
+        pin.contains(&format!("revision = \"{OLD_PIN}\"")),
+        "the external target is unstamped: {pin}"
+    );
+    assert!(
+        fs::symlink_metadata(repo.join(".github-gen/velnor-workflow.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link itself is untouched"
+    );
+    assert_eq!(
+        git(&repo, &["rev-list", "--count", "HEAD"]).trim(),
+        "2",
+        "no commit lands"
+    );
+    assert!(
+        git(&repo, &["status", "--porcelain"]).is_empty(),
+        "the tree is untouched"
+    );
+    let _ = fs::remove_dir_all(&root);
+}

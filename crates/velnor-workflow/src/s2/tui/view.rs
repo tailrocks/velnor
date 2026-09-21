@@ -927,6 +927,7 @@ mod tests {
             ],
             changed: Vec::new(),
             stale: vec![PathBuf::from(".github/workflows/old.yml")],
+            unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: true,
             ownership_needs_refresh: true,

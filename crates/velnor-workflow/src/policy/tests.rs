@@ -1594,3 +1594,181 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
         "the sibling checkout carries no reusable workflows"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Complete-tree comparison
+// ---------------------------------------------------------------------------
+
+fn file_entry(content: &str, executable: bool) -> TreeEntry {
+    TreeEntry::File {
+        bytes: content.as_bytes().to_vec(),
+        executable,
+    }
+}
+
+fn link_entry(target: &str) -> TreeEntry {
+    TreeEntry::Symlink {
+        target: PathBuf::from(target),
+    }
+}
+
+fn compare(expected: &TreeEntry, found: Option<&TreeEntry>) -> Vec<String> {
+    let mut differences = Vec::new();
+    compare_tree_entry(
+        Path::new(".github/probe"),
+        expected,
+        found,
+        &mut differences,
+    );
+    differences
+}
+
+#[test]
+fn tree_comparison_names_every_drift_class() {
+    assert!(
+        compare(
+            &file_entry("same\n", false),
+            Some(&file_entry("same\n", false))
+        )
+        .is_empty(),
+        "identical files compare clean"
+    );
+    assert!(
+        compare(&file_entry("same\n", false), None)
+            .join("\n")
+            .contains("missing from the tree"),
+        "an absent path reports missing"
+    );
+    assert!(
+        compare(&file_entry("a\n", false), Some(&file_entry("b\n", false)))
+            .join("\n")
+            .contains("differs from the pinned render"),
+        "edited bytes report a diff"
+    );
+    assert!(
+        compare(
+            &file_entry("same\n", false),
+            Some(&file_entry("same\n", true))
+        )
+        .join("\n")
+        .contains("is executable in the tree"),
+        "a set execute bit reports mode drift"
+    );
+    assert!(
+        compare(&link_entry("AGENTS.md"), Some(&link_entry("AGENTS.md"))).is_empty(),
+        "an identical link compares clean"
+    );
+    assert!(
+        compare(&link_entry("AGENTS.md"), Some(&link_entry("other.md")))
+            .join("\n")
+            .contains("points at"),
+        "a retargeted link reports its target"
+    );
+    // The type-blindness regression: a regular file with identical bytes
+    // must not satisfy a link, and a link must not satisfy a file.
+    assert!(
+        compare(
+            &link_entry("AGENTS.md"),
+            Some(&file_entry("AGENTS.md", false))
+        )
+        .join("\n")
+        .contains("is a regular file in the tree but the pinned render has a symlink"),
+        "a file squatting a link reports mistyped"
+    );
+    assert!(
+        compare(
+            &file_entry("content\n", false),
+            Some(&link_entry("content"))
+        )
+        .join("\n")
+        .contains("is a symlink in the tree but the pinned render has a regular file"),
+        "a link squatting a file reports mistyped"
+    );
+    assert!(
+        compare(&file_entry("content\n", false), Some(&TreeEntry::Directory))
+            .join("\n")
+            .contains("is a directory in the tree"),
+        "a directory squatting a file reports mistyped"
+    );
+}
+
+#[test]
+fn exclude_hatch_covers_top_level_workflows_only() {
+    let excludes = BTreeSet::from(["hand.yml".to_owned()]);
+    assert!(
+        is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &excludes),
+        "a named top-level workflow is excluded"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/other.yml"), &excludes),
+        "an unnamed workflow is not excluded"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/nested/hand.yml"), &excludes),
+        "a nested path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/notes.txt"), &excludes),
+        "a non-workflow path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &BTreeSet::new()),
+        "no excludes means no hatch"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tree_collection_never_follows_symlinks() {
+    let root = temporary_directory("tree-collection");
+    let outside = temporary_directory("tree-collection-outside");
+    write(&outside.join("kept.txt"), "external bytes\n");
+    write(&root.join(".github/real.txt"), "real\n");
+    must(
+        std::os::unix::fs::symlink(outside.join("kept.txt"), root.join(".github/link.txt")),
+        "link outside the tree",
+    );
+    let mut entries = BTreeMap::new();
+    must(
+        collect_tree_entries(&root, &root.join(".github"), &mut entries),
+        "collect the tree",
+    );
+    assert_eq!(
+        entries.get(&PathBuf::from(".github/real.txt")),
+        Some(&file_entry("real\n", false)),
+        "a regular file collects by bytes"
+    );
+    let target_path = outside.join("kept.txt");
+    let target = must(
+        target_path.to_str().ok_or("non-utf8 temp path"),
+        "render the link target",
+    );
+    assert_eq!(
+        entries.get(&PathBuf::from(".github/link.txt")),
+        Some(&link_entry(target)),
+        "a link collects by target, never by the bytes it points at"
+    );
+    assert!(
+        !entries.values().any(|entry| matches!(entry,
+            TreeEntry::File { bytes, .. } if bytes == b"external bytes\n")),
+        "external bytes must not leak into the collection"
+    );
+    assert_eq!(
+        must(
+            stat_tree_entry(&root.join(".github/link.txt")),
+            "stat the link"
+        ),
+        Some(link_entry(target)),
+        "a single stat classifies the link itself"
+    );
+    assert_eq!(
+        must(
+            stat_tree_entry(&root.join(".github/absent.txt")),
+            "stat an absent path"
+        ),
+        None,
+        "an absent path stats as missing"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
