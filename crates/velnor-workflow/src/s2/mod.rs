@@ -1141,7 +1141,8 @@ pub(crate) struct ReleaseSpec {
 /// reference, its build inputs, and the sibling images whose tags must
 /// exist before it inspects or builds. Empty `dockerfile`/`context`
 /// select the scalar conventions; empty `platforms` selects both Linux
-/// architectures.
+/// architectures; `lfs` fetches Git LFS objects in the row's
+/// platform-lane checkout.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReleaseImageSpec {
     pub(crate) name: String,
@@ -1150,6 +1151,7 @@ pub(crate) struct ReleaseImageSpec {
     pub(crate) context: String,
     pub(crate) platforms: Vec<String>,
     pub(crate) needs: Vec<String>,
+    pub(crate) lfs: bool,
 }
 
 /// One typed named-task release job. Product build, sign, and publication
@@ -2919,6 +2921,7 @@ fn apply_release(
                 context: row.context().unwrap_or_default().to_owned(),
                 platforms: row.platforms().to_vec(),
                 needs: row.needs().unwrap_or_default().to_vec(),
+                lfs: row.lfs(),
             })
             .collect();
     }
@@ -12348,6 +12351,38 @@ mod tests {
         assert_eq!(release.images[1].context, "images/node");
         assert_eq!(release.images[1].platforms, vec!["linux/amd64".to_owned()]);
         assert_eq!(release.images[1].needs, vec!["base".to_owned()]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// `lfs` travels the config-to-spec path per row: a declared `true`
+    /// lands on the spec, an absent knob stays false.
+    #[test]
+    fn release_image_lfs_maps_onto_the_spec() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            [release]\nenabled = true\nkind = \"docker\"\n\n\
+            [[release.image]]\nname = \"base\"\nimage = \"example/base\"\n\n\
+            [[release.image]]\nname = \"heimdall\"\nimage = \"example/heimdall\"\nlfs = true\n";
+        let root = configured_repository("release-image-lfs", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        let release = must_some(scanned.config.release.as_ref(), "release contract");
+        assert_eq!(release.images.len(), 2);
+        assert!(
+            !release.images[0].lfs,
+            "an absent lfs must stay false on the spec"
+        );
+        assert!(
+            release.images[1].lfs,
+            "a declared lfs must land on the spec"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
