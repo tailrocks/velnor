@@ -20636,6 +20636,10 @@ lockfile = true
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test pins one explicit unit per tool-union combination"
+    )]
     fn kind_reusable_unions_member_tools_and_covers_every_fetch_unit() {
         let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
         let rust_index = must_some(
@@ -20984,6 +20988,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),

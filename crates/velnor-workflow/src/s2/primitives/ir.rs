@@ -499,16 +499,10 @@ mod tests {
         let mut deep = rust_unit("rust-deep", "crates/deep");
         deep.full_history = true;
         let shallow = rust_unit("rust-shallow", "crates/shallow");
-        let ir = owner_test_ir(
-            "example/full-history",
-            vec![deep.clone(), shallow.clone()],
-        );
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
         for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
-            let deep_facts = ir.unit_provider_facts(
-                &deep,
-                &ir.default_unit_contract(&deep, true),
-                provider,
-            );
+            let deep_facts =
+                ir.unit_provider_facts(&deep, &ir.default_unit_contract(&deep, true), provider);
             let shallow_facts = ir.unit_provider_facts(
                 &shallow,
                 &ir.default_unit_contract(&shallow, true),
@@ -542,7 +536,7 @@ mod tests {
                 "{provider:?} renders the boolean unquoted: {rendered}"
             );
         }
-        let bare = ProviderStepFacts::default();
+        let bare = super::ProviderStepFacts::default();
         assert!(
             !bare
                 .input_values()
@@ -638,10 +632,7 @@ mod tests {
         let mut deep = rust_unit("rust-deep", "crates/deep");
         deep.full_history = true;
         let shallow = rust_unit("rust-shallow", "crates/shallow");
-        let ir = owner_test_ir(
-            "example/full-history",
-            vec![deep.clone(), shallow],
-        );
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow]);
         let mut output = String::new();
         must_ok(
             ir.render_collapsed_provider_verify_job(
@@ -693,24 +684,19 @@ mod tests {
         let mut deep = rust_unit("rust-deep", "crates/deep");
         deep.full_history = true;
         let shallow = rust_unit("rust-shallow", "crates/shallow");
-        let ir = owner_test_ir(
-            "example/full-history",
-            vec![deep.clone(), shallow.clone()],
-        );
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
         let file = nested_unit_workflow_file(&deep);
         for (unit, expect) in [(&deep, true), (&shallow, false)] {
             let callers = ir.unit_provider_callers(unit, &file, None);
-            assert!(
-                !callers.is_empty(),
-                "unit {} renders call jobs",
-                unit.id
-            );
+            assert!(!callers.is_empty(), "unit {} renders call jobs", unit.id);
             for caller in &callers {
                 let mut output = String::new();
                 ir.render_unit_provider_caller(&mut output, unit, caller, false, &[], false);
                 if expect {
                     assert!(
-                        output.lines().any(|line| line == "      full_history: true"),
+                        output
+                            .lines()
+                            .any(|line| line == "      full_history: true"),
                         "the deep unit's {} call job passes unquoted true: {output}",
                         caller.job_id
                     );
@@ -4886,6 +4872,7 @@ pub(crate) struct ProviderStepFacts {
 
 impl ProviderStepFacts {
     /// The `with:` values a caller passes: one entry per non-empty fact.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn input_values(&self) -> Vec<(&'static str, String)> {
         let mut values = Vec::new();
         if !self.mise_tools.is_empty() {
