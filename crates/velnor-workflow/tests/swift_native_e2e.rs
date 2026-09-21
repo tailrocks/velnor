@@ -243,6 +243,64 @@ fn generation_refuses_an_unpinned_xcodegen() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn install_subset_closes_over_configured_binstall() -> Result<(), Box<dyn Error>> {
+    let (scratch, root) = fixture_root("binstall")?;
+    let config = fs::read_to_string(root.join("mise.toml"))?;
+    fs::write(
+        root.join("mise.toml"),
+        format!("{config}\n[settings]\ncargo.binstall = true\n"),
+    )?;
+    let lock = fs::read_to_string(root.join("mise.lock"))?;
+    fs::write(
+        root.join("mise.lock"),
+        format!(
+            "{lock}\n[[tools.cargo-binstall]]\nversion = \"1.21.1\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n"
+        ),
+    )?;
+    let out = scratch.join("out");
+    generate(&root, &out)?;
+    let ci_pr = fs::read_to_string(out.join(".github/workflows/ci-pr.yml"))?;
+    for id in [PRODUCER, CONSUMER] {
+        let caller = caller_block(&ci_pr, id)?;
+        assert!(
+            caller.contains("mise_tools: \"cargo:boltffi_cli cargo-binstall\""),
+            "the {id} caller installs the configured dependency beside the cargo tool:\n{caller}"
+        );
+    }
+    let app_caller = caller_block(&ci_pr, APP)?;
+    assert!(
+        app_caller.contains("mise_tools: xcodegen"),
+        "a subset with no cargo tool installs nothing extra:\n{app_caller}"
+    );
+    fs::remove_dir_all(&scratch)?;
+    Ok(())
+}
+
+#[test]
+fn generation_refuses_cargo_subset_without_binstall_provider() -> Result<(), Box<dyn Error>> {
+    let (scratch, root) = fixture_root("binstall-missing")?;
+    let config = fs::read_to_string(root.join("mise.toml"))?;
+    fs::write(
+        root.join("mise.toml"),
+        format!("{config}\n[settings]\ncargo.binstall = true\n"),
+    )?;
+    let out = scratch.join("out");
+    let result = generate(&root, &out);
+    let message = match &result {
+        Ok(()) => String::new(),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        result.is_err()
+            && message.contains(PRODUCER)
+            && message.contains("cargo:boltffi_cli")
+            && message.contains("cargo.binstall"),
+        "generation refuses naming the unit, the cargo tool, and the missing edge: {message}"
+    );
+    fs::remove_dir_all(&scratch)?;
+    Ok(())
+}
 fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
     let output = Command::new("git").current_dir(root).args(args).output()?;
     if !output.status.success() {

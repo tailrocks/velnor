@@ -1290,6 +1290,11 @@ pub struct ProjectConfig {
     /// lock, in which case identity checking is skipped. Never serialized:
     /// the lock itself is the source of truth.
     pub(crate) mise_lock_keys: BTreeSet<String>,
+    /// Install dependencies the root `mise.toml` declares, over which
+    /// derived `install_args` subsets close. Empty when the scan root has
+    /// no mise configuration. Never serialized: the config itself is the
+    /// source of truth.
+    pub(crate) mise_install_deps: config::MiseInstallDeps,
     /// Generator-only GitHub cache retention from `[cache.github]`. Never
     /// serialized into `project.toml`.
     pub(crate) github_cache: config::CacheGithubSection,
@@ -1834,6 +1839,11 @@ fn scan_target(
     // `config::mise_lock_keys_for_root` for the per-unit-lock gap.
     let mise_lock_keys = config::mise_lock_keys_for_root(root)?;
     config.mise_lock_keys.clone_from(&mise_lock_keys);
+    // The root config's install edges close every derived subset: a subset
+    // that omits a configured dependency fails at install time on the
+    // runner, so both validation and rendering resolve against these.
+    let mise_install_deps = config::mise_install_deps_for_root(root)?;
+    config.mise_install_deps.clone_from(&mise_install_deps);
     validate_actionlint_pin_coherence(root)?;
     // The repo-owned config is validated against the resolved surface before
     // it can influence anything: a declared unit the scan did not find, or a
@@ -1862,6 +1872,14 @@ fn scan_target(
     // would fail at install time on the runner instead; refuse it at
     // generation time with the exact missing key.
     crate::s2::primitives::validate_xcodegen_tools_are_locked(&config.units, &mise_lock_keys)?;
+    // A subset that omits a configured install dependency fails at install
+    // time on the runner instead; refuse it at generation time with the
+    // exact missing edge.
+    crate::s2::primitives::validate_mise_install_deps_are_closed(
+        &config.units,
+        &mise_lock_keys,
+        &mise_install_deps,
+    )?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
@@ -11193,6 +11211,7 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         }
@@ -18994,6 +19013,7 @@ lockfile = true
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         };

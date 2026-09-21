@@ -537,6 +537,7 @@ impl From<RepositoryShape> for ProjectConfig {
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
             velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
             check_profiles: Vec::new(),
