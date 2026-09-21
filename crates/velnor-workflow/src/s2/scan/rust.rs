@@ -1447,8 +1447,8 @@ struct BoltffiBindings {
 /// `Config::swift_bindings_file_stem`: an empty `PascalCase` library name
 /// yields bare `BoltFFI`. The FFI module falls back from
 /// `targets.apple.swift.ffi_module_name` to `{framework}FFI`. An unknown
-/// layout or a resolved path outside the repository is an `Err` for a scan
-/// diagnostic.
+/// layout, a resolved path outside the repository, or a deployment target
+/// outside `major.minor[.patch]` shape is an `Err` for a scan diagnostic.
 fn boltffi_binding_facts(
     parsed: &BoltffiManifest,
     root: &str,
@@ -1519,13 +1519,19 @@ fn boltffi_binding_facts(
         };
         Some(join_repo_path(&resolved, "Package.swift"))
     };
+    let deployment_target = parsed
+        .deployment_target
+        .clone()
+        .unwrap_or_else(|| BOLTFFI_DEFAULT_DEPLOYMENT_TARGET.to_owned());
+    if !valid_deployment_floor(&deployment_target) {
+        return Err(format!(
+            "declares deployment target `{deployment_target}`, which is not a valid Apple deployment version: use `major.minor[.patch]` with numeric parts"
+        ));
+    }
     Ok(BoltffiBindings {
         dir,
         file,
-        deployment_target: parsed
-            .deployment_target
-            .clone()
-            .unwrap_or_else(|| BOLTFFI_DEFAULT_DEPLOYMENT_TARGET.to_owned()),
+        deployment_target,
         ffi_module: parsed
             .swift_ffi_module_name
             .clone()
@@ -1719,35 +1725,82 @@ pub(crate) fn valid_cargo_profile(profile: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
+/// The environment variable that pins the Apple deployment floor for the
+/// pack and its Swift consumers: without it `rustc` falls back to the
+/// host-SDK default, which can exceed the declared target.
+pub(crate) const MACOSX_DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
+
+/// An Apple deployment floor: `major.minor[.patch]`, all numeric. The
+/// recipe exports exactly this value; the manifest scan fact stays the
+/// raw `targets.apple.deployment_target` string on the producer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeploymentFloor(pub(crate) String);
+
+impl DeploymentFloor {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Whether `value` is an Apple deployment version: two or three
+/// dot-separated numeric parts (`major.minor[.patch]`).
+pub(crate) fn valid_deployment_floor(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    (parts.len() == 2 || parts.len() == 3)
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 /// The declared Apple native-pack policy: the Cargo profile from
-/// `[native.apple] cargo_profile`, or `None` when the repository declares
-/// none and the scan keeps `BoltFFI`'s own default.
+/// `[native.apple] cargo_profile` and the deployment floor from
+/// `[native.apple] deployment_floor`, each `None` when the repository
+/// declares nothing and the scan keeps the tool or manifest default.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AppleNativePolicy {
     pub(crate) cargo_profile: Option<CargoProfile>,
+    pub(crate) deployment_floor: Option<DeploymentFloor>,
 }
 
 impl AppleNativePolicy {
-    /// Parse the declared `[native.apple] cargo_profile` into the typed
-    /// policy. Absent stays `None`; a present value must be a valid Cargo
-    /// profile name.
+    /// Parse the declared `[native.apple]` policy into the typed form.
+    /// Absent values stay `None`; a present value must pass its shape
+    /// check.
     ///
     /// # Errors
     /// Returns a usage error naming `[native.apple] cargo_profile` when the
-    /// declared value is not a valid Cargo profile name.
-    pub(crate) fn from_cargo_profile(raw: Option<&str>) -> Result<Self, GeneratorError> {
-        let Some(raw) = raw else {
-            return Ok(Self {
-                cargo_profile: None,
-            });
+    /// declared profile is not a valid Cargo profile name, or naming
+    /// `[native.apple] deployment_floor` when the declared floor is not a
+    /// valid Apple deployment version.
+    pub(crate) fn from_declared(
+        profile: Option<&str>,
+        floor: Option<&str>,
+    ) -> Result<Self, GeneratorError> {
+        let cargo_profile = match profile {
+            None => None,
+            Some(raw) => {
+                if !valid_cargo_profile(raw) {
+                    return Err(GeneratorError::usage(format!(
+                        "[native.apple] cargo_profile `{raw}` is not a valid Cargo profile name: use 1 to 64 ASCII letters, digits, `-`, or `_`, starting with a letter or digit"
+                    )));
+                }
+                Some(CargoProfile(raw.to_owned()))
+            }
         };
-        if !valid_cargo_profile(raw) {
-            return Err(GeneratorError::usage(format!(
-                "[native.apple] cargo_profile `{raw}` is not a valid Cargo profile name: use 1 to 64 ASCII letters, digits, `-`, or `_`, starting with a letter or digit"
-            )));
-        }
+        let deployment_floor = match floor {
+            None => None,
+            Some(raw) => {
+                if !valid_deployment_floor(raw) {
+                    return Err(GeneratorError::usage(format!(
+                        "[native.apple] deployment_floor `{raw}` is not a valid Apple deployment version: use `major.minor[.patch]` with numeric parts"
+                    )));
+                }
+                Some(DeploymentFloor(raw.to_owned()))
+            }
+        };
         Ok(Self {
-            cargo_profile: Some(CargoProfile(raw.to_owned())),
+            cargo_profile,
+            deployment_floor,
         })
     }
 }
@@ -1755,23 +1808,25 @@ impl AppleNativePolicy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BoltffiRecipe {
     pub(crate) profile: Option<CargoProfile>,
+    pub(crate) deployment: DeploymentFloor,
     pub(crate) locked: bool,
     pub(crate) verbose: bool,
 }
 
 impl BoltffiRecipe {
-    /// The recipe half of the exact inputs digest: profile and lock
-    /// enforcement change the produced artifacts, so they participate in
-    /// the identity. Verbosity only changes streamed diagnostics and is
-    /// deliberately absent: a quiet and a verbose run over the same
-    /// closure produce the same bytes.
+    /// The recipe half of the exact inputs digest: profile, deployment
+    /// floor, and lock enforcement change the produced artifacts, so they
+    /// participate in the identity. Verbosity only changes streamed
+    /// diagnostics and is deliberately absent: a quiet and a verbose run
+    /// over the same closure produce the same bytes.
     pub(crate) fn digest_identity(&self) -> String {
         format!(
-            "boltffi:pack:apple:profile={}:locked={}",
+            "boltffi:pack:apple:profile={}:locked={}:deployment={}",
             self.profile
                 .as_ref()
                 .map_or("default", CargoProfile::as_str),
             self.locked,
+            self.deployment.as_str(),
         )
     }
 
@@ -1796,7 +1851,14 @@ impl BoltffiRecipe {
         let snapshot = join_repo_path(&staging, "bindings");
         let mut commands = vec![format!("rm -rf {}", shell_quote(output))];
         commands.extend(boltffi_snapshot_commands(surface, &staging, &snapshot));
-        let mut pack = String::from("boltffi");
+        // The floor rides the pack invocation itself, not the producer
+        // unit's env: env maps do not travel to the consumer's guarded
+        // rebuild, while the recorded command does.
+        let mut pack = format!(
+            "{}={} boltffi",
+            MACOSX_DEPLOYMENT_TARGET,
+            shell_quote(self.deployment.as_str())
+        );
         if self.verbose {
             pack.push_str(" -v");
         }
@@ -2052,8 +2114,15 @@ fn boltffi_producer_from_manifest(
         native_input_closure(context.root, context.files, context.file_set, &root, &seed)?;
     // The scanner never invents a Cargo profile: the recipe carries exactly
     // the declared Apple policy, and `None` keeps `BoltFFI`'s own default.
+    // The deployment floor is always concrete: the declared floor wins,
+    // else the manifest value the binding facts already shape-checked.
     let recipe = BoltffiRecipe {
         profile: context.apple.cargo_profile.clone(),
+        deployment: context
+            .apple
+            .deployment_floor
+            .clone()
+            .unwrap_or_else(|| DeploymentFloor(bindings.deployment_target.clone())),
         locked: boltffi_recipe_locked(&inputs),
         verbose: true,
     };
@@ -3679,42 +3748,58 @@ mod tests {
 
     #[test]
     fn boltffi_recipe_digest_separates_policy_from_verbosity() {
-        use super::BoltffiRecipe;
+        use super::{BoltffiRecipe, DeploymentFloor};
+        let floor = || DeploymentFloor("16.0".to_owned());
         let quiet = BoltffiRecipe {
             profile: None,
+            deployment: floor(),
             locked: false,
             verbose: false,
         };
         let loud = BoltffiRecipe {
             profile: None,
+            deployment: floor(),
             locked: false,
             verbose: true,
         };
         assert_eq!(
             quiet.digest_identity(),
-            "boltffi:pack:apple:profile=default:locked=false"
+            "boltffi:pack:apple:profile=default:locked=false:deployment=16.0"
         );
         assert_eq!(quiet.digest_identity(), loud.digest_identity());
         let profiled = BoltffiRecipe {
             profile: Some(super::CargoProfile("ci-release".to_owned())),
+            deployment: floor(),
             locked: false,
             verbose: false,
         };
         assert_eq!(
             profiled.digest_identity(),
-            "boltffi:pack:apple:profile=ci-release:locked=false"
+            "boltffi:pack:apple:profile=ci-release:locked=false:deployment=16.0"
         );
         assert_ne!(quiet.digest_identity(), profiled.digest_identity());
         let locked = BoltffiRecipe {
             profile: None,
+            deployment: floor(),
             locked: true,
             verbose: false,
         };
         assert_eq!(
             locked.digest_identity(),
-            "boltffi:pack:apple:profile=default:locked=true"
+            "boltffi:pack:apple:profile=default:locked=true:deployment=16.0"
         );
         assert_ne!(quiet.digest_identity(), locked.digest_identity());
+        let raised = BoltffiRecipe {
+            profile: None,
+            deployment: DeploymentFloor("15.0".to_owned()),
+            locked: false,
+            verbose: false,
+        };
+        assert_eq!(
+            raised.digest_identity(),
+            "boltffi:pack:apple:profile=default:locked=false:deployment=15.0"
+        );
+        assert_ne!(quiet.digest_identity(), raised.digest_identity());
     }
 
     #[test]
@@ -3744,13 +3829,14 @@ mod tests {
     fn apple_policy_parses_absent_and_names_section_on_error() {
         use super::AppleNativePolicy;
         let absent = must(
-            AppleNativePolicy::from_cargo_profile(None),
+            AppleNativePolicy::from_declared(None, None),
             "absent stays none",
         );
         assert_eq!(absent, AppleNativePolicy::default());
         assert_eq!(absent.cargo_profile, None);
+        assert_eq!(absent.deployment_floor, None);
         let typed = must(
-            AppleNativePolicy::from_cargo_profile(Some("ci-release")),
+            AppleNativePolicy::from_declared(Some("ci-release"), Some("15.0")),
             "valid parses",
         );
         assert_eq!(
@@ -3760,14 +3846,59 @@ mod tests {
                 .map(super::CargoProfile::as_str),
             Some("ci-release")
         );
+        assert_eq!(
+            typed
+                .deployment_floor
+                .as_ref()
+                .map(super::DeploymentFloor::as_str),
+            Some("15.0")
+        );
         for raw in ["has space", "", "-lead", "dot.name"] {
             let error = must_err(
-                AppleNativePolicy::from_cargo_profile(Some(raw)),
+                AppleNativePolicy::from_declared(Some(raw), None),
                 "bad charset must fail",
             );
             assert!(
                 error.to_string().contains("[native.apple] cargo_profile"),
                 "{raw:?} must name the section: {error}"
+            );
+        }
+        for raw in ["abc", "15", "", "15.0-beta"] {
+            let error = must_err(
+                AppleNativePolicy::from_declared(None, Some(raw)),
+                "bad floor must fail",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("[native.apple] deployment_floor"),
+                "{raw:?} must name the section: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn deployment_floor_versions_accept_valid_and_refuse_the_rest() {
+        use super::valid_deployment_floor;
+        for valid in ["13.0", "26.1.3", "16.0", "10.15.7"] {
+            assert!(valid_deployment_floor(valid), "{valid:?} must be accepted");
+        }
+        for invalid in [
+            "",
+            "abc",
+            "15",
+            "15.0-beta",
+            "15..0",
+            ".15",
+            "15.",
+            "1.2.3.4",
+            "15.0 ",
+            " 15.0",
+            "v15.0",
+        ] {
+            assert!(
+                !valid_deployment_floor(invalid),
+                "{invalid:?} must be refused"
             );
         }
     }
@@ -3800,10 +3931,10 @@ mod tests {
         assert_eq!(producers[0].recipe.profile, None);
         assert_eq!(
             producers[0].recipe.digest_identity(),
-            "boltffi:pack:apple:profile=default:locked=false"
+            "boltffi:pack:apple:profile=default:locked=false:deployment=16.0"
         );
         let typed = must(
-            AppleNativePolicy::from_cargo_profile(Some("ci-release")),
+            AppleNativePolicy::from_declared(Some("ci-release"), None),
             "parse declared profile",
         );
         let context = ScanContext {
@@ -3831,6 +3962,138 @@ mod tests {
             "the digest carries the declared profile: {}",
             producers[0].recipe.digest_identity()
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producer_resolves_declared_floor_over_manifest_target() {
+        use super::{boltffi_producers, AppleNativePolicy, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple]\ndeployment_target = \"15.0\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ]);
+        let floor_for = |policy: &AppleNativePolicy| {
+            let context = ScanContext {
+                root: &root,
+                files: &files,
+                file_set: &file_set,
+                apple: policy,
+            };
+            let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert_eq!(producers.len(), 1);
+            (
+                producers[0].recipe.deployment.as_str().to_owned(),
+                producers[0].deployment_target.clone(),
+            )
+        };
+        let default = AppleNativePolicy::default();
+        assert_eq!(
+            floor_for(&default),
+            ("15.0".to_owned(), "15.0".to_owned()),
+            "absent policy keeps the manifest target"
+        );
+        let declared = must(
+            AppleNativePolicy::from_declared(None, Some("13.0")),
+            "parse declared floor",
+        );
+        assert_eq!(
+            floor_for(&declared),
+            ("13.0".to_owned(), "15.0".to_owned()),
+            "the declared floor wins while the scan fact stays the manifest value"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producer_with_bad_manifest_target_yields_diagnostic_not_edge() {
+        use super::{boltffi_producers, AppleNativePolicy, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple]\ndeployment_target = \"soon\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ]);
+        let default = AppleNativePolicy::default();
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+            apple: &default,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "scan succeeds");
+        assert!(producers.is_empty(), "{producers:?}");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0].contains("deployment target `soon`")
+                && diagnostics[0].contains("no producer edge was constructed"),
+            "unexpected diagnostic: {}",
+            diagnostics[0]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_inputs_digest_mints_new_identity_on_floor_change() {
+        use super::{boltffi_producers, AppleNativePolicy, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/plain/boltffi.toml",
+                "[package]\nname = \"plain-core\"\n",
+            ),
+            (
+                "crates/plain/Cargo.toml",
+                &boltffi_minimal_crate("plain-core"),
+            ),
+        ]);
+        let digest_for = |policy: &AppleNativePolicy| {
+            let context = ScanContext {
+                root: &root,
+                files: &files,
+                file_set: &file_set,
+                apple: policy,
+            };
+            let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert_eq!(producers.len(), 1);
+            producers[0].inputs_digest.clone()
+        };
+        let default = AppleNativePolicy::default();
+        let first = must(
+            digest_for(&default).ok_or("complete closure mints a digest"),
+            "digest without a floor",
+        );
+        let floored = must(
+            AppleNativePolicy::from_declared(None, Some("15.0")),
+            "parse declared floor",
+        );
+        let second = must(
+            digest_for(&floored).ok_or("complete closure mints a digest"),
+            "digest with a floor",
+        );
+        assert_ne!(
+            first, second,
+            "declaring a floor must mint a new inputs digest"
+        );
+        let retry = must(
+            digest_for(&floored).ok_or("complete closure mints a digest"),
+            "digest with the same floor",
+        );
+        assert_eq!(second, retry, "the same floor keeps its digest");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3865,7 +4128,7 @@ mod tests {
             "digest without a profile",
         );
         let release = must(
-            AppleNativePolicy::from_cargo_profile(Some("ci-release")),
+            AppleNativePolicy::from_declared(Some("ci-release"), None),
             "parse declared profile",
         );
         let second = must(
@@ -3882,7 +4145,7 @@ mod tests {
         );
         assert_eq!(second, retry, "the same profile keeps its digest");
         let other = must(
-            AppleNativePolicy::from_cargo_profile(Some("ci-debug")),
+            AppleNativePolicy::from_declared(Some("ci-debug"), None),
             "parse another profile",
         );
         let third = must(
@@ -3922,7 +4185,10 @@ mod tests {
             "parse generation config under test",
         );
         let policy = must(
-            AppleNativePolicy::from_cargo_profile(config.native_apple().cargo_profile.as_deref()),
+            AppleNativePolicy::from_declared(
+                config.native_apple().cargo_profile.as_deref(),
+                config.native_apple().deployment_floor.as_deref(),
+            ),
             "parse declared profile",
         );
         let providers = std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
@@ -3954,6 +4220,12 @@ mod tests {
                 .any(|command| command.contains("--cargo-arg=--profile --cargo-arg='ci-release'")),
             "the rendered pack carries the declared profile: {commands:?}"
         );
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.contains("MACOSX_DEPLOYMENT_TARGET='16.0' boltffi")),
+            "the rendered pack pins the manifest floor: {commands:?}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3961,6 +4233,7 @@ mod tests {
         (
             super::BoltffiRecipe {
                 profile: None,
+                deployment: super::DeploymentFloor("16.0".to_owned()),
                 locked: false,
                 verbose: true,
             },
@@ -4001,7 +4274,7 @@ mod tests {
         );
         assert_eq!(
             commands[3],
-            "cd -- 'libs/bridge-ffi' && boltffi -v pack apple"
+            "cd -- 'libs/bridge-ffi' && MACOSX_DEPLOYMENT_TARGET='16.0' boltffi -v pack apple"
         );
         assert!(
             commands[4].starts_with("diff -r ")
@@ -4020,6 +4293,7 @@ mod tests {
     fn boltffi_recipe_omits_package_swift_when_skipped() {
         let recipe = super::BoltffiRecipe {
             profile: Some(super::CargoProfile("ci-release".to_owned())),
+            deployment: super::DeploymentFloor("15.0".to_owned()),
             locked: true,
             verbose: false,
         };
@@ -4043,7 +4317,7 @@ mod tests {
         );
         assert_eq!(
             commands[2],
-            "boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='ci-release' pack apple"
+            "MACOSX_DEPLOYMENT_TARGET='15.0' boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='ci-release' pack apple"
         );
     }
 
