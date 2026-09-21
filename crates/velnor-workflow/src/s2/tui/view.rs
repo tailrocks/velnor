@@ -696,6 +696,7 @@ mod tests {
         let mut app = app();
         app.inputs = Some(crate::s2::GenerationInputs::parts(0, 0));
         let unit = crate::s2::Unit {
+            xcode: None,
             id: "workspace-with-a-long-name".to_owned(),
             label: "Workspace with a long Unicode label λ".to_owned(),
             kind: crate::s2::UnitKind::Rust,

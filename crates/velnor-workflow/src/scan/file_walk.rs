@@ -168,12 +168,25 @@ fn collect_files(
         if kind.is_symlink() {
             continue;
         }
+        // Parity with the git-index walk, which filters on the leading path
+        // component only: tool-output names stay excluded at the repository
+        // root, but nested content (committed fixtures under a nested `dist/`,
+        // ...) scans like any other input. `.git` metadata is never an input
+        // at any depth — the index never lists it, and a linked worktree's
+        // `.git` pointer file must not enter the scan either.
+        if name.as_ref() == ".git" {
+            continue;
+        }
+        let at_root = directory == root;
         if kind.is_dir() {
-            if is_excluded_directory(name.as_ref()) {
+            if at_root && is_excluded_directory(name.as_ref()) {
                 continue;
             }
             collect_files(root, &path, files)?;
         } else if kind.is_file() {
+            if at_root && is_excluded_directory(name.as_ref()) {
+                continue;
+            }
             let relative = path.strip_prefix(root).map_err(|error| {
                 GeneratorError::usage(format!("make repository path relative: {error}"))
             })?;
@@ -440,6 +453,70 @@ mod tests {
         assert_eq!(
             files,
             vec!["nested/deep.txt".to_owned(), "present.txt".to_owned()]
+        );
+    }
+
+    #[test]
+    fn physical_walk_matches_git_index_exclusion_depth() {
+        let root = scratch("exclusion-depth");
+        must(
+            fs::create_dir_all(root.join("dist")),
+            "create root dist directory",
+        );
+        must(
+            fs::write(root.join("dist/bundle.js"), "bundle"),
+            "write root dist file",
+        );
+        must(
+            fs::create_dir_all(root.join("target")),
+            "create root target directory",
+        );
+        must(
+            fs::write(root.join("target/app"), "app"),
+            "write root target file",
+        );
+        must(
+            fs::create_dir_all(root.join("pkg/dist")),
+            "create nested dist directory",
+        );
+        must(
+            fs::write(root.join("pkg/dist/data.txt"), "data"),
+            "write nested dist file",
+        );
+        must(
+            fs::create_dir_all(root.join("pkg/target")),
+            "create nested target directory",
+        );
+        must(
+            fs::write(root.join("pkg/target/lib.rlib"), "lib"),
+            "write nested target file",
+        );
+        must(
+            fs::write(root.join("pkg/main.rs"), "main"),
+            "write nested source",
+        );
+        must(
+            fs::create_dir_all(root.join("pkg/.git/objects")),
+            "create nested git directory",
+        );
+        must(
+            fs::write(root.join("pkg/.git/objects/pack"), "pack"),
+            "write nested git file",
+        );
+        must(
+            fs::write(root.join(".git"), "gitdir: elsewhere"),
+            "write worktree pointer file",
+        );
+
+        let mut files = must(repository_files(&root, &[]), "scan plain directory");
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "pkg/dist/data.txt".to_owned(),
+                "pkg/main.rs".to_owned(),
+                "pkg/target/lib.rlib".to_owned(),
+            ]
         );
     }
 }

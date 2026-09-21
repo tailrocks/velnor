@@ -246,12 +246,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn find_on_path(tool: &str) -> PathBuf {
     let path = must_some(std::env::var_os("PATH"), "PATH is set for tests");
-    must_some(
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(tool))
-            .find(|candidate| candidate.is_file()),
-        &format!("{tool} is a test prerequisite on PATH"),
-    )
+    let candidates: Vec<PathBuf> = std::env::split_paths(&path)
+        .map(|dir| dir.join(tool))
+        .filter(|candidate| candidate.is_file())
+        .collect();
+    candidates
+        .iter()
+        .find(|candidate| !candidate.to_string_lossy().contains("shims"))
+        .or_else(|| candidates.first())
+        .cloned()
+        .unwrap_or_else(|| panic!("{tool} is a test prerequisite on PATH"))
 }
 
 fn write_executable(path: &Path, content: &str) {

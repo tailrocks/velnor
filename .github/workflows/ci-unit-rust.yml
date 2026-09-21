@@ -705,12 +705,17 @@ jobs:
         with:
           job_label: ${{ inputs.unit }}
           ci_lane: github
+          cache_declared_layers: rustup,mold,mbx,cargo
+          cache_rustup_outcome: ${{ steps.rustup-toolchain.outcome }}
           cache_rustup_primary: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
           cache_rustup_matched: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          cache_mold_outcome: ${{ steps.mold-cache.outcome }}
           cache_mold_primary: ${{ steps.mold-cache.outputs.cache-primary-key }}
           cache_mold_matched: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          cache_mbx_outcome: ${{ steps.mbx-cache.outcome }}
           cache_mbx_hit: ${{ steps.mbx-cache.outputs.cache-hit }}
           cache_mbx_primary: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          cache_cargo_outcome: ${{ steps.cache.outcome }}
           cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
           cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
       - name: Record unit result

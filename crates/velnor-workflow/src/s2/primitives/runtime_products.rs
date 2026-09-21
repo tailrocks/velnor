@@ -675,6 +675,7 @@ mod tests {
 
     fn unit() -> crate::s2::Unit {
         crate::s2::Unit {
+            xcode: None,
             id: "rust-example".to_owned(),
             label: "rust-example".to_owned(),
             kind: UnitKind::Rust,

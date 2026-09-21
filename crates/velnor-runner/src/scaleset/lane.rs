@@ -43,6 +43,7 @@ use velnor_model::{
 };
 
 use crate::scaleset::converge::WorkerLane;
+use crate::scaleset::errors::ScaleSetFault;
 use crate::scaleset::intents::{
     jit_fingerprint, permit_holder, ProvisionIntent, ProvisionIntentStore,
 };
@@ -592,12 +593,42 @@ impl DaemonWorkerLane {
             name: runner_name.to_owned(),
             work_folder: RUNNER_WORK_DIR.to_owned(),
         };
-        let config = client
+        let config = match client
             .generate_jit_runner_config(&setting, scale_set_id)
             .await
-            .map_err(|error| {
-                anyhow::anyhow!("generate JIT config for runner {runner_name:?}: {error}")
-            })?;
+        {
+            Ok(config) => config,
+            Err(ref error)
+                if error.fault() == Some(ScaleSetFault::RunnerExists)
+                    || error.fault() == Some(ScaleSetFault::Conflict) =>
+            {
+                tracing::warn!(
+                    runner_name,
+                    "JIT configuration returned 409 Conflict (runner already exists); attempting cleanup"
+                );
+                if let Ok(Some(existing)) = client.get_runner_by_name(runner_name).await {
+                    tracing::info!(
+                        runner_name,
+                        runner_id = existing.id,
+                        "removing existing runner to unblock JIT configuration"
+                    );
+                    let _ = client.remove_runner(i64::from(existing.id)).await;
+                }
+                client
+                    .generate_jit_runner_config(&setting, scale_set_id)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "retry generate JIT config for runner {runner_name:?}: {error}"
+                        )
+                    })?
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "generate JIT config for runner {runner_name:?}: {error}"
+                ));
+            }
+        };
         if config.encoded_jit_config.is_empty() {
             anyhow::bail!("empty JIT config for runner {runner_name:?}");
         }
@@ -1454,7 +1485,7 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_assigned(&mut self, assigned: &ScaleSetJobAssigned) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = assigned.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&assigned.base);
         let Some(intent) = self
             .intents
             .get_by_request(self.config.scale_set_id, request_id)
@@ -1479,7 +1510,7 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_started(&mut self, started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = started.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
         let Some(intent) = self
             .intents
             .get_by_request(self.config.scale_set_id, request_id)
@@ -1532,7 +1563,8 @@ impl WorkerLane for DaemonWorkerLane {
     }
 
     fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
-        self.note_terminal_request(completed.base.runner_request_id)
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
+        self.note_terminal_request(request_id)
     }
 
     fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {

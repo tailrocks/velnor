@@ -1,0 +1,26 @@
+name: BridgeApp
+options:
+  minimumXcodeGenVersion: 2.46.0
+targets:
+  BridgeApp:
+    type: application
+    platform: macOS
+    sources:
+      - BridgeApp
+    info:
+      path: BridgeApp/Info.plist
+  BridgeAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - BridgeAppTests
+    dependencies:
+      - target: BridgeApp
+schemes:
+  BridgeApp:
+    build:
+      targets:
+        BridgeApp: all
+    test:
+      targets:
+        - BridgeAppTests

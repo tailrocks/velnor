@@ -24,13 +24,13 @@ use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
     kind_unit_workflow_file, nested_unit_workflow_file, prepare_cargo_caller_job_id,
-    provider_supports_unit, render_mr_boxington_store_budget_step, rendered_cache_values,
-    rust_dependency_needs, stack_group_job_id, unit_group, unit_group_job_id,
-    unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
+    product_dependency_needs, provider_supports_unit, render_mr_boxington_store_budget_step,
+    rendered_cache_values, rust_dependency_needs, stack_group_job_id, unit_group,
+    unit_group_job_id, unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
     yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RustNeeds, RustToolchain,
-    SelectionFieldSources, Unit, UnitKind, ValidationPhase, GENERATED_HEADER, MR_BOXINGTON_VERSION,
-    OPEN_TOFU_VERSION,
+    SelectionFieldSources, Unit, UnitKind, ValidationPhase, XcodeToolchain, GENERATED_HEADER,
+    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -172,8 +172,9 @@ mod tests {
     use super::{
         provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
         ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
-        REQUIRED_CHECK,
+        XcodeToolchain, REQUIRED_CHECK,
     };
+    use crate::s2::platform::{NamedProduct, Prerequisite};
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
@@ -271,6 +272,7 @@ mod tests {
     /// ownership of the generator crate.
     fn rust_unit(id: &str, root: &str) -> Unit {
         Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -315,6 +317,57 @@ mod tests {
                 .to_owned(),
         ];
         unit
+    }
+
+    /// One hand-built Rust unit carrying the joined native pack, mirroring
+    /// what the scan appends to a `BoltFFI` producer.
+    fn boltffi_unit(id: &str) -> Unit {
+        let mut unit = rust_unit(id, "libs/bridge-ffi");
+        unit.pr_commands
+            .push("cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned());
+        unit.full_commands
+            .push("cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned());
+        unit
+    }
+
+    #[test]
+    fn boltffi_need_installs_the_locked_tool_id() {
+        let unit = boltffi_unit("rust-producer");
+        assert!(super::needs_boltffi(&unit));
+        assert!(!super::needs_boltffi(&rust_unit("rust-plain", ".")));
+        let mut across_separator = rust_unit("rust-echo", ".");
+        across_separator.pr_commands = vec!["echo boltffi && make pack".to_owned()];
+        assert!(!super::needs_boltffi(&across_separator));
+        let lock = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        assert_eq!(
+            super::mise_tool_ids(&unit, &lock),
+            vec![super::BOLTFFI_TOOL.to_owned()]
+        );
+        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock).is_empty());
+    }
+
+    #[test]
+    fn boltffi_validation_refuses_an_unpinned_pack() {
+        let unit = boltffi_unit("rust-producer");
+        let pinned = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        assert!(
+            super::validate_boltffi_tools_are_locked(std::slice::from_ref(&unit), &pinned).is_ok()
+        );
+        let plain = rust_unit("rust-plain", ".");
+        assert!(super::validate_boltffi_tools_are_locked(
+            std::slice::from_ref(&plain),
+            &BTreeSet::new()
+        )
+        .is_ok());
+        let missing = BTreeSet::from(["rust".to_owned()]);
+        let error = must_err(
+            super::validate_boltffi_tools_are_locked(std::slice::from_ref(&unit), &missing),
+            "unpinned pack must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("rust-producer"), "{message}");
+        assert!(message.contains(super::BOLTFFI_TOOL), "{message}");
+        assert!(message.contains("rust"), "{message}");
     }
 
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
@@ -520,6 +573,156 @@ mod tests {
         );
     }
 
+    fn transport_product(name: &str, outputs: &[&str]) -> NamedProduct {
+        NamedProduct {
+            name: name.to_owned(),
+            outputs: outputs.iter().map(ToString::to_string).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn transport_edge(producer: &str, product: &str) -> Prerequisite {
+        Prerequisite {
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Producer with one transportable product and one output-less product,
+    /// plus a consumer that needs both. The output-less edge always rebuilds
+    /// locally; only the declared-outputs edge rides the artifact transport.
+    fn transport_fixture() -> (Unit, Unit) {
+        let mut producer = rust_unit("rust-ffi", "crates/ffi");
+        producer.products = vec![
+            transport_product("xcframework", &["native/out/lib.xcframework"]),
+            transport_product("sourceless", &[]),
+        ];
+        let mut consumer = rust_unit("rust-app", "crates/app");
+        consumer.prerequisites = vec![
+            transport_edge("rust-ffi", "xcframework"),
+            transport_edge("rust-ffi", "sourceless"),
+        ];
+        (producer, consumer)
+    }
+
+    #[test]
+    fn kind_reusable_transports_eligible_products_between_members() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            kind.contains("product_provides:"),
+            "the kind header declares the provides input"
+        );
+        assert!(
+            kind.contains("product_transport_ready:"),
+            "the kind header declares the readiness input"
+        );
+        assert!(
+            kind.contains("Download product velnor-product-rust-ffi--xcframework"),
+            "the consumer downloads the eligible product"
+        );
+        assert!(
+            kind.contains("Verify product velnor-product-rust-ffi--xcframework"),
+            "the consumer verifies the downloaded product"
+        );
+        assert!(
+            kind.contains("Stage product velnor-product-rust-ffi--xcframework"),
+            "the producer stages the eligible product"
+        );
+        assert!(
+            kind.contains("Upload product velnor-product-rust-ffi--xcframework"),
+            "the producer uploads the staged product"
+        );
+        assert!(
+            kind.contains("rust-ffi/xcframework:true"),
+            "the consumer block gates on the caller-evaluated verdict"
+        );
+        assert!(
+            !kind.contains("velnor-product-rust-ffi--sourceless"),
+            "an output-less product rides no artifact"
+        );
+    }
+
+    #[test]
+    fn transport_facts_pass_records_only_on_hosted() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer.clone()]);
+        let hosted = ir.unit_provider_facts(
+            &consumer,
+            &ir.default_unit_contract(&consumer, true),
+            ProviderId::GithubHosted,
+        );
+        let values = hosted.input_values();
+        let (_, verdicts) = must_some(
+            values
+                .iter()
+                .find(|(name, _)| *name == provider_input::PRODUCT_TRANSPORT_READY),
+            &format!("the hosted caller passes readiness verdicts: {values:?}"),
+        );
+        assert!(
+            verdicts.contains("rust-ffi/xcframework:${{ needs.")
+                && verdicts.contains(".result == 'success' }}"),
+            "the verdict names the edge and the producer job result: {verdicts}"
+        );
+        assert!(
+            !verdicts.contains("sourceless"),
+            "an output-less edge carries no verdict: {verdicts}"
+        );
+        let consumer_provides = values
+            .iter()
+            .find(|(name, _)| *name == provider_input::PRODUCT_PROVIDES);
+        assert!(
+            consumer_provides.is_none(),
+            "a pure consumer provides no products: {values:?}"
+        );
+        let maker_facts = ir.unit_provider_facts(
+            &ir.units[0],
+            &ir.default_unit_contract(&ir.units[0], true),
+            ProviderId::GithubHosted,
+        );
+        let maker_values = maker_facts.input_values();
+        let record = maker_values
+            .iter()
+            .find(|(name, _)| *name == provider_input::PRODUCT_PROVIDES);
+        assert_eq!(
+            record.map(|(_, value)| value.as_str()),
+            Some("rust-ffi/xcframework"),
+            "the hosted caller passes the producer record: {maker_values:?}"
+        );
+        // Local providers share the workspace: no records, no readiness.
+        for provider in [ProviderId::Velnor, ProviderId::GithubSelfHosted] {
+            let local = ir.unit_provider_facts(
+                &consumer,
+                &ir.default_unit_contract(&consumer, true),
+                provider,
+            );
+            let local_values = local.input_values();
+            assert!(
+                !local_values
+                    .iter()
+                    .any(|(name, _)| *name == provider_input::PRODUCT_PROVIDES
+                        || *name == provider_input::PRODUCT_TRANSPORT_READY),
+                "{provider:?} passes no transport records: {local_values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_reusable_without_products_declares_no_transport_inputs() {
+        let ir = owner_test_ir("example/no-transport", vec![rust_unit("rust", ".")]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            !kind.contains("product_provides") && !kind.contains("product_transport_ready"),
+            "a product-less kind declares no transport inputs"
+        );
+        assert!(
+            !kind.contains("velnor-product-"),
+            "a product-less kind renders no transport steps"
+        );
+    }
+
     #[test]
     fn collapsed_rust_members_gate_mbx_per_member() {
         let mbx_unit = rust_unit("rust-mbx", "crates/mbx");
@@ -686,6 +889,17 @@ mod tests {
         match value {
             Some(value) => value,
             None => panic!("{context}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_err<T: std::fmt::Debug, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(value) => panic!("{context}: unexpectedly succeeded with {value:?}"),
+            Err(error) => error,
         }
     }
 
@@ -905,6 +1119,273 @@ mod tests {
             !rust_workflow.contains("runs-on: macos-15")
                 && !rust_workflow.contains("runs-on: macos-26"),
             "{rust_workflow}"
+        );
+    }
+
+    fn xcode_swift_unit(id: &str, root: &str, version: &str) -> Unit {
+        let mut unit = rust_unit(id, root);
+        unit.kind = UnitKind::Swift;
+        unit.label = format!("Swift package ({root})");
+        unit.platform = crate::s2::provider::Platform::MacosArm64;
+        unit.xcode = Some(XcodeToolchain {
+            version: version.to_owned(),
+        });
+        unit
+    }
+
+    #[test]
+    fn xcode_pin_renders_probe_step_on_hosted_swift() {
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![xcode_swift_unit("swift-package-native", "native", "26.6")],
+        );
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(workflow.contains("- name: Select Xcode 26.6"), "{workflow}");
+        assert!(workflow.contains("DEVELOPER_DIR="), "{workflow}");
+        assert!(workflow.contains("xcodebuild -version"), "{workflow}");
+    }
+
+    /// A fake `/Applications` tree plus `xcodebuild`/`swift` shims that
+    /// executes the exact rendered probe script.
+    struct ProbeStage {
+        root: std::path::PathBuf,
+    }
+
+    impl ProbeStage {
+        fn create(name: &str) -> Self {
+            static NEXT_STAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "velnor-xcode-probe-{name}-{}-{}",
+                std::process::id(),
+                NEXT_STAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            must_ok(
+                std::fs::create_dir_all(root.join("Applications")),
+                "stage Applications",
+            );
+            must_ok(std::fs::create_dir_all(root.join("bin")), "stage bin");
+            for tool in ["xcodebuild", "swift"] {
+                let shim = root.join("bin").join(tool);
+                must_ok(
+                    std::fs::write(&shim, format!("#!/bin/sh\necho fake-{tool}\n")),
+                    "stage tool shim",
+                );
+                Self::make_executable(&shim);
+            }
+            Self { root }
+        }
+
+        fn make_executable(path: &std::path::Path) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                must_ok(
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)),
+                    "stage shim is executable",
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+            }
+        }
+
+        fn install_versioned(&self, name: &str) {
+            must_ok(
+                std::fs::create_dir_all(
+                    self.root
+                        .join("Applications")
+                        .join(format!("{name}.app/Contents/Developer")),
+                ),
+                "stage versioned Xcode",
+            );
+        }
+
+        fn install_unversioned(&self, version: &str) {
+            let dir = self
+                .root
+                .join("Applications")
+                .join("Xcode.app/Contents/Developer/usr/bin");
+            must_ok(std::fs::create_dir_all(&dir), "stage Xcode.app");
+            let stub = dir.join("xcodebuild");
+            must_ok(
+                std::fs::write(
+                    &stub,
+                    format!("#!/bin/sh\necho 'Xcode {version}'\necho 'Build version TEST'\n"),
+                ),
+                "stage Xcode.app xcodebuild",
+            );
+            Self::make_executable(&stub);
+        }
+
+        fn run(&self, pin: &str) -> (bool, String, String, String) {
+            let script = WorkflowIr::xcode_probe_script(pin).replace(
+                "/Applications",
+                &self.root.join("Applications").to_string_lossy(),
+            );
+            let path = format!(
+                "{}:{}",
+                self.root.join("bin").to_string_lossy(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let env_file = self.root.join("github-env.txt");
+            let output = must_ok(
+                Command::new("bash")
+                    .args(["-c", &script])
+                    .env("PATH", path)
+                    .env("GITHUB_ENV", &env_file)
+                    .output(),
+                "bash executes the probe",
+            );
+            let env = std::fs::read_to_string(&env_file).unwrap_or_default();
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                env,
+            )
+        }
+    }
+
+    impl Drop for ProbeStage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn xcode_probe_selects_exact_prefix_and_unversioned() {
+        let stage = ProbeStage::create("exact");
+        stage.install_versioned("Xcode_26.6");
+        stage.install_versioned("Xcode_26.6.1");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "exact match wins: {stderr}");
+        assert!(
+            env.contains("DEVELOPER_DIR=") && env.contains("Xcode_26.6.app/Contents/Developer"),
+            "exact Xcode_26.6.app is exported, not the newer prefix or Xcode.app: {env}"
+        );
+
+        let stage = ProbeStage::create("prefix");
+        stage.install_versioned("Xcode_26.6.1");
+        stage.install_versioned("Xcode_26.6.2");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "newest prefix match wins: {stderr}");
+        assert!(
+            env.contains("Xcode_26.6.2.app/Contents/Developer"),
+            "newest prefix Xcode_26.6.2.app is exported: {env}"
+        );
+
+        let stage = ProbeStage::create("unversioned");
+        stage.install_unversioned("26.6.1");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "version-matching Xcode.app is accepted: {stderr}");
+        assert!(
+            env.contains("Xcode.app/Contents/Developer"),
+            "Xcode.app is exported: {env}"
+        );
+    }
+
+    #[test]
+    fn xcode_probe_fails_closed_with_diagnostic() {
+        let stage = ProbeStage::create("mismatch");
+        stage.install_versioned("Xcode_27.0");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, _) = stage.run("26.6");
+        assert!(!success, "a wrong-version Xcode.app is refused");
+        assert!(
+            stderr.contains("::error::no installed Xcode matches pin 26.6"),
+            "refusal names the pin: {stderr}"
+        );
+
+        let stage = ProbeStage::create("empty");
+        let (success, _, stderr, _) = stage.run("26.6");
+        assert!(!success, "no installed Xcode fails");
+        assert!(
+            stderr.contains("::error::no installed Xcode matches pin 26.6"),
+            "an empty tree reports the diagnostic instead of dying silently: {stderr}"
+        );
+    }
+
+    #[test]
+    fn swift_without_xcode_pin_renders_no_probe_step() {
+        let mut swift = rust_unit("swift-package-native", "native");
+        swift.kind = UnitKind::Swift;
+        swift.platform = crate::s2::provider::Platform::MacosArm64;
+        let ir = owner_test_ir("example/fixture", vec![swift]);
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(!workflow.contains("Select Xcode"), "{workflow}");
+    }
+
+    #[test]
+    fn disagreeing_xcode_pins_fail_swift_render() {
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![
+                xcode_swift_unit("swift-package-a", "a", "26.6"),
+                xcode_swift_unit("swift-package-b", "b", "26.7"),
+            ],
+        );
+        let error = must_err(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "members disagree on the Xcode pin",
+        );
+        assert!(error.to_string().contains("Xcode toolchain pin"), "{error}");
+    }
+
+    #[test]
+    fn apple_cache_purposes_enable_actions_cache_and_render() {
+        let cache = |purpose| {
+            Some(crate::s2::CacheSpec {
+                key_files: vec!["Package.swift".to_owned(), "mise.lock".to_owned()],
+                paths: vec!["~/.swiftpm".to_owned()],
+                purpose,
+                mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
+            })
+        };
+        let mut package = rust_unit("swift-package-native", "native");
+        package.kind = UnitKind::Swift;
+        package.platform = crate::s2::provider::Platform::MacosArm64;
+        package.cache = cache(crate::s2::CachePurpose::SwiftPmSources);
+        let mut scheme = rust_unit("swift-xcodeproj-app", "native");
+        scheme.kind = UnitKind::Swift;
+        scheme.platform = crate::s2::provider::Platform::MacosArm64;
+        scheme.cache = cache(crate::s2::CachePurpose::XcodeIntermediates);
+        let ir = owner_test_ir("example/fixture", vec![package, scheme]);
+        for unit in &ir.units {
+            assert!(
+                crate::s2::primitives::CacheBackend::Detected.provider_enables_actions_cache(
+                    crate::s2::provider::ProviderId::GithubHosted,
+                    &ir,
+                    unit,
+                ),
+                "apple cache enables restore/save steps: {}",
+                unit.id
+            );
+        }
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(
+            workflow.contains("Restore unit cache"),
+            "swift cache renders a restore step: {workflow}"
+        );
+        assert!(
+            workflow.contains("-swift-${{ hashFiles(inputs.cache_key_files) }}"),
+            "swift cache keeps the kind-level key segment: {workflow}"
         );
     }
 
@@ -2159,6 +2640,7 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         payload: "mbx",
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: config_rust_toolchain(config),
+        xcode: None,
         host_image: config
             .selectors
             .get(&ProviderId::GithubHosted)
@@ -2209,6 +2691,7 @@ fn snapshot_compatibility(
         },
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: unit.toolchain.clone(),
+        xcode: unit.xcode.clone(),
         host_image: ir
             .selectors
             .get(&provider)
@@ -2526,12 +3009,27 @@ fn render_cache_outcome_report_inputs(
     if provider.is_local() {
         if let Some(layers) = &facts.host_warm_layers {
             let _ = writeln!(output, "          host_warm_layers: {layers}");
+            // The Velnor lane has no restore steps to observe; the host-warm
+            // list is the declaration, so the classifier reports listed
+            // layers as declared-but-unobserved instead of disabled.
+            let _ = writeln!(output, "          cache_declared_layers: {layers}");
         }
         return;
     }
+    let declared = facts
+        .layers
+        .iter()
+        .map(|layer| layer.report_input_prefix())
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = writeln!(output, "          cache_declared_layers: {declared}");
     for layer in &facts.layers {
         let input_prefix = layer.report_input_prefix();
         let step_id = layer.step_id();
+        let _ = writeln!(
+            output,
+            "          cache_{input_prefix}_outcome: ${{{{ steps.{step_id}.outcome }}}}"
+        );
         if *layer == ReportedCacheLayer::Mbx {
             let _ = writeln!(
                 output,
@@ -2982,11 +3480,44 @@ pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<St
     if needs_nextest(unit) {
         push_mise_tool(&mut tools, nextest_tool_id(lock_keys).to_owned());
     }
+    if needs_boltffi(unit) {
+        push_mise_tool(&mut tools, BOLTFFI_TOOL.to_owned());
+    }
     for declared in &unit.mise_tools {
         push_mise_tool(&mut tools, declared.clone());
     }
     tools
 }
+
+/// Whether any of the unit's commands drive the `BoltFFI` pack the native join
+/// appends to a producing Rust unit. One predicate feeds both the mise
+/// install list and the lock validation, so the two can never disagree
+/// about what a unit needs.
+pub(crate) fn needs_boltffi(unit: &Unit) -> bool {
+    unit_commands(unit).any(|command| {
+        let mut seen_boltffi = false;
+        command.split_whitespace().any(|token| {
+            // Shell separators start a new simple command: a `pack` past
+            // one belongs to whatever follows, not to the earlier `boltffi`.
+            if matches!(token, "&&" | "||" | ";" | "|") {
+                seen_boltffi = false;
+                return false;
+            }
+            if seen_boltffi {
+                token == "pack"
+            } else {
+                seen_boltffi = token == "boltffi" || token.ends_with("/boltffi");
+                false
+            }
+        })
+    })
+}
+
+/// The single mise spelling the `BoltFFI` CLI pins under: the cargo backend
+/// serving the `boltffi_cli` crate, as evidenced by the `mise.lock` key.
+/// `mise --locked` requires install args to equal the lock keys byte for
+/// byte, so validation refuses any other state before rendering.
+pub(crate) const BOLTFFI_TOOL: &str = "cargo:boltffi_cli";
 
 pub(crate) fn needs_cargo_deny(unit: &Unit) -> bool {
     unit_commands(unit)
@@ -3079,6 +3610,33 @@ pub(crate) fn validate_nextest_tools_are_locked(
             let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
             return Err(GeneratorError::usage(format!(
                 "unit {} runs cargo-nextest but mise.lock pins neither {QUALIFIED_NEXTEST_TOOL} nor {BARE_NEXTEST_TOOL}; install one and re-lock so install_args match the lock, known keys: {known}",
+                unit.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a unit that needs `BoltFFI` while the root lock does not pin its
+/// tool id: rendering anything else would emit `install_args` the runner's
+/// own lock check rejects, and unlike nextest there is no cargo-bin
+/// fallback, so an absent lock fails here rather than at pack time.
+///
+/// # Errors
+/// Returns a usage error naming the first unit whose `BoltFFI` need the lock
+/// does not pin, with every key the lock does pin.
+pub(crate) fn validate_boltffi_tools_are_locked(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if lock_keys.contains(BOLTFFI_TOOL) {
+        return Ok(());
+    }
+    for unit in units {
+        if needs_boltffi(unit) {
+            let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(GeneratorError::usage(format!(
+                "unit {} runs boltffi pack but mise.lock does not pin {BOLTFFI_TOOL}; pin it and re-lock so install_args match the lock, known keys: {known}",
                 unit.id
             )));
         }
@@ -3934,6 +4492,13 @@ pub(crate) mod provider_input {
     /// Comma-separated prepared-tool need records (`tool:digest:producers`)
     /// the provider restores for the unit; empty when it needs none.
     pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
+    /// Comma-separated transport records (`producer/product`) the unit
+    /// publishes as artifacts; empty when it produces nothing.
+    pub(crate) const PRODUCT_PROVIDES: &str = "product_provides";
+    /// Comma-separated `{record}:{verdict}` pairs, one per transportable
+    /// prerequisite edge; the caller evaluates each producer job's result
+    /// inline because the callee cannot read the caller's `needs`.
+    pub(crate) const PRODUCT_TRANSPORT_READY: &str = "product_transport_ready";
     /// Comma-separated validation phases the unit verifies through
     /// (`fmt,clippy,test,doctest`); empty when the unit keeps the single
     /// legacy checks step.
@@ -3966,6 +4531,8 @@ pub(crate) mod provider_input {
         UNIT_DEPENDENCIES,
         UNIT_ADMISSION,
         PREPARED_TOOLS,
+        PRODUCT_PROVIDES,
+        PRODUCT_TRANSPORT_READY,
         VALIDATION_PHASES,
     ];
 
@@ -4067,6 +4634,10 @@ pub(crate) struct ProviderStepFacts {
     pub(crate) unit_admission: ProviderAdmission,
     /// Prepared-tool need records the provider restores for the unit.
     pub(crate) prepared_tools: Vec<String>,
+    /// Transport records (`producer/product`) the unit publishes; hosted only.
+    pub(crate) product_provides: Vec<String>,
+    /// Caller-evaluated readiness verdicts, one per transportable edge.
+    pub(crate) product_transport_ready: Option<String>,
     /// The validation phases the unit verifies through, in step order;
     /// empty when the unit keeps the single legacy checks step.
     pub(crate) validation_phases: Vec<ValidationPhase>,
@@ -4168,6 +4739,7 @@ impl ProviderStepFacts {
                 self.prepared_tools.join(","),
             ));
         }
+        self.push_transport_values(&mut values);
         if !self.validation_phases.is_empty() {
             values.push((
                 provider_input::VALIDATION_PHASES,
@@ -4175,6 +4747,20 @@ impl ProviderStepFacts {
             ));
         }
         values
+    }
+
+    /// The transport `with:` values: the records this unit publishes, plus
+    /// the caller-evaluated readiness verdicts when it consumes any.
+    fn push_transport_values(&self, values: &mut Vec<(&'static str, String)>) {
+        if !self.product_provides.is_empty() {
+            values.push((
+                provider_input::PRODUCT_PROVIDES,
+                self.product_provides.join(","),
+            ));
+        }
+        if let Some(ready) = &self.product_transport_ready {
+            values.push((provider_input::PRODUCT_TRANSPORT_READY, ready.clone()));
+        }
     }
 }
 
@@ -4673,6 +5259,10 @@ impl WorkflowIr {
             &mut needs,
             rust_dependency_needs(provider, unit, self.rust_needs, &self.units),
         );
+        append_unique_needs(
+            &mut needs,
+            product_dependency_needs(provider, unit, &self.units),
+        );
         let mut conditions = vec![
             aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
@@ -4687,6 +5277,13 @@ impl WorkflowIr {
             );
         }
         for dependency in rust_dependency_needs(provider, unit, self.rust_needs, &self.units) {
+            conditions.push(format!(
+                "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
+            ));
+        }
+        // A skipped or failed producer means no artifact: the consumer's
+        // guarded rebuild covers it, so the caller still runs.
+        for dependency in product_dependency_needs(provider, unit, &self.units) {
             conditions.push(format!(
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
@@ -4999,6 +5596,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 continue;
             }
+            // The transport inputs likewise stay out of headers whose
+            // members neither produce nor consume build products.
+            if *name == provider_input::PRODUCT_PROVIDES
+                && !members.iter().any(|unit| {
+                    unit.products
+                        .iter()
+                        .any(super::product_transport::transport_eligible)
+                })
+            {
+                continue;
+            }
+            if *name == provider_input::PRODUCT_TRANSPORT_READY
+                && !members.iter().any(|unit| !unit.prerequisites.is_empty())
+            {
+                continue;
+            }
             // The validation-phases input is declared only when a member is
             // phased: an unconditional declaration would rewrite every kind
             // header for a feature only phased rust units use.
@@ -5274,10 +5887,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// The per-unit facts of one (unit, provider) pair. This is the single source
     /// both sides of the `workflow_call` boundary derive from: the caller's
     /// `with:` values and the callee's step gates.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "per-provider unit facts spell one line per caller input; the phase list is one more"
-    )]
     pub(crate) fn unit_provider_facts(
         &self,
         unit: &Unit,
@@ -5286,17 +5895,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     ) -> ProviderStepFacts {
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mise_tools = if hosted {
-            if tools.contains(&ToolRequirement::Mise) {
-                mise_tool_ids(unit, &self.mise_lock_keys)
-            } else {
-                Vec::new()
-            }
-        } else if tools.contains(&ToolRequirement::Mise) {
-            velnor_mise_install_tool_ids(unit, &self.mise_lock_keys)
-        } else {
-            Vec::new()
-        };
+        let mise_tools =
+            Self::mise_tool_ids_for_provider(hosted, &tools, unit, &self.mise_lock_keys);
         let mise_runner = hosted
             && tools.contains(&ToolRequirement::Mise)
             && mise_tools.is_empty()
@@ -5383,8 +5983,76 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             unit_dependencies: unit.depends_on.clone(),
             unit_admission: ProviderAdmission::for_unit(provider, unit),
             prepared_tools: super::prepared_tools::need_records(&unit.prepared_tools),
+            product_provides: Self::transport_provides(unit, provider),
+            product_transport_ready: Self::transport_ready(&self.units, unit, provider),
             validation_phases: unit.runnable_phases(),
         }
+    }
+
+    /// The mise tool ids one unit installs on `hosted`: the hosted spell
+    /// for GitHub runners, the Velnor install spell for local lanes.
+    fn mise_tool_ids_for_provider(
+        hosted: bool,
+        tools: &BTreeSet<ToolRequirement>,
+        unit: &Unit,
+        lock_keys: &BTreeSet<String>,
+    ) -> Vec<String> {
+        if hosted {
+            if tools.contains(&ToolRequirement::Mise) {
+                mise_tool_ids(unit, lock_keys)
+            } else {
+                Vec::new()
+            }
+        } else if tools.contains(&ToolRequirement::Mise) {
+            velnor_mise_install_tool_ids(unit, lock_keys)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The transport records one unit publishes on `provider`: its eligible
+    /// products. Hosted only; local providers share the workspace.
+    fn transport_provides(unit: &Unit, provider: ProviderId) -> Vec<String> {
+        if provider != ProviderId::GithubHosted {
+            return Vec::new();
+        }
+        unit.products
+            .iter()
+            .filter(|product| super::product_transport::transport_eligible(product))
+            .map(|product| super::product_transport::transport_record(&unit.id, &product.name))
+            .collect()
+    }
+
+    /// The caller-evaluated readiness verdicts for one unit's transportable
+    /// prerequisite edges on `provider`, or `None` when no edge can ride
+    /// the transport and the consumer always rebuilds.
+    fn transport_ready(units: &[Unit], unit: &Unit, provider: ProviderId) -> Option<String> {
+        if provider != ProviderId::GithubHosted {
+            return None;
+        }
+        let mut edges = Vec::new();
+        for prerequisite in &unit.prerequisites {
+            let Some(producer) = units
+                .iter()
+                .find(|candidate| candidate.id == prerequisite.producer)
+            else {
+                continue;
+            };
+            let eligible = producer.products.iter().any(|product| {
+                product.name == prerequisite.product
+                    && super::product_transport::transport_eligible(product)
+            });
+            if eligible && provider_supports_unit(provider, producer) {
+                edges.push((
+                    super::product_transport::transport_record(
+                        &prerequisite.producer,
+                        &prerequisite.product,
+                    ),
+                    unit_job_id(provider, &prerequisite.producer),
+                ));
+            }
+        }
+        super::product_transport::ready_records(&edges)
     }
 
     /// Whether the collapsed provider job renders the cargo-fetch phase at all:
@@ -5440,6 +6108,103 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &mut block,
                 self.pins.cache_restore,
                 std::slice::from_ref(need),
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+    }
+
+    /// The union of product-consumer steps across the collapsed provider's
+    /// members: one download+verify block per distinct transportable
+    /// prerequisite edge, gated on the caller-evaluated `{record}:true`
+    /// verdict. The verdict varies per run, so every block carries its
+    /// gate; members whose producer did not run skip the block and their
+    /// guarded rebuild covers the product. Hosted only.
+    fn render_collapsed_product_consumer_steps(&self, output: &mut String, members: &[&Unit]) {
+        let mut union: BTreeMap<String, (String, &crate::s2::platform::NamedProduct)> =
+            BTreeMap::new();
+        for member in members {
+            for prerequisite in &member.prerequisites {
+                let Some(product) = self.units.iter().find_map(|unit| {
+                    if unit.id != prerequisite.producer {
+                        return None;
+                    }
+                    unit.products
+                        .iter()
+                        .find(|product| product.name == prerequisite.product)
+                }) else {
+                    continue;
+                };
+                if !super::product_transport::transport_eligible(product) {
+                    continue;
+                }
+                let record = super::product_transport::transport_record(
+                    &prerequisite.producer,
+                    &prerequisite.product,
+                );
+                union
+                    .entry(record)
+                    .or_insert_with(|| (prerequisite.producer.clone(), product));
+            }
+        }
+        for (record, (producer, product)) in &union {
+            let gate = provider_input::contains_gate(
+                provider_input::PRODUCT_TRANSPORT_READY,
+                &format!("{record}:true"),
+            );
+            let marker = crate::s2::platform::transport_marker(producer, &product.name);
+            let block = super::product_transport::render_consumer_block(
+                self.pins.download_artifact,
+                producer,
+                product,
+                &marker,
+            );
+            output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
+        }
+    }
+
+    /// The union of product-producer steps across the collapsed provider's
+    /// members: one stage+upload block per distinct eligible product, after
+    /// the checks that build it. A failed check skips the upload, so no
+    /// artifact ever certifies a red producer. Hosted only.
+    fn render_collapsed_product_producer_steps(&self, output: &mut String, members: &[&Unit]) {
+        let mut union: BTreeMap<String, (String, &crate::s2::platform::NamedProduct)> =
+            BTreeMap::new();
+        for member in members {
+            for product in &member.products {
+                if !super::product_transport::transport_eligible(product) {
+                    continue;
+                }
+                let record = super::product_transport::transport_record(&member.id, &product.name);
+                union
+                    .entry(record)
+                    .or_insert_with(|| (member.id.clone(), product));
+            }
+        }
+        if union.is_empty() {
+            return;
+        }
+        let member_records: Vec<BTreeSet<String>> = members
+            .iter()
+            .map(|unit| {
+                unit.products
+                    .iter()
+                    .filter(|product| super::product_transport::transport_eligible(product))
+                    .map(|product| {
+                        super::product_transport::transport_record(&unit.id, &product.name)
+                    })
+                    .collect()
+            })
+            .collect();
+        for (record, (producer, product)) in &union {
+            let shared = member_records
+                .iter()
+                .all(|records| records.contains(record));
+            let gate = (!shared)
+                .then(|| provider_input::contains_gate(provider_input::PRODUCT_PROVIDES, record));
+            let block = super::product_transport::render_producer_block(
+                self.pins.upload_artifact,
+                producer,
+                product,
             );
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
@@ -5504,6 +6269,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             pins.into_iter().next().flatten()
         };
+        let xcode = {
+            let pins = members
+                .iter()
+                .map(|unit| unit.xcode.clone())
+                .collect::<Vec<_>>();
+            if pins.iter().any(|pin| pin != &pins[0]) {
+                return Err(disagreement("the Xcode toolchain pin"));
+            }
+            pins.into_iter().next().flatten()
+        };
         let kind_tools = {
             let per_member = members
                 .iter()
@@ -5563,6 +6338,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             && let Some(toolchain) = &toolchain
         {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
+        }
+        if hosted
+            && kind == UnitKind::Swift
+            && let Some(xcode) = &xcode
+        {
+            Self::render_xcode_toolchain_step(output, xcode);
         }
         if hosted && mise_tools.any {
             let trusted = trusted_cache_save_expression(&self.default_branch);
@@ -5777,6 +6558,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
 
+        // Verified product transport: download and install the producer's
+        // artifact before the checks consume it. The verify step exports
+        // the ready marker the guarded rebuild reads.
+        if hosted {
+            self.render_collapsed_product_consumer_steps(output, members);
+        }
+
         // Verification. Units with validation phases verify through one
         // step per runnable phase behind `run --phase`; units without keep
         // the single legacy step. A kind mixing both gates each side on the
@@ -5844,6 +6632,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 candidate,
                 provider_input::CANDIDATE_PUBLISH,
             ));
+        }
+
+        // Product publication: stage and upload the built products after
+        // the checks that produced them.
+        if hosted {
+            self.render_collapsed_product_producer_steps(output, members);
         }
 
         // Cache collection.
@@ -6439,6 +7233,41 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             toolchain,
             save_gate.as_deref(),
         );
+    }
+
+    /// The hosted-provider Xcode contract: select the installed Xcode
+    /// matching the repository's `.xcode-version` pin, fail closed when no
+    /// installed Xcode matches, and export `DEVELOPER_DIR` so every later
+    /// step uses the same toolchain instead of the image default. An exact
+    /// `Xcode_<pin>.app` match wins; otherwise the newest installed
+    /// `Xcode_<pin>*.app` is selected; otherwise an unversioned
+    /// `Xcode.app` is accepted only when its reported version matches the
+    /// pin. Every fallible probe pipeline ends in `|| true`: under
+    /// `set -euo pipefail` a bare failing substitution would kill the step
+    /// before the diagnostic runs. Local providers own their Xcode
+    /// installation and skip this step.
+    fn render_xcode_toolchain_step(output: &mut String, xcode: &XcodeToolchain) {
+        let _ = writeln!(
+            output,
+            "      - name: Select Xcode {}\n        run: |{}",
+            xcode.version(),
+            Self::xcode_probe_script(xcode.version()).lines().fold(
+                String::new(),
+                |mut indented, line| {
+                    indented.push_str("\n          ");
+                    indented.push_str(line);
+                    indented
+                }
+            ),
+        );
+    }
+
+    /// The `Select Xcode` probe body, factored out so behavioral tests
+    /// execute the exact script the workflow renders.
+    fn xcode_probe_script(pin: &str) -> String {
+        format!(
+            "set -euo pipefail\nwant=\"{pin}\"\ndir=\"\"\nif [ -d \"/Applications/Xcode_${{want}}.app\" ]; then\n  dir=\"/Applications/Xcode_${{want}}.app\"\nelse\n  dir=\"$(ls -d /Applications/Xcode_${{want}}*.app 2>/dev/null | sort | tail -n 1 || true)\"\nfi\nif [ -z \"$dir\" ] && [ -d /Applications/Xcode.app ]; then\n  found=\"$(/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version 2>/dev/null | head -n 1 | awk '{{print $2}}' || true)\"\n  case \"$found\" in\n    \"$want\"|\"$want\".*) dir=/Applications/Xcode.app ;;\n  esac\nfi\nif [ -z \"$dir\" ]; then\n  echo \"::error::no installed Xcode matches pin $want\" >&2\n  ls /Applications | grep -i xcode || true\n  exit 1\nfi\necho \"DEVELOPER_DIR=$dir/Contents/Developer\" >> \"$GITHUB_ENV\"\nexport DEVELOPER_DIR=\"$dir/Contents/Developer\"\nxcodebuild -version\nswift --version"
+        )
     }
 
     /// The cargo-bin tools a hosted provider installs through the pinned

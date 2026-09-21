@@ -785,9 +785,6 @@ pub fn admit_job(
         let Some(reference) = step.reference.as_ref() else {
             continue;
         };
-        let Some(repository) = reference.name.as_deref() else {
-            continue;
-        };
         let step_label = step
             .display_name_template()
             .or_else(|| step.name.clone())
@@ -821,6 +818,10 @@ pub fn admit_job(
             )?;
             continue;
         }
+
+        let Some(repository) = reference.name.as_deref() else {
+            continue;
+        };
 
         // Remote root. Resolve inputs against the full job context, then
         // validate the ref/subpath/inputs before any metadata fetch.
@@ -1437,6 +1438,9 @@ fn render_admission_expression(value: &str, context_data: &[(String, Value)]) ->
 }
 
 fn is_local_reference(name: Option<&str>, path: Option<&str>) -> bool {
+    if name.is_some_and(|n| !n.starts_with('.') && n.contains('/')) {
+        return false;
+    }
     path.is_some_and(|value| value.starts_with('.'))
         || name.is_some_and(|value| value.starts_with('.'))
 }
@@ -2709,5 +2713,47 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.kind == AdmissionNodeKind::LocalAction));
+    }
+
+    #[test]
+    fn remote_repository_action_with_dot_subpath_is_admitted_remotely() {
+        assert!(!is_local_reference(
+            Some("tailrocks/velnor"),
+            Some(".github/actions/report-velnor-ci-outcomes")
+        ));
+        assert!(!is_local_reference(Some("actions/cache"), Some("restore")));
+        assert!(is_local_reference(
+            Some("./.github/actions/report-velnor-ci-outcomes"),
+            Some("./.github/actions/report-velnor-ci-outcomes")
+        ));
+        assert!(is_local_reference(
+            None,
+            Some("./.github/actions/report-velnor-ci-outcomes")
+        ));
+
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "repository": "donbeave/essential-mac",
+                "workflow_sha": "f429698900d2a9b3639d5379d91ce3c940764f4b"
+            }),
+        )];
+        let velnor_sha = "8b8f1cbe03427227e9d04301de530b3e744110f4";
+        let job = job(serde_json::json!([repo_step(
+            "tailrocks/velnor",
+            velnor_sha,
+            Some(".github/actions/report-velnor-ci-outcomes"),
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[(
+            &format!("tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@{velnor_sha}"),
+            "runs:\n  using: composite\n  steps: []\n",
+        )]);
+        let graph = admit_job(&job, &context, &source).unwrap();
+        assert!(graph.contains_remote_action(
+            "tailrocks/velnor",
+            velnor_sha,
+            Some(".github/actions/report-velnor-ci-outcomes")
+        ));
     }
 }

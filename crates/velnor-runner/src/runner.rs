@@ -8917,6 +8917,9 @@ async fn handle_job_request(
                 renewal.abort();
                 let teardown = take_teardown_owner(&teardown_slot);
                 let had_teardown = teardown.is_some();
+                if had_teardown {
+                    permit_guard.transition_cleaning();
+                }
                 let teardown_permit = permit_guard.teardown_release();
                 let teardown_result = if let Some(teardown) = teardown {
                     start_failed_execution_teardown(
@@ -9013,6 +9016,9 @@ async fn handle_job_request(
                     renewal.abort();
                     let teardown = take_teardown_owner(&teardown_slot);
                     let had_teardown = teardown.is_some();
+                    if had_teardown {
+                        permit_guard.transition_cleaning();
+                    }
                     let teardown_permit = permit_guard.teardown_release();
                     let teardown_result = if let Some(teardown) = teardown {
                         start_failed_execution_teardown(
@@ -9157,6 +9163,7 @@ async fn handle_job_request(
             teardown_ms: None,
         };
         if let Some(teardown) = teardown {
+            permit_guard.transition_cleaning();
             let teardown_permit = permit_guard.teardown_release();
             if let Err(error) = start_post_completion_teardown(
                 teardown_config_dir.clone(),
@@ -10975,6 +10982,8 @@ fn execute_script_job(
     teardown_slot: &TeardownSlot,
     runner_name: &str,
 ) -> Result<ScriptJobResult> {
+    let _power_assertion =
+        crate::platform::PowerAssertionGuard::acquire(&format!("velnor-job-{}", job.job_id));
     let slot_work_dir = slot_work_dir(config_dir, work_dir.as_deref());
     let job_dir = slot_work_dir.join(sanitize_path_segment(&job.job_id));
     register_job_cache_session(job);

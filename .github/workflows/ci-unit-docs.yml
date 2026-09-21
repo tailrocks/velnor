@@ -352,6 +352,8 @@ jobs:
         with:
           job_label: ${{ inputs.unit }}
           ci_lane: github
+          cache_declared_layers: cargo
+          cache_cargo_outcome: ${{ steps.cache.outcome }}
           cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
           cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
       - name: Record unit result
