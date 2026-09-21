@@ -828,6 +828,84 @@ mod tests {
     }
 
     #[test]
+    fn watch_graph_render_adds_workspace_manifests_to_nested_bun_member(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("velnor-watch-bun-ws-{}", crate::unique_suffix()));
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","packageManager":"bun@1.3.14","workspaces":["docs"],"scripts":{"build":"bun build"}}"#,
+        )?;
+        fs::write(root.join("bun.lock"), "lock")?;
+        fs::write(
+            root.join("docs/package.json"),
+            r#"{"name":"docs","packageManager":"bun@1.3.14","scripts":{"build":"bun build"}}"#,
+        )?;
+        fs::write(root.join("docs/bun.lock"), "lock")?;
+        fs::write(root.join("docs/codegen.ts"), "export {};\n")?;
+
+        let shape = crate::scan::scan_shape(&root, crate::RunnerMode::Both, "main", &[])?;
+        let config = crate::ProjectConfig::from(shape.clone());
+        assert!(
+            config
+                .analysis
+                .detected
+                .contains(&"package-workspace:.".to_owned()),
+            "the root workspaces field proves a workspace: {:?}",
+            config.analysis.detected
+        );
+        let units = config.units.iter().collect::<Vec<_>>();
+        let pins = super::super::Pins::resolved();
+        let lanes = super::super::lanes::resolve(&config, &[])?;
+        let cache = super::super::cache::resolve(&[])?;
+        let nodes = Vec::new();
+        let contracts = BTreeMap::new();
+        let ctx = RenderCtx {
+            root: &root,
+            shape: &shape,
+            config: &config,
+            unit: None,
+            units: &units,
+            file: None,
+            family: super::super::WATCH_GRAPH,
+            pins: &pins,
+            lanes: &lanes,
+            cache: &cache,
+            nodes: &nodes,
+            contracts: &contracts,
+        };
+        let args = BTreeMap::new();
+        let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&args))?;
+        let nested_unit = rendered
+            .units
+            .iter()
+            .find(|unit| unit.root == "docs")
+            .ok_or_else(|| std::io::Error::other("nested Bun unit missing"))?;
+        for expected in [
+            "package.json",
+            "bun.lock",
+            "bun.lockb",
+            "package-lock.json",
+            "docs/package.json",
+        ] {
+            assert!(
+                nested_unit.watch.contains(&expected.to_owned()),
+                "the workspace member watches ancestor manifests ({expected}): {:?}",
+                nested_unit.watch
+            );
+        }
+        assert!(
+            !nested_unit.watch.contains(&"src/**".to_owned()),
+            "the member stays scoped to manifests, not root sources: {:?}",
+            nested_unit.watch
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn workspace_topology_gate_ignores_whole_crate_trees() {
         assert!(is_broad_per_crate_source_watch("crates/**"));
         assert!(is_broad_per_crate_source_watch("tools/**"));
