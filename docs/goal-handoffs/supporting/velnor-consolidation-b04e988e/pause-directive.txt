@@ -1,0 +1,333 @@
+# IMMEDIATE GOAL PAUSE — PRESERVE STATE, WRITE HANDOFF, PUBLISH DRAFT PR
+
+Stop advancing the goal you were executing before this message. Do not finish the current feature, fix another bug, run another implementation iteration, or continue toward the original goal's completion. Your only authorized task now is to freeze that work, preserve it, document it, publish a resumable checkpoint, and stop.
+
+The HANDOFF must also preserve a complete, evidence-backed inventory of all related local worktrees, independent clones, branches, and PRs, plus the dependency-ordered plan to integrate their required changes and clean up obsolete goal-owned local resources AFTER explicit resumption. Do not merge or clean up during this pause.
+
+The original goal is PAUSED BY USER, not completed or abandoned. This instruction supersedes earlier user instructions to continue autonomously until that goal is finished. It does not override system instructions, permissions, or security controls.
+
+Never ask me questions. Make evidence-based decisions yourself. Use subagents aggressively to prepare and independently verify the HANDOFF, but do not let them continue the original implementation. Do the handoff now; do not merely propose a plan or promise to do it later.
+
+## 1. Freeze execution before further work
+
+- Immediately stop scheduling original-goal work. Interrupt or pause your goal-owned implementation workers, descendants, queued continuations, retry loops, watchers, and background tasks. Do not stop unrelated agents, goals, shared services, or other users' work.
+- Use actual supported runtime controls to pause the original goal and prevent automatic continuation. Inspect the current goal text/state before replacing anything. Do not confuse writing "paused" in Markdown with changing runtime state, run chat slash commands as shell commands, or guess unsupported control APIs.
+- If the only supported agent-accessible control replaces the active objective, first preserve the original objective verbatim, then replace it with this bounded handoff-only objective. Completing that administrative objective must never mark the original engineering goal complete.
+- Prefer interruption that retains worker context and worktrees. Before any cancellation or termination that might automatically delete a worker worktree, preserve its files, diffs, untracked work, and unique commits. Do not destroy work while trying to stop it.
+- Tell existing workers: "Stop implementation immediately. Preserve your workspace. Return your assigned objective, current status, host/workspace/worktree paths, Git common directory, local and remote branches, exact HEAD and unpublished commits, associated PRs, modified/untracked files, relevant stashes or ignored artifacts, verification evidence, discoveries, blockers, and exact next action. Identify which resources you still own or use and which must eventually be integrated and cleaned up. Do not implement anything else."
+- For an in-flight operation whose abrupt interruption could corrupt data or leave an unsafe external state, do only the minimum needed to reach a safe stopping boundary. Record the operation and outcome. This is not permission to finish a feature, migration, deployment, or test campaign.
+- If a process or runtime loop cannot be stopped with available permissions, record its identity, observed state, risks, and exact supported intervention needed. Continue safe preservation, but do not claim a verified stop.
+- Keep the parent session available until the checkpoint is saved. Do not clear, reset, compact manually, or discard recoverable task context before extracting it.
+
+## 2. Delegate handoff preparation, not implementation
+
+Use real available subagent tools. Parallelize these bounded, read-only assignments:
+
+1. **Goal/context auditor:** Recover the original goal, amendments, constraints, acceptance criteria, decisions, and outstanding obligations from available conversation and task records.
+2. **Worktree/local-state auditor:** Enumerate relevant independent clones and every registered worktree in each discovered Git common repository, including agent-created and detached worktrees. Inspect per-worktree changes, unpublished commits, related stashes/artifacts, activity, ownership, locks, and missing paths. Produce the worktree ledger and preservation gaps.
+3. **Branch/PR integration auditor:** Enumerate local branches, remote-tracking refs and observed remote heads, including branches with no worktree or PR. Discover related PRs across open, closed, and merged states. Build the worktree-to-branch-to-PR map, dependency/overlap graph, integration order, and future local-cleanup gates.
+4. **Verification/resume auditor:** Reconcile claimed progress with actual evidence; inventory failed, interrupted, missing, and stale checks; specify the remaining work and exact resumption procedure, including integration and cleanup after explicit resumption.
+
+After drafting, use an independent reviewer to evaluate the HANDOFF from a fresh reader's perspective against repository evidence and the original requirements, not just the other agents' conclusions.
+
+Give each worker this pause-only scope, explicit read permissions, and a finite deliverable. Only the coordinator writes the canonical HANDOFF and performs Git/PR mutations. Do not let multiple agents edit the same files or Git index. Return reports to the coordinator; avoid shared scratch files.
+
+Respect actual concurrency limits. Reuse available workers or run bounded waves rather than repeatedly spawning into a full pool. Do not terminate workers with unpreserved work to free slots. If subagent tools are genuinely unavailable, record that limitation and perform the same audits yourself; never fabricate delegation or independent review.
+
+## 3. Assign a unique, stable handoff identity
+
+Resolve the repository and original goal from actual session and repository evidence. Do not ask me for names or paths.
+
+Use an existing dedicated goal-handoff directory if one is established; otherwise use `docs/goal-handoffs/`.
+
+Create a NEW Markdown file named:
+
+`<goal-slug>--<YYYYMMDDTHHMMSSZ>--<agent-slug>--<random8>.md`
+
+Use a specific original-goal slug, actual current UTC timestamp, actual agent identity, and eight random hexadecimal characters. Check for collisions. Never use a generic filename such as `HANDOFF.md`, `GOAL.md`, or `STATUS.md`, and never overwrite another goal's document.
+
+Reuse this identity throughout this handoff operation and any publication retries. Do not generate duplicate documents or PRs when retrying. Update only this goal's own handoff artifacts. Do not modify global agent rules or another goal's progress files to announce the pause.
+
+## 4. Capture and preserve the actual work
+
+Immediately write an initial handoff skeleton containing the original goal, known current state, and intended pause, then enrich it during the audits. Use a safe isolated location if the working checkout is shared.
+
+Inspect repository instructions, relevant plans, task trackers, available session records, existing PR descriptions/reviews, and actual filesystem/Git state. Preserve the latest user amendments; do not mistake this handoff request for the original goal.
+
+Inventory, before changing Git state:
+
+- Repository identity, sanitized remotes, source branch, upstream, current HEAD, intended PR base and observed base SHA, and ahead/behind state when known.
+- Goal-owned committed-but-unpushed work, staged changes, unstaged changes, untracked files, relevant ignored artifacts, and separate worker worktrees/branches. Preserve the distinction between these original states in the record.
+- All related independent clones, linked worktrees, local branches with or without checkouts/upstreams, observed remote branches, and open/closed/merged PRs. Build the ledgers in section 5.E; do not inventory only the current branch or current agent. Preserve initial observations and refresh the inventory after creating the handoff checkpoint.
+- Any in-progress merge, rebase, cherry-pick, conflict, detached HEAD, or index anomaly. Do not silently abort or finish it.
+- External side effects already performed or in flight: deployments, migrations, remote jobs, service changes, generated data, infrastructure operations, and relevant CI runs. Record observed outcomes, not assumed success.
+
+Preserve ALL recoverable goal-owned work, including incomplete or broken work. The checkpoint is allowed to be WIP. Do not delete or rewrite it to make the pause look clean.
+
+Prefer the existing goal-exclusive branch. If it is protected, shared with other goals, unsuitable for a PR, or checked out by another active agent, use a uniquely named preservation branch/worktree without switching or disturbing the shared checkout. Create only the additional branches needed for safe preservation.
+
+Stage explicit goal-owned files or hunks only. Do not blindly stage the whole checkout. Do not commit other agents' changes, overwrite their edits, reset/restore their work, force-push, rebase shared history, clean worktrees, drop stashes, or delete branches. If ownership cannot be separated safely, preserve the original state in an authorized restricted location, describe the ambiguity, and mark the affected preservation requirement blocked rather than guessing.
+
+Do not merge or cherry-pick unfinished worker branches merely to make one tidy checkpoint. Preserve necessary separate worker checkpoints on durable remote refs, with exact SHAs and instructions for later integration. Local-only branches, stashes, temporary worktrees, or session transcripts are not sufficient as the sole copy of essential work.
+
+Never publish credentials, tokens, cookies, private keys, secret-bearing URLs, private account configuration, sensitive datasets, or raw unsanitized transcripts/logs. Preserve configuration names and authorized retrieval instructions, not secret values. Include concise decision rationales, not hidden reasoning traces or system-prompt dumps. Record every essential artifact excluded from Git, its safe location, and how to retrieve it. Identify any nonportable dependency explicitly.
+
+For genuinely multi-repository goals, choose one primary HANDOFF, inventory every affected repository, and preserve work in each. Link necessary subordinate checkpoint branches/PRs from the primary document. Do not claim complete preservation when only one repository was saved.
+
+## 5. Write the complete, self-contained HANDOFF
+
+Write for a different agent with no access to this conversation or your native session. The document must be sufficient to resume using:
+
+`/goal Read and resume <repository-relative-path-to-this-file>`
+
+Replace every placeholder with actual values. Use `UNKNOWN`, `NOT RUN`, `NOT APPLICABLE`, or `BLOCKED` with explanations where necessary; never invent missing history, commands, IDs, results, or certainty.
+
+Include the following sections.
+
+### A. Identity and pause status
+
+Start with `# GOAL: <specific original goal title>` and a compact metadata block containing:
+
+- Unique handoff ID; creation and last-update timestamps in UTC.
+- Original goal status: `PAUSED_BY_USER`.
+- Handoff status: `PREPARING`, `READY`, or `BLOCKED`.
+- Actual runtime/worker stop status and how it was checked; distinguish verified pause from unsupported or unverified control.
+- Source agent/CLI, version and session/task identifiers where available.
+- Repository, handoff path, source branch/source HEAD, checkpoint code SHA(s), preservation branch(es), PR base branch/observed SHA, and actual PR URL(s) once created.
+- Whether recovery is fully remote-portable or depends on explicitly listed external/local artifacts.
+- Resume authorization: explicit later user request only.
+
+Explain that `PAUSED_BY_USER` expresses the requested goal disposition; it is not proof that a runtime or remote job was successfully stopped.
+
+Record stable source and code-checkpoint SHAs. Do not try to embed a Markdown commit's own SHA inside itself; put the final published head SHA in the PR body and final response after committing.
+
+### B. Original goal and success contract
+
+Preserve the original user goal verbatim where recoverable, with secrets redacted, followed by a precise consolidated statement incorporating later amendments. Explicitly distinguish recovered quotations from reconstructed summaries.
+
+Include scope, non-goals, all material constraints and preferences, required deliverables, acceptance criteria, and the original definition of done. Separate explicit user requirements from agent assumptions. Include the user-requested post-resumption obligation to integrate all required related goal work, resolve its PRs, and clean up verified obsolete goal-owned local worktrees and branches. This does not authorize blind merging of every experiment or deletion of shared/unrelated resources. Preserve applicable merge permissions and repository policies, and any limits on deploying, publishing, or modifying external systems.
+
+### C. State at the exact interruption point
+
+Describe the last completed action, the action that was in progress, its observed outcome, and the exact next intended action. Identify partially edited files/functions, unresolved conflicts, open hypotheses, and temporary inconsistencies.
+
+Record paused/stopped/still-running goal-owned workers, commands, jobs, and remote operations. Include identifiers, ownership, last observations, and safe inspection or resumption instructions. Do not assume an interrupted operation made no changes.
+
+### D. Requirement-by-requirement progress ledger
+
+Give every requirement/work item a stable ID and record:
+
+`ID | Requirement | Status | Evidence/files/commits | Remaining work | Dependencies`
+
+Use explicit statuses such as `VERIFIED_DONE`, `IMPLEMENTED_UNVERIFIED`, `IN_PROGRESS`, `NOT_STARTED`, and `BLOCKED`.
+
+“Implemented” is not “verified.” Link verified claims to concrete evidence and the revision/environment tested. Mark prior results stale where later changes invalidate them. Include documentation, tests, cleanup, review comments, CI, integration, and deployment obligations when they belong to the original goal.
+
+### E. Change and preservation inventory
+
+For each relevant file, component, commit, worker branch, and artifact, explain what changed, why it matters, completion state, ownership, and where its exact contents are preserved.
+
+Account for original staged/unstaged/untracked changes and unmerged worker results. Distinguish included checkpoint work from pre-existing/unrelated changes intentionally left untouched. Explain how to recover any essential material not contained directly in the main PR diff.
+
+### E.1. Discovery scope and ownership
+
+Inventory ALL resources related to this goal across every affected repository, not merely your present checkout, current branch, or most recent PR. Include resources created by this agent, its subagents, previous sessions, and other participating agents when evidence connects them to this goal.
+
+Enumerate every registered worktree and local branch in each discovered Git common repository to establish coverage, then classify relevance. Independently inspect known separate clones and agent-managed workspace roots identified by session records, worker reports, configuration, or relevant project locations. Do not assume one repository's worktree registry covers independent clones or other machines. Do not scan arbitrary private directories or the entire filesystem. Report the locations inspected, discovery methods, timestamps, pagination/limits, inaccessible paths, and any remaining coverage uncertainty.
+
+Use supported structured inspection, such as `git worktree list --porcelain -z`, ref enumeration, and per-worktree status. Do not parse paths by splitting on whitespace. Capture local state before any remote-ref refresh; distinguish cached remote-tracking refs from freshly observed server heads. Do not prune refs, run cleanup/garbage collection, or change checkout/index state to perform the audit.
+
+Give each repository/clone, worktree, branch, and PR a stable inventory ID. Classify ownership as `GOAL_EXCLUSIVE`, `GOAL_SHARED`, `UNRELATED`, or `UNKNOWN`, with evidence. Naming patterns or commit authors alone are not ownership proof. Record unrelated entries only as necessary to demonstrate exclusion; do not copy their private content into this handoff. Shared or unknown resources must be retained until ownership and dependencies are resolved.
+
+### E.2. Local worktree and clone ledger
+
+For EVERY related worktree or separate clone, record:
+
+- Stable ID, machine/host label, exact local path, repository identity, main-worktree or bare-repository path, and resolved Git common directory. Distinguish separate clones from linked worktrees. Retain exact recovery locations in an authorized restricted record if publishing a path would expose sensitive information.
+- Main/linked/bare/independent-clone type; owner agent/session; assigned goal/workstream; relation to other inventory IDs; observation timestamp.
+- Checked-out branch and full HEAD SHA, or explicit detached/unborn state; upstream/push destination; related PR IDs. Detached work is not exempt from preservation.
+- Actual filesystem availability and registration state; lock/prunable flags and reasons; relevant submodule/nested-repository state. A missing path is not proof it is disposable.
+- Staged, unstaged, untracked, and essential ignored contents; conflicts or in-progress Git operations; unique/unpublished commits; preservation locations and exact checkpoint refs/SHAs. Do not call a directory disposable merely because tracked files are clean.
+- Goal-owned running processes/watchers and last-verified ownership/activity; unknown activity or other-goal use; any required local-only configuration/artifact without secret values.
+- Intended future disposition: `KEEP`, `INTEGRATE_THEN_REMOVE`, `REVIEW_SHARED`, or `BLOCKED`; prerequisites and integration destination. Record `NOT_APPLICABLE` where the resource is not a removal candidate, including the primary checkout retained for future work.
+
+For a known but inaccessible worktree, include its last known information, the access failure, recoverable refs, and the exact inspection still needed. Do not omit it or invent its dirty/clean state.
+
+### E.3. Local and remote branch ledger
+
+For EVERY related branch/ref, including branches with no worktree, no upstream, no PR, or a deleted upstream, record:
+
+- Stable ID, repository/clone ID, exact full local ref, local tip SHA, purpose, ownership, and every worktree checking it out.
+- Configured upstream and push remote/ref; observed remote-head SHA and observation time; existence/freshness of remote-tracking data. Do not confuse `refs/remotes/...` with proof of current server state.
+- Intended integration target and observed target SHA; ahead/behind information against that target and the upstream separately when verifiable. Identify which comparison each count describes.
+- Unique goal commits/changes not integrated into the target; unpushed changes; any local commits added after an associated PR was merged or closed. A historically merged PR does not dispose of later work on the same branch.
+- Associated PR IDs, source worktree IDs, dependencies, overlaps/duplicate changes, and any superseding branch/PR with evidence.
+- Durable preservation ref/commit or authorized archive, exact restoration procedure, intended merge destination, and future disposition: integrate, keep, superseded-with-evidence, or blocked.
+
+Inventory related stashes with object IDs as well as their current labels and base commits, detached tips, and known goal-relevant reflog-only commits. Do not pop/apply/drop stashes during this audit. Preserve essential content durably; a reflog entry, local stash, or bare SHA written in Markdown is not an adequate sole recovery mechanism. Record any essential Git LFS objects, submodule commits, or external artifacts separately from the refs pointing to them.
+
+### E.4. Related PR ledger
+
+Discover ALL relevant PRs in open, closed, and merged states, including drafts, stacked dependencies, predecessor attempts, superseded PRs, and worker PRs. Use explicit repository/all-state queries, follow available pagination, check truncation, and cross-reference branch names, source repositories, commits, task records, linked issues, and review discussions. Do not rely solely on one author's PRs, title matches, a default result page, or the current branch's PR.
+
+For each PR, record:
+
+- Stable ID, repository, number, URL, title, state/draft status, goal/workstream, and observed update time.
+- Source repository/fork and exact head branch/SHA; base repository/branch and observed base SHA. Distinguish current observations from historical merge-time values and mark unavailable history unknown.
+- Related branch/worktree IDs and whether current local and remote tips actually match the PR's recorded head.
+- Dependencies/stack position, overlapping or duplicated changes, predecessor/superseding PRs, and merge-order rationale.
+- Observed checks with tested SHA and run links, required approvals, unresolved review discussions and requested changes, mergeability/queue/auto-merge status, and blockers. Unknown or pending status is not a pass.
+- For merged PRs: merge timestamp, resulting merge/squash commit, method when verifiable, target, and whether all currently preserved work is covered. For closed-unmerged PRs: why they closed if known and where their useful changes remain.
+- Intended future action: finish/review/merge, retain, close-as-superseded only after proven coverage, or investigate. Never equate `CLOSED` with `MERGED` or assume each related experiment should be merged unchanged.
+
+Refresh this ledger after publishing the primary handoff PR, including any preservation worktrees/branches created during this handoff operation. Keep the canonical inventory inside the HANDOFF; supporting artifacts may supplement it but must not replace it with an inaccessible link.
+
+### E.5. Integration map and ordered landing plan — FUTURE EXECUTION ONLY
+
+Provide a linked map using stable IDs:
+
+`worktree/clone -> local branch or detached checkpoint -> remote preservation ref -> PR(s) -> intended integration target`
+
+Represent many-to-many relationships explicitly. Add a dependency-ordered integration plan covering every relevant entry, not merely the primary handoff PR. Name which work can be reviewed or validated in parallel and which target-branch mutations must be coordinated sequentially.
+
+For each landing step, specify the exact source checkpoint, target, prerequisites, unresolved review comments, expected overlap/conflict areas, validation commands, allowed merge method, and required evidence of successful integration. Respect actual repository policy; do not impose a merge method that violates it or rewrite shared history. Identify uncertain conflicts as hypotheses rather than claiming an unperformed test merge.
+
+Distinguish required changes from duplicate, rejected, or superseded experiments. Do not blindly merge every branch. Account for each contribution through verified integration, explicit supersession/rejection with rationale, or an unresolved blocker. Confirm the final combined result, not just each branch separately; record required target-branch CI and other original acceptance gates.
+
+The later resuming agent must reread all relevant PR review comments, compare live heads with the recorded SHAs, and reconcile intervening changes before landing anything. Publishing a checkpoint is NOT evidence that its changes have landed in the intended target.
+
+### E.6. Post-integration local cleanup runbook — FUTURE EXECUTION ONLY
+
+Document this now; execute it only after explicit resumption and verified integration. The future finalization scope includes safe cleanup of obsolete goal-exclusive local worktrees and branches. Do not delete anything during the handoff operation.
+
+Create one cleanup row per candidate:
+
+`Resource ID | Exact host/path/ref | Expected HEAD/tip | Final target | Integration proof | Recovery reference | No-use/cleanliness gates | Proposed action | Status/blocker`
+
+The later agent must re-observe each candidate immediately before any destructive action. If the head, contents, owner, active processes, or dependencies changed, stop that deletion and reconcile the difference without asking questions. An old handoff snapshot is not live deletion authorization.
+
+Require ALL of these gates:
+
+1. Every required change from the candidate is verified in the intended target, or explicitly superseded/rejected with recorded rationale and necessary recovery material retained. Compare the actual saved and current tips, not just a branch name or PR state.
+2. All commits, tracked/untracked edits, essential ignored artifacts, related stashes, and nested repositories are accounted for. There is no unpreserved work or unresolved ownership.
+3. No active agent/session/process, other goal, stacked PR, retained worktree, or required recovery path depends on the resource. Shared/unknown resources stay intact.
+4. Required post-integration validation has passed at the relevant revision. The primary HANDOFF, final integration ledger, and recovery references remain durably reachable after removing the candidate, not solely on a branch about to be deleted.
+5. The exact repository, host, common Git directory, path/ref, and expected current tip are verified. Only individually named, justified resources are in scope; never use a name prefix or apparent age as the deletion criterion.
+
+For merge commits, verify appropriate ancestry and actual target state. For squash/rebase/cherry-picked integration, verify PR source/result mapping, complete change coverage, post-merge source commits, and relevant tests; do not use ancestry alone to decide that work was lost or safely integrated. Likewise, a successful `git branch -d` is not by itself proof of integration into the intended target: check that target independently rather than trusting an upstream comparison.
+
+Order cleanup safely: persist integration/recovery evidence outside the candidate; inspect and release only confirmed obsolete linked worktrees; remove those through Git's worktree mechanism without forcing dirty/active worktree removal; then remove only eligible local branches not used by any worktree. Recheck expected tips before branch deletion. Prefer normal guarded deletion; any narrowly scoped exception needed after a squash merge requires independent coverage/recovery proof and permission under the applicable policies. A command refusing deletion is not permission to override it blindly.
+
+Do not use bulk force deletion, wildcard/prefix-based branch removal, recursive directory deletion, blanket stash deletion, or shared `.git` metadata manipulation. Treat separate-clone removal as a different operation, not `git worktree remove`; retain the primary working clone, and leave a separate clone intact unless it is explicitly documented and verified as a disposable goal-exclusive artifact.
+
+For stale worktree metadata, first preview pruning and inspect EVERY candidate. Do not prune when that would also affect unverified, disconnected, shared, or unrelated worktrees. Do not unlock a worktree merely to delete it; establish why it was locked and whether that protection is still needed.
+
+Local cleanup does not authorize deleting remote branches, tags, or other users' resources. Perform remote cleanup only when separately covered by existing goal/repository authorization, after dependencies and durable recovery are checked. Record why retained local/remote resources remain.
+
+After cleanup, re-enumerate local worktrees and branches, reconcile them with the ledger, and write a durable receipt of each removed/retained resource, final integrated SHAs/PRs, performed checks, and remaining blockers. Require every inventoried goal resource to have a final justified disposition before claiming integration and cleanup complete.
+
+### F. Decisions, findings, assumptions, and rejected approaches
+
+Capture important architectural decisions and concise rationale; researched findings with source references; alternatives tried or rejected and why; discovered pitfalls; and assumptions still needing validation.
+
+Clearly separate observations from hypotheses and settled decisions from open questions. Preserve enough context to avoid repeating failed experiments or reopening settled choices without new evidence.
+
+### G. Verification evidence and known failures
+
+For each significant check, record the exact command, working directory, relevant environment/configuration, tested revision, actual result/exit code if available, and durable evidence location or sanitized excerpt.
+
+Distinguish `PASS`, `FAIL`, `INTERRUPTED`, `NOT RUN`, and `STALE`. Include relevant CI run/job references, failures, reproduction steps, and whether attribution is established or unknown. Never infer a pass from an absent log or completed command launch.
+
+Do not start a full validation campaign during handoff. Run only bounded, nonmutating checks necessary to verify preservation/document accuracy. Put product fixes and outstanding validation into the remaining-work plan.
+
+### H. Ordered remaining-work plan
+
+List every outstanding obligation, including unfinished worker assignments, review feedback, dependency-ordered integration of related branches/PRs, and post-integration cleanup of eligible goal-owned local resources from section E. Do not execute these integration/cleanup items during the pause. For each item give:
+
+- Concrete outcome and relevant files/components.
+- Dependencies and what can safely run in parallel.
+- Recommended next action and evidence needed to resolve uncertainty.
+- Exact validation method and completion criteria.
+- Blocker and required capability/input, if any.
+
+Name the FIRST actionable resumption task explicitly. Avoid instructions like “finish the rest,” “continue as discussed,” or “see previous chat.” Do not expand the goal or silently drop difficult requirements.
+
+### I. Environment and operational recovery
+
+Record required platforms/tool versions, relevant setup commands, working directories, configuration names, service dependencies, fixtures, and permissions. Identify reproducible generated artifacts versus irreplaceable artifacts.
+
+For external operations, record what changed, current observed state, whether repeating the action is safe, checks required before retry, and known recovery/rollback procedures. This section documents recovery; it does not authorize executing it during the pause.
+
+### J. Fresh-agent resume runbook
+
+Provide concrete repository/PR/branch retrieval instructions in both the HANDOFF and PR body. Explain that an unmerged handoff lives on its preservation branch, not necessarily on the default branch.
+
+Give the exact resume command using this file's real repository-relative path. The runbook must instruct the future agent to:
+
+1. Read this document completely and read applicable repository instructions and linked essential artifacts.
+2. Recover the recorded checkpoint into an appropriate exclusive branch/worktree without overwriting unrelated work.
+3. Compare current repository, PR, dependency, runtime, and external-system state with the recorded checkpoint. Detect intervening changes before acting; do not trust stale process IDs or blindly rerun side-effecting commands.
+4. Reconcile already-completed work and changed assumptions without discarding useful progress, rewriting shared history, or restarting finished tasks unnecessarily.
+5. Resume the ORIGINAL goal at the named first outstanding task, not the administrative handoff task. Use subagents with clear ownership, preserve the original constraints, and verify actual acceptance criteria.
+6. Maintain this goal-specific progress record and make scoped checkpoint commits during resumed work.
+7. After completing and validating the goal work, execute the section E integration plan under applicable permissions, verify the final combined target state, and then carry out only the eligible local cleanup actions. Recheck live ownership, heads, files, and dependencies before each action; preserve shared/unrelated work and durable handoff/recovery records. Account for every worktree, branch, and PR with a final disposition and cleanup receipt.
+
+Include an explicit interpretation rule: the pause applies until the user requests resumption. A later instruction such as `/goal Read and resume <this-file>` authorizes continuation of the original goal. It does NOT instruct the future agent to pause again, regenerate this handoff, or recursively create another handoff PR.
+
+### K. Blockers, omissions, and independent review
+
+List missing context, inaccessible artifacts, uncertain ownership, unavailable tools, stopped/unstopped processes, failed preservation/publication operations, and exact remedies. Say `NONE` only when checked.
+
+Record actual handoff review findings, corrections made, and unresolved issues. A claimed independent review must have actually occurred. Include the reviewer's assessment of whether a fresh agent can recover the work and identify its next action without this conversation. The review must also reconcile discovery coverage with the worktree/branch/PR ledgers, identify unmapped or unpublished work, and verify that every future cleanup candidate has explicit integration, ownership, recovery, and no-use gates.
+
+## 6. Commit, push, and create the handoff PR
+
+Do not stop after writing a local document. Preserve goal-owned progress in checkpoint commit(s), commit the HANDOFF and necessary sanitized supporting artifacts, push to the correct authorized remote, and create a DRAFT PR.
+
+Keep the PR focused on this paused goal. Reuse/update an existing open PR only when it exclusively represents this same goal; otherwise create a dedicated handoff PR on a suitable branch. Never commandeer another goal's PR. Check for a matching handoff ID before retrying PR creation. Preserve relevant existing PR context and review obligations. Ensure the designated goal-exclusive PR has auto-merge disabled and is not queued for merge; use existing authorized controls and report any inability to enforce this.
+
+Use this title format, filling in actual values:
+
+`GOAL: <specific original outcome> — paused handoff [<short-unique-id>]`
+
+The title must describe the original engineering goal, not merely “create handoff” or “save progress.”
+
+The PR body must include:
+
+- `PAUSED / WIP — checkpoint for later resumption; not a completion or merge claim.`
+- Original goal, scope, and why this checkpoint exists.
+- Direct link to the unique HANDOFF on the PR branch.
+- Completed, partial, unverified, and remaining work summaries.
+- Included code/artifact preservation scope and excluded/unrelated work.
+- Actual validation results, known failures, and operational risks.
+- Related worker checkpoints/PRs and any nonportable dependencies.
+- A linked worktree/branch/PR inventory summary with stable IDs and coverage counts; distinguish local-only, remotely preserved, already integrated, superseded, and blocked work. Include the integration order, applicable merge policy, remaining review obligations, and the future local-cleanup scope with explicit keep/shared exclusions.
+- `NO MERGING OR LOCAL CLEANUP DURING THIS HANDOFF. Integration and eligible cleanup occur only after explicit resumption and fresh safety checks.`
+- Concrete checkout/retrieval instructions, the exact `/goal Read and resume ...` command, and the named first outstanding task.
+- Final pushed checkpoint SHA(s), plus remaining blockers if publication or preservation is incomplete.
+
+Use noninteractive existing authorized tooling. With GitHub CLI, supply explicit repository, base, head, title, body file, and draft options rather than relying on prompts or commit-message autofill. Follow repository commit/sign-off requirements.
+
+Do not fix product code to satisfy a checkpoint hook, bypass permissions/security controls, change repository protections, enable auto-merge, merge, release, or deploy. Check publishing side effects; do not assume a draft PR suppresses CI or deployment workflows. Record automatically triggered CI without starting a repair loop. If a hook blocks a WIP commit, use an already authorized documented checkpoint mechanism or preserve recoverable patches/files with base SHA and integrity information; report the limitation honestly.
+
+After PR creation, add its actual URL to the HANDOFF, commit/push that metadata update, and refresh the PR body with the final published head SHA. Verify rather than entering a self-referential SHA-update loop.
+
+## 7. Verify the checkpoint, then stop
+
+Check that:
+
+- The original goal, constraints, exact interruption point, progress, evidence, and remaining work are recoverable without this chat.
+- All recoverable goal-owned code and essential artifacts are durably preserved, or every exception is explicitly reported.
+- All discovered related clones, worktrees, branches, detached checkpoints, and PRs are recorded and cross-linked, including branches without checkouts/PRs and resources created during this handoff. Coverage limits, shared/unknown ownership, unpublished content, and inaccessible worktrees are explicit.
+- The post-resumption integration and cleanup plans cover every inventory entry with its destination or justified retention/supersession, dependencies, evidence requirements, and exact local resource identity. No merger or cleanup was performed to make this checkpoint appear complete.
+- The unique HANDOFF exists on the remote PR head, with the correct content; required supporting artifacts are retrievable.
+- Local intended head, remote branch head, and PR head agree where applicable, and the PR has the correct repository/base, `GOAL:` title, useful body, and draft state.
+- The resume command references the actual file, and retrieval instructions reach the branch containing it.
+- Your original-goal workers and continuation mechanisms are stopped/paused as claimed. Handoff-only subagents have finished, and none is continuing implementation.
+- Unrelated work was not changed, staged, stopped, or lost.
+
+Set the HANDOFF to `READY` only when its essential preservation, publication, and stop checks pass. Otherwise use `BLOCKED` and state exactly what succeeded, what remains local/unverified/running, and the demonstrated blocker. A missing permission or failed remote operation is not permission to fabricate success or resume the original goal. Preserve the maximum safe recoverable state without asking questions.
+
+End with a compact receipt containing the original goal title, pause/worker status, full HANDOFF path, PR URL, branch, final pushed SHA(s), preservation completeness, inventory coverage/counts of related clones/worktrees/branches/PRs, unmapped or local-only work, first resumption task, and the exact resume command. State that merging and local cleanup have been documented for later execution and were not performed during the handoff. If blocked, also name the missing prerequisite and exact recovery action without asking a question.
+
+Then STOP. Do not resume implementation, watch CI indefinitely, create follow-up automations, merge the PR, or continue because the old goal is unfinished. Wait for an explicit later user instruction to resume.
