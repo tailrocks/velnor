@@ -8125,13 +8125,21 @@ fn reject_managed_symlink_ancestors<'a>(
     root: &Path,
     generated: impl IntoIterator<Item = &'a PathBuf>,
 ) -> Result<(), GeneratorError> {
-    let mut managed = BTreeSet::from([PathBuf::from(".github")]);
+    let mut managed = BTreeSet::from([
+        PathBuf::from(".github"),
+        PathBuf::from("config"),
+        PathBuf::from("config/fleet"),
+    ]);
     for relative in generated {
         managed.extend(
             relative
                 .ancestors()
                 .skip(1)
-                .filter(|ancestor| ancestor.starts_with(".github"))
+                .filter(|ancestor| {
+                    ancestor.starts_with(".github")
+                        || *ancestor == Path::new("config")
+                        || ancestor.starts_with("config/fleet")
+                })
                 .map(Path::to_path_buf),
         );
     }
@@ -21008,6 +21016,33 @@ channel = "stable"
             .to_string()
             .contains("refusing symlinked managed directory"));
         assert!(must(fs::read_dir(&outside), "read outside directory")
+            .next()
+            .is_none());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn generation_refuses_symlinked_fleet_directory() {
+        let root = temporary_repository("symlinked-fleet-directory");
+        let outside = temporary_directory("symlinked-fleet-target");
+        must(
+            std::os::unix::fs::symlink(&outside, root.join("config")),
+            "create fleet directory symlink",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan symlinked fleet repository",
+        );
+        let files = must(generated_files(&config), "generate fleet surface");
+        let error = must_some(
+            write_generated(&root, &files, false, false, true).err(),
+            "symlinked fleet directory must be rejected",
+        );
+        assert!(error
+            .to_string()
+            .contains("refusing symlinked managed directory"));
+        assert!(must(fs::read_dir(&outside), "read fleet target")
             .next()
             .is_none());
         let _ = fs::remove_dir_all(root);
