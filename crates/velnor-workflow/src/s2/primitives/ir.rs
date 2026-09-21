@@ -887,6 +887,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apple_rust_producer_passes_the_closed_mise_tools_to_both_provider_lanes() {
+        let mut apple = boltffi_unit("rust-apple-producer");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        let linux = boltffi_unit("rust-linux-producer");
+        let mut ir = owner_test_ir("example/fixture", vec![apple.clone(), linux.clone()]);
+        ir.mise_lock_keys = BTreeSet::from([
+            super::BOLTFFI_TOOL.to_owned(),
+            "rust".to_owned(),
+            "cargo-binstall".to_owned(),
+            "cargo:sccache".to_owned(),
+        ]);
+        let expected = vec![
+            super::BOLTFFI_TOOL.to_owned(),
+            "rust".to_owned(),
+            "cargo-binstall".to_owned(),
+            "cargo:sccache".to_owned(),
+        ];
+
+        for unit in [&apple, &linux] {
+            for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+                let contract = ir.default_unit_contract(unit, true);
+                let facts = ir.unit_provider_facts(unit, &contract, provider);
+                assert_eq!(
+                    facts.mise_tools, expected,
+                    "{provider:?} derives the same closed tools for {}",
+                    unit.id
+                );
+                assert!(
+                    !facts.mise_runner,
+                    "a tool install needs no bare Mise runner"
+                );
+                assert!(
+                    facts
+                        .input_values()
+                        .contains(&(provider_input::MISE_TOOLS, expected.join(" "))),
+                    "the caller passes the complete closure for {provider:?} {}",
+                    unit.id
+                );
+                let caller_inputs = super::render_caller_inputs(&facts.input_values());
+                assert!(
+                    caller_inputs
+                        .lines()
+                        .any(|line| {
+                            line == "      mise_tools: \"cargo:boltffi_cli rust cargo-binstall cargo:sccache\""
+                        }),
+                    "the rendered caller keeps the complete closure for {provider:?} {}: {caller_inputs}",
+                    unit.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn velnor_runtime_installs_the_same_closed_apple_tools() {
+        let mut apple = boltffi_unit("rust-apple-producer");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        let mut ir = owner_test_ir("example/fixture", vec![apple.clone()]);
+        let expected = [
+            super::BOLTFFI_TOOL,
+            "rust",
+            "cargo-binstall",
+            "cargo:sccache",
+        ];
+        ir.mise_lock_keys = expected.iter().map(|tool| (*tool).to_owned()).collect();
+
+        let contract = ir.default_unit_contract(&apple, true);
+        let facts = ir.unit_provider_facts(&apple, &contract, ProviderId::Velnor);
+        assert_eq!(
+            facts.mise_tools,
+            expected
+                .iter()
+                .map(|tool| (*tool).to_owned())
+                .collect::<Vec<_>>()
+        );
+        let mut output = String::new();
+        ir.render_tool_provisioning(&mut output, ProviderId::Velnor, &apple, true);
+        assert!(
+            output.contains(&format!("mise --yes install {}", expected.join(" "))),
+            "Velnor direct runtime installs caller's closed tools: {output}"
+        );
+        assert!(
+            !output.contains("Set up Mise tools"),
+            "Velnor does not emit hosted action: {output}"
+        );
+    }
+
+    #[test]
+    fn apple_rust_without_tools_emits_no_empty_mise_action() {
+        let mut apple = rust_unit("rust-apple-plain", "crates/plain");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        let mut ir = owner_test_ir("example/fixture", vec![apple.clone()]);
+        // This exercises the empty derived subset even when the repository
+        // has Mise: Rust provisioning must not turn that global fact into an
+        // empty `install_args` action for an unrelated Apple unit.
+        ir.mise_present = true;
+
+        for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+            let contract = ir.default_unit_contract(&apple, true);
+            let facts = ir.unit_provider_facts(&apple, &contract, provider);
+            assert!(facts.mise_tools.is_empty(), "{provider:?} has no tools");
+            assert!(!facts.mise_runner, "{provider:?} does not need bare Mise");
+
+            let mut output = String::new();
+            ir.render_tool_provisioning(&mut output, provider, &apple, true);
+            assert!(
+                !output.contains("Set up Mise"),
+                "{provider:?} emits no empty Mise setup for Apple Rust: {output}"
+            );
+            assert!(
+                !output.contains("install_args:"),
+                "{provider:?} emits no empty install_args: {output}"
+            );
+        }
+    }
+
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
         WorkflowIr {
             default_branch: "main".to_owned(),
@@ -5350,14 +5466,7 @@ fn push_mise_tool(tools: &mut Vec<String>, tool: String) {
     }
 }
 
-fn render_velnor_mise_install(
-    output: &mut String,
-    unit: &Unit,
-    lock_keys: &BTreeSet<String>,
-    lock_backends: &BTreeMap<String, String>,
-    install_deps: &MiseInstallDeps,
-) {
-    let tools = velnor_mise_install_tool_ids(unit, lock_keys, lock_backends, install_deps);
+fn render_velnor_mise_install(output: &mut String, tools: &[String]) {
     if tools.is_empty() {
         return;
     }
@@ -6631,6 +6740,18 @@ pub(crate) struct ProviderStepFacts {
     /// kind spans more than one channel; single-channel kinds provision the
     /// pin without any input.
     pub(crate) toolchain: Option<String>,
+}
+
+/// The Mise portion of one unit/provider contract. Callers, collapsed
+/// provider jobs, and direct setup paths must use the same derived list: an
+/// Apple Rust producer is still a Rust unit whose `BoltFFI` recipe needs the
+/// same `cargo:boltffi_cli` plus `cargo-binstall` closure as its Linux
+/// counterpart. An empty list is meaningful — it suppresses the tools action;
+/// only `runner` can request the bare Mise action for a `mise run` command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MiseStepFacts {
+    tools: Vec<String>,
+    runner: bool,
 }
 
 impl ProviderStepFacts {
@@ -8012,11 +8133,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     ) -> ProviderStepFacts {
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mise_tools = self.mise_tool_ids_for_provider(hosted, &tools, unit);
-        let mise_runner = hosted
-            && tools.contains(&ToolRequirement::Mise)
-            && mise_tools.is_empty()
-            && commands_invoke_mise(unit);
+        let mise = self.mise_step_facts(hosted, &tools, unit);
         let mbx = (hosted && tools.contains(&ToolRequirement::MrBoxington))
             .then(|| unit_snapshot_facts(self, unit, provider));
         let cargo_bin_tools = if hosted {
@@ -8072,8 +8189,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 .as_ref()
                 .is_some_and(cache_is_local_host_persistent);
         ProviderStepFacts {
-            mise_tools,
-            mise_runner,
+            mise_tools: mise.tools,
+            mise_runner: mise.runner,
             mbx_enabled: tools.contains(&ToolRequirement::MrBoxington),
             mbx,
             cargo_bin_tools,
@@ -8105,6 +8222,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             validation_phases: unit.runnable_phases(),
             full_history: unit.full_history,
             toolchain: Self::toolchain_fact_for_kind(&self.units, unit),
+        }
+    }
+
+    /// Derive the complete Mise contract once for every rendering path. The
+    /// caller passes these values through `workflow_call`; the callee gates
+    /// its steps from those inputs; direct provider setup (release and local
+    /// render tests) consumes the same values. Keeping the provider choice in
+    /// this helper prevents an Apple executor split from changing the tool
+    /// closure or emitting an empty tools action.
+    fn mise_step_facts(
+        &self,
+        hosted: bool,
+        tools: &BTreeSet<ToolRequirement>,
+        unit: &Unit,
+    ) -> MiseStepFacts {
+        let mise_tools = self.mise_tool_ids_for_provider(hosted, tools, unit);
+        let runner = hosted
+            && tools.contains(&ToolRequirement::Mise)
+            && mise_tools.is_empty()
+            && commands_invoke_mise(unit);
+        MiseStepFacts {
+            tools: mise_tools,
+            runner,
         }
     }
 
@@ -9577,45 +9717,33 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // action surface and hoping the runner can ignore the other provider.
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        if !hosted && tools.contains(&ToolRequirement::Mise) {
+        let mise = self.mise_step_facts(hosted, &tools, unit);
+        if !hosted && !mise.tools.is_empty() {
             // Hosted mise-action is not admitted on Velnor. Auto-install is
             // off on the checks step, so declared lockfile tools must be
             // installed explicitly or shims fail closed. Install only what
             // this unit's commands need — never the whole root manifest.
-            render_velnor_mise_install(
-                output,
-                unit,
-                &self.mise_lock_keys,
-                &self.mise_lock_backends,
-                &self.mise_install_deps,
-            );
+            render_velnor_mise_install(output, &mise.tools);
         }
         if !local_skips_pinned_rust_toolchain(provider)
             && let Some(toolchain) = &unit.toolchain
         {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
         }
-        if hosted && tools.contains(&ToolRequirement::Mise) {
+        if hosted {
             // The Rust toolchain is never a mise tool: the scan refuses a
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
             // the unit's own commands name or the repository declares.
-            let mise_tools = mise_tool_ids(
-                unit,
-                &self.mise_lock_keys,
-                &self.mise_lock_backends,
-                &self.mise_install_deps,
-            );
-            let invokes_mise = commands_invoke_mise(unit);
-            if !mise_tools.is_empty() {
+            if !mise.tools.is_empty() {
                 let trusted = trusted_cache_save_expression(&self.default_branch);
                 let _ = writeln!(
                     output,
                     "      - name: Set up Mise tools\n        uses: {}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
                     self.pins.mise,
-                    mise_tools.join(" ")
+                    mise.tools.join(" ")
                 );
-            } else if invokes_mise {
+            } else if mise.runner {
                 // The unit runs repository tasks through the mise task
                 // runner. It gets the runner binary and nothing else: the
                 // tools those tasks need are provisioned by the steps above,
