@@ -14,6 +14,8 @@ use crate::github_acquisition::{
     RawStorageError,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+#[cfg(unix)]
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
 use std::io;
@@ -172,6 +174,13 @@ impl RawObjectFileStore {
         if sidecar_bytes.len() > MAX_RAW_SIDECAR_BYTES {
             return Err(RawStorageError::Refused);
         }
+        // The transaction journal carries only metadata and digest claims. The
+        // immutable CAS objects remain the sole payload, so recovery never
+        // writes a second payload-sized journal before installing the sidecar.
+        let transaction_payload = transaction_bytes(&reference)?;
+        if transaction_payload.len() > MAX_RAW_SIDECAR_BYTES {
+            return Err(RawStorageError::Refused);
+        }
         // A valid raw ID can already be bound to a different response. Read
         // that sidecar before publishing anything so a collision cannot
         // create an unreferenced object as a side effect. The journal is the
@@ -179,11 +188,11 @@ impl RawObjectFileStore {
         // after both immutable CAS objects are complete.
         ensure_sidecar_slot(&self.refs, &sidecar_name, &sidecar_bytes)?;
         let transaction_name = transaction_name(&reference.raw_id)?;
-        ensure_sidecar_slot(&self.refs, &transaction_name, &sidecar_bytes)?;
+        ensure_sidecar_slot(&self.refs, &transaction_name, &transaction_payload)?;
         publish_if_absent(
             &self.refs,
             &transaction_name,
-            &sidecar_bytes,
+            &transaction_payload,
             MAX_RAW_SIDECAR_BYTES,
         )?;
         publish_if_absent(
@@ -207,7 +216,7 @@ impl RawObjectFileStore {
         remove_exact_file(
             &self.refs,
             &transaction_name,
-            &sidecar_bytes,
+            &transaction_payload,
             MAX_RAW_SIDECAR_BYTES,
         )?;
         self.anchor
@@ -313,6 +322,116 @@ fn sidecar_bytes(reference: &RawObjectRef) -> Result<Vec<u8>, RawStorageError> {
         "original_storage_ref": reference.original_storage_ref,
     }))
     .map_err(|_| RawStorageError::Refused)
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTransaction {
+    raw_id: String,
+    request_id: String,
+    object_kind: String,
+    canonicalization: String,
+    sha256: String,
+    byte_length: u64,
+    original_sha256: String,
+    original_byte_length: u64,
+    media_type: String,
+    storage_ref: String,
+    original_storage_ref: String,
+}
+
+#[cfg(unix)]
+fn transaction_bytes(reference: &RawObjectRef) -> Result<Vec<u8>, RawStorageError> {
+    serde_json::to_vec(&RawTransaction {
+        raw_id: reference.raw_id.clone(),
+        request_id: reference.request_id.clone(),
+        object_kind: reference.object_kind.clone(),
+        canonicalization: reference.canonicalization.clone(),
+        sha256: reference.sha256.clone(),
+        byte_length: reference.byte_length,
+        original_sha256: reference.original_sha256.clone(),
+        original_byte_length: reference.original_byte_length,
+        media_type: reference.media_type.clone(),
+        storage_ref: reference.storage_ref.clone(),
+        original_storage_ref: reference.original_storage_ref.clone(),
+    })
+    .map_err(|_| RawStorageError::Refused)
+}
+
+#[cfg(unix)]
+fn parse_transaction(raw_id: &str, bytes: &[u8]) -> Option<RawTransaction> {
+    // Legit compact journals are metadata-only (<4 KiB in practice). Bound the
+    // shape so a pathological over-cap journal is swept as debris instead of
+    // aborting reconcile on post-completion publish and bricking open().
+    // Legacy full-sidecar journals safely fall through to parse_reference.
+    if bytes.len() > 64 * 1024 {
+        return None;
+    }
+    let transaction = serde_json::from_slice::<RawTransaction>(bytes).ok()?;
+    if transaction.raw_id != raw_id
+        || transaction.byte_length > MAX_RAW_OBJECT_BYTES as u64
+        || transaction.original_byte_length > MAX_RAW_OBJECT_BYTES as u64
+        || !valid_digest(&transaction.sha256)
+        || !valid_digest(&transaction.original_sha256)
+        || transaction.storage_ref != content_addressed_storage_ref(&transaction.sha256)
+        || transaction.original_storage_ref
+            != content_addressed_storage_ref(&transaction.original_sha256)
+    {
+        return None;
+    }
+    Some(transaction)
+}
+
+#[cfg(unix)]
+fn complete_transaction_reference(
+    objects: &File,
+    originals: &File,
+    transaction: &RawTransaction,
+) -> Option<RawObjectRef> {
+    let object_name = digest_name(&transaction.sha256).ok()?;
+    let safe_bytes = read_named(objects, &object_name, MAX_RAW_OBJECT_BYTES).ok()?;
+    if safe_bytes.len() as u64 != transaction.byte_length
+        || sha256_digest(&safe_bytes) != transaction.sha256
+    {
+        return None;
+    }
+    let original_name = digest_name(&transaction.original_sha256).ok()?;
+    let original_bytes = read_named(originals, &original_name, MAX_RAW_OBJECT_BYTES).ok()?;
+    if original_bytes.len() as u64 != transaction.original_byte_length
+        || sha256_digest(&original_bytes) != transaction.original_sha256
+    {
+        return None;
+    }
+    Some(RawObjectRef {
+        raw_id: transaction.raw_id.clone(),
+        request_id: transaction.request_id.clone(),
+        object_kind: transaction.object_kind.clone(),
+        canonicalization: transaction.canonicalization.clone(),
+        sha256: transaction.sha256.clone(),
+        byte_length: transaction.byte_length,
+        original_sha256: transaction.original_sha256.clone(),
+        original_byte_length: transaction.original_byte_length,
+        bytes_base64: BASE64.encode(safe_bytes),
+        media_type: transaction.media_type.clone(),
+        storage_ref: transaction.storage_ref.clone(),
+        original_storage_ref: transaction.original_storage_ref.clone(),
+    })
+}
+
+#[cfg(unix)]
+fn parse_transaction_journal(
+    objects: &File,
+    originals: &File,
+    raw_id: &str,
+    bytes: &[u8],
+) -> Option<RawObjectRef> {
+    if let Some(transaction) = parse_transaction(raw_id, bytes) {
+        return complete_transaction_reference(objects, originals, &transaction);
+    }
+    // Upgrade window: journals written before the compact format carry the
+    // full sidecar. Both shapes deny unknown fields, so they never overlap.
+    parse_reference(raw_id, bytes)
 }
 
 fn sidecar_size_within_limit(reference: &RawObjectRef) -> bool {
@@ -871,18 +990,22 @@ fn reconcile_namespace(
             remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
             continue;
         }
-        let transaction_bytes = read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?;
-        let Some(reference) = parse_reference(raw_id, &transaction_bytes) else {
+        let transaction_payload = read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?;
+        let Some(reference) =
+            parse_transaction_journal(objects, originals, raw_id, &transaction_payload)
+        else {
             remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
             continue;
         };
         let sidecar_name = raw_id_name(raw_id)?;
+        // Belt-and-suspenders: complete_transaction_reference already hashed
+        // both CAS objects; this re-read re-verifies the bundle before the
+        // sidecar is published. Recovery-path only.
         if object_bundle_matches(objects, originals, &reference) {
+            // Complete the public sidecar from descriptor-verified CAS bytes;
+            // the compact journal itself is intentionally never copied as a
+            // payload-sized recovery temporary.
             let expected_sidecar = sidecar_bytes(&reference)?;
-            if transaction_bytes != expected_sidecar {
-                remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
-                continue;
-            }
             ensure_sidecar_slot(refs, &sidecar_name, &expected_sidecar)?;
             publish_if_absent(
                 refs,
@@ -891,7 +1014,7 @@ fn reconcile_namespace(
                 MAX_RAW_SIDECAR_BYTES,
             )?;
         }
-        remove_exact_file(refs, &name, &transaction_bytes, MAX_RAW_SIDECAR_BYTES)?;
+        remove_exact_file(refs, &name, &transaction_payload, MAX_RAW_SIDECAR_BYTES)?;
     }
 
     let mut safe_names = HashSet::new();
