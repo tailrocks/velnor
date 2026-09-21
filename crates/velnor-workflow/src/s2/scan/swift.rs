@@ -2502,7 +2502,10 @@ mod tests {
             product.inputs_unknown
         );
         let mut resolved = crate::s2::ProjectConfig::from(shape.clone());
-        crate::s2::platform::resolve(&mut resolved).expect("native product graph resolves");
+        must_ok(
+            crate::s2::platform::resolve(&mut resolved),
+            "native product graph resolves",
+        );
         let resolved_producer = must_some(
             resolved.units.iter().find(|unit| {
                 unit.id == "rust-libs-bridge-ffi" || unit.id.starts_with("rust-bridge")
