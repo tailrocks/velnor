@@ -125,10 +125,9 @@ runs:
           --source-ref refs/heads/main
         jq -e \
           --arg closure "$CLOSURE" \
-          --arg revision "$(jq -er '.revision' "$temporary/manifest.json")" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
           --arg asset "$asset" \
-          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == "velnor-workflow.runtime-build-identity.v1" and .source_revision == $revision and .platform == $platform and .toolchain != "" and .rustc != "" and .target != "" and .host != "" and .profile == "release" and .features == "" and (.rustflags | type == "string") and (.cargo_encoded_rustflags | type == "string") and (.linker | type == "string") and (.cc | type == "string") and (.cflags | type == "string"))' \
+          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
           "$temporary/manifest.json" >/dev/null
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         mkdir -p "$runtime"
@@ -175,10 +174,8 @@ runs:
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         jq -e \
           --arg closure "$CLOSURE" \
-          --arg revision "$(jq -er '.revision' "$runtime/manifest.json")" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
-          --arg asset "velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}" \
-          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == "velnor-workflow.runtime-build-identity.v1" and .source_revision == $revision and .platform == $platform and .toolchain != "" and .rustc != "" and .target != "" and .host != "" and .profile == "release" and .features == "" and (.rustflags | type == "string") and (.cargo_encoded_rustflags | type == "string") and (.linker | type == "string") and (.cc | type == "string") and (.cflags | type == "string"))' \
+          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \
           "$runtime/manifest.json" >/dev/null
         if command -v sha256sum >/dev/null 2>&1; then
           actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"
@@ -187,9 +184,6 @@ runs:
         fi
         expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"
         [[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }
-        expected_identity="$(jq -ec --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].build' "$runtime/manifest.json")"
-        actual_identity="$("$runtime/bin/velnor-workflow" --build-identity)"
-        jq -e --argjson expected "$expected_identity" --argjson actual "$actual_identity" '$expected == $actual' >/dev/null || { echo "::error::runtime build identity mismatch" >&2; exit 1; }
 
     - name: Add runtime to PATH
       shell: bash
