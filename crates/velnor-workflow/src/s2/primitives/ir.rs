@@ -1685,9 +1685,10 @@ mod tests {
         // The plan scope must equal the scheduled provider scope: a narrowed
         // universe that plans unfiltered writes phantom entries for
         // unscheduled providers, and the aggregate fails closed on records
-        // no job can report. The dispatch `providers` input narrows the
-        // scope at runtime; automatic events fall back to the configured
-        // automatic set.
+        // no job can report. There is no `providers` dispatch input —
+        // manual dispatches select the static universe — so the plan
+        // carries the static automatic set, which under the singleton
+        // visibility policy is exactly the scheduled universe.
         let mut ir = owner_test_ir(
             "example/s4-plan-providers",
             vec![rust_unit("rust", "crates/rust")],
@@ -1697,14 +1698,12 @@ mod tests {
         let mut plan = String::new();
         ir.render_plan(&mut plan);
         assert!(
-            plan.contains(
-                "VELNOR_PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || 'github-hosted' }}"
-            ),
+            plan.contains("VELNOR_PROVIDERS: github-hosted\n"),
             "a single-provider universe plans only its provider: {plan}"
         );
         assert!(
-            !plan.contains("|| 'github-hosted,"),
-            "the fallback names no unscheduled provider: {plan}"
+            !plan.contains("inputs.providers"),
+            "no dispatch provider input exists to narrow by: {plan}"
         );
     }
 
