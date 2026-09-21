@@ -94,7 +94,7 @@ at `crates/velnor-workflow/src/s2/runtime.rs:1841-1871`):
 | `plan_digest` | digest (schema-2 only) | Stable identity over the planned units and exclusions. |
 | `excluded` | JSON (schema-2 only) | Units excluded with per-unit provider and reason. |
 | `<kind>_matrix` | JSON array of `{unit, label}` | Per-kind caller matrix; empty for unselected kinds. |
-| `fallback_reason` | string, on fallback and opaque-narrowed selections | Why a fallback widened the selection: the full set, or the opaque subset an unmatched path conservatively selects; absent for proven-narrow plans. |
+| `fallback_reason` | string, on fallback and opaque-narrowed selections | Why a fallback widened the selection: the full set, or the opaque subset an unmatched path conservatively selects; unmatched-path reasons also name the missing narrowing contract. Absent for proven-narrow plans. |
 | `planned_no_work` | `true`, only on no-work | Presence-only marker: `true` or absent, never `false`. |
 | `no_work_reason` | string, only on no-work | Why zero units were selected. |
 

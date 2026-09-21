@@ -6376,8 +6376,11 @@ workspace_check = true
                 .as_deref()
                 .is_some_and(|reason| reason.contains("command read-globs")
                     && reason.contains("selects only opaque units")
-                    && reason.contains("bun-web")),
-            "the fallback reason names the consulted sources and the opaque unit: {:?}",
+                    && reason.contains("bun-web")
+                    && reason.contains("missing contract")
+                    && reason.contains("for unit `bun-web`")
+                    && reason.contains("covering `AGENTS.md`")),
+            "the fallback reason names the consulted sources, the opaque unit, and the missing contract: {:?}",
             selection.fallback_reason
         );
         std::fs::remove_dir_all(root)?;
