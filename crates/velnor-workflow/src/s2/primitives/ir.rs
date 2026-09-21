@@ -1430,6 +1430,62 @@ mod tests {
     }
 
     #[test]
+    fn apple_rust_job_bootstraps_the_runtime_through_setup_action() {
+        // The plan job publishes the runtime artifact only for its own
+        // Linux executor, so the Apple partition of a Rust kind must
+        // bootstrap the pinned runtime through the setup action instead of
+        // downloading an artifact no job publishes for macOS. The kind
+        // reusable serves whole-plan and affected-scope callers alike, so
+        // one render proves both.
+        let ir = owner_test_ir("example/fixture", mixed_platform_rust_units());
+        let workflow = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "rust kind reusable renders",
+            ),
+            "rust kind has members",
+        )
+        .1;
+        let apple = job_block(&workflow, "verify-github-hosted-apple");
+        assert!(
+            apple.contains("setup-velnor-workflow"),
+            "the Apple Rust job bootstraps the pinned runtime itself: {apple}"
+        );
+        assert!(
+            !apple.contains("Download Velnor workflow runtime"),
+            "the Apple Rust job must not download the Linux-built plan artifact: {apple}"
+        );
+        let default = job_block(&workflow, "verify-github-hosted");
+        assert!(
+            default.contains("Download Velnor workflow runtime"),
+            "the Linux Rust job keeps consuming the plan artifact: {default}"
+        );
+        assert!(
+            !default.contains("setup-velnor-workflow"),
+            "the Linux Rust job needs no setup action: {default}"
+        );
+        // A uniform Apple kind keeps the setup acquisition it always had.
+        let uniform = owner_test_ir(
+            "example/fixture",
+            vec![xcode_swift_unit("swift-package-native", "native", "26.6")],
+        );
+        let swift = must_some(
+            must_ok(
+                uniform.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        let hosted = job_block(&swift, "verify-github-hosted");
+        assert!(
+            hosted.contains("setup-velnor-workflow")
+                && !hosted.contains("Download Velnor workflow runtime"),
+            "a uniform Apple kind bootstraps through the setup action: {hosted}"
+        );
+    }
+
+    #[test]
     fn executor_split_keeps_unsplit_kinds_on_one_job() {
         // All-Linux: the one hosted job on the selector, no executor clause.
         let linux = owner_test_ir(
@@ -7409,10 +7465,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if provider != ProviderId::GithubHosted {
             return;
         }
-        // Manual dispatch jobs bootstrap the pinned runtime themselves. Apple
-        // jobs cannot consume a Linux-built plan artifact even when Planning
-        // is hosted.
-        if unit.kind == UnitKind::Swift {
+        // Manual dispatch jobs bootstrap the pinned runtime themselves. The
+        // setup acquisition serves every job the Linux-built plan artifact
+        // cannot: Apple jobs, whose executor never matches what the hosted
+        // plan publishes, and Swift jobs, which stay executor-uniform and
+        // set the runtime up wherever they land. A macOS Rust unit (a
+        // `BoltFFI` producer the join forced onto macOS) bootstraps
+        // through the setup action exactly like a Swift unit, while other
+        // Linux units keep the plan download. Collapsed partitions are
+        // executor-homogeneous, so the sampled member represents the job.
+        if unit.kind == UnitKind::Swift
+            || unit.platform == crate::s2::provider::Platform::MacosArm64
+        {
             self.render_workflow_runtime_setup(output, provider);
         } else {
             self.render_workflow_runtime_download(output, provider);
