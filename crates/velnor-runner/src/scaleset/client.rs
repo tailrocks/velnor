@@ -555,6 +555,9 @@ impl ScaleSetClient {
         let mut set = set.clone();
         ensure_labels(&mut set)?;
         apply_default_label_types(&mut set);
+        if set.created_on.is_empty() {
+            set.created_on = "0001-01-01T00:00:00Z".to_string();
+        }
         let body = serde_json::to_vec(&set).map_err(|error| {
             ScaleSetError::Local(format!("failed to marshal runner scale set: {error}"))
         })?;
@@ -575,6 +578,9 @@ impl ScaleSetClient {
     ) -> Result<RunnerScaleSet, ScaleSetError> {
         let mut set = set.clone();
         apply_default_label_types(&mut set);
+        if set.created_on.is_empty() {
+            set.created_on = "0001-01-01T00:00:00Z".to_string();
+        }
         let body = serde_json::to_vec(&set).map_err(|error| {
             ScaleSetError::Local(format!("failed to marshal runner scale set: {error}"))
         })?;
@@ -1460,5 +1466,21 @@ mod tests {
         let rendered = format!("{client:?}");
         assert!(!rendered.contains("config-url-secret"), "{rendered}");
         assert!(!rendered.contains("pat-secret"), "{rendered}");
+    }
+
+    #[test]
+    fn test_request_body_bytes() {
+        let client = reqwest::Client::new();
+        let req = client
+            .post("https://example.com")
+            .header(CONTENT_TYPE, "application/json")
+            .body(vec![1, 2, 3])
+            .build()
+            .unwrap();
+        assert_eq!(req.body().and_then(|b| b.as_bytes()), Some(&[1, 2, 3][..]));
+        assert_eq!(
+            req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
     }
 }
