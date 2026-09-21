@@ -330,6 +330,34 @@ impl AcquireBatchStore {
         rows.collect::<Result<Vec<_>, _>>()
             .context("read open batches")
     }
+
+    /// Whether any durable acquire batch has ever included `request_id`.
+    ///
+    /// Startup uses this to distinguish a pre-network orphan `AcquireIntent`
+    /// from a request that may already have reached Actions Service. Scan
+    /// historical rows too: a resolved batch is still evidence that the
+    /// network call may have happened.
+    pub fn contains_request(&self, scale_set_id: i32, request_id: i64) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT request_ids_json FROM scaleset_acquire_batches
+                 WHERE scale_set_id = ?1",
+            )
+            .context("prepare acquire-batch membership query")?;
+        let rows = stmt
+            .query_map(params![scale_set_id], |row| row.get::<_, String>(0))
+            .context("query acquire-batch memberships")?;
+        for row in rows {
+            let encoded = row.context("read acquire-batch membership")?;
+            let request_ids: Vec<i64> =
+                serde_json::from_str(&encoded).context("decode acquire-batch membership")?;
+            if request_ids.contains(&request_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// One `scaleset_provision_intents` row: the persisted step-5 intent the

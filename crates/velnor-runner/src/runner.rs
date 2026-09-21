@@ -1210,6 +1210,7 @@ async fn complete_recorded_in_flight_job_with_failure(
         None,
         infrastructure_failure_category,
         reason,
+        FailureRemediation::DaemonApi,
     )
     .await
     {
@@ -5715,7 +5716,7 @@ fn maybe_startup_host_docker_reclaim_with(
         }
         for claims in &report.unreadable_claims {
             eprintln!(
-                "Warning: startup builder horizon reap: unreadable claim file {claims} pins \
+                "Warning: startup builder horizon reap: unreadable ownership file {claims} pins \
                  its builder as claimed; quiesce this daemon's jobs, delete the file, and \
                  let the next claim recreate it"
             );
@@ -7651,21 +7652,47 @@ async fn handle_v2_message(
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
-    // Oldest-observed-first admission: record this offer's age before any
-    // fence can skip it, so a redelivery retains the original age even when
-    // this slot shuts down (cordon/drain) before reaching the permit fence.
-    // Best-effort and silent: the fence below re-submits authoritatively.
-    {
-        let ledger_path =
-            crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
-        if let Ok(mut demand) = crate::native_demand::NativeDemandStore::open(&ledger_path) {
-            let _ = demand.submit_offer(
-                &reference.runner_request_id,
-                &stored.settings.github_url,
-                crate::native_demand::now_unix(),
+    // Persist this observation in the shared permit ledger before any
+    // admission fence can skip it. Redelivery refreshes liveness but keeps
+    // the original first-seen age and host-wide sequence. An unreadable
+    // demand authority must fail closed; acquiring without this observation
+    // could let native work overtake older Scale Set demand.
+    let permit_holder = crate::permit_guard::native_permit_holder(&reference.runner_request_id);
+    let ledger_path =
+        crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
+    let observed_unix = velnor_control::permit_ledger::unix_now();
+    let mut demand_ledger = match velnor_control::permit_ledger::PermitLedger::open(&ledger_path) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            forensics.broker(&format!(
+                "admission SKIPPED request={} shared demand ledger unavailable",
+                reference.runner_request_id
+            ));
+            eprintln!(
+                "Warning: skipping broker message {}: shared demand ledger unavailable ({error}); waiting for redelivery.",
+                message.message_id
             );
+            return Ok(V2MessageAction::None);
         }
+    };
+    if let Err(error) = demand_ledger.observe_demand(
+        &permit_holder,
+        velnor_control::permit_ledger::PermitLane::Native,
+        &stored.settings.github_url,
+        observed_unix,
+        observed_unix,
+    ) {
+        forensics.broker(&format!(
+            "admission SKIPPED request={} shared demand observation failed",
+            reference.runner_request_id
+        ));
+        eprintln!(
+            "Warning: skipping broker message {}: failed to persist shared demand observation ({error}); waiting for redelivery.",
+            message.message_id
+        );
+        return Ok(V2MessageAction::None);
     }
+    drop(demand_ledger);
     let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
     let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
     // A cordoned slot must leave the broker session before acknowledging or
@@ -7722,47 +7749,9 @@ async fn handle_v2_message(
         ));
         return Ok(V2MessageAction::Shutdown);
     }
-    // Host-wide capacity fence beside the durable intent: one ledger permit
-    // per acquisition attempt, held until owned cleanup is confirmed. A
-    // full ledger (or an unreadable one) skips the acquisition and the
-    // broker redelivers; redelivery of a crashed attempt adopts its row.
-    let permit_holder = crate::permit_guard::native_permit_holder(&reference.runner_request_id);
-    let ledger_path =
-        crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
-    // Oldest-observed-first admission across every scope: defer while older
-    // fresh eligible demand exists that free permits cannot also cover. The
-    // broker redelivers; no global FIFO is promised.
-    match crate::native_demand::fence_admission(
-        &ledger_path,
-        &reference.runner_request_id,
-        &stored.settings.github_url,
-        crate::native_demand::now_unix(),
-        crate::native_demand::STALE_AFTER_SECS,
-    ) {
-        crate::native_demand::FenceOutcome::Grant => {}
-        crate::native_demand::FenceOutcome::Defer { older } => {
-            forensics.broker(&format!(
-                "admission DEFERRED request={} older_fresh_eligible={older}",
-                reference.runner_request_id
-            ));
-            println!(
-                "Deferring broker message {}: {older} older eligible demand rows hold priority; waiting for redelivery.",
-                message.message_id
-            );
-            return Ok(V2MessageAction::None);
-        }
-        crate::native_demand::FenceOutcome::Blind { reason } => {
-            forensics.broker(&format!(
-                "admission BLIND request={} reason={reason}",
-                reference.runner_request_id
-            ));
-            eprintln!(
-                "Warning: oldest-first ordering blind for broker message {} ({reason}); ledger capacity still enforced.",
-                message.message_id
-            );
-        }
-    }
-    let permit_guard = match crate::permit_guard::NativePermitGuard::acquire(
+    // The ledger compares durable demand age and acquires in one immediate
+    // transaction. The shared decision covers native and Scale Set lanes.
+    let mut permit_guard = match crate::permit_guard::NativePermitGuard::acquire(
         &ledger_path,
         permit_holder,
         &stored.settings.github_url,
@@ -7770,11 +7759,11 @@ async fn handle_v2_message(
         Ok(Some(guard)) => guard,
         Ok(None) => {
             forensics.broker(&format!(
-                "acquire SKIPPED request={} host permit ledger is full",
+                "acquire SKIPPED request={} global admission deferred",
                 reference.runner_request_id
             ));
             println!(
-                "Skipping broker message {}: host permit ledger is full (max_jobs reached); waiting for redelivery.",
+                "Skipping broker message {}: global admission is full or an older eligible demand owns priority; waiting for redelivery.",
                 message.message_id
             );
             return Ok(V2MessageAction::None);
@@ -7808,6 +7797,10 @@ async fn handle_v2_message(
     }
     let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
+    // Mark the permit retained before polling the request future: it can be
+    // cancelled or unwound after the server commits but before a result is
+    // delivered to this task.
+    permit_guard.retain_until_terminal();
     let acquire_result = tokio::select! {
         result = run_service
         .acquire_job(
@@ -7822,12 +7815,20 @@ async fn handle_v2_message(
                 "acquire canceled by daemon drain request={}",
                 reference.runner_request_id
             ));
+            // The acquire request may have reached the service before this
+            // future was cancelled. Keep occupancy until the durable intent
+            // recovery proves the request was not assigned or completes it.
+            permit_guard.retain_until_terminal();
             return Ok(V2MessageAction::Shutdown);
         }
     };
     let job_value = match acquire_result {
         Ok(job_value) => job_value,
         Err(error) => {
+            // A lost response does not prove the server rejected the job;
+            // it may have committed the assignment before the connection
+            // failed. Retain the hold for intent recovery.
+            permit_guard.retain_until_terminal();
             if !is_transient_acquire_error(&error) {
                 forensics.broker(&format!(
                     "acquire ERROR request={} permanent; closing session: {}",
@@ -7855,7 +7856,10 @@ async fn handle_v2_message(
         }
     };
     let job_value = match job_value {
-        AcquireJobOutcome::Acquired(value) => value,
+        AcquireJobOutcome::Acquired(value) => {
+            permit_guard.retain_until_terminal();
+            value
+        }
         AcquireJobOutcome::Skipped {
             status,
             request_id,
@@ -7882,7 +7886,11 @@ async fn handle_v2_message(
                         sanitized_retry_error(&error)
                     );
                 }
+                permit_guard.release_cancelled();
             } else {
+                // Conflict does not identify the holder; the service may
+                // have assigned this request before the reply was lost.
+                permit_guard.retain_until_terminal();
                 println!(
                     "Leaving the acquisition intent for request {} in place: the acquire reply does not prove this runner lost the job.",
                     reference.runner_request_id
@@ -7939,14 +7947,24 @@ async fn handle_v2_message(
     let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
         Ok(job) => job,
         Err(error) => {
-            complete_acquired_job_failure(
+            if let Err(completion_error) = complete_acquired_job_failure(
                 &fallback_run_service_job,
                 &acquired_identity,
                 None,
                 Some("job_parse".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::DaemonApi,
             )
-            .await?;
+            .await
+            {
+                permit_guard.mark_uncertain_and_disarm();
+                return Err(completion_error.context(format!(
+                    "failed to complete malformed acquired job: {error:#}"
+                )));
+            }
+            // No workflow or container was started, and the run service
+            // accepted terminal completion for this acquired job.
+            permit_guard.release();
             return Err(error).context("parse acquired run-service job");
         }
     };
@@ -7958,14 +7976,23 @@ async fn handle_v2_message(
     {
         Ok(client) => client.unwrap_or_else(|| run_service.clone()),
         Err(error) => {
-            complete_acquired_job_failure(
+            if let Err(completion_error) = complete_acquired_job_failure(
                 &fallback_run_service_job,
                 &acquired_identity,
                 Some(&job),
                 Some("run_service_client".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::DaemonApi,
             )
-            .await?;
+            .await
+            {
+                permit_guard.mark_uncertain_and_disarm();
+                return Err(completion_error.context(format!(
+                    "failed to complete job after run-service client setup failed: {error:#}"
+                )));
+            }
+            // This failure is before workflow setup or container ownership.
+            permit_guard.release();
             return Err(error).context("build run-service client from acquired job");
         }
     };
@@ -8015,7 +8042,7 @@ async fn handle_job_request(
     job: AgentJobRequestMessage,
     forensics: &SlotForensics,
     pickup_ms: u64,
-    permit_guard: crate::permit_guard::NativePermitGuard,
+    mut permit_guard: crate::permit_guard::NativePermitGuard,
 ) -> Result<()> {
     let capacity_run_root = &storage_layout.run_root;
     let journal_dir = crate::node::complete::journal_dir_near(config_dir);
@@ -8025,6 +8052,9 @@ async fn handle_job_request(
             "Skipping duplicate delivery of run-service job {}; another local slot owns it.",
             job.job_id
         );
+        // The local job claim proves another slot owns this work; this
+        // duplicate request has no independent execution or teardown.
+        permit_guard.release();
         return Ok(());
     };
     println!(
@@ -8102,6 +8132,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("execution_backend".to_string()),
                 &format!("{REASON}: {error}"),
+                FailureRemediation::DaemonApi,
             )
             .await;
             completion
@@ -8193,12 +8224,13 @@ async fn handle_job_request(
                     admission_rejection_reason(code),
                     admission_rejection_remediation(code),
                 ),
-                AdmissionPersistenceOutcome::DeadlineExceeded => {
-                    (DEADLINE_REASON.to_owned(), REJECTION_DAEMON_REMEDIATION)
-                }
+                AdmissionPersistenceOutcome::DeadlineExceeded => (
+                    DEADLINE_REASON.to_owned(),
+                    FailureRemediation::OperationalStore,
+                ),
                 _ => (
                     WORKER_FAILURE_REASON.to_owned(),
-                    REJECTION_DAEMON_REMEDIATION,
+                    FailureRemediation::OperationalStore,
                 ),
             };
             // No admission row exists on any of these failure paths. The
@@ -8208,7 +8240,7 @@ async fn handle_job_request(
             // a forensic line and never changes the run-service outcome.
             // Completion is the truthful run-service diagnostic and is
             // always attempted.
-            let completion = complete_acquired_job_failure_with_remediation(
+            let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
                 Some(&job),
@@ -8224,13 +8256,13 @@ async fn handle_job_request(
         Some(telemetry_admission)
     } else {
         const REASON: &str = "operational store is unavailable; job failed closed before execution";
-        let completion = complete_acquired_job_failure_with_remediation(
+        let completion = complete_acquired_job_failure(
             &run_service_job,
             &AcquiredJobIdentity::from_job(&job),
             Some(&job),
             Some("operational_store".to_string()),
             REASON,
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         )
         .await;
         completion.context("failed to complete the job rejected for store unavailability")?;
@@ -8383,6 +8415,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("step_mapping".to_string()),
                 "cannot execute scripts because step mapping failed",
+                FailureRemediation::WorkflowPolicy,
             )
             .await?;
             clear_in_flight_job(config_dir)
@@ -8398,6 +8431,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("trust_policy".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::WorkflowPolicy,
             )
             .await?;
             clear_in_flight_job(config_dir)
@@ -8415,6 +8449,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("capability_validation".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::WorkflowPolicy,
             )
             .await?;
             clear_in_flight_job(config_dir)
@@ -8430,13 +8465,16 @@ async fn handle_job_request(
         .await
         {
             Ok(graph) => graph,
-            Err(error) => {
+            Err(failure) => {
+                let remediation = failure.remediation;
+                let error = failure.error;
                 complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
                     Some(&job),
                     Some("action_admission".to_string()),
                     &format!("{error:#}"),
+                    remediation,
                 )
                 .await?;
                 clear_in_flight_job(config_dir)
@@ -8613,6 +8651,7 @@ async fn handle_job_request(
                         Some(&job),
                         payload.infrastructure_failure_category.clone(),
                         reason,
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
@@ -8630,6 +8669,7 @@ async fn handle_job_request(
                         crate::protocol::TaskResult::Canceled,
                         Some("canceled".to_string()),
                         "job canceled while waiting for host disk capacity",
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
@@ -8662,6 +8702,7 @@ async fn handle_job_request(
                         Some(&job),
                         payload.infrastructure_failure_category.clone(),
                         &reason,
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
@@ -8684,6 +8725,7 @@ async fn handle_job_request(
                     Some(&job),
                     Some("storage_lease".to_string()),
                     &format!("{error:#}"),
+                    FailureRemediation::DaemonApi,
                 )
                 .await?;
                 clear_in_flight_job(config_dir)
@@ -8869,11 +8911,15 @@ async fn handle_job_request(
                     Some(&job),
                     Some("executor_panic".to_string()),
                     &format!("{join_error:#}"),
+                    FailureRemediation::DaemonApi,
                 )
                 .await;
                 renewal.abort();
                 let teardown = take_teardown_owner(&teardown_slot);
                 let had_teardown = teardown.is_some();
+                if had_teardown {
+                    permit_guard.transition_cleaning();
+                }
                 let teardown_permit = permit_guard.teardown_release();
                 let teardown_result = if let Some(teardown) = teardown {
                     start_failed_execution_teardown(
@@ -8910,6 +8956,9 @@ async fn handle_job_request(
                     clear_in_flight_job(&teardown_config_dir)
                         .context("failed to clear acknowledged in-flight job")?;
                 }
+                // Completion and any owned teardown are confirmed. Do not
+                // let Drop requeue this already-served demand.
+                permit_guard.release();
                 return Err(join_error).context("join Docker job execution thread");
             }
         };
@@ -8961,11 +9010,15 @@ async fn handle_job_request(
                         Some(&job),
                         infrastructure_failure_category,
                         &format!("{error:#}"),
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
                     let teardown = take_teardown_owner(&teardown_slot);
                     let had_teardown = teardown.is_some();
+                    if had_teardown {
+                        permit_guard.transition_cleaning();
+                    }
                     let teardown_permit = permit_guard.teardown_release();
                     let teardown_result = if let Some(teardown) = teardown {
                         start_failed_execution_teardown(
@@ -9000,6 +9053,9 @@ async fn handle_job_request(
                         clear_in_flight_job(&teardown_config_dir)
                             .context("failed to clear acknowledged in-flight job")?;
                     }
+                    // Completion and any owned teardown are confirmed. Do
+                    // not let Drop requeue this already-served demand.
+                    permit_guard.release();
                     return Err(error);
                 }
             }
@@ -9107,6 +9163,7 @@ async fn handle_job_request(
             teardown_ms: None,
         };
         if let Some(teardown) = teardown {
+            permit_guard.transition_cleaning();
             let teardown_permit = permit_guard.teardown_release();
             if let Err(error) = start_post_completion_teardown(
                 teardown_config_dir.clone(),
@@ -10925,6 +10982,8 @@ fn execute_script_job(
     teardown_slot: &TeardownSlot,
     runner_name: &str,
 ) -> Result<ScriptJobResult> {
+    let _power_assertion =
+        crate::platform::PowerAssertionGuard::acquire(&format!("velnor-job-{}", job.job_id));
     let slot_work_dir = slot_work_dir(config_dir, work_dir.as_deref());
     let job_dir = slot_work_dir.join(sanitize_path_segment(&job.job_id));
     register_job_cache_session(job);
@@ -12887,6 +12946,35 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
     })
 }
 
+#[derive(Debug)]
+struct ActionAdmissionFailure {
+    remediation: FailureRemediation,
+    error: anyhow::Error,
+}
+
+impl ActionAdmissionFailure {
+    fn new(remediation: FailureRemediation, error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            remediation,
+            error: error.into(),
+        }
+    }
+
+    fn daemon_api(error: impl Into<anyhow::Error>) -> Self {
+        Self::new(FailureRemediation::DaemonApi, error)
+    }
+}
+
+fn action_admission_failure_remediation(
+    kind: crate::admission::AdmissionFailureKind,
+) -> FailureRemediation {
+    use crate::admission::AdmissionFailureKind as K;
+    match kind {
+        K::ApiTransport | K::ApiStatus | K::Internal => FailureRemediation::DaemonApi,
+        K::Policy | K::ManifestMissing | K::ManifestMalformed => FailureRemediation::WorkflowPolicy,
+    }
+}
+
 /// Complete the transitively-closed action admission graph before any side
 /// effect. Builds the read-only Contents-API metadata source from the job
 /// repository token and admits every root (local and remote), recursing nested
@@ -12901,7 +12989,7 @@ async fn admit_job_closure(
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
     telemetry_admission: Option<&crate::ops::JobAdmission>,
-) -> Result<crate::admission::AdmissionGraph> {
+) -> std::result::Result<crate::admission::AdmissionGraph, ActionAdmissionFailure> {
     let stage_started_unix_ms = unix_millis_now();
     let (permit, limiter_wait) = wait_for_action_admission_slot().await;
     let limiter_wait_ms = duration_ms(limiter_wait);
@@ -12931,14 +13019,19 @@ async fn admit_job_closure(
         stage_started_unix_ms,
     );
     match graph {
-        Ok(joined) => joined.context("action admission blocking worker failed")?,
-        Err(_elapsed) => bail!(
+        Ok(joined) => match joined {
+            Ok(result) => result,
+            Err(error) => Err(ActionAdmissionFailure::daemon_api(
+                anyhow::Error::from(error).context("action admission blocking worker failed"),
+            )),
+        },
+        Err(_elapsed) => Err(ActionAdmissionFailure::daemon_api(anyhow::anyhow!(
             "action admission read {}ms of action.yml metadata after a {limiter_wait_ms}ms local \
              wait and exhausted its {}s budget (stage=action_admission \
              wait_reason=github_contents_api)",
             duration_ms(fetches_started.elapsed()),
             ACTION_ADMISSION_TIMEOUT.as_secs()
-        ),
+        ))),
     }
 }
 
@@ -12946,19 +13039,37 @@ fn admit_job_closure_sync(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
-) -> Result<crate::admission::AdmissionGraph> {
+) -> std::result::Result<crate::admission::AdmissionGraph, ActionAdmissionFailure> {
     // The SystemVssConnection token authenticates Actions service endpoints and
     // does not carry repository Contents API scope; use only the repository
     // token and the runner-configured GitHub API scope.
-    let token = job_repository_access_token(job)
-        .context("action admission requires the job repository access token")?;
-    let scope = GitHubScope::parse(&stored.settings.github_url)
-        .context("parse configured GitHub scope for action admission")?;
-    validate_job_api_endpoint(context_data, &scope)?;
-    let source = crate::admission::ContentsApiMetadataSource::new(token, &scope)
-        .context("build read-only action metadata source")?;
-    let graph =
-        crate::admission::admit_job(job, context_data, &source).map_err(anyhow::Error::new)?;
+    let token = job_repository_access_token(job).ok_or_else(|| {
+        ActionAdmissionFailure::daemon_api(anyhow::anyhow!(
+            "action admission requires the job repository access token"
+        ))
+    })?;
+    let scope = GitHubScope::parse(&stored.settings.github_url).map_err(|error| {
+        ActionAdmissionFailure::daemon_api(
+            error.context("parse configured GitHub scope for action admission"),
+        )
+    })?;
+    validate_job_api_endpoint(context_data, &scope).map_err(ActionAdmissionFailure::daemon_api)?;
+    let source =
+        crate::admission::ContentsApiMetadataSource::new(token, &scope).map_err(|error| {
+            ActionAdmissionFailure::daemon_api(
+                error.context("build read-only action metadata source"),
+            )
+        })?;
+    let graph = crate::admission::admit_job(job, context_data, &source);
+    let graph = match graph {
+        Ok(graph) => graph,
+        Err(error) => {
+            return Err(ActionAdmissionFailure::new(
+                action_admission_failure_remediation(error.failure_kind()),
+                anyhow::Error::new(error),
+            ));
+        }
+    };
     println!(
         "Admitted action closure: {} node(s) from {} read-only metadata fetch(es).",
         graph.nodes.len(),
@@ -15097,6 +15208,7 @@ fn failed_acquired_job_completion(
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
     reason: &str,
+    remediation: FailureRemediation,
 ) -> RunServiceCompleteJob {
     terminal_acquired_job_completion(
         identity,
@@ -15104,6 +15216,7 @@ fn failed_acquired_job_completion(
         TaskResult::Failed,
         infrastructure_failure_category,
         reason,
+        remediation,
     )
 }
 
@@ -15117,6 +15230,7 @@ fn pre_execution_registration_lost_completion(
         billing_owner_id,
         Some("runner_registration".to_string()),
         reason,
+        FailureRemediation::DaemonApi,
     )
 }
 
@@ -15132,6 +15246,7 @@ fn pre_execution_capacity_timeout_completion(
         billing_owner_id,
         Some("host_capacity".to_string()),
         &crate::capacity::host_capacity_timeout_reason(elapsed, timeout, last_error),
+        FailureRemediation::DaemonApi,
     )
 }
 
@@ -15141,24 +15256,7 @@ fn terminal_acquired_job_completion(
     conclusion: TaskResult,
     infrastructure_failure_category: Option<String>,
     reason: &str,
-) -> RunServiceCompleteJob {
-    terminal_acquired_job_completion_with_remediation(
-        identity,
-        billing_owner_id,
-        conclusion,
-        infrastructure_failure_category,
-        reason,
-        REJECTION_WORKFLOW_REMEDIATION,
-    )
-}
-
-fn terminal_acquired_job_completion_with_remediation(
-    identity: &AcquiredJobIdentity,
-    billing_owner_id: Option<String>,
-    conclusion: TaskResult,
-    infrastructure_failure_category: Option<String>,
-    reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> RunServiceCompleteJob {
     // GitHub renders jobs with empty step_results as zero-step failures with
     // no operator-visible reason. Always emit one synthetic failed step plus
@@ -15262,34 +15360,57 @@ fn recovered_terminal_completion(
 
 /// Remediation for a rejection the workflow controls: a rejected field, ref,
 /// or action, or a capability Velnor has not reviewed yet.
-const REJECTION_WORKFLOW_REMEDIATION: &str = "remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun";
-/// Remediation for a daemon-side rejection: the workflow was not at fault, so
-/// the fix is on the daemon, never in workflow fields.
-const REJECTION_DAEMON_REMEDIATION: &str = "remediation: daemon-side operational-store rejection; inspect the daemon forensic line (forensics.ops event=store-write-failed), check disk capacity, then restart/redeploy the daemon and rerun";
+const WORKFLOW_POLICY_REMEDIATION: &str = "remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun";
+/// Remediation for an operational-store rejection. The workflow was not at
+/// fault; the store rejected or could not persist the admission row.
+const OPERATIONAL_STORE_REMEDIATION: &str = "remediation: daemon-side operational-store rejection; inspect the daemon forensic line (forensics.ops event=store-write-failed), check disk capacity, then restart/redeploy the daemon and rerun";
+/// Remediation for runner, daemon, or GitHub/API failures. Do not ask the
+/// workflow author to change an unrelated field when a backend failed.
+const DAEMON_API_REMEDIATION: &str = "remediation: inspect the Velnor daemon and GitHub/API failure details, repair the runner configuration or service issue, then rerun";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureRemediation {
+    WorkflowPolicy,
+    OperationalStore,
+    DaemonApi,
+}
+
+impl FailureRemediation {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::WorkflowPolicy => WORKFLOW_POLICY_REMEDIATION,
+            Self::OperationalStore => OPERATIONAL_STORE_REMEDIATION,
+            Self::DaemonApi => DAEMON_API_REMEDIATION,
+        }
+    }
+}
 
 /// GitHub-facing reason for one admission check failure. The code is part of
 /// the reason so a rejected job names the check that failed it closed.
 fn admission_rejection_reason(code: &str) -> String {
-    format!(
-        "operational store rejected the sanitized admission row ({code}); job failed closed before execution"
-    )
+    let failure = if code == "store.admission.validate" {
+        "workflow job metadata failed sanitized admission validation"
+    } else {
+        "operational store rejected the sanitized admission row"
+    };
+    format!("{failure} ({code}); job failed closed before execution")
 }
 
 /// Remediation class for one admission check failure. Only
 /// `store.admission.validate` blames workflow input; every infra code — and
 /// any unknown future code — is a daemon action, never a workflow edit.
-fn admission_rejection_remediation(code: &str) -> &'static str {
+fn admission_rejection_remediation(code: &str) -> FailureRemediation {
     if code == "store.admission.validate" {
-        REJECTION_WORKFLOW_REMEDIATION
+        FailureRemediation::WorkflowPolicy
     } else {
-        REJECTION_DAEMON_REMEDIATION
+        FailureRemediation::OperationalStore
     }
 }
 
 fn rejection_log_lines_with_remediation(
     category: &str,
     reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> Vec<String> {
     let mut lines = vec![
         "##[error]Velnor rejected this job before workflow execution.".to_string(),
@@ -15302,7 +15423,7 @@ fn rejection_log_lines_with_remediation(
     }
     lines.extend([
         "effect: no declared workflow command was executed".to_string(),
-        remediation.to_string(),
+        remediation.message().to_string(),
     ]);
     lines
 }
@@ -15310,7 +15431,7 @@ fn rejection_log_lines_with_remediation(
 fn failed_acquired_job_step_log_with_remediation(
     category: &str,
     reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> StepLog {
     let now = unix_now_iso8601();
     StepLog {
@@ -15339,27 +15460,9 @@ async fn complete_acquired_job_failure(
     job: Option<&AgentJobRequestMessage>,
     infrastructure_failure_category: Option<String>,
     reason: &str,
+    remediation: FailureRemediation,
 ) -> Result<()> {
-    complete_acquired_job_failure_with_remediation(
-        run_service_job,
-        identity,
-        job,
-        infrastructure_failure_category,
-        reason,
-        REJECTION_WORKFLOW_REMEDIATION,
-    )
-    .await
-}
-
-async fn complete_acquired_job_failure_with_remediation(
-    run_service_job: &RunServiceJobContext,
-    identity: &AcquiredJobIdentity,
-    job: Option<&AgentJobRequestMessage>,
-    infrastructure_failure_category: Option<String>,
-    reason: &str,
-    remediation: &str,
-) -> Result<()> {
-    complete_acquired_job_outcome_with_remediation(
+    complete_acquired_job_outcome(
         run_service_job,
         identity,
         job,
@@ -15539,6 +15642,7 @@ async fn fail_closed_after_journal_acceptance_error(
         Some(job),
         Some("journal_acceptance".to_string()),
         &reason,
+        FailureRemediation::DaemonApi,
     )
     .await;
     if let Err(error) = &completion {
@@ -15593,6 +15697,7 @@ async fn fail_closed_after_in_flight_persist_error(
         Some(job),
         Some("in_flight_persist".to_string()),
         &reason,
+        FailureRemediation::DaemonApi,
     )
     .await;
     if let Err(error) = &completion {
@@ -15635,27 +15740,7 @@ async fn complete_acquired_job_outcome(
     conclusion: TaskResult,
     infrastructure_failure_category: Option<String>,
     reason: &str,
-) -> Result<()> {
-    complete_acquired_job_outcome_with_remediation(
-        run_service_job,
-        identity,
-        job,
-        conclusion,
-        infrastructure_failure_category,
-        reason,
-        REJECTION_WORKFLOW_REMEDIATION,
-    )
-    .await
-}
-
-async fn complete_acquired_job_outcome_with_remediation(
-    run_service_job: &RunServiceJobContext,
-    identity: &AcquiredJobIdentity,
-    job: Option<&AgentJobRequestMessage>,
-    conclusion: TaskResult,
-    infrastructure_failure_category: Option<String>,
-    reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> Result<()> {
     let masked_reason = job.map_or_else(
         || reason.to_string(),
@@ -15733,15 +15818,14 @@ async fn complete_acquired_job_outcome_with_remediation(
             );
         }
     }
-    let completion =
-        fail_closed_pre_execution_completion(terminal_acquired_job_completion_with_remediation(
-            identity,
-            run_service_job.billing_owner_id.clone(),
-            conclusion,
-            infrastructure_failure_category,
-            &masked_reason,
-            remediation,
-        ))?;
+    let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
+        identity,
+        run_service_job.billing_owner_id.clone(),
+        conclusion,
+        infrastructure_failure_category,
+        &masked_reason,
+        remediation,
+    ))?;
     establish_durable_completion_ownership(run_service_job, identity)
         .await
         .context("establish durable ownership before acquired-job completion")?;
@@ -16659,7 +16743,7 @@ fn doctor_host_docker_reclaim(
         }
         for claims in &report.unreadable_claims {
             eprintln!(
-                "doctor builder horizon: unreadable claim file {claims} pins its builder as \
+                "doctor builder horizon: unreadable ownership file {claims} pins its builder as \
                  claimed; quiesce this daemon's jobs, delete the file, and let the next \
                  claim recreate it"
             );
@@ -18305,7 +18389,7 @@ mod tests {
         assert!(text.contains("unsupported capability"), "{text}");
         assert!(text.contains("execution.context_data"), "{text}");
         assert!(text.contains("received '<empty>'"), "{text}");
-        assert!(text.contains("manifest version 13"), "{text}");
+        assert!(text.contains("manifest version 15"), "{text}");
     }
 
     #[test]
@@ -21770,19 +21854,26 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    fn assert_admission_rejection_renders(code: &str, expected_remediation: &str) {
+    fn assert_admission_rejection_renders(code: &str, expected_remediation: FailureRemediation) {
         assert_eq!(admission_rejection_remediation(code), expected_remediation);
         let reason = admission_rejection_reason(code);
         assert!(
             reason.contains(code),
             "the reason names the failing check: {reason}"
         );
+        if expected_remediation == FailureRemediation::WorkflowPolicy {
+            assert!(reason.contains("workflow job metadata"), "{reason}");
+        } else {
+            assert!(reason.contains("operational store"), "{reason}");
+        }
         let lines = rejection_log_lines_with_remediation(
             "operational_store",
             &reason,
             admission_rejection_remediation(code),
         );
-        assert!(lines.iter().any(|line| line == expected_remediation));
+        assert!(lines
+            .iter()
+            .any(|line| line == expected_remediation.message()));
         assert!(lines
             .iter()
             .any(|line| line.starts_with("reason:") && line.contains(code)));
@@ -21792,7 +21883,7 @@ jobs:
     fn admission_rejection_identity_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.identity",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
@@ -21800,7 +21891,7 @@ jobs:
     fn admission_rejection_validate_renders_workflow_remediation() {
         assert_admission_rejection_renders(
             "store.admission.validate",
-            REJECTION_WORKFLOW_REMEDIATION,
+            FailureRemediation::WorkflowPolicy,
         );
     }
 
@@ -21808,7 +21899,7 @@ jobs:
     fn admission_rejection_instance_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.instance",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
@@ -21816,34 +21907,57 @@ jobs:
     fn admission_rejection_transition_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.transition",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
     #[test]
     fn admission_rejection_masks_renders_daemon_remediation() {
-        assert_admission_rejection_renders("store.masks", REJECTION_DAEMON_REMEDIATION);
+        assert_admission_rejection_renders("store.masks", FailureRemediation::OperationalStore);
     }
 
     #[test]
     fn admission_rejection_physical_budget_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.physical-budget",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
     #[test]
     fn admission_rejection_persist_renders_daemon_remediation() {
-        assert_admission_rejection_renders("store.admission.persist", REJECTION_DAEMON_REMEDIATION);
+        assert_admission_rejection_renders(
+            "store.admission.persist",
+            FailureRemediation::OperationalStore,
+        );
     }
 
     #[test]
     fn admission_rejection_unknown_code_fails_closed_to_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.future-check",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
+    }
+
+    #[test]
+    fn action_admission_maps_typed_failures_to_remediation() {
+        use crate::admission::AdmissionFailureKind as K;
+
+        for (kind, expected) in [
+            (K::ApiTransport, FailureRemediation::DaemonApi),
+            (K::ApiStatus, FailureRemediation::DaemonApi),
+            (K::ManifestMissing, FailureRemediation::WorkflowPolicy),
+            (K::ManifestMalformed, FailureRemediation::WorkflowPolicy),
+            (K::Policy, FailureRemediation::WorkflowPolicy),
+            (K::Internal, FailureRemediation::DaemonApi),
+        ] {
+            assert_eq!(
+                action_admission_failure_remediation(kind),
+                expected,
+                "failure kind {kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -22538,6 +22652,7 @@ jobs:
             Some("billing-owner".into()),
             Some("executor_panic".into()),
             "join Docker job execution task: task panicked",
+            FailureRemediation::DaemonApi,
         );
 
         assert_eq!(completion.plan_id, "plan-1");
@@ -22558,7 +22673,7 @@ jobs:
         let rejection_log = failed_acquired_job_step_log_with_remediation(
             "executor_panic",
             "join Docker job execution task",
-            REJECTION_WORKFLOW_REMEDIATION,
+            FailureRemediation::DaemonApi,
         );
         assert_eq!(rejection_log.exit_code, 1);
         assert!(rejection_log
@@ -22573,6 +22688,14 @@ jobs:
             .lines
             .iter()
             .any(|line| line.starts_with("remediation:")));
+        assert!(rejection_log
+            .lines
+            .iter()
+            .any(|line| line == DAEMON_API_REMEDIATION));
+        assert!(!rejection_log
+            .lines
+            .iter()
+            .any(|line| line == WORKFLOW_POLICY_REMEDIATION));
         assert_eq!(
             completion.step_results[0].completed_log_lines,
             rejection_log.lines.len() as i64
@@ -22674,6 +22797,7 @@ jobs:
             None,
             Some("operational_store".to_owned()),
             "operational store admission worker failed; job failed closed before execution",
+            FailureRemediation::OperationalStore,
         );
         assert_eq!(completion.conclusion, TaskResult::Failed);
         assert_eq!(
@@ -22902,6 +23026,7 @@ jobs:
             None,
             Some("promotion_test".to_owned()),
             "durable promotion test",
+            FailureRemediation::DaemonApi,
         )
         .await
         .unwrap();
@@ -22988,6 +23113,7 @@ jobs:
             None,
             Some("recovery_test".to_owned()),
             "ownership proof unavailable",
+            FailureRemediation::DaemonApi,
         )
         .await
         .unwrap_err();
@@ -23447,7 +23573,7 @@ jobs:
                 timeout,
                 "capacity backpressure: free=117548818432 required=134432476364",
             ),
-            REJECTION_WORKFLOW_REMEDIATION,
+            FailureRemediation::DaemonApi,
         );
         assert_eq!(rejection_log.exit_code, 1);
         assert!(rejection_log
@@ -23467,6 +23593,7 @@ jobs:
             None,
             Some("host_capacity".into()),
             "capacity wait timed out",
+            FailureRemediation::DaemonApi,
         );
         success.conclusion = TaskResult::Succeeded;
         let success_error = fail_closed_pre_execution_completion(success)
@@ -23481,6 +23608,7 @@ jobs:
             None,
             Some("host_capacity".into()),
             "capacity wait timed out",
+            FailureRemediation::DaemonApi,
         );
         empty.step_results.clear();
         let empty_error = fail_closed_pre_execution_completion(empty)
@@ -23520,6 +23648,7 @@ jobs:
             TaskResult::Canceled,
             Some("canceled".into()),
             "job canceled while waiting for host disk capacity",
+            FailureRemediation::DaemonApi,
         ))
         .unwrap();
         assert_eq!(completion.conclusion, TaskResult::Canceled);
@@ -24622,7 +24751,7 @@ jobs:
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
-    async fn transient_acquire_failure_keeps_broker_session_alive() {
+    async fn transient_acquire_failure_retains_uncertain_permit_and_session() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -24677,11 +24806,17 @@ jobs:
         .unwrap();
 
         assert_eq!(action, V2MessageAction::None);
-        // The failed attempt freed its permit: the ledger is empty again.
+        // A 5xx after sending acquire is ambiguous: the service may have
+        // committed the assignment before losing its response. Keep the
+        // permit occupied until intent recovery proves the terminal result.
         let ledger =
             velnor_control::permit_ledger::PermitLedger::open(&args.permit_ledger.clone().unwrap())
                 .unwrap();
-        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            ledger.holder_state("native/request-1").unwrap(),
+            Some(velnor_control::permit_ledger::PermitState::Uncertain)
+        );
         std::fs::remove_dir_all(temp).ok();
     }
 

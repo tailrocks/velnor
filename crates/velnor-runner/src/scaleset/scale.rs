@@ -29,20 +29,21 @@
 //! rows re-queue with age kept, and the rest record grant/acquire/provision
 //! progress. A missing row vetoes the ACK.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use velnor_model::{
     RunnerScaleSetMessage, RunnerScaleSetStatistic, ScaleSetJobAssigned, ScaleSetJobCompleted,
     ScaleSetJobStarted,
 };
 
+use crate::protocol::TaskResult;
 use crate::scaleset::capacity::{
-    reserve_for_offer, CapacityLedger, LedgerPermitState, ReserveOutcome,
+    reserve_for_offer, CapacityLedger, LedgerLane, LedgerPermitState, ReserveOutcome,
 };
 use crate::scaleset::converge::{
     ensure_provision_intent, local_population, reconcile_population, PopulationDecision,
     ProvisionImages, WorkerLane,
 };
-use crate::scaleset::demand::{grant_oldest, DemandState, DemandStore, SubmitOutcome};
+use crate::scaleset::demand::{grant_oldest, Demand, DemandState, DemandStore, SubmitOutcome};
 use crate::scaleset::intents::{
     mint_batch_id, permit_holder, reconcile_returned_ids, AcquireBatchStore, ProvisionIntentStore,
 };
@@ -146,6 +147,12 @@ impl<Q, L, W> Processor<Q, L, W> {
         self.cached_stats
     }
 
+    /// Refresh the authoritative snapshot observed outside a real message
+    /// (the message session exposes statistics on 202/None polls too).
+    pub fn set_cached_stats(&mut self, stats: RunnerScaleSetStatistic) {
+        self.cached_stats = Some(stats);
+    }
+
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
@@ -167,9 +174,15 @@ impl<Q, L, W> Processor<Q, L, W> {
     }
 
     /// Disjoint mutable access to the reconcile inputs (one method so the
-    /// borrow checker sees the disjoint fields).
-    pub fn parts_mut(&mut self) -> (&mut L, &mut DemandStore, &mut AcquireBatchStore) {
-        (&mut self.ledger, &mut self.demand, &mut self.batches)
+    /// borrow checker sees the disjoint fields). The lane answers worker
+    /// ownership for the idle orphan release.
+    pub fn parts_mut(&mut self) -> (&mut L, &mut DemandStore, &mut AcquireBatchStore, &mut W) {
+        (
+            &mut self.ledger,
+            &mut self.demand,
+            &mut self.batches,
+            &mut self.lane,
+        )
     }
 
     pub fn ledger_ref(&self) -> &L {
@@ -194,23 +207,57 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         message: Option<&RunnerScaleSetMessage>,
     ) -> Result<ScaleOutcome, ScaleError<Q::Error, W::Error>> {
         let Some(message) = message else {
-            let decision = self
-                .cached_stats
-                .map(|stats| {
-                    let local = self.local_count()?;
-                    Ok(reconcile_population(&stats, local))
-                })
-                .transpose()?;
-            return Ok(ScaleOutcome {
-                kind: ScaleKind::Nil,
-                decision,
-                ..ScaleOutcome::empty()
-            });
+            return self.scale_idle().await;
         };
         if message.message_id == crate::scaleset::listener::INITIAL_MESSAGE_ID {
             return self.scale_initial(message);
         }
         self.scale_message(message).await
+    }
+
+    /// Resume durable work on an empty poll. Offers and partial acquire
+    /// batches can outlive the message that created them, so grants,
+    /// acquires, and provisions must not depend on another queue message.
+    async fn scale_idle(&mut self) -> Result<ScaleOutcome, ScaleError<Q::Error, W::Error>> {
+        let generation = self.generation()?;
+        let eligible = self
+            .demand
+            .oldest_eligible(self.config.scale_set_id, 512)
+            .map_err(ScaleError::Store)?;
+        for row in &eligible {
+            self.observe_global_demand(row)?;
+        }
+        let granted = grant_oldest(
+            &mut self.demand,
+            self.config.scale_set_id,
+            generation,
+            &self.metrics,
+        )
+        .map_err(ScaleError::Store)?;
+        for row in &granted {
+            self.observe_global_demand(row)?;
+        }
+        let (acquired, missing, uncertain) = self.acquire_pass(self.cached_stats).await?;
+        let canceled = self.drain_canceled_acquisitions(generation)?;
+        let provisioned = self.provision_pass().await?;
+        let decision = self
+            .cached_stats
+            .map(|stats| {
+                let local = self.local_count()?;
+                Ok(reconcile_population(&stats, local))
+            })
+            .transpose()?;
+        Ok(ScaleOutcome {
+            kind: ScaleKind::Nil,
+            granted: granted.len(),
+            acquired,
+            missing,
+            uncertain,
+            completed: canceled,
+            provisioned,
+            decision,
+            ..ScaleOutcome::empty()
+        })
     }
 
     fn scale_initial(
@@ -271,6 +318,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 SubmitOutcome::Inserted { .. } => outcome.offers_submitted += 1,
                 SubmitOutcome::Redelivered { .. } | SubmitOutcome::ReofferedTerminal => {}
             }
+            if let Some(row) = self
+                .demand
+                .get(offer.base.runner_request_id)
+                .map_err(ScaleError::Store)?
+            {
+                self.sync_global_demand(&row)?;
+            }
         }
         self.metrics.add_offers_observed(outcome.offers_seen as u64);
         let granted = grant_oldest(
@@ -280,13 +334,20 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             &self.metrics,
         )
         .map_err(ScaleError::Store)?;
+        for row in &granted {
+            self.observe_global_demand(row)?;
+        }
         outcome.granted = granted.len();
 
         // Steps 3–4: reserve + acquire, bounded by convergence headroom.
-        let (acquired, missing, uncertain) = self.acquire_pass(message).await?;
+        let (acquired, missing, uncertain) = self
+            .acquire_pass(message.statistics.or(self.cached_stats))
+            .await?;
         outcome.acquired = acquired;
         outcome.missing = missing;
         outcome.uncertain = uncertain;
+
+        outcome.completed += self.drain_canceled_acquisitions(self.generation()?)?;
 
         // Step 5: provision every acquired row still missing its intent.
         outcome.provisioned = self.provision_pass().await?;
@@ -328,9 +389,104 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         local_population(&self.demand, self.config.scale_set_id).map_err(ScaleError::Store)
     }
 
-    /// Step-1 `JobAssigned`: staked rows (`granted | acquire_intent |
-    /// uncertain`) move to `acquired` and their permits to `acquiring`;
-    /// already-`acquired`/`provision_intent` rows replay idempotently.
+    fn observe_global_demand(
+        &mut self,
+        row: &Demand,
+    ) -> Result<(), ScaleError<Q::Error, W::Error>> {
+        let parsed = velnor_model::Timestamp::parse(&row.first_seen_at)
+            .context("parse durable Scale Set first-seen time")
+            .map_err(ScaleError::Store)?;
+        let first_seen_unix = u64::try_from(parsed.as_offset_datetime().unix_timestamp())
+            .context("Scale Set first-seen time predates Unix epoch")
+            .map_err(ScaleError::Store)?;
+        let holder = permit_holder(row.scale_set_id, row.request_id);
+        let scope = format!("scaleset/{}", row.scale_set_id);
+        self.ledger
+            .observe_demand(
+                &holder,
+                LedgerLane::ScaleSet,
+                &scope,
+                first_seen_unix,
+                velnor_control::permit_ledger::unix_now(),
+            )
+            .map_err(|error| ScaleError::Ledger(ledger_error(error)))
+    }
+
+    fn sync_global_demand(&mut self, row: &Demand) -> Result<(), ScaleError<Q::Error, W::Error>> {
+        match row.state {
+            DemandState::Observed | DemandState::Declined => {
+                let holder = permit_holder(row.scale_set_id, row.request_id);
+                self.ledger
+                    .cancel_demand(&holder)
+                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+            }
+            DemandState::Terminal => {}
+            DemandState::CanceledPending | DemandState::CanceledAcquired => {}
+            DemandState::CanceledDone => {
+                let holder = permit_holder(row.scale_set_id, row.request_id);
+                self.ledger
+                    .release_cancelled(&holder)
+                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+            }
+            DemandState::Eligible
+            | DemandState::Granted
+            | DemandState::AcquireIntent
+            | DemandState::Acquired
+            | DemandState::Uncertain
+            | DemandState::ProvisionIntent => self.observe_global_demand(row)?,
+        }
+        Ok(())
+    }
+
+    fn drain_canceled_acquisitions(
+        &mut self,
+        generation: u64,
+    ) -> Result<usize, ScaleError<Q::Error, W::Error>> {
+        let canceled = self
+            .demand
+            .list_in_states(
+                self.config.scale_set_id,
+                &[DemandState::CanceledAcquired, DemandState::CanceledDone],
+            )
+            .map_err(ScaleError::Store)?;
+        let mut completed = 0;
+        for (request_id, state) in canceled {
+            if state == DemandState::CanceledAcquired {
+                self.lane
+                    .note_canceled(request_id)
+                    .map_err(ScaleError::Lane)?;
+            }
+            let holder = permit_holder(self.config.scale_set_id, request_id);
+            self.ledger
+                .release_cancelled(&holder)
+                .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+            self.demand
+                .set_state(request_id, DemandState::Terminal, None, generation)
+                .map_err(ScaleError::Store)?;
+            completed += 1;
+        }
+        Ok(completed)
+    }
+
+    fn close_canceled_unacquired(
+        &mut self,
+        request_id: i64,
+    ) -> Result<(), ScaleError<Q::Error, W::Error>> {
+        let generation = self.generation()?;
+        self.demand
+            .set_state(request_id, DemandState::CanceledDone, None, generation)
+            .map_err(ScaleError::Store)?;
+        self.ledger
+            .release_cancelled(&permit_holder(self.config.scale_set_id, request_id))
+            .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+        self.demand
+            .set_state(request_id, DemandState::Terminal, None, generation)
+            .map_err(ScaleError::Store)
+    }
+
+    /// Step-1 `JobAssigned`: only rows already confirmed by acquirejobs or
+    /// worker ownership reach the lane. This event alone never proves
+    /// acquire success.
     /// Untracked IDs and stake-less rows (another adapter won the race)
     /// are not ours: counted, never claimed. Returns whether the
     /// observation matched tracked work.
@@ -338,24 +494,19 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         assigned: &ScaleSetJobAssigned,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = assigned.base.runner_request_id;
-        let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
-            return Ok(false);
-        };
-        if row.state == DemandState::Terminal || row.state == DemandState::Declined {
-            return Ok(true);
-        }
-        if !row.state.holds_permit() {
-            return Ok(true);
-        }
         let generation = self.generation()?;
-        if matches!(
-            row.state,
-            DemandState::Granted | DemandState::AcquireIntent | DemandState::Uncertain
+        let (request_id, state) = self
+            .demand
+            .submit_assigned(self.config.scale_set_id, assigned, generation)
+            .map_err(ScaleError::Store)?;
+        if state == DemandState::Terminal || state == DemandState::Declined {
+            return Ok(true);
+        }
+        if !matches!(
+            state,
+            DemandState::Acquired | DemandState::ProvisionIntent | DemandState::CanceledAcquired
         ) {
-            self.demand
-                .set_state(request_id, DemandState::Acquired, None, generation)
-                .map_err(ScaleError::Store)?;
+            return Ok(true);
         }
         transition_or_adopt(
             &mut self.ledger,
@@ -378,17 +529,44 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         started: &ScaleSetJobStarted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = started.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
         let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
             return Ok(false);
         };
         if row.state == DemandState::Terminal || row.state == DemandState::Declined {
             return Ok(true);
         }
+        if row.state == DemandState::CanceledPending {
+            let generation = self.generation()?;
+            self.demand
+                .set_state(request_id, DemandState::CanceledAcquired, None, generation)
+                .map_err(ScaleError::Store)?;
+            transition_or_adopt(
+                &mut self.ledger,
+                &permit_holder(self.config.scale_set_id, request_id),
+                LedgerPermitState::Acquiring,
+                generation,
+            )
+            .map_err(ScaleError::Store)?;
+            self.lane.note_started(started).map_err(ScaleError::Lane)?;
+            return Ok(true);
+        }
+        if row.state == DemandState::CanceledAcquired {
+            self.lane.note_started(started).map_err(ScaleError::Lane)?;
+            return Ok(true);
+        }
         if !row.state.holds_permit() {
             return Ok(true);
         }
         let generation = self.generation()?;
+        if matches!(
+            row.state,
+            DemandState::Granted | DemandState::AcquireIntent | DemandState::Uncertain
+        ) {
+            self.demand
+                .set_state(request_id, DemandState::ProvisionIntent, None, generation)
+                .map_err(ScaleError::Store)?;
+        }
         transition_or_adopt(
             &mut self.ledger,
             &permit_holder(self.config.scale_set_id, request_id),
@@ -409,7 +587,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         completed: &ScaleSetJobCompleted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = completed.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
         let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
             return Ok(false);
         };
@@ -419,8 +597,86 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             .holder_state(&holder)
             .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
             .is_some();
+        // The wire carries both `actions/runner` PascalCase and Velnor
+        // lowercase spellings; parse via the protocol result type so a
+        // `Canceled` completion takes the cancel path too.
+        let canceled = matches!(
+            TaskResult::parse_wire(&completed.result),
+            Some(TaskResult::Canceled)
+        );
         if row.state == DemandState::Terminal && !held {
+            if canceled {
+                self.ledger
+                    .release_cancelled(&holder)
+                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+            }
             return Ok(true);
+        }
+
+        if canceled {
+            match row.state {
+                DemandState::Observed | DemandState::Declined => {
+                    self.close_canceled_unacquired(request_id)?;
+                    return Ok(true);
+                }
+                DemandState::Eligible | DemandState::Granted => {
+                    self.observe_global_demand(&row)?;
+                    self.close_canceled_unacquired(request_id)?;
+                    return Ok(true);
+                }
+                DemandState::AcquireIntent
+                | DemandState::Uncertain
+                | DemandState::CanceledPending => {
+                    // An unbatched intent is before the network boundary, so
+                    // this old canceled attempt can close immediately. For a
+                    // batched intent, keep occupancy until acquirejobs proves
+                    // whether the runner took ownership. Upstream emits a
+                    // new request for a requeued retry.
+                    if row.state == DemandState::AcquireIntent
+                        && !self
+                            .batches
+                            .contains_request(self.config.scale_set_id, request_id)
+                            .map_err(ScaleError::Store)?
+                    {
+                        self.observe_global_demand(&row)?;
+                        self.close_canceled_unacquired(request_id)?;
+                        return Ok(true);
+                    }
+                    let generation = self.generation()?;
+                    if !held {
+                        transition_or_adopt(
+                            &mut self.ledger,
+                            &holder,
+                            LedgerPermitState::Uncertain,
+                            generation,
+                        )
+                        .map_err(ScaleError::Store)?;
+                    } else {
+                        fenced_transition(
+                            &mut self.ledger,
+                            &holder,
+                            LedgerPermitState::Uncertain,
+                            generation,
+                        )
+                        .map_err(ScaleError::Ledger)?;
+                    }
+                    self.demand
+                        .set_state(request_id, DemandState::CanceledPending, None, generation)
+                        .map_err(ScaleError::Store)?;
+                    return Ok(true);
+                }
+                DemandState::CanceledAcquired
+                | DemandState::Acquired
+                | DemandState::ProvisionIntent => {
+                    // Durable acquire response or worker state proves this
+                    // is an owned cancellation. Drive cleanup before ACK.
+                }
+                DemandState::CanceledDone => {
+                    self.close_canceled_unacquired(request_id)?;
+                    return Ok(true);
+                }
+                DemandState::Terminal => {}
+            }
         }
         let staked = row.state.holds_permit() || held;
         let generation = self.generation()?;
@@ -442,6 +698,15 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             self.lane
                 .note_terminal(completed)
                 .map_err(ScaleError::Lane)?;
+            if canceled {
+                self.ledger
+                    .release_cancelled(&holder)
+                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+            }
+        } else {
+            self.ledger
+                .release(&holder)
+                .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
         }
         Ok(true)
     }
@@ -451,9 +716,8 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
     /// acquire intent, call `acquirejobs`, and set-reconcile the answer.
     async fn acquire_pass(
         &mut self,
-        message: &RunnerScaleSetMessage,
+        stats: Option<RunnerScaleSetStatistic>,
     ) -> Result<(Vec<i64>, Vec<i64>, Vec<i64>), ScaleError<Q::Error, W::Error>> {
-        let stats = message.statistics.or(self.cached_stats);
         let Some(stats) = stats else {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         };
@@ -473,6 +737,9 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             .map_err(ScaleError::Store)?;
         if candidates.is_empty() {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+        for candidate in &candidates {
+            self.observe_global_demand(candidate)?;
         }
 
         // Step 3: reserve oldest-first; the first exhausted permit stops the
@@ -506,11 +773,6 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         if taken.is_empty() {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
-        for (request_id, _) in &taken {
-            self.demand
-                .set_state(*request_id, DemandState::AcquireIntent, None, generation)
-                .map_err(ScaleError::Store)?;
-        }
         let request_ids: Vec<i64> = taken.iter().map(|(id, _)| *id).collect();
         let holders: Vec<String> = taken.iter().map(|(_, holder)| holder.clone()).collect();
         let batch_id = mint_batch_id(self.config.scale_set_id);
@@ -523,6 +785,15 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 generation,
             )
             .map_err(ScaleError::Store)?;
+        // The batch record is the durable boundary before the network call.
+        // If a crash lands while these row writes are partial, startup can
+        // recover every member from the batch as uncertain. An unbatched
+        // AcquireIntent therefore proves the request was never sent.
+        for request_id in &request_ids {
+            self.demand
+                .set_state(*request_id, DemandState::AcquireIntent, None, generation)
+                .map_err(ScaleError::Store)?;
+        }
         self.metrics.inc_acquire_batches();
 
         // Step 4: the call, then set-reconcile. Transport failure after send
@@ -562,7 +833,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         }
         for request_id in &missing {
             self.ledger
-                .release(&permit_holder(self.config.scale_set_id, *request_id))
+                .release_to_eligible(&permit_holder(self.config.scale_set_id, *request_id))
                 .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
             self.demand
                 .set_state(*request_id, DemandState::Eligible, None, generation)
@@ -744,6 +1015,9 @@ mod tests {
     struct StubLane {
         provisioned: Vec<String>,
         terminals: Vec<i64>,
+        assigned: Vec<i64>,
+        started: Vec<i64>,
+        canceled: Vec<i64>,
     }
 
     #[derive(Debug)]
@@ -768,16 +1042,23 @@ mod tests {
             Ok(())
         }
 
-        fn note_assigned(&mut self, _assigned: &ScaleSetJobAssigned) -> Result<(), Self::Error> {
+        fn note_assigned(&mut self, assigned: &ScaleSetJobAssigned) -> Result<(), Self::Error> {
+            self.assigned.push(assigned.base.runner_request_id);
             Ok(())
         }
 
-        fn note_started(&mut self, _started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
+        fn note_started(&mut self, started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
+            self.started.push(started.base.runner_request_id);
             Ok(())
         }
 
         fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
             self.terminals.push(completed.base.runner_request_id);
+            Ok(())
+        }
+
+        fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {
+            self.canceled.push(request_id);
             Ok(())
         }
     }
@@ -822,6 +1103,57 @@ mod tests {
                 finish_time: String::new(),
             },
         }
+    }
+
+    fn base(id: i64, message_type: ScaleSetJobMessageType) -> ScaleSetJobMessage {
+        ScaleSetJobMessage {
+            message_type,
+            runner_request_id: id,
+            repository_name: "velnor".to_owned(),
+            owner_name: "tailrocks".to_owned(),
+            job_id: format!("job-{id}"),
+            job_workflow_ref: String::new(),
+            job_display_name: String::new(),
+            workflow_run_id: 0,
+            event_name: "push".to_owned(),
+            request_labels: vec!["velnor".to_owned()],
+            queue_time: String::new(),
+            scale_set_assign_time: String::new(),
+            runner_assign_time: String::new(),
+            finish_time: String::new(),
+        }
+    }
+
+    fn completed(id: i64, result: &str) -> ScaleSetJobCompleted {
+        ScaleSetJobCompleted {
+            result: result.to_owned(),
+            runner_id: 1,
+            runner_name: format!("velnor-7-{id}"),
+            base: base(id, ScaleSetJobMessageType::JobCompleted),
+        }
+    }
+
+    fn completion_message(message_id: i32, id: i64) -> RunnerScaleSetMessage {
+        RunnerScaleSetMessage {
+            message_id,
+            statistics: Some(stats(4)),
+            job_completed_messages: vec![completed(id, "canceled")],
+            ..RunnerScaleSetMessage::default()
+        }
+    }
+
+    fn age_batch(path: &std::path::Path, batch_id: &str) {
+        let old = velnor_model::Timestamp::now()
+            .minus(std::time::Duration::from_secs(3600))
+            .to_rfc3339()
+            .unwrap();
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "UPDATE scaleset_acquire_batches SET created_at = ?1 WHERE batch_id = ?2",
+                rusqlite::params![old, batch_id],
+            )
+            .unwrap();
     }
 
     fn stats(assigned: i32) -> RunnerScaleSetStatistic {
@@ -984,6 +1316,210 @@ mod tests {
             .unwrap();
         let replay = processor.scale(Some(&observed)).await.unwrap();
         assert_eq!(replay.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn assigned_then_canceled_before_acquire_closes_old_attempt() {
+        let path = temp_path("assigned-canceled-before-acquire");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        let generation = processor.ledger_mut().generation().unwrap();
+        processor
+            .demand_mut()
+            .submit_offer(7, &push_offer(901), generation)
+            .unwrap();
+        processor
+            .demand_mut()
+            .set_state(901, DemandState::Granted, None, generation)
+            .unwrap();
+
+        assert!(processor
+            .observe_assigned(&ScaleSetJobAssigned {
+                base: base(901, ScaleSetJobMessageType::JobAssigned),
+            })
+            .unwrap());
+        assert_eq!(
+            processor.demand_mut().get(901).unwrap().unwrap().state,
+            DemandState::Granted,
+            "JobAssigned alone must not assert acquire success"
+        );
+        assert!(processor
+            .observe_completed(&completed(901, "canceled"))
+            .unwrap());
+        assert_eq!(
+            processor.demand_mut().get(901).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+        assert!(processor.lane_mut().assigned.is_empty());
+        assert!(processor.lane_mut().terminals.is_empty());
+        assert!(processor.lane_mut().canceled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_result_casings_both_take_cancel_path() {
+        // The wire carries both `actions/runner` PascalCase and Velnor
+        // lowercase `result` spellings; both must take the cancel path
+        // (close without driving the lane terminal).
+        for (index, result) in ["canceled", "Canceled"].iter().enumerate() {
+            let id = 910 + index as i64;
+            let path = temp_path(&format!("completed-result-casing-{result}"));
+            let mut processor = processor(&path, ScriptedQueue::default());
+            let generation = processor.ledger_mut().generation().unwrap();
+            processor
+                .demand_mut()
+                .submit_offer(7, &push_offer(id), generation)
+                .unwrap();
+            processor
+                .demand_mut()
+                .set_state(id, DemandState::Granted, None, generation)
+                .unwrap();
+            assert!(processor.observe_completed(&completed(id, result)).unwrap());
+            assert_eq!(
+                processor.demand_mut().get(id).unwrap().unwrap().state,
+                DemandState::Terminal,
+                "result {result} must close the attempt"
+            );
+            assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+            assert!(
+                processor.lane_mut().terminals.is_empty(),
+                "result {result} must take the cancel path, not the lane terminal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn acquired_cancellation_cleans_lane_before_releasing_permit() {
+        let path = temp_path("acquired-canceled");
+        let queue = ScriptedQueue {
+            answer: std::sync::Mutex::new(Some(Ok(vec![902]))),
+        };
+        let mut processor = processor(&path, queue);
+        let initial = processor
+            .scale(Some(&message(21, vec![push_offer(902)])))
+            .await
+            .unwrap();
+        assert_eq!(initial.acquired, vec![902]);
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+
+        let outcome = processor
+            .scale(Some(&completion_message(22, 902)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.completed, 1);
+        assert_eq!(
+            processor.demand_mut().get(902).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(processor.lane_mut().terminals, vec![902]);
+        assert!(processor.lane_mut().canceled.is_empty());
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn unresolved_cancellation_holds_until_reacquire_proves_absence() {
+        let path = temp_path("canceled-uncertain-missing");
+        let queue = ScriptedQueue {
+            answer: std::sync::Mutex::new(Some(Err("connection reset".to_owned()))),
+        };
+        let mut processor = processor(&path, queue);
+        processor
+            .scale(Some(&message(23, vec![push_offer(903)])))
+            .await
+            .unwrap();
+        processor
+            .scale(Some(&completion_message(24, 903)))
+            .await
+            .unwrap();
+        assert_eq!(
+            processor.demand_mut().get(903).unwrap().unwrap().state,
+            DemandState::CanceledPending
+        );
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+        assert!(processor.lane_mut().terminals.is_empty());
+
+        let batch = processor
+            .batches_mut()
+            .open_batches(7, usize::MAX)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        age_batch(&path, &batch.batch_id);
+        *processor.queue.answer.lock().unwrap() = Some(Ok(Vec::new()));
+        let generation = processor.ledger_mut().generation().unwrap();
+        let report = {
+            let Processor {
+                queue,
+                ledger,
+                demand,
+                batches,
+                lane,
+                metrics,
+                ..
+            } = &mut processor;
+            super::super::reconcile::idle_poll(
+                queue, ledger, demand, batches, lane, 7, generation, metrics,
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(report.reacquired_batches, 1);
+        assert_eq!(
+            processor.demand_mut().get(903).unwrap().unwrap().state,
+            DemandState::CanceledDone
+        );
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+
+        let drained = processor.scale(None).await.unwrap();
+        assert_eq!(drained.completed, 1);
+        assert_eq!(
+            processor.demand_mut().get(903).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert!(processor.lane_mut().terminals.is_empty());
+        assert!(processor.lane_mut().canceled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn started_after_pending_cancel_binds_lane_and_finishes_cleanup() {
+        let path = temp_path("canceled-pending-started");
+        let queue = ScriptedQueue {
+            answer: std::sync::Mutex::new(Some(Err("connection reset".to_owned()))),
+        };
+        let mut processor = processor(&path, queue);
+        processor
+            .scale(Some(&message(25, vec![push_offer(904)])))
+            .await
+            .unwrap();
+        processor
+            .scale(Some(&completion_message(26, 904)))
+            .await
+            .unwrap();
+        assert_eq!(
+            processor.demand_mut().get(904).unwrap().unwrap().state,
+            DemandState::CanceledPending
+        );
+
+        let started = ScaleSetJobStarted {
+            runner_id: 1,
+            runner_name: "velnor-7-904".to_owned(),
+            base: base(904, ScaleSetJobMessageType::JobStarted),
+        };
+        assert!(processor.observe_started(&started).unwrap());
+        assert_eq!(
+            processor.demand_mut().get(904).unwrap().unwrap().state,
+            DemandState::CanceledAcquired
+        );
+        assert_eq!(processor.lane_mut().started, vec![904]);
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+
+        processor.scale(None).await.unwrap();
+        assert_eq!(
+            processor.demand_mut().get(904).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(processor.lane_mut().canceled, vec![904]);
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
     }
 
     #[tokio::test]

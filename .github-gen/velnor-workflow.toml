@@ -6,24 +6,25 @@ repository = "tailrocks/velnor"
 # validator regenerates the tree with the generator built at this commit and
 # requires a byte-identical result; bump it in a single pin commit after the
 # last generator change (see the plan ledger).
-revision = "fdeed261bd2247a38db6922a7726cd45d3d6f31e"
+# The branch changes the generator, so keep Stage 0 on the published base
+# product until the generator change is merged and published. The policy
+# candidate path verifies the checked-in tree with this branch's renderer.
+revision = "6737cdb3b90d5c2c039b2694b5862e3b163420d2"
 
 [scan]
 exclude = ["migrations/**"]
 
-# Provider placement: `providers` is the available backends.
-# `automatic_providers` run on PR/push/schedule without a dispatch choice.
-# Recovery: both families automatically and in parallel.
+# Provider placement: the visibility-based runner policy resolves exactly one
+# provider from the repository visibility evidence. This repository is public,
+# so every executable job runs on GitHub-hosted runners only; a Velnor
+# selector or universe here would be a contradictory rejection.
 [workflow]
-providers = ["github-hosted", "velnor"]
-automatic_providers = ["github-hosted", "velnor"]
-default_dispatch_providers = ["github-hosted", "velnor"]
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
 default_branch = "main"
-# Routing contract: the release-side guest-payload producer builds Linux
-# cross-target guest agents and Firecracker kernel/rootfs images, so the
-# generator keeps that job on the hosted selector. The verification units
-# below only run native Linux checks and remain eligible for Docker-backed
-# Velnor capacity, including a macOS host.
+# Routing contract: this public repository renders hosted-only, so every
+# job — including the release-side guest-payload producer — runs on the
+# hosted selector.
 profile = "rust-workspace-release"
 rust_needs = "dependency-closure"
 # Supersede stale heads within one PR/branch; separate PRs run in parallel.
@@ -37,11 +38,6 @@ version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust
 
 [workflow.selectors.github-hosted]
 runs_on = ["ubuntu-24.04"]
-
-# Recovery: repository-scoped macOS/Linux hosts claim Velnor-lane jobs with
-# these labels without joining an org pool.
-[workflow.selectors.velnor]
-runs_on = ["self-hosted", "velnor-target-mvp"]
 
 [policy]
 ruleset_required_status_checks = ["ci-required"]
@@ -66,6 +62,9 @@ mbx_generation_bound = 6
 enabled = true
 reason = "Release contract is explicitly cataloged; review credentials, environments, and tag protection before cutover."
 kind = "native"
+# Release verification prerequisites follow the hosted-only singleton: a
+# public repository verifies releases on GitHub-hosted runners.
+verification_providers = ["github-hosted"]
 package = "velnor-runner"
 packages = []
 binary = "velnor-runner"
@@ -148,9 +147,8 @@ units = ["rust-production-topology"]
 primitive = "rust-crate-pipeline"
 units = ["rust-velnor-workflow-contract"]
 
-# Lanes and cache: the default matrix (GitHub-hosted plus the trust-gated
-# self-hosted lane) and the detected cache contract, stated explicitly so the
-# repository owns the decision.
+# Lanes and cache: retain the Velnor provider and cache contract for explicit
+# later qualification. Automatic recovery remains hosted-only above.
 
 [[declare]]
 primitive = "provider-matrix"

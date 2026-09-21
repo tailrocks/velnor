@@ -696,6 +696,7 @@ mod tests {
         let mut app = app();
         app.inputs = Some(crate::s2::GenerationInputs::parts(0, 0));
         let unit = crate::s2::Unit {
+            xcode: None,
             id: "workspace-with-a-long-name".to_owned(),
             label: "Workspace with a long Unicode label λ".to_owned(),
             kind: crate::s2::UnitKind::Rust,
@@ -705,6 +706,8 @@ mod tests {
                 .map(|index| format!("cargo test --package example-{index}"))
                 .collect(),
             full_commands: vec!["cargo test --workspace --all-targets".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: true,
             cache: None,
@@ -723,6 +726,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -761,6 +765,7 @@ mod tests {
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: vec![unit],
             workflow_templates: BTreeMap::new(),
@@ -770,11 +775,11 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             rust_needs: crate::s2::RustNeeds::Parallel,
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
@@ -927,6 +932,7 @@ mod tests {
             ],
             changed: Vec::new(),
             stale: vec![PathBuf::from(".github/workflows/old.yml")],
+            unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: true,
             ownership_needs_refresh: true,

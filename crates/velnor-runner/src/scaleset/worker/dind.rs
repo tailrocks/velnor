@@ -41,6 +41,12 @@ pub const DIND_SOCKET: &str = "/velnor/scaleset/dind.sock";
 pub const BUILDKIT_CACHE_DIR: &str = "/velnor/scaleset/buildkit-cache";
 /// dockerd's data root inside the daemon container (named volume).
 pub const DIND_DATA_ROOT: &str = "/var/lib/docker";
+/// Guest-absolute workspace mount point (identical path in runner and DinD).
+pub const WORK_DIR: &str = super::runner::RUNNER_WORK_DIR;
+/// Re-export of [`super::runner::RUNNER_WORK_DIR`].
+pub use super::runner::RUNNER_WORK_DIR;
+/// Tool cache dir, identical absolute path in both containers of a pair.
+pub use super::runner::TOOL_CACHE_DIR;
 
 /// Fully-derived DinD provision spec: image, identity, host state dir.
 #[derive(Debug, Clone)]
@@ -95,7 +101,9 @@ impl DindSpec {
     /// * `--privileged` (DinD cannot run unprivileged; documented, not hidden);
     /// * no `-p`/`--publish`/`--expose`: no TCP surface at all;
     /// * no host socket bind: the only socket is the daemon's own;
-    /// * dockerd command line carries exactly one `-H unix://` listener.
+    /// * dockerd command line carries exactly one `-H unix://` listener;
+    /// * workspace and tool cache volumes mounted at identical paths to the runner
+    ///   (`/home/runner/_work` and `/opt/hostedtoolcache`).
     #[must_use]
     pub fn create_args(&self) -> Vec<String> {
         let mut args = vec![
@@ -113,6 +121,10 @@ impl DindSpec {
             format!("{}:{DIND_DATA_ROOT}", self.identity.dind_data_volume()),
             "--volume".to_string(),
             format!("{}:{STATE_MOUNT}", self.state_dir.display()),
+            "--volume".to_string(),
+            format!("{}:{WORK_DIR}", self.identity.workspace_volume()),
+            "--volume".to_string(),
+            format!("{}:{TOOL_CACHE_DIR}", self.identity.tool_cache_volume()),
         ];
         args.extend(self.identity.label_args(ROLE_DIND));
         args.push("--".to_string());
@@ -536,19 +548,49 @@ mod tests {
 
     #[test]
     fn create_argv_binds_no_host_socket() {
-        let args = spec().create_args();
+        let spec = spec();
+        let args = spec.create_args();
         assert!(
             !args.iter().any(|arg| arg.contains("/var/run/docker.sock")),
             "{args:?}"
         );
         // The state bind is the worker's own dir at the identical path.
         assert!(args.contains(&format!("/tmp/velnor-test-dind-state:{STATE_MOUNT}")));
+        // Workspace and tool cache volumes mounted at identical paths to runner.
+        assert!(args.contains(&format!(
+            "{}:{WORK_DIR}",
+            spec.identity().workspace_volume()
+        )));
+        assert!(args.contains(&format!(
+            "{}:{TOOL_CACHE_DIR}",
+            spec.identity().tool_cache_volume()
+        )));
         // Privileged is explicit (DinD requirement), pinned image, ownership labels.
         assert!(args.contains(&"--privileged".to_string()));
         assert!(args.contains(&DIND_REF.to_string()));
         assert!(args
             .iter()
             .any(|arg| arg.contains("velnor.scaleset.ownership=")));
+    }
+
+    #[test]
+    fn dind_argv_mounts_workspace_and_tool_cache_coherently() {
+        let spec = spec();
+        let args = spec.create_args().join("\n");
+        assert!(
+            args.contains(&format!(
+                "{}:{WORK_DIR}",
+                spec.identity().workspace_volume()
+            )),
+            "DinD argv must mount workspace at {WORK_DIR}:\n{args}"
+        );
+        assert!(
+            args.contains(&format!(
+                "{}:{TOOL_CACHE_DIR}",
+                spec.identity().tool_cache_volume()
+            )),
+            "DinD argv must mount tool cache at {TOOL_CACHE_DIR}:\n{args}"
+        );
     }
 
     #[test]

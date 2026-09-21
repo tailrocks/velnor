@@ -53,6 +53,49 @@ config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
 
+## Typed package-release verification hooks
+
+Schema-2 `package-release` declarations may name repository-owned mise tasks in
+`verify_tasks`. Velnor validates each name against the scanned `mise.toml` and
+renders the task after producer creation, after the downloaded handoff is
+re-verified, and after the immutable release is downloaded. The task runs from
+the exact source checkout with `VELNOR_VERIFIED_PACKAGE_DIR` pointing at the
+bytes under verification; Velnor does not interpret the task's package
+semantics.
+
+```toml
+[[declare]]
+primitive = "package-release"
+file = "preview.yml"
+
+[declare.args]
+build_tasks = ["build-package"]
+verify_tasks = ["verify-package"]
+publication_lock_branch = "package-release-lock"
+```
+
+`verify_tasks` is a list of plain mise task names, not shell commands or an
+arbitrary command array. Omit it when a package has no repository-owned
+semantic verification beyond Velnor's generic manifest, checksum, and
+provenance checks.
+
+`pre_publish_tasks` is an optional list of distinct plain mise task names for
+one-time migration work that runs exactly once after the verified source
+checkout and publication lock, but before immutable release mutation. These
+tasks receive the publisher's GitHub token and source-checkout context; they
+must write any remote-mutation marker to `GITHUB_ENV` before mutation and must
+not overlap `verify_tasks`. `publication_lock_branch` is a required,
+repository-specific lock namespace; do not reuse it across independent
+publication lanes.
+
+The rolling release is current-contract-only: an existing public release must
+match the declared manifest, identity, asset digests, tag, source, and version
+contract. An interrupted draft is discarded only after that same typed contract
+and release/tag ownership are re-read; missing or mixed state is rejected before
+publication mutation. Migration of an older consumer release belongs in that
+consumer's release automation and must use `pre_publish_tasks` with a durable
+recovery contract.
+
 ## `[renovate]` — self-hosted dependency updates
 
 Scan evidence alone (`renovate.json`, `renovate.json5`, or `.github/renovate.json*`)

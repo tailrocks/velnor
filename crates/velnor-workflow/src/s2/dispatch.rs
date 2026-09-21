@@ -26,6 +26,8 @@ const RUNTIME_COMMANDS: &[&str] = &[
     "version",
     "closure",
     "prepared-tool-install",
+    "stage-product",
+    "verify-product",
     "cache-plan",
     "aggregate",
     "select",
@@ -47,6 +49,15 @@ pub(crate) fn run_if_s2() -> Option<Result<(), crate::GeneratorError>> {
 }
 
 fn wants_s2(arguments: &[OsString]) -> bool {
+    // `visibility` is schema-agnostic evidence plumbing; it always stays on
+    // the schema-1 path, which owns the subcommand for both pipelines.
+    if arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .is_some_and(|command| command == "visibility")
+    {
+        return false;
+    }
     if has_providers_flag(arguments) {
         return true;
     }
@@ -149,8 +160,10 @@ mod tests {
     }
 
     fn fixture_dir(name: &str, config: Option<&str>) -> PathBuf {
-        let root =
-            env::temp_dir().join(format!("velnor-r2-dispatch-{}-{name}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "velnor-r2-dispatch-{}-{name}",
+            crate::unique_suffix()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         must(
             std::fs::create_dir_all(root.join(".github-gen")),
@@ -253,5 +266,17 @@ mod tests {
     fn version_and_closure_stay_put() {
         assert!(!wants_s2(&args(&["version"])));
         assert!(!wants_s2(&args(&["closure"])));
+    }
+
+    #[test]
+    fn product_transport_subcommands_route_as_runtime_commands() {
+        // Membership pins the bridge peek: without it the schema-1 parser
+        // would reject the transport subcommands before `try_run` sees them.
+        for command in ["stage-product", "verify-product"] {
+            assert!(
+                RUNTIME_COMMANDS.contains(&command),
+                "{command} routes as a binary-only runtime command"
+            );
+        }
     }
 }

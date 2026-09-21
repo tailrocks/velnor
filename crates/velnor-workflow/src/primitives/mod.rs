@@ -33,8 +33,8 @@ use std::path::PathBuf;
 use crate::config::RepoGenerationConfig;
 use crate::scan::RepositoryShape;
 use crate::{
-    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode,
-    Unit, UnitKind,
+    nested_unit_workflow_file, validate_unit_phases, CachePurpose, CacheSpec, GeneratorError,
+    ProjectConfig, RunnerMode, Unit, UnitKind,
 };
 
 pub(crate) use ir::{
@@ -595,6 +595,245 @@ impl Args<'_> {
         }
         Ok(tables)
     }
+
+    /// A table of declared reads indexed by unit id, validated against the
+    /// scan: each unit names typed contract entries for relations the scan
+    /// cannot discover (opaque task runners, helper scripts, dynamic
+    /// includes). Generation-time only: the `watch-graph` primitive unions
+    /// the paths into the unit's watch set, so the runtime contract is
+    /// unchanged.
+    pub(crate) fn unit_reads(
+        &self,
+        ctx: &RenderCtx<'_>,
+        key: &str,
+    ) -> Result<Option<BTreeMap<String, Vec<DeclaredRead>>>, GeneratorError> {
+        let Some(value) = self.0.get(key) else {
+            return Ok(None);
+        };
+        let tables = parse_declared_reads(key, value)?;
+        for unit in tables.keys() {
+            if !ctx.shape.unit_ids().any(|candidate| candidate == unit) {
+                return Err(GeneratorError::usage(format!(
+                    "`{key}` names unit `{unit}`, which the scan did not produce; available units: {}",
+                    ctx.shape.unit_ids().collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
+        Ok(Some(tables))
+    }
+}
+
+/// One declared read: paths a unit's owner asserts the unit reads, with the
+/// non-empty reason that audits the claim and the contract type that says
+/// what the claim covers. The declaration row itself is the audit trail;
+/// the paths compile into the unit's watch set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeclaredRead {
+    pub(crate) paths: Vec<String>,
+    pub(crate) reason: String,
+    pub(crate) kind: DeclaredReadKind,
+    /// The opaque script a `script` contract binds, unioned into the watch
+    /// set with the paths so changing the script reselects exactly its
+    /// unit. `None` for every other contract type.
+    pub(crate) script: Option<String>,
+    /// The unprovable mechanism an `unresolved` contract records. `None`
+    /// for every other contract type.
+    pub(crate) limitation: Option<String>,
+}
+
+/// The contract type of one declared read: plain path reads, the opaque
+/// script plus its declared input bound, or an explicit record of a
+/// relationship the scan cannot bound. Every type unions its paths into the
+/// unit's watch set; no type narrows selection beyond the paths it covers,
+/// so a wrong claim over-selects instead of silently skipping verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeclaredReadKind {
+    Paths,
+    Script,
+    Unresolved,
+}
+
+impl DeclaredReadKind {
+    /// The config spelling of the contract type.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Paths => "paths",
+            Self::Script => "script",
+            Self::Unresolved => "unresolved",
+        }
+    }
+
+    /// Parse the `type` value of one entry: one of the three contract
+    /// types, else a usage error listing them.
+    fn parse(key: &str, unit: &str, value: &toml::Value) -> Result<Self, GeneratorError> {
+        let toml::Value::String(name) = value else {
+            return Err(unexpected(key, value, "a contract type string"));
+        };
+        match name.as_str() {
+            "paths" => Ok(Self::Paths),
+            "script" => Ok(Self::Script),
+            "unresolved" => Ok(Self::Unresolved),
+            _ => Err(GeneratorError::usage(format!(
+                "`[[declare]]` argument `{key}` for unit `{unit}` takes type `\"paths\"`, `\"script\"`, or `\"unresolved\"`, found `{name}`"
+            ))),
+        }
+    }
+
+    /// The keys one entry of this type may spell, for the typo check.
+    fn allowed_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Paths => &["paths", "reason", "type"],
+            Self::Script => &["paths", "reason", "type", "script"],
+            Self::Unresolved => &["paths", "reason", "type", "limitation"],
+        }
+    }
+}
+
+/// Parse a `reads` table of unit ids to typed contract entries. Every entry
+/// spells `paths` (an array of strings, each a valid watch glob) and
+/// `reason` (a non-empty string); `type` selects the contract (`"paths"`
+/// when absent, else `"script"` or `"unresolved"`), and each type adds its
+/// own required key (`script`, `limitation`). A typo'd, mistyped, or
+/// undocumented relation fails closed instead of silently widening (or
+/// never narrowing) affected selection.
+fn parse_declared_reads(
+    key: &str,
+    value: &toml::Value,
+) -> Result<BTreeMap<String, Vec<DeclaredRead>>, GeneratorError> {
+    let toml::Value::Table(table) = value else {
+        return Err(unexpected(
+            key,
+            value,
+            "a table of unit ids to typed contract entries",
+        ));
+    };
+    let mut reads = BTreeMap::new();
+    for (unit, entries) in table {
+        let toml::Value::Array(items) = entries else {
+            return Err(unexpected(
+                key,
+                entries,
+                "an array of typed contract tables",
+            ));
+        };
+        let mut declared = Vec::new();
+        for item in items {
+            let toml::Value::Table(entry) = item else {
+                return Err(unexpected(key, item, "a typed contract table"));
+            };
+            let kind = match entry.get("type") {
+                None => DeclaredReadKind::Paths,
+                Some(value) => DeclaredReadKind::parse(key, unit, value)?,
+            };
+            for name in entry.keys() {
+                if !kind.allowed_keys().contains(&name.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` argument `{key}` for unit `{unit}` takes only {} for a `\"{}\"` contract, found `{name}`",
+                        kind.allowed_keys()
+                            .iter()
+                            .map(|key| format!("`{key}`"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        kind.as_str(),
+                    )));
+                }
+            }
+            let Some(paths) = entry.get("paths") else {
+                return Err(GeneratorError::usage(format!(
+                    "`[[declare]]` argument `{key}` for unit `{unit}` is missing `paths`"
+                )));
+            };
+            let toml::Value::Array(paths) = paths else {
+                return Err(unexpected(key, paths, "an array of path strings"));
+            };
+            let mut owned = Vec::new();
+            for path in paths {
+                let toml::Value::String(path) = path else {
+                    return Err(unexpected(key, path, "a path string"));
+                };
+                if globset::Glob::new(path).is_err() {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` argument `{key}` for unit `{unit}` names an invalid watch glob `{path}`"
+                    )));
+                }
+                owned.push(path.clone());
+            }
+            let reason = match entry.get("reason") {
+                Some(toml::Value::String(reason)) if !reason.trim().is_empty() => reason.clone(),
+                _ => {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` argument `{key}` for unit `{unit}` needs a non-empty `reason` auditing the read"
+                    )));
+                }
+            };
+            let script = match kind {
+                DeclaredReadKind::Script => Some(parse_contract_script(key, unit, entry)?),
+                _ => None,
+            };
+            let limitation = match kind {
+                DeclaredReadKind::Unresolved => Some(parse_contract_limitation(key, unit, entry)?),
+                _ => None,
+            };
+            declared.push(DeclaredRead {
+                paths: owned,
+                reason,
+                kind,
+                script,
+                limitation,
+            });
+        }
+        reads.insert(unit.clone(), declared);
+    }
+    Ok(reads)
+}
+
+/// Parse the `script` of a `script` contract: the repo-relative path of the
+/// opaque script, treated as data (glob-unioned into the watch set, never
+/// executed or existence-checked — a build-generated script is legitimate).
+/// Absolute paths and root escapes fail closed; the glob check keeps the
+/// watch union infallible.
+fn parse_contract_script(
+    key: &str,
+    unit: &str,
+    entry: &toml::map::Map<String, toml::Value>,
+) -> Result<String, GeneratorError> {
+    let script = match entry.get("script") {
+        Some(toml::Value::String(script)) if !script.trim().is_empty() => script.clone(),
+        _ => {
+            return Err(GeneratorError::usage(format!(
+                "`[[declare]]` argument `{key}` for unit `{unit}` needs a non-empty `script` naming the opaque script"
+            )));
+        }
+    };
+    if script.starts_with('/') || script.split('/').any(|segment| segment == "..") {
+        return Err(GeneratorError::usage(format!(
+            "`[[declare]]` argument `{key}` for unit `{unit}` names a script outside the repository `{script}`"
+        )));
+    }
+    if globset::Glob::new(&script).is_err() {
+        return Err(GeneratorError::usage(format!(
+            "`[[declare]]` argument `{key}` for unit `{unit}` names an invalid watch glob `{script}`"
+        )));
+    }
+    Ok(script)
+}
+
+/// Parse the `limitation` of an `unresolved` contract: the non-empty record
+/// of the unprovable mechanism, so the limitation is explicit in the
+/// authoritative config instead of silent in the classifier.
+fn parse_contract_limitation(
+    key: &str,
+    unit: &str,
+    entry: &toml::map::Map<String, toml::Value>,
+) -> Result<String, GeneratorError> {
+    match entry.get("limitation") {
+        Some(toml::Value::String(limitation)) if !limitation.trim().is_empty() => {
+            Ok(limitation.clone())
+        }
+        _ => Err(GeneratorError::usage(format!(
+            "`[[declare]]` argument `{key}` for unit `{unit}` needs a non-empty `limitation` recording what cannot be proven"
+        ))),
+    }
 }
 
 fn unexpected(key: &str, found: &toml::Value, expected: &str) -> GeneratorError {
@@ -882,6 +1121,9 @@ pub(crate) fn generate(
     }
     let mut resolved = config.clone();
     resolved.units.clone_from(&units);
+    // Unit contracts mutate commands after the scan validated them; refuse
+    // a misaligned phase model before it reaches any `--phase` step.
+    validate_unit_phases(&resolved)?;
     let lanes = lanes::resolve(&resolved, &rows)?;
 
     // Per-unit pipelines, then the plan, then the aggregates that compose both.
@@ -1683,5 +1925,211 @@ mod tests {
             "\"a\\\"b\\\\c\\u0027d\"",
             "quotes, backslashes, and apostrophes escape"
         );
+    }
+
+    /// The `watch-graph` schema admits the generation-time `reads` table
+    /// alongside the watch additions it unions with.
+    #[test]
+    fn watch_graph_schema_admits_declared_reads() -> Result<(), Box<dyn std::error::Error>> {
+        let primitive = lookup(WATCH_GRAPH)?;
+        let schema = primitive.schema();
+        assert!(schema.contains(&"watch"));
+        assert!(schema.contains(&"reads"));
+        Ok(())
+    }
+
+    /// Declared reads parse per unit id into typed contract entries; an
+    /// absent `type` defaults to the `paths` contract.
+    #[test]
+    fn declared_reads_parse_paths_and_reasons() -> Result<(), Box<dyn std::error::Error>> {
+        let value: toml::Value = toml::from_str(
+            r#""rust-alpha" = [
+                { paths = ["scripts/check-boundary.sh"], reason = "task runner execs this script" },
+                { paths = ["assets/**"], reason = "bundler consumes non-source inputs" },
+            ]"#,
+        )?;
+        let reads = parse_declared_reads("reads", &value)?;
+        assert_eq!(
+            reads.get("rust-alpha"),
+            Some(&vec![
+                DeclaredRead {
+                    paths: vec!["scripts/check-boundary.sh".to_owned()],
+                    reason: "task runner execs this script".to_owned(),
+                    kind: DeclaredReadKind::Paths,
+                    script: None,
+                    limitation: None,
+                },
+                DeclaredRead {
+                    paths: vec!["assets/**".to_owned()],
+                    reason: "bundler consumes non-source inputs".to_owned(),
+                    kind: DeclaredReadKind::Paths,
+                    script: None,
+                    limitation: None,
+                },
+            ])
+        );
+        Ok(())
+    }
+
+    /// A missing, empty, or blank reason fails closed: every declared read
+    /// must audit its claim.
+    #[test]
+    fn declared_reads_reject_an_empty_reason() -> Result<(), Box<dyn std::error::Error>> {
+        for entry in [
+            r#"{ paths = ["scripts/check.sh"] }"#,
+            r#"{ paths = ["scripts/check.sh"], reason = "" }"#,
+            r#"{ paths = ["scripts/check.sh"], reason = "  " }"#,
+            r#"{ paths = ["scripts/check.sh"], reason = 7 }"#,
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("an undocumented read must fail");
+            };
+            assert!(error.to_string().contains("reason"), "{error}");
+        }
+        Ok(())
+    }
+
+    /// Malformed entries fail closed: unknown keys, missing or mistyped
+    /// paths, and invalid globs never silently widen selection.
+    #[test]
+    fn declared_reads_reject_malformed_entries() -> Result<(), Box<dyn std::error::Error>> {
+        for (entry, needle) in [
+            (
+                r#"{ paths = ["a"], reason = "r", extra = true }"#,
+                "takes only `paths`, `reason`, `type`",
+            ),
+            (r#"{ reason = "r" }"#, "missing `paths`"),
+            (
+                r#"{ paths = "a", reason = "r" }"#,
+                "an array of path strings",
+            ),
+            (r#"{ paths = [7], reason = "r" }"#, "a path string"),
+            (
+                r#"{ paths = ["["], reason = "r" }"#,
+                "an invalid watch glob",
+            ),
+            (r#""just-a-string""#, "a typed contract table"),
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("a malformed entry must fail: {entry}");
+            };
+            assert!(error.to_string().contains(needle), "entry {entry}: {error}");
+        }
+        let Err(error) = parse_declared_reads("reads", &toml::Value::Array(vec![])) else {
+            panic!("a non-table reads value must fail");
+        };
+        assert!(error.to_string().contains("a table of unit ids"), "{error}");
+        Ok(())
+    }
+
+    /// `script` and `unresolved` contracts parse with their kind and their
+    /// type-specific key: the bound script, or the recorded limitation.
+    #[test]
+    fn declared_read_contracts_parse_script_and_unresolved_types(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let value: toml::Value = toml::from_str(
+            r#""rust-alpha" = [
+                { type = "script", script = "scripts/check-boundary.sh", paths = ["schemas/**"], reason = "task runner execs this script" },
+                { type = "unresolved", paths = [], reason = "bundler reads are dynamic", limitation = "bundler plugin graph resolves at build time" },
+            ]"#,
+        )?;
+        let reads = parse_declared_reads("reads", &value)?;
+        assert_eq!(
+            reads.get("rust-alpha"),
+            Some(&vec![
+                DeclaredRead {
+                    paths: vec!["schemas/**".to_owned()],
+                    reason: "task runner execs this script".to_owned(),
+                    kind: DeclaredReadKind::Script,
+                    script: Some("scripts/check-boundary.sh".to_owned()),
+                    limitation: None,
+                },
+                DeclaredRead {
+                    paths: vec![],
+                    reason: "bundler reads are dynamic".to_owned(),
+                    kind: DeclaredReadKind::Unresolved,
+                    script: None,
+                    limitation: Some("bundler plugin graph resolves at build time".to_owned()),
+                },
+            ])
+        );
+        Ok(())
+    }
+
+    /// Unknown types, misplaced type keys, and missing or escaping
+    /// type-specific values fail closed with the valid contract spelled out.
+    #[test]
+    fn declared_read_contracts_reject_mistyped_entries() -> Result<(), Box<dyn std::error::Error>> {
+        for (entry, needle) in [
+            (
+                r#"{ type = "glob", paths = ["a"], reason = "r" }"#,
+                "takes type `\"paths\"`, `\"script\"`, or `\"unresolved\"`",
+            ),
+            (
+                r#"{ type = 7, paths = ["a"], reason = "r" }"#,
+                "a contract type string",
+            ),
+            (
+                r#"{ paths = ["a"], reason = "r", script = "s.sh" }"#,
+                "for a `\"paths\"` contract, found `script`",
+            ),
+            (
+                r#"{ paths = ["a"], reason = "r", limitation = "l" }"#,
+                "for a `\"paths\"` contract, found `limitation`",
+            ),
+            (
+                r#"{ type = "script", paths = ["a"], reason = "r" }"#,
+                "needs a non-empty `script`",
+            ),
+            (
+                r#"{ type = "script", script = "/bin/x.sh", paths = ["a"], reason = "r" }"#,
+                "a script outside the repository",
+            ),
+            (
+                r#"{ type = "script", script = "../x.sh", paths = ["a"], reason = "r" }"#,
+                "a script outside the repository",
+            ),
+            (
+                r#"{ type = "script", script = "[", paths = ["a"], reason = "r" }"#,
+                "an invalid watch glob",
+            ),
+            (
+                r#"{ type = "unresolved", paths = ["a"], reason = "r" }"#,
+                "needs a non-empty `limitation`",
+            ),
+            (
+                r#"{ type = "unresolved", paths = ["a"], reason = "r", limitation = "  " }"#,
+                "needs a non-empty `limitation`",
+            ),
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("a mistyped entry must fail: {entry}");
+            };
+            assert!(error.to_string().contains(needle), "entry {entry}: {error}");
+        }
+        Ok(())
+    }
+
+    /// A script contract never requires its script to exist: the path is
+    /// data unioned into the watch set, never executed during discovery —
+    /// a build-generated script is legitimate.
+    #[test]
+    fn declared_script_contract_ignores_script_existence() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let value: toml::Value = toml::from_str(
+            r#""a" = [ { type = "script", script = "scripts/does-not-exist.sh", paths = [], reason = "generated at build time" } ]"#,
+        )?;
+        let reads = parse_declared_reads("reads", &value)?;
+        assert_eq!(
+            reads
+                .get("a")
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry.script.as_deref()),
+            Some("scripts/does-not-exist.sh")
+        );
+        Ok(())
     }
 }

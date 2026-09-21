@@ -1359,6 +1359,11 @@ pub(crate) fn need_record(need: &PreparedToolNeed) -> String {
     )
 }
 
+/// The caller-input records for every need, in declaration order.
+pub(crate) fn need_records(needs: &[PreparedToolNeed]) -> Vec<String> {
+    needs.iter().map(need_record).collect()
+}
+
 /// The exact-key expression a consumer restores: the requested identity with
 /// the platform ABI and the current run id interpolated by the runner. An
 /// exact current-run producer output hits this key.
@@ -1967,7 +1972,7 @@ mod tests {
             .iter()
             .any(|(path, _, executable)| { *path == "bin/test-runner" && *executable }));
         let root =
-            std::env::temp_dir().join(format!("velnor-prepared-tool-{}", std::process::id()));
+            std::env::temp_dir().join(format!("velnor-prepared-tool-{}", crate::unique_suffix()));
         let _ = std::fs::remove_dir_all(&root);
         must(std::fs::create_dir_all(&root), "fixture root");
         let destination = root.join("tool");

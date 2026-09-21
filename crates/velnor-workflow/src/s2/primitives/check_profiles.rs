@@ -441,6 +441,15 @@ fn render_profile_job(
     if !profile.needs.is_empty() {
         let _ = writeln!(output, "    needs: [{}]", profile.needs.join(", "));
     }
+    // A Velnor profile mounts the checkout and runs named tasks, so it
+    // skips fork and bot pull requests exactly like any other local job.
+    if profile.runner.as_str() == "velnor" {
+        let _ = writeln!(
+            output,
+            "    if: ${{{{ ({}) }}}}",
+            super::ir::WorkflowIr::trusted_event_expression()
+        );
+    }
     let runs_on = profile_runs_on(config, profile)?;
     let _ = writeln!(output, "    runs-on: {runs_on}");
     let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
@@ -454,7 +463,7 @@ fn render_profile_job(
         }
     }
     output.push_str("    steps:\n");
-    render_checkout_step(output);
+    render_checkout_step(output, profile.full_history);
     render_tool_steps(output, config, profile);
     for task in &profile.tasks {
         let _ = writeln!(
@@ -486,11 +495,19 @@ fn profile_runs_on(
     }
 }
 
-fn render_checkout_step(output: &mut String) {
+fn render_checkout_step(output: &mut String, full_history: bool) {
     let checkout = ActionPin::Checkout.reference();
+    // Profile jobs are standalone: no `inputs` indirection, so a deep
+    // profile renders the static depth and every other profile keeps
+    // today's exact bytes.
+    let fetch_depth = if full_history {
+        "\n          fetch-depth: 0"
+    } else {
+        ""
+    };
     let _ = writeln!(
         output,
-        "      - name: Checkout repository\n        uses: {checkout}\n        with:\n          persist-credentials: false"
+        "      - name: Checkout repository\n        uses: {checkout}\n        with:\n          persist-credentials: false{fetch_depth}"
     );
 }
 
@@ -505,24 +522,25 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
         if !profile.tools.is_empty() {
             let _ = writeln!(
                 output,
-                "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes install \"${{tools[@]}}\"",
+                "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes --locked install \"${{tools[@]}}\"",
                 yaml_scalar(&profile.tools.join(" "))
             );
         }
         return;
     }
-    if !profile.tools.is_empty() {
+    if profile.tools.is_empty() {
+        let _ = writeln!(
+            output,
+            "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false"
+        );
+    } else {
         let trusted = super::trusted_cache_save_expression(&config.default_branch);
         let _ = writeln!(
             output,
-            "      - name: Set up Mise tools\n        uses: {mise}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
+            "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
             yaml_scalar(&profile.tools.join(" "))
         );
     }
-    let _ = writeln!(
-        output,
-        "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false"
-    );
 }
 
 fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
@@ -578,6 +596,7 @@ mod tests {
             artifacts: Vec::new(),
             advisory: false,
             env: BTreeMap::new(),
+            full_history: false,
         }
     }
 
@@ -601,10 +620,6 @@ mod tests {
                 crate::s2::provider::ProviderId::Velnor,
             ]),
             automatic_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::GithubHosted,
-                crate::s2::provider::ProviderId::Velnor,
-            ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::GithubHosted,
                 crate::s2::provider::ProviderId::Velnor,
             ]),
@@ -632,6 +647,7 @@ mod tests {
             docs_reason: String::new(),
             docs: None,
             check_profiles: profiles,
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),
@@ -645,6 +661,7 @@ mod tests {
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: true,
             mise_lock_keys: std::collections::BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),
@@ -701,6 +718,77 @@ mod tests {
         assert!(
             advisory.contains("continue-on-error: true"),
             "an advisory job reports without gating: {advisory}"
+        );
+    }
+
+    #[test]
+    fn deep_profile_checks_out_full_history_while_default_stays_shallow() {
+        let config = profile_config(vec![profile("smoke")]);
+        let mut shallow = String::new();
+        must(
+            render_profile_job(&mut shallow, &config, &config.check_profiles[0]),
+            "render the shallow job",
+        );
+        assert!(
+            !shallow.contains("fetch-depth"),
+            "a default profile carries no fetch-depth key: {shallow}"
+        );
+        let checkout = format!(
+            "      - name: Checkout repository\n        uses: {}\n        with:\n          persist-credentials: false\n",
+            ActionPin::Checkout.reference()
+        );
+        assert!(
+            shallow.contains(&checkout),
+            "the shallow checkout keeps today's exact bytes: {shallow}"
+        );
+        let mut deep_spec = profile("perf");
+        deep_spec.full_history = true;
+        let deep_config = profile_config(vec![deep_spec]);
+        let mut deep = String::new();
+        must(
+            render_profile_job(&mut deep, &deep_config, &deep_config.check_profiles[0]),
+            "render the deep job",
+        );
+        assert!(
+            deep.contains("          fetch-depth: 0\n"),
+            "a deep profile clones full history: {deep}"
+        );
+    }
+
+    #[test]
+    fn mixed_profiles_keep_independent_checkout_depths() {
+        let mut perf = profile("perf");
+        perf.full_history = true;
+        let strict = profile("perf-strict");
+        let config = profile_config(vec![perf, strict]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select every profile",
+        );
+        let workflow = render(&config, None, &selected);
+        assert_eq!(
+            workflow.matches("fetch-depth: 0").count(),
+            1,
+            "exactly the deep profile clones full history: {workflow}"
+        );
+        let mut deep = String::new();
+        must(
+            render_profile_job(&mut deep, &config, &config.check_profiles[0]),
+            "render perf",
+        );
+        assert!(
+            deep.contains("fetch-depth: 0"),
+            "perf clones full history: {deep}"
+        );
+        let mut shallow = String::new();
+        must(
+            render_profile_job(&mut shallow, &config, &config.check_profiles[1]),
+            "render perf-strict",
+        );
+        assert!(
+            !shallow.contains("fetch-depth"),
+            "perf-strict stays shallow: {shallow}"
         );
     }
 
@@ -788,8 +876,16 @@ mod tests {
             workflow.contains("install_args: \"ripgrep cargo:example-tool\""),
             "{workflow}"
         );
+        assert_eq!(
+            workflow.matches(crate::ActionPin::Mise.reference()).count(),
+            1,
+            "one hosted profile owns one Mise bootstrap action: {workflow}"
+        );
         assert!(workflow.contains("MISE_TOOLS: ripgrep"), "{workflow}");
-        assert!(workflow.contains("mise --yes install"), "{workflow}");
+        assert!(
+            workflow.contains("mise --yes --locked install \"${tools[@]}\""),
+            "{workflow}"
+        );
         let mut bare_job = String::new();
         must(
             render_profile_job(&mut bare_job, &config, &config.check_profiles[2]),
@@ -919,7 +1015,7 @@ mod tests {
         apple.runner = "macos".to_owned();
         assert_eq!(
             must(profile_runs_on(&config, &apple), "render the Apple runner"),
-            "macos-15"
+            "macos-26"
         );
         let mut unknown = profile("unknown");
         unknown.runner = "planetary".to_owned();

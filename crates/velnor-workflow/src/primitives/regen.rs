@@ -37,12 +37,16 @@ impl Primitive for RegenGate {
             let mut unit = (*unit).clone();
             // The gate runs before anything else, and only once: a declared
             // command that the unit already carries is left where it is.
+            // Inserting shifts every position, so a unit that gains the gate
+            // drops its phase tags and verifies through the single legacy
+            // step, gate first.
             if !unit
                 .pr_commands
                 .iter()
                 .any(|candidate| candidate == &command)
             {
                 unit.pr_commands.insert(0, command.clone());
+                unit.clear_phases();
             }
             if !unit
                 .full_commands
@@ -50,6 +54,7 @@ impl Primitive for RegenGate {
                 .any(|candidate| candidate == &command)
             {
                 unit.full_commands.insert(0, command.clone());
+                unit.clear_phases();
             }
             units.push(unit);
         }

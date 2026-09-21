@@ -37,6 +37,16 @@ pub enum DemandState {
     Acquired,
     /// `acquirejobs` transport failed after send; may-or-may-not be ours.
     Uncertain,
+    /// Upstream canceled the assignment while an acquire batch is still
+    /// in flight or has an uncertain result. Keep occupancy until acquire
+    /// reconciliation proves whether the runner took ownership.
+    CanceledPending,
+    /// A pending cancellation was reconciled as successfully acquired;
+    /// terminal cleanup must run before releasing the held permit.
+    CanceledAcquired,
+    /// A canceled attempt was confirmed unacquired. It cannot be offered
+    /// again under this request ID; finish closing its global demand.
+    CanceledDone,
     /// Provision intent persisted; worker lane owns creation.
     ProvisionIntent,
     /// Terminally refused with a reason; never re-offered by us.
@@ -55,6 +65,9 @@ impl DemandState {
             Self::AcquireIntent => "acquire_intent",
             Self::Acquired => "acquired",
             Self::Uncertain => "uncertain",
+            Self::CanceledPending => "canceled_pending",
+            Self::CanceledAcquired => "canceled_acquired",
+            Self::CanceledDone => "canceled_done",
             Self::ProvisionIntent => "provision_intent",
             Self::Declined => "declined",
             Self::Terminal => "terminal",
@@ -69,6 +82,9 @@ impl DemandState {
             "acquire_intent" => Ok(Self::AcquireIntent),
             "acquired" => Ok(Self::Acquired),
             "uncertain" => Ok(Self::Uncertain),
+            "canceled_pending" => Ok(Self::CanceledPending),
+            "canceled_acquired" => Ok(Self::CanceledAcquired),
+            "canceled_done" => Ok(Self::CanceledDone),
             "provision_intent" => Ok(Self::ProvisionIntent),
             "declined" => Ok(Self::Declined),
             "terminal" => Ok(Self::Terminal),
@@ -85,6 +101,8 @@ impl DemandState {
                 | Self::AcquireIntent
                 | Self::Acquired
                 | Self::Uncertain
+                | Self::CanceledPending
+                | Self::CanceledAcquired
                 | Self::ProvisionIntent
         )
     }
@@ -160,6 +178,31 @@ fn is_pull_request_event(event: &str) -> bool {
 
 fn is_workflow_run_event(event: &str) -> bool {
     event.eq_ignore_ascii_case("workflow_run")
+}
+
+/// Resolve a stable non-negative 64-bit request ID from a job message.
+///
+/// Upstream Actions Service transmits `runnerRequestId` on job offers.
+/// When direct scale-set assignment is active, `runnerRequestId` may be 0,
+/// but `jobId` (GUID) is consistently transmitted across `JobAssigned`,
+/// `JobStarted`, and `JobCompleted`. We project non-zero `runnerRequestId`
+/// when present, else hash `jobId` stably.
+#[must_use]
+pub fn resolve_job_request_id(base: &velnor_model::ScaleSetJobMessage) -> i64 {
+    if base.runner_request_id != 0 {
+        base.runner_request_id
+    } else if !base.job_id.is_empty() {
+        let val = crate::scaleset::intents::stable_i64(&base.job_id);
+        if val != 0 {
+            val
+        } else {
+            1
+        }
+    } else if base.workflow_run_id != 0 {
+        base.workflow_run_id
+    } else {
+        1
+    }
 }
 
 /// Classify one offer. Pure over the offer: no I/O, no clock.
@@ -330,6 +373,61 @@ impl DemandStore {
             return Ok(SubmitOutcome::Redelivered { state });
         }
         Ok(SubmitOutcome::Inserted { sequence })
+    }
+
+    /// Record an assigned job directly into `scaleset_demand`.
+    ///
+    /// When GitHub directly assigns a job (`JobAssigned`) without a prior
+    /// `JobAvailable` offer, the row is recorded in `DemandState::Acquired`
+    /// so that the provision pass can provision an ephemeral runner for it.
+    pub fn submit_assigned(
+        &mut self,
+        scale_set_id: i32,
+        assigned: &velnor_model::ScaleSetJobAssigned,
+        generation: u64,
+    ) -> Result<(i64, DemandState)> {
+        let request_id = resolve_job_request_id(&assigned.base);
+        if let Some(existing) = self.get(request_id)? {
+            return Ok((request_id, existing.state));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin demand submit_assigned transaction")?;
+        let sequence: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM scaleset_demand",
+                [],
+                |row| row.get(0),
+            )
+            .context("allocate demand sequence")?;
+        let now = Self::now_rfc3339();
+        let labels_hash = crate::scaleset::intents::labels_hash(&assigned.base.request_labels);
+        let job_id_hash = crate::scaleset::intents::stable_i64(&assigned.base.job_id);
+        tx.execute(
+            "INSERT OR IGNORE INTO scaleset_demand
+             (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+              repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                request_id,
+                scale_set_id,
+                now,
+                sequence,
+                DemandState::Acquired.as_str(),
+                Option::<String>::None,
+                assigned.base.owner_name,
+                assigned.base.repository_name,
+                job_id_hash,
+                labels_hash,
+                i64::try_from(generation).unwrap_or(i64::MAX),
+                now,
+                assigned.base.event_name,
+            ],
+        )
+        .context("insert demand row for assigned job")?;
+        tx.commit().context("commit demand submit_assigned")?;
+        Ok((request_id, DemandState::Acquired))
     }
 
     /// Fetch one demand row by request ID.

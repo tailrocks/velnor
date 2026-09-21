@@ -7,11 +7,6 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      providers:
-        description: Comma-separated provider subset (release publishes from github-hosted)
-        required: false
-        default: github-hosted
-        type: string
       existing-image-digest:
         description: Exact OCI index digest for an explicitly verified failed-run recovery.
         type: string
@@ -26,34 +21,6 @@ permissions:
   contents: read
 
 jobs:
-  admit-provider:
-    name: Control / Admit release
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Reject Velnor-only native release
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{0},', github.event.inputs.providers), ',github-hosted,') }}
-        run: |
-          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2
-          exit 1
-      - name: Reject local providers on tag dispatch
-        if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && (contains(format(',{0},', github.event.inputs.providers), ',velnor,') || contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) }}
-        run: |
-          echo 'tag dispatch publishes github-hosted only; use a tag push for full provider scope' >&2
-          exit 1
-      - name: Declare release provider scope
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          PROVIDERS: ${{ github.event.inputs.providers }}
-        run: |
-          set -euo pipefail
-          scope="${PROVIDERS:-github-hosted}"
-          echo "release provider scope: $scope"
-          case ",$scope," in
-            *,velnor,*|*,github-self-hosted,*) echo 'full provider scope includes local lanes' ;;
-            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (local qualification deferred)' ;;
-          esac
-
   verify:
     name: Control / Verify release
     outputs:
@@ -70,9 +37,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -114,9 +81,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Restore "Bun package (velnor)" cache
@@ -161,13 +128,37 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Expose GitHub Actions runtime
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Restore Docker build seed
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .velnor-docker-cache
+          key: velnor-docker-seed-v3-7e67216c9e23-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
+          restore-keys: |
+            velnor-docker-seed-v3-7e67216c9e23-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
+            velnor-docker-seed-v3-7e67216c9e23-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-
+      - name: Prepare Docker build seed context
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-docker-cache/seed
+          if compgen -G ".velnor-docker-cache/seed/*" > /dev/null; then
+            echo "Docker build seed restored:"
+            du -sh .velnor-docker-cache/seed/*
+          else
+            echo "Docker build seed empty: the build starts from cold cache mounts"
+          fi
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -204,9 +195,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Documentation cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -249,9 +240,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
@@ -299,9 +290,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -320,15 +311,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-ec62b8b58bab-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-${{ hashFiles('.cargo/audit.toml', '.cargo/deny.toml', 'Cargo.lock', 'audit.toml', 'deny.toml') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-fe8982552e68-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-${{ hashFiles('.cargo/audit.toml', '.cargo/deny.toml', 'Cargo.lock', 'audit.toml', 'deny.toml') }}
           restore-keys: |
-            velnor-mbx-v3-ec62b8b58bab-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-
-            velnor-mbx-v3-ec62b8b58bab-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-
+            velnor-mbx-v3-fe8982552e68-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-
+            velnor-mbx-v3-fe8982552e68-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-
           save-on-workflow-dispatch: true
       - name: Restore cargo bin toolchain
         id: cargo-bin-toolchain
@@ -454,9 +445,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -481,15 +472,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-f75156e9e834-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('mise.lock', 'tools/unit-collector/**/*.rs', 'tools/unit-collector/benches/**', 'tools/unit-collector/examples/**', 'tools/unit-collector/src/**', 'tools/unit-collector/tests/**', 'tools/unit-collector/tests/fixtures/dependency-bump.jsonl', 'tools/unit-collector/tests/fixtures/fresh.jsonl', 'tools/unit-collector/tests/fixtures/touched-source.jsonl') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-42873ff80729-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('mise.lock', 'tools/unit-collector/**/*.rs', 'tools/unit-collector/benches/**', 'tools/unit-collector/examples/**', 'tools/unit-collector/src/**', 'tools/unit-collector/tests/**', 'tools/unit-collector/tests/fixtures/dependency-bump.jsonl', 'tools/unit-collector/tests/fixtures/fresh.jsonl', 'tools/unit-collector/tests/fixtures/touched-source.jsonl') }}
           restore-keys: |
-            velnor-mbx-v3-f75156e9e834-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-f75156e9e834-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-unit-collector-
+            velnor-mbx-v3-42873ff80729-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-42873ff80729-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-unit-collector-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -560,7 +551,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (unit-collector)" checks
+      - name: Formatting check ("Rust crate (unit-collector)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-unit-collector
@@ -570,7 +561,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector --phase fmt
+
+      - name: Clippy check ("Rust crate (unit-collector)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-unit-collector
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector --phase clippy
+
+      - name: Tests ("Rust crate (unit-collector)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-unit-collector
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector --phase test
+
+      - name: Doctests ("Rust crate (unit-collector)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-unit-collector
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector --phase doctest
 
   release-github-hosted-rust-velnor-bench:
     name: "github-hosted / Rust / rust-velnor-bench"
@@ -586,9 +613,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -613,15 +640,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-9874c4732ec4-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-bench/**/*.rs', 'crates/velnor-bench/benches/**', 'crates/velnor-bench/examples/**', 'crates/velnor-bench/src/**', 'crates/velnor-bench/tests/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-9204e859dced-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-bench/**/*.rs', 'crates/velnor-bench/benches/**', 'crates/velnor-bench/examples/**', 'crates/velnor-bench/src/**', 'crates/velnor-bench/tests/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-9874c4732ec4-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-9874c4732ec4-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-bench-
+            velnor-mbx-v3-9204e859dced-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-9204e859dced-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-bench-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -692,7 +719,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-bench)" checks
+      - name: Formatting check ("Rust crate (velnor-bench)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-bench
@@ -702,7 +729,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-bench)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-bench
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench --phase clippy
+
+      - name: Tests ("Rust crate (velnor-bench)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-bench
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench --phase test
+
+      - name: Doctests ("Rust crate (velnor-bench)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-bench
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench --phase doctest
 
   release-github-hosted-rust-velnor-client:
     name: "github-hosted / Rust / rust-velnor-client"
@@ -718,9 +781,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -745,15 +808,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-d7ddd7df48d1-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-c0e76007e2ac-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-d7ddd7df48d1-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-d7ddd7df48d1-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-client-
+            velnor-mbx-v3-c0e76007e2ac-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-c0e76007e2ac-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-client-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -824,7 +887,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-client)" checks
+      - name: Formatting check ("Rust crate (velnor-client)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-client
@@ -834,7 +897,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-client)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-client
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client --phase clippy
+
+      - name: Tests ("Rust crate (velnor-client)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-client
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client --phase test
+
+      - name: Doctests ("Rust crate (velnor-client)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-client
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client --phase doctest
 
   release-github-hosted-rust-velnor-control:
     name: "github-hosted / Rust / rust-velnor-control"
@@ -850,9 +949,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -877,15 +976,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-fed6b5542fa2-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-control-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-b3f51a63e390-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-control-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-fed6b5542fa2-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-control-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-fed6b5542fa2-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-control-
+            velnor-mbx-v3-b3f51a63e390-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-control-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-b3f51a63e390-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-control-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -956,7 +1055,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-control)" checks
+      - name: Formatting check ("Rust crate (velnor-control)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-control
@@ -966,7 +1065,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-control)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-control
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control --phase clippy
+
+      - name: Tests ("Rust crate (velnor-control)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-control
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control --phase test
+
+      - name: Doctests ("Rust crate (velnor-control)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-control
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control --phase doctest
 
   release-github-hosted-rust-velnor-model:
     name: "github-hosted / Rust / rust-velnor-model"
@@ -982,9 +1117,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1009,15 +1144,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-6caac7864631-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-model-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-ac0e80cc51da-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-model-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-6caac7864631-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-model-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-6caac7864631-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-model-
+            velnor-mbx-v3-ac0e80cc51da-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-model-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-ac0e80cc51da-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-model-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -1088,7 +1223,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-model)" checks
+      - name: Formatting check ("Rust crate (velnor-model)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-model
@@ -1098,7 +1233,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-model)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-model
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model --phase clippy
+
+      - name: Tests ("Rust crate (velnor-model)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-model
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model --phase test
+
+      - name: Doctests ("Rust crate (velnor-model)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-model
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model --phase doctest
 
   release-github-hosted-rust-velnor-render:
     name: "github-hosted / Rust / rust-velnor-render"
@@ -1114,9 +1285,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1141,15 +1312,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-81e65c6ca644-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-render-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-render/**/*.rs', 'crates/velnor-render/benches/**', 'crates/velnor-render/examples/**', 'crates/velnor-render/src/**', 'crates/velnor-render/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-627bcc53ad13-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-render-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-render/**/*.rs', 'crates/velnor-render/benches/**', 'crates/velnor-render/examples/**', 'crates/velnor-render/src/**', 'crates/velnor-render/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-81e65c6ca644-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-render-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-81e65c6ca644-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-render-
+            velnor-mbx-v3-627bcc53ad13-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-render-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-627bcc53ad13-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-render-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -1220,7 +1391,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-render)" checks
+      - name: Formatting check ("Rust crate (velnor-render)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-render
@@ -1230,7 +1401,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-render)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-render
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render --phase clippy
+
+      - name: Tests ("Rust crate (velnor-render)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-render
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render --phase test
+
+      - name: Doctests ("Rust crate (velnor-render)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-render
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render --phase doctest
 
   release-github-hosted-rust-velnor-runner:
     name: "github-hosted / Rust / rust-velnor-runner"
@@ -1246,9 +1453,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1273,15 +1480,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -1352,7 +1559,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-runner)" checks
+      - name: Formatting check ("Rust crate (velnor-runner)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-runner
@@ -1362,7 +1569,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-runner)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-runner
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner --phase clippy
+
+      - name: Tests ("Rust crate (velnor-runner)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-runner
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner --phase test
+
+      - name: Doctests ("Rust crate (velnor-runner)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-runner
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner --phase doctest
 
   release-github-hosted-rust-velnor-tools:
     name: "github-hosted / Rust / rust-velnor-tools"
@@ -1378,9 +1621,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1405,15 +1648,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-64c5561b2930-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/src/manifest.rs', 'crates/velnor-tools/**/*.rs', 'crates/velnor-tools/benches/**', 'crates/velnor-tools/examples/**', 'crates/velnor-tools/src/**', 'crates/velnor-tools/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-ed56b5dcf3d7-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/src/manifest.rs', 'crates/velnor-tools/**/*.rs', 'crates/velnor-tools/benches/**', 'crates/velnor-tools/examples/**', 'crates/velnor-tools/src/**', 'crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/checks/jackin-project_jackin-agent-smith/pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0/check-runs/page-0001.body.base64', 'crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/runs/tailrocks_holla-apt/run-35079189599/attempt-1/jobs/page-0001.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-corpus-20260920-080318/corpus.zip.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/dco-2.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/github-actions.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/sonarqubecloud.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/homebrew-96059348318.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108219979.body.base64', 'crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108227551.body.base64', 'crates/velnor-tools/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-64c5561b2930-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-64c5561b2930-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-
+            velnor-mbx-v3-ed56b5dcf3d7-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-ed56b5dcf3d7-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-tools-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -1484,7 +1727,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-tools)" checks
+      - name: Formatting check ("Rust crate (velnor-tools)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-tools
@@ -1494,7 +1737,31 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-tools
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-tools --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-tools)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-tools
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-tools --phase clippy
+
+      - name: Tests ("Rust crate (velnor-tools)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-tools
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-tools --phase test
 
   release-github-hosted-rust-velnor-workflow:
     name: "github-hosted / Rust / rust-velnor-workflow"
@@ -1510,9 +1777,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1537,15 +1804,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-a1e6d261b1d9-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('Dockerfile', 'config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnor-workflow/**/*.rs', 'crates/velnor-workflow/README.md', 'crates/velnor-workflow/benches/**', 'crates/velnor-workflow/build.rs', 'crates/velnor-workflow/examples/**', 'crates/velnor-workflow/src/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnor-workflow/templates/**', 'crates/velnor-workflow/templates/release-package-signer.yml', 'crates/velnor-workflow/tests/**', 'crates/velnor-workflow/tests/generic_surface_literals.rs', 'docker/build-mise.*', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-8ca12b20166c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('Dockerfile', 'config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnor-workflow/**/*.rs', 'crates/velnor-workflow/README.md', 'crates/velnor-workflow/benches/**', 'crates/velnor-workflow/build.rs', 'crates/velnor-workflow/examples/**', 'crates/velnor-workflow/src/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnor-workflow/templates/**', 'crates/velnor-workflow/templates/release-package-signer.yml', 'crates/velnor-workflow/tests/**', 'crates/velnor-workflow/tests/generic_surface_literals.rs', 'docker/build-mise.*', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-a1e6d261b1d9-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-a1e6d261b1d9-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-
+            velnor-mbx-v3-8ca12b20166c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-8ca12b20166c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -1616,6 +1883,15 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
+      - name: Fetch D19 pin history
+        run: |
+          set -euo pipefail
+          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
+          test "$pin" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }
+          if ! git cat-file -e "$pin^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$pin"
+          fi
+
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
@@ -1642,9 +1918,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1669,15 +1945,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-3b2aa59909ca-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-contract-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-workflow-contract/**/*.rs', 'crates/velnor-workflow-contract/Cargo.lock', 'crates/velnor-workflow-contract/benches/**', 'crates/velnor-workflow-contract/examples/**', 'crates/velnor-workflow-contract/src/**', 'crates/velnor-workflow-contract/tests/**', 'mise.lock') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-6af73ff64799-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-contract-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-workflow-contract/**/*.rs', 'crates/velnor-workflow-contract/Cargo.lock', 'crates/velnor-workflow-contract/benches/**', 'crates/velnor-workflow-contract/examples/**', 'crates/velnor-workflow-contract/src/**', 'crates/velnor-workflow-contract/tests/**', 'mise.lock') }}
           restore-keys: |
-            velnor-mbx-v3-3b2aa59909ca-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-contract-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-3b2aa59909ca-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-contract-
+            velnor-mbx-v3-6af73ff64799-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-contract-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-6af73ff64799-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-contract-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -1748,7 +2024,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnor-workflow-contract)" checks
+      - name: Formatting check ("Rust crate (velnor-workflow-contract)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow-contract
@@ -1758,7 +2034,31 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow-contract
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow-contract --phase fmt
+
+      - name: Clippy check ("Rust crate (velnor-workflow-contract)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-workflow-contract
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow-contract --phase clippy
+
+      - name: Tests ("Rust crate (velnor-workflow-contract)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnor-workflow-contract
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow-contract --phase test
 
   release-github-hosted-rust-velnorctl:
     name: "github-hosted / Rust / rust-velnorctl"
@@ -1774,9 +2074,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1801,15 +2101,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-f9bd0478a352-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-render/**/*.rs', 'crates/velnor-render/benches/**', 'crates/velnor-render/examples/**', 'crates/velnor-render/src/**', 'crates/velnor-render/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/canary.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnorctl/**/*.rs', 'crates/velnorctl/benches/**', 'crates/velnorctl/examples/**', 'crates/velnorctl/src/**', 'crates/velnorctl/tests/**', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-6a1deaf2af9c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-render/**/*.rs', 'crates/velnor-render/benches/**', 'crates/velnor-render/examples/**', 'crates/velnor-render/src/**', 'crates/velnor-render/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/canary.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnorctl/**/*.rs', 'crates/velnorctl/benches/**', 'crates/velnorctl/examples/**', 'crates/velnorctl/src/**', 'crates/velnorctl/tests/**', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-f9bd0478a352-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-f9bd0478a352-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnorctl-
+            velnor-mbx-v3-6a1deaf2af9c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-6a1deaf2af9c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnorctl-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -1880,7 +2180,7 @@ jobs:
           mkdir -p .velnor-ci-selection
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Run "Rust crate (velnorctl)" checks
+      - name: Formatting check ("Rust crate (velnorctl)")
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnorctl
@@ -1890,7 +2190,43 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl --phase fmt
+
+      - name: Clippy check ("Rust crate (velnorctl)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnorctl
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl --phase clippy
+
+      - name: Tests ("Rust crate (velnorctl)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnorctl
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl --phase test
+
+      - name: Doctests ("Rust crate (velnorctl)")
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: rust-velnorctl
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl --phase doctest
 
   release-github-hosted-rust-production-topology:
     name: "github-hosted / Rust / rust-production-topology"
@@ -1906,9 +2242,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1931,15 +2267,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-84d1e28baf02-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ hashFiles('./**/*.rs', 'crates/velnor-runner/**', 'docker/**', 'microvm/**', 'mise.lock', 'scripts/check-release-feature-boundary.sh', 'scripts/test-check-release-feature-boundary.sh') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-4f81dcee4c93-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ hashFiles('./**/*.rs', 'crates/velnor-runner/**', 'docker/**', 'microvm/**', 'mise.lock', 'scripts/check-release-feature-boundary.sh', 'scripts/test-check-release-feature-boundary.sh') }}
           restore-keys: |
-            velnor-mbx-v3-84d1e28baf02-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
-            velnor-mbx-v3-84d1e28baf02-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-production-topology-
+            velnor-mbx-v3-4f81dcee4c93-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
+            velnor-mbx-v3-4f81dcee4c93-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-production-topology-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -2022,924 +2358,10 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-production-topology
 
-  release-velnor-bun-velnor:
-    name: "velnor / Bun / bun-velnor"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Bun package (velnor)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: bun-velnor
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit bun-velnor
-
-  release-velnor-docker:
-    name: "velnor / Docker / docker"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run Docker checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: docker
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-          GITHUB_TOKEN: ${{ github.token }}
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docker
-
-  release-velnor-docs:
-    name: "velnor / Documentation / docs"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run Documentation checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: docs
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docs
-
-  release-velnor-opentofu:
-    name: "velnor / OpenTofu / opentofu"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run OpenTofu checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: opentofu
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit opentofu
-
-  release-velnor-rust-policy:
-    name: "velnor / Rust / rust-policy"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:EmbarkStudios/cargo-deny
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust dependency policy" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-policy
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-policy
-
-  release-velnor-rust-unit-collector:
-    name: "velnor / Rust / rust-unit-collector"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='tools/unit-collector'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (unit-collector)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-unit-collector
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector
-
-  release-velnor-rust-velnor-bench:
-    name: "velnor / Rust / rust-velnor-bench"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-model, release-velnor-rust-velnor-runner]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-bench'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-bench)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-bench
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench
-
-  release-velnor-rust-velnor-client:
-    name: "velnor / Rust / rust-velnor-client"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-model]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-client'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-client)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-client
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client
-
-  release-velnor-rust-velnor-control:
-    name: "velnor / Rust / rust-velnor-control"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-model]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-control'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-control)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-control
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control
-
-  release-velnor-rust-velnor-model:
-    name: "velnor / Rust / rust-velnor-model"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-model'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-model)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-model
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model
-
-  release-velnor-rust-velnor-render:
-    name: "velnor / Rust / rust-velnor-render"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-model]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-render'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-render)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-render
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render
-
-  release-velnor-rust-velnor-runner:
-    name: "velnor / Rust / rust-velnor-runner"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-runner'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-runner)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-runner
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner
-
-  release-velnor-rust-velnor-tools:
-    name: "velnor / Rust / rust-velnor-tools"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-model]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-tools'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-tools)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-tools
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-tools
-
-  release-velnor-rust-velnor-workflow:
-    name: "velnor / Rust / rust-velnor-workflow"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-runner]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Provision pinned Velnor workflow policy runtime
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PINNED_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
-          CHECKOUT_PATH: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          if ! git -C "$CHECKOUT_PATH" cat-file -e "$PINNED_REVISION^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PINNED_REVISION"
-          fi
-          listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$PINNED_REVISION" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
-          test "$listing" != '' || { echo "::error::revision $PINNED_REVISION has no closure inputs" >&2; exit 1; }
-          if command -v sha256sum >/dev/null 2>&1; then
-            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
-          else
-            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | shasum -a 256 | awk '{print $1}')"
-          fi
-          binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
-          tag="velnor-workflow-runtime-v1-${closure:0:16}"
-          asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
-          temporary="$(mktemp -d)"
-          trap 'rm -rf "$temporary"' EXIT
-          if ! gh release download "$tag" --repo tailrocks/velnor --pattern manifest.json --dir "$temporary"; then
-            echo "::error::no policy runtime product for revision $PINNED_REVISION (closure ${closure:0:16}); the mainline runtime-product publisher builds it after merge" >&2
-            exit 1
-          fi
-          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
-          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
-          expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
-          existing=""
-          if [[ -x "$binary" ]]; then
-            if command -v sha256sum >/dev/null 2>&1; then
-              existing="$(sha256sum "$binary" | awk '{print $1}')"
-            else
-              existing="$(shasum -a 256 "$binary" | awk '{print $1}')"
-            fi
-          fi
-          if [[ "$existing" != "$expected" ]]; then
-            gh release download "$tag" --repo tailrocks/velnor --pattern "$asset" --dir "$temporary"
-            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
-            if command -v sha256sum >/dev/null 2>&1; then
-              actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
-            else
-              actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
-            fi
-            [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
-            install -Dm0755 "$temporary/$asset" "$binary"
-          fi
-          reported="$("$binary" --closure)"
-          [[ "$reported" == "$closure" ]] || { echo "::error::pinned workflow policy runtime reports closure $reported, expected $closure" >&2; exit 1; }
-          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-workflow'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-workflow)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-workflow
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow
-
-  release-velnor-rust-velnor-workflow-contract:
-    name: "velnor / Rust / rust-velnor-workflow-contract"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnor-workflow-contract'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnor-workflow-contract)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-workflow-contract
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow-contract
-
-  release-velnor-rust-velnorctl:
-    name: "velnor / Rust / rust-velnorctl"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model, release-velnor-rust-velnor-render, release-velnor-rust-velnor-runner]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='crates/velnorctl'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust crate (velnorctl)" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnorctl
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl
-
-  release-velnor-rust-production-topology:
-    name: "velnor / Rust / rust-production-topology"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    needs: [verify]
-    runs-on: [self-hosted, velnor-target-mvp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Mr. Boxington
-        id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Prepare Cargo sources
-        env:
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -euo pipefail
-          root='.'
-          if [[ "$root" != "." ]]; then
-            cd -- "$root"
-          fi
-          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo sources warm; skipping fetch"
-          else
-            cargo fetch --locked
-          fi
-      - name: Plan full release selection
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-        run: |
-          set -euo pipefail
-          mkdir -p .velnor-ci-selection
-          velnor-workflow plan --config .github/ci/project.toml
-
-      - name: Run "Rust production topology" checks
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-production-topology
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-production-topology
-
 
   build:
     name: Build / ${{ matrix.target }}
-    needs: [verify, image-admission, release-github-hosted-bun-velnor, release-github-hosted-docker, release-github-hosted-docs, release-github-hosted-opentofu, release-github-hosted-rust-policy, release-github-hosted-rust-unit-collector, release-github-hosted-rust-velnor-bench, release-github-hosted-rust-velnor-client, release-github-hosted-rust-velnor-control, release-github-hosted-rust-velnor-model, release-github-hosted-rust-velnor-render, release-github-hosted-rust-velnor-runner, release-github-hosted-rust-velnor-tools, release-github-hosted-rust-velnor-workflow, release-github-hosted-rust-velnor-workflow-contract, release-github-hosted-rust-velnorctl, release-github-hosted-rust-production-topology, release-velnor-bun-velnor, release-velnor-docker, release-velnor-docs, release-velnor-opentofu, release-velnor-rust-policy, release-velnor-rust-unit-collector, release-velnor-rust-velnor-bench, release-velnor-rust-velnor-client, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model, release-velnor-rust-velnor-render, release-velnor-rust-velnor-runner, release-velnor-rust-velnor-tools, release-velnor-rust-velnor-workflow, release-velnor-rust-velnor-workflow-contract, release-velnor-rust-velnorctl, release-velnor-rust-production-topology]
+    needs: [verify, image-admission, release-github-hosted-bun-velnor, release-github-hosted-docker, release-github-hosted-docs, release-github-hosted-opentofu, release-github-hosted-rust-policy, release-github-hosted-rust-unit-collector, release-github-hosted-rust-velnor-bench, release-github-hosted-rust-velnor-client, release-github-hosted-rust-velnor-control, release-github-hosted-rust-velnor-model, release-github-hosted-rust-velnor-render, release-github-hosted-rust-velnor-runner, release-github-hosted-rust-velnor-tools, release-github-hosted-rust-velnor-workflow, release-github-hosted-rust-velnor-workflow-contract, release-github-hosted-rust-velnorctl, release-github-hosted-rust-production-topology]
     strategy:
       fail-fast: false
       matrix:
@@ -2951,7 +2373,7 @@ jobs:
             provider: github-hosted
             runner: ubuntu-24.04
     runs-on: ubuntu-24.04
-    if: ${{ always() && needs.verify.result == 'success' && (needs.release-github-hosted-bun-velnor.result == 'success' && needs.release-github-hosted-docker.result == 'success' && needs.release-github-hosted-docs.result == 'success' && needs.release-github-hosted-opentofu.result == 'success' && needs.release-github-hosted-rust-policy.result == 'success' && needs.release-github-hosted-rust-unit-collector.result == 'success' && needs.release-github-hosted-rust-velnor-bench.result == 'success' && needs.release-github-hosted-rust-velnor-client.result == 'success' && needs.release-github-hosted-rust-velnor-control.result == 'success' && needs.release-github-hosted-rust-velnor-model.result == 'success' && needs.release-github-hosted-rust-velnor-render.result == 'success' && needs.release-github-hosted-rust-velnor-runner.result == 'success' && needs.release-github-hosted-rust-velnor-tools.result == 'success' && needs.release-github-hosted-rust-velnor-workflow.result == 'success' && needs.release-github-hosted-rust-velnor-workflow-contract.result == 'success' && needs.release-github-hosted-rust-velnorctl.result == 'success' && needs.release-github-hosted-rust-production-topology.result == 'success') && (github.event_name == 'workflow_dispatch' || (needs.release-velnor-bun-velnor.result == 'success' && needs.release-velnor-docker.result == 'success' && needs.release-velnor-docs.result == 'success' && needs.release-velnor-opentofu.result == 'success' && needs.release-velnor-rust-policy.result == 'success' && needs.release-velnor-rust-unit-collector.result == 'success' && needs.release-velnor-rust-velnor-bench.result == 'success' && needs.release-velnor-rust-velnor-client.result == 'success' && needs.release-velnor-rust-velnor-control.result == 'success' && needs.release-velnor-rust-velnor-model.result == 'success' && needs.release-velnor-rust-velnor-render.result == 'success' && needs.release-velnor-rust-velnor-runner.result == 'success' && needs.release-velnor-rust-velnor-tools.result == 'success' && needs.release-velnor-rust-velnor-workflow.result == 'success' && needs.release-velnor-rust-velnor-workflow-contract.result == 'success' && needs.release-velnor-rust-velnorctl.result == 'success' && needs.release-velnor-rust-production-topology.result == 'success')) && (github.event_name != 'workflow_dispatch' || (github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,') && !contains(format(',{0},', github.event.inputs.providers), ',velnor,'))) && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
+    if: ${{ always() && needs.verify.result == 'success' && (needs.release-github-hosted-bun-velnor.result == 'success' && needs.release-github-hosted-docker.result == 'success' && needs.release-github-hosted-docs.result == 'success' && needs.release-github-hosted-opentofu.result == 'success' && needs.release-github-hosted-rust-policy.result == 'success' && needs.release-github-hosted-rust-unit-collector.result == 'success' && needs.release-github-hosted-rust-velnor-bench.result == 'success' && needs.release-github-hosted-rust-velnor-client.result == 'success' && needs.release-github-hosted-rust-velnor-control.result == 'success' && needs.release-github-hosted-rust-velnor-model.result == 'success' && needs.release-github-hosted-rust-velnor-render.result == 'success' && needs.release-github-hosted-rust-velnor-runner.result == 'success' && needs.release-github-hosted-rust-velnor-tools.result == 'success' && needs.release-github-hosted-rust-velnor-workflow.result == 'success' && needs.release-github-hosted-rust-velnor-workflow-contract.result == 'success' && needs.release-github-hosted-rust-velnorctl.result == 'success' && needs.release-github-hosted-rust-production-topology.result == 'success') && (github.event_name == 'workflow_dispatch' || (true)) && (github.event_name != 'workflow_dispatch' || github.ref_type == 'tag') && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -2966,20 +2388,34 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Add Rust target
         run: rustup target add "${{ matrix.target }}"
+      - name: Install cross C toolchain
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or
+            # vendored openssl (sys/types.h / bits/libc-header-start.h).
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
+          fi
       - name: Build release binary
         env:
           CARGO_INCREMENTAL: "0"
           RUSTC_WRAPPER: sccache
           VELNOR_RELEASE_BUILD: "1"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: mbx build --locked --release --package velnor-runner --bin velnor-runner --features release-build --target "${{ matrix.target }}"
       - name: Package release binary
         env:
@@ -3016,7 +2452,7 @@ jobs:
           retention-days: 2
 
   image-admission:
-    needs: [admit-provider, verify]
+    needs: [verify]
     name: Admit immutable image tag
     timeout-minutes: 10
     runs-on: ubuntu-24.04
@@ -3079,7 +2515,7 @@ jobs:
 
   image-platform:
     name: Build ${{ matrix.arch }} GHCR image
-    needs: [admit-provider, verify, metadata, image-admission]
+    needs: [verify, metadata, image-admission]
     if: ${{ needs.image-admission.outputs.existing != 'true' && github.event_name != 'workflow_dispatch' }}
     timeout-minutes: 60
     strategy:
@@ -3133,15 +2569,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -3258,8 +2694,8 @@ jobs:
           retention-days: 2
 
   image:
-    if: ${{ always() && needs.admit-provider.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
-    needs: [admit-provider, verify, metadata, image-platform, image-admission]
+    if: ${{ always() && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
+    needs: [verify, metadata, image-platform, image-admission]
     name: Assemble one multi-platform GHCR image
     timeout-minutes: 15
     runs-on: ubuntu-24.04
@@ -3374,9 +2810,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3401,15 +2837,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -3527,15 +2963,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -3699,7 +3135,7 @@ jobs:
 
   debian:
     name: Build ${{ matrix.arch }} deb (release-build)
-    needs: [admit-provider, verify, build, metadata, guest-payload]
+    needs: [verify, build, metadata, guest-payload]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -3729,9 +3165,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          rev: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6737cdb3b90d5c2c039b2694b5862e3b163420d2" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3756,15 +3192,15 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0
         with:
           backend: github
           github-cache-mode: objects
-          version: 1.11.1
-          cache-key: velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          version: 1.12.0
+          cache-key: velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-91fc926cb724-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-8ec7f343ea18-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -3806,6 +3242,16 @@ jobs:
           mold --version | grep -F "$MOLD_VERSION"
       - name: Add Rust target
         run: rustup target add "$TARGET"
+      - name: Install cross C toolchain
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or
+            # vendored openssl (sys/types.h / bits/libc-header-start.h).
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
+          fi
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -3822,7 +3268,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-metadata
-          path: metadata
+          path: ${{ runner.temp }}/release-metadata
       - name: Download release binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3855,6 +3301,10 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           RUSTC_WRAPPER: sccache
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: |
           set -euo pipefail
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
@@ -3871,22 +3321,24 @@ jobs:
       - name: Stage acyclic identity files packaged into the deb
         run: |
           set -euo pipefail
-          test -s metadata/build-identity.json || { echo "::error::release metadata missing build-identity.json" >&2; exit 1; }
-          test -s metadata/manifest.json || { echo "::error::release metadata missing manifest.json" >&2; exit 1; }
-          jq -e '.source_sha and .crate_version' metadata/build-identity.json >/dev/null
-          jq -e 'type == "object"' metadata/manifest.json >/dev/null
+          metadata_dir="$RUNNER_TEMP/release-metadata"
+          test -s "$metadata_dir/build-identity.json" || { echo "::error::release metadata missing build-identity.json" >&2; exit 1; }
+          test -s "$metadata_dir/manifest.json" || { echo "::error::release metadata missing manifest.json" >&2; exit 1; }
+          jq -e '.source_sha and .crate_version' "$metadata_dir/build-identity.json" >/dev/null
+          jq -e 'type == "object"' "$metadata_dir/manifest.json" >/dev/null
           mkdir -p 'crates/velnor-runner/release'
-          cp metadata/build-identity.json metadata/manifest.json 'crates/velnor-runner/release'/
+          cp "$metadata_dir/build-identity.json" "$metadata_dir/manifest.json" 'crates/velnor-runner/release'/
       - name: Stage the deb's own package record
         run: |
           set -euo pipefail
-          chmod +x metadata/velnor-runner-release-tool
+          metadata_dir="$RUNNER_TEMP/release-metadata"
+          chmod +x "$metadata_dir/velnor-runner-release-tool"
           binary="target/$TARGET/release/velnor-runner"
           test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
           binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
-          manifest_sha256="$(sha256sum metadata/manifest.json | awk '{print $1}')"
-          manifest_version="$(jq -er '.version | numbers' metadata/manifest.json)"
-          source_sha=$(jq -er '.source_sha' metadata/build-identity.json)
+          manifest_sha256="$(sha256sum "$metadata_dir/manifest.json" | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' "$metadata_dir/manifest.json")"
+          source_sha=$(jq -er '.source_sha' "$metadata_dir/build-identity.json")
           jq -n \
             --arg schema "velnor.package-record/v1" \
             --arg repo 'tailrocks/velnor' \
@@ -3906,7 +3358,7 @@ jobs:
                        manifest_version: $mv, manifest_sha256: $mhash },
               architecture: { arch: $arch, target: $target, binary_sha256: $binary }
             }' > package-record.candidate.json
-          metadata/velnor-runner-release-tool release emit \
+          "$metadata_dir/velnor-runner-release-tool" release emit \
             --record package-record.candidate.json \
             --binary "$binary" \
             --out 'crates/velnor-runner/release'/package-record.json
@@ -4028,7 +3480,7 @@ jobs:
 
   publish:
     name: Control / Publish
-    needs: [admit-provider, verify, build, image, metadata, guest-payload, debian, sign-deb]
+    needs: [verify, build, image, metadata, guest-payload, debian, sign-deb]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: github-release

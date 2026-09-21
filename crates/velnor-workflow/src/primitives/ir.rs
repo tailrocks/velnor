@@ -28,11 +28,103 @@ use crate::{
     workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
     workflow_selection_file_materialize, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
     ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources, Unit, UnitKind,
-    VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
+    ValidationPhase, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
 pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+
+/// The plan job's expected-work artifact, by exact name. Same-run threading:
+/// the plan job uploads it, `ci-required` downloads it by this exact name
+/// from the same run, and the aggregate's SHA binding proves it is this
+/// plan's file before scoring anything.
+pub(crate) const EXPECTED_WORK_ARTIFACT: &str = "velnor-expected-work";
+
+/// The workspace-relative expected-work directory: the plan step creates it
+/// before invoking `plan`, so the runtime's write never needs a
+/// pre-existing dir — including under the pinned older product.
+pub(crate) const EXPECTED_WORK_DIR: &str = ".velnor-ci-expected-work";
+
+/// The workspace-relative expected-work file: the plan step writes it here
+/// (via [`EXPECTED_WORK_FILE_ENV`]) and the upload step publishes this path.
+/// It always lives directly inside [`EXPECTED_WORK_DIR`].
+pub(crate) const EXPECTED_WORK_FILE: &str = ".velnor-ci-expected-work/expected-work.json";
+
+/// The env var binding `plan` to its expected-work file. Spelled identically
+/// to the runtime's read; an older runtime ignores it and the upload step
+/// then fails the plan job loudly via `if-no-files-found`.
+pub(crate) const EXPECTED_WORK_FILE_ENV: &str = "VELNOR_EXPECTED_WORK_FILE";
+
+/// The per-record result artifact prefix. One artifact per concluded
+/// `(unit, lane)`: `{RESULT_ARTIFACT_PREFIX}{unit}-{lane}`.
+pub(crate) const RESULT_ARTIFACT_PREFIX: &str = "velnor-result-";
+
+/// The workspace-relative directory holding one record file per concluded
+/// `(unit, lane)` — in unit jobs the single file this job wrote, in
+/// `ci-required` the merged download of every record.
+pub(crate) const RESULT_DIR: &str = ".velnor-ci-results";
+
+/// The workspace-relative collected results file the aggregate scores: the
+/// merge of every downloaded record, or the empty set when no unit ran.
+pub(crate) const COLLECTED_RESULTS_FILE: &str = ".velnor-ci-results.json";
+
+/// The plan job's expected-work upload: the aggregate's half of the
+/// plan/aggregate cut. `if-no-files-found: error` keeps a plan that wrote no
+/// file (an older runtime, a truncated step) red instead of silently
+/// unbound.
+fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
+    format!(
+        "      - name: Publish expected work\n        uses: {upload_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_FILE}\n          if-no-files-found: error\n          retention-days: 7\n"
+    )
+}
+
+/// The `ci-required` aggregate steps, rendered before the shell verdict step.
+///
+/// Conjunction, never replacement: the aggregate verdict AND the shell
+/// verdict must both pass. The shell reasons over `needs.*.result` plus the
+/// admission predicates and guards the controls the aggregate cannot see
+/// (plan/policy/admission prerequisites, malformed plan outputs); the
+/// aggregate reasons over SHA-bound expected work plus per-record evidence
+/// the shell cannot see (duplicates, matrix completeness, prerequisite
+/// gating). Either side failing fails the check, so no previously-failing
+/// case newly passes.
+///
+/// `runtime_steps` provisions the `velnor-workflow` binary (the verified
+/// plan-artifact download on hosted control planes, the image runtime on
+/// Velnor). The results download tolerates zero artifacts — a no-work plan
+/// runs no unit jobs — because the aggregate fails a real-work plan with
+/// zero records anyway; every other step fails the check.
+fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
+    format!(
+        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+    )
+}
+
+/// The record tail of one collapsed lane verify job: exactly one result
+/// record per concluded `(unit, lane)`.
+///
+/// Collection discipline (exactly-once across retries, lanes, and splits):
+/// the record step runs `always()` on the job's own class gate only
+/// (`record_gate`: the dispatched unit's admission class, plus the executor
+/// partition when the kind splits one), so exactly one lane job of the kind
+/// records each dispatch; the upload overwrites its exact-name artifact, so
+/// a retried job replaces its one record instead of doubling it; and the
+/// aggregate still rejects duplicate keys, so a second producer of the same
+/// record fails closed instead of merging silently.
+///
+/// The outcome derives from `job.status`, which unit code cannot fake: the
+/// checks steps `exit` nonzero on failure, every live checks path runs at
+/// least one checks step for the dispatched unit, and anything but an
+/// all-green job records `failure` (`cancelled` stays `cancelled`). A
+/// skipped job records nothing, and the aggregate fails the missing record
+/// unless the plan expected no work. Records carry no `matrix` (the planner
+/// writes empty matrices: one unmatrixed verdict per lane) and no
+/// `reused_from` (no live reuse path; collection rejects any).
+fn render_unit_result_steps(upload_artifact_pin: &str, lane: &str, record_gate: &str) -> String {
+    format!(
+        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {lane}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          mkdir -p {RESULT_DIR}\n          jq -n --arg unit \"$VELNOR_RESULT_UNIT\" --arg lane \"$VELNOR_RESULT_LANE\" --arg outcome \"$outcome\" '{{results: [{{unit: $unit, lane: $lane, outcome: $outcome}}]}}' > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{lane}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{lane}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
+    )
+}
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
@@ -70,6 +162,7 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::process::Command;
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
@@ -167,6 +260,8 @@ mod tests {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -212,6 +307,140 @@ mod tests {
             pins: Pins::resolved(),
             mise_lock_keys: BTreeSet::new(),
             declared_ruleset_contexts: String::new(),
+        }
+    }
+
+    fn aggregate_fixture_nodes(ir: &WorkflowIr) -> Vec<GraphNode> {
+        ir.units
+            .iter()
+            .map(|unit| GraphNode::Unit {
+                unit_id: unit.id.clone(),
+                job_id: stack_group_job_id(unit.kind),
+                name: sidebar_group_name(unit),
+                file: nested_unit_workflow_file(unit),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pull_request_aggregate_cancellation_guard_preserves_status_contract() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let mut ir = owner_test_ir(
+            "example/cancellation",
+            vec![rust_unit("rust-root", "crates/root"), leaf],
+        );
+        ir.velnor_rust_needs = VelnorRustNeeds::DependencyClosure;
+        let nodes = aggregate_fixture_nodes(&ir);
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let expected_callers = ir.required_callers(&nodes, None).len();
+        assert_eq!(
+            pr.matches("if: ${{ !cancelled() &&").count(),
+            expected_callers,
+            "every rendered PR caller carries the cancellation guard"
+        );
+        assert!(
+            pr.contains("if: ${{ !cancelled() && needs.plan.result == 'success'"),
+            "PR callers keep the explicit plan-success prerequisite after the cancellation guard"
+        );
+        assert!(
+            pr.contains("result == 'skipped'"),
+            "dependency skips remain an explicit caller condition"
+        );
+        assert!(
+            pr.contains("selected CI job") && pr.contains("case \"$result\" in"),
+            "the required gate still evaluates each selected caller result"
+        );
+        assert!(
+            pr.contains("cancel-in-progress: true")
+                && pr.contains("ci-required:\n    name:")
+                && pr.contains("if: ${{ !cancelled() }}"),
+            "PR concurrency and required checks use the cancellation-aware aggregate guard"
+        );
+        let direct_pr = ir.render(WorkflowKind::PullRequest);
+        assert!(
+            direct_pr.contains("cancel-in-progress: true")
+                && direct_pr.contains("if: ${{ !cancelled() }}"),
+            "the legacy direct renderer carries the same PR guard"
+        );
+
+        for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
+            let stable = ir.render_nested(kind, &nodes, None);
+            assert!(
+                stable.contains("cancel-in-progress: false"),
+                "{kind:?} keeps cancellation disabled"
+            );
+            assert!(
+                !stable.contains("if: ${{ !cancelled()"),
+                "{kind:?} keeps publishing/alert jobs on the always-running path"
+            );
+            assert!(
+                stable.contains("if: ${{ always()"),
+                "{kind:?} retains its always-running aggregate checks"
+            );
+        }
+    }
+
+    #[test]
+    fn required_gate_rejects_failed_skipped_and_cancelled_selected_callers() {
+        let ir = owner_test_ir(
+            "example/cancellation-results",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            super::REQUIRED_CHECK,
+            false,
+            false,
+        );
+        // The aggregate steps precede the verdict step; anchor on the
+        // verdict step's name so the fixture executes the shell verdict, not
+        // the collection script.
+        let script = must_some(
+            rendered
+                .split_once("- name: Validate generated stack results")
+                .and_then(|(_, step)| step.split_once("        run: |\n"))
+                .and_then(|(_, body)| body.split_once("\n  required:\n").map(|(body, _)| body)),
+            "required gate shell fixture",
+        )
+        .lines()
+        .map(|line| line.strip_prefix("          ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        for result in ["success", "failure", "skipped", "cancelled"] {
+            let mut needs = serde_json::Map::new();
+            needs.insert("plan".to_owned(), serde_json::json!({"result": "success"}));
+            if ir.emits_velnor_lane_admission() {
+                needs.insert(
+                    "velnor-lane-admission".to_owned(),
+                    serde_json::json!({"result": "skipped"}),
+                );
+            }
+            for caller in &callers {
+                needs.insert(caller.job_id.clone(), serde_json::json!({"result": result}));
+            }
+            let mut command = Command::new("bash");
+            command
+                .args(["-euo", "pipefail", "-c", &script])
+                .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
+                .env("SELECTED_UNITS", "rust")
+                .env("LANE_ADMITTED_GITHUB", "true")
+                .env("LANE_ADMITTED_VELNOR", "true")
+                .env("LANE_ADMITTED_VELNOR_TRUSTED", "true");
+            let output = must_ok(command.output(), "bash executes required gate fixture");
+            assert_eq!(
+                output.status.success(),
+                result == "success",
+                "selected caller result {result}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
@@ -329,6 +558,135 @@ mod tests {
             !kind.contains("prepared_tool"),
             "an undeclared kind mentions no prepared tools"
         );
+    }
+
+    #[test]
+    fn collapsed_rust_members_gate_mbx_per_member() {
+        let mbx_unit = rust_unit("rust-mbx", "crates/mbx");
+        let mut disabled_unit = rust_unit("rust-disabled", "crates/disabled");
+        disabled_unit.mbx = Some(false);
+        let mut ir = owner_test_ir("example/mbx-gating", vec![mbx_unit, disabled_unit]);
+        ir.mr_boxington = true;
+
+        let kind = must_render_kind(&ir);
+        assert_eq!(
+            kind.matches("Set up Mr. Boxington").count(),
+            2,
+            "each lane keeps the MBX setup block"
+        );
+        assert!(
+            kind.contains("if: ${{ inputs.mbx_enabled }}"),
+            "mixed members gate MBX on the selected member"
+        );
+        assert!(
+            kind.contains("if: ${{ inputs.mbx_enabled == false }}"),
+            "mixed members gate the sccache alternative on the selected member"
+        );
+        assert!(
+            kind.contains(
+                "- name: Configure sccache environment\n        if: ${{ inputs.mbx_enabled == false }}"
+            ),
+            "mixed members gate the sccache environment on the selected member"
+        );
+        assert!(
+            kind.contains(
+                "          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\""
+            ),
+            "sccache exports share one redirect so shellcheck accepts the generated block"
+        );
+        assert!(
+            !kind.contains("echo 'CARGO_INCREMENTAL=0' >> \"$GITHUB_ENV\""),
+            "sccache exports do not use individual redirects"
+        );
+        for assignment in [
+            "CARGO_INCREMENTAL=0",
+            "RUSTC_WRAPPER=sccache",
+            "SCCACHE_GHA_ENABLED=true",
+        ] {
+            assert!(
+                kind.contains(&format!("echo '{assignment}'")),
+                "mixed sccache members export {assignment}: {kind}"
+            );
+        }
+        assert!(
+            kind.contains("hashFiles(inputs.mbx_dependency_files)"),
+            "MBX members keep their per-member snapshot key inputs"
+        );
+
+        for (unit, enabled) in [(&ir.units[0], true), (&ir.units[1], false)] {
+            for lane in [RunnerMode::Github, RunnerMode::Velnor] {
+                let facts = ir.unit_lane_facts(unit, &ir.default_unit_contract(unit, true), lane);
+                assert_eq!(facts.mbx_enabled, enabled, "{lane:?} / {}", unit.id);
+                let values = facts.input_values();
+                assert_eq!(
+                    values.iter().any(|(name, value)| {
+                        *name == lane_input::MBX_ENABLED && value == "true"
+                    }),
+                    enabled,
+                    "typed MBX input for {lane:?} / {}",
+                    unit.id
+                );
+                assert_eq!(
+                    facts.mbx.is_some(),
+                    lane == RunnerMode::Github && enabled,
+                    "hosted snapshot facts for {lane:?} / {}",
+                    unit.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_rust_all_mbx_keeps_ungated_mbx_setup() {
+        let mut ir = owner_test_ir(
+            "example/mbx-all",
+            vec![
+                rust_unit("rust-a", "crates/a"),
+                rust_unit("rust-b", "crates/b"),
+            ],
+        );
+        ir.mr_boxington = true;
+
+        let kind = must_render_kind(&ir);
+        assert_eq!(kind.matches("Set up Mr. Boxington").count(), 2);
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+        assert!(!kind.contains("Set up sccache"));
+    }
+
+    #[test]
+    fn collapsed_rust_all_disabled_omits_mbx_and_keeps_sccache() {
+        for global_mbx in [true, false] {
+            let mut disabled = rust_unit("rust-disabled", "crates/disabled");
+            disabled.mbx = Some(false);
+            let mut ir = owner_test_ir("example/mbx-none", vec![disabled]);
+            ir.mr_boxington = global_mbx;
+
+            let kind = must_render_kind(&ir);
+            assert!(!kind.contains("Set up Mr. Boxington"));
+            assert_eq!(kind.matches("Set up sccache").count(), 1);
+            assert_eq!(
+                kind.matches("Configure sccache environment").count(),
+                1,
+                "the all-disabled job configures sccache once"
+            );
+            assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
+            assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+            let facts = ir.unit_lane_facts(
+                &ir.units[0],
+                &ir.default_unit_contract(&ir.units[0], true),
+                RunnerMode::Github,
+            );
+            assert!(!facts.mbx_enabled);
+            assert!(facts.mbx.is_none());
+            assert!(
+                facts
+                    .input_values()
+                    .iter()
+                    .all(|(name, _)| *name != lane_input::MBX_ENABLED),
+                "disabled members pass no MBX input"
+            );
+        }
     }
 
     fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
@@ -1075,6 +1433,378 @@ mod tests {
             "no caller passes the flag"
         );
     }
+
+    /// One job's body from a rendered workflow. Job bodies indent past two
+    /// spaces, so the next `\n  ` past a job header is the next job whatever
+    /// the render order.
+    fn s4_job_block<'a>(content: &'a str, job: &str) -> &'a str {
+        let header = format!("\n  {job}:\n");
+        let start = must_some(content.find(header.as_str()), job) + header.len();
+        let tail = &content[start..];
+        let mut end = tail.len();
+        let mut search = 0;
+        while let Some(found) = tail[search..].find("\n  ") {
+            let candidate = search + found + 3;
+            if tail[candidate..]
+                .chars()
+                .next()
+                .is_some_and(|next| next != ' ')
+            {
+                end = search + found;
+                break;
+            }
+            search = candidate;
+        }
+        &tail[..end]
+    }
+
+    #[test]
+    fn plan_job_threads_expected_work_and_maps_no_work_outputs() {
+        let ir = owner_test_ir("example/s4-plan", vec![rust_unit("rust", "crates/rust")]);
+        let mut plan = String::new();
+        ir.render_plan(&mut plan, RunnerMode::Both, false);
+        assert!(
+            plan.contains("VELNOR_EXPECTED_WORK_FILE: .velnor-ci-expected-work/expected-work.json"),
+            "the plan step binds the expected-work file path: {plan}"
+        );
+        assert!(
+            plan.contains("name: velnor-expected-work\n"),
+            "the plan job publishes the expected-work artifact under its exact name: {plan}"
+        );
+        assert!(
+            plan.contains("path: .velnor-ci-expected-work/expected-work.json\n          if-no-files-found: error"),
+            "a missing expected-work file fails the plan job loudly, never silently: {plan}"
+        );
+        assert!(
+            plan.contains("planned_no_work: ${{ steps.plan.outputs.planned_no_work }}"),
+            "the plan job maps the no-work marker output: {plan}"
+        );
+        assert!(
+            plan.contains("no_work_reason: ${{ steps.plan.outputs.no_work_reason }}"),
+            "the plan job maps the no-work reason output: {plan}"
+        );
+    }
+
+    #[test]
+    fn plan_job_scopes_expected_work_lanes_to_scheduled_lanes() {
+        // The plan scope must equal the scheduled lane scope in every mode:
+        // a single-lane workflow that plans unfiltered writes phantom
+        // entries for the unscheduled lane, and the aggregate fails closed
+        // on records no job can report. The dispatch `runner` input narrows
+        // the scope at runtime; automatic events fall back to the
+        // configured lanes.
+        for mode in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+            let mut ir = owner_test_ir(
+                "example/s4-plan-lanes",
+                vec![rust_unit("rust", "crates/rust")],
+            );
+            ir.runners = mode;
+            ir.automatic = mode;
+            let mut plan = String::new();
+            ir.render_plan(&mut plan, mode, false);
+            assert!(
+                plan.contains(&format!(
+                    "VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}",
+                    mode.as_str()
+                )),
+                "{mode:?} plans its scheduled lanes with dispatch narrowing: {plan}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_step_creates_expected_work_dir_before_invoking_plan() {
+        // The pinned product predates the runtime's own parent creation, so
+        // the branch-controlled render prepares the dir for the old binary.
+        let ir = owner_test_ir(
+            "example/s4-plan-mkdir",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let mut plan = String::new();
+        ir.render_plan(&mut plan, RunnerMode::Both, false);
+        let mkdir = must_some(
+            plan.find(&format!("mkdir -p {}\n", super::EXPECTED_WORK_DIR)),
+            "expected-work dir creation",
+        );
+        let invoke = must_some(
+            plan.find("velnor-workflow plan --config"),
+            "plan invocation",
+        );
+        assert!(
+            mkdir < invoke,
+            "the plan step creates the expected-work dir before invoking plan: {plan}"
+        );
+        assert_eq!(
+            super::EXPECTED_WORK_FILE,
+            format!("{}/expected-work.json", super::EXPECTED_WORK_DIR),
+            "the env-bound file stays inside the created dir",
+        );
+    }
+
+    #[test]
+    fn no_work_branch_contract_is_presence_only() {
+        let ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
+            let surface = ir.render_nested(kind, &nodes, None);
+            assert!(
+                surface.contains("never `false`"),
+                "{kind:?} documents the presence-only marker contract: {surface}"
+            );
+            // The contract comment itself names the legal comparison; only
+            // code lines count as branches.
+            let code = surface
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.contains("planned_no_work == 'false'"),
+                "{kind:?} never branches on the impossible `false` value: {surface}"
+            );
+            assert!(
+                !code.contains("planned_no_work ==") && !code.contains("planned_no_work !="),
+                "{kind:?} branches nowhere on the marker: the aggregate tolerates no-work itself: {surface}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_check_scores_aggregate_before_the_shell_verdict() {
+        let ir = owner_test_ir(
+            "example/s4-required",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            super::REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains("name: velnor-expected-work\n"),
+            "ci-required downloads the expected-work artifact by exact name: {rendered}"
+        );
+        assert!(
+            rendered.contains("pattern: velnor-result-*"),
+            "ci-required collects every per-unit result artifact: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "velnor-workflow aggregate --expected .velnor-ci-expected-work/expected-work.json --results .velnor-ci-results.json"
+            ),
+            "ci-required scores collected results against expected work: {rendered}"
+        );
+        assert!(
+            rendered.contains("BASE_SHA: ${{ needs.plan.outputs.base_sha }}")
+                && rendered.contains("HEAD_SHA: ${{ needs.plan.outputs.head_sha }}"),
+            "the aggregate binds the plan identity from this run's plan outputs: {rendered}"
+        );
+        let aggregate = must_some(
+            rendered.find("velnor-workflow aggregate"),
+            "aggregate invocation",
+        );
+        let verdict = must_some(
+            rendered.find("Validate generated stack results"),
+            "shell verdict step",
+        );
+        assert!(
+            aggregate < verdict,
+            "the aggregate scores before the shell verdict re-confirms: {rendered}"
+        );
+        assert!(
+            rendered.contains("selected CI job"),
+            "the shell verdict still evaluates every caller: {rendered}"
+        );
+    }
+
+    #[test]
+    fn record_step_creates_result_dir_before_first_write() {
+        let steps =
+            super::render_unit_result_steps("actions/upload-artifact@pinned", "github", "always()");
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let write = must_some(
+            steps.find("> \".velnor-ci-results/result-"),
+            "first result write",
+        );
+        assert!(
+            mkdir < write,
+            "the record step creates the result dir before writing: {steps}"
+        );
+        assert!(
+            steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github.json"),
+            "the upload publishes exactly what the record step wrote: {steps}"
+        );
+    }
+
+    #[test]
+    fn collect_step_creates_result_dir_before_first_read() {
+        let steps = super::render_aggregate_score_steps("", "actions/download-artifact@pinned");
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let glob = must_some(
+            steps.find("files=(.velnor-ci-results/result-*.json)"),
+            "result glob",
+        );
+        assert!(
+            mkdir < glob,
+            "the collect step creates the result dir before globbing: {steps}"
+        );
+    }
+
+    #[test]
+    fn aggregate_wiring_leaves_the_shell_verdict_verbatim() {
+        let ir = owner_test_ir(
+            "example/s4-verbatim",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let mut verdicts = String::new();
+        super::render_required_caller_verdicts(&mut verdicts, &callers);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            super::REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains(&verdicts),
+            "the per-caller verdict block renders byte-for-byte beside the aggregate: {rendered}"
+        );
+    }
+
+    #[test]
+    fn aggregate_failure_can_fail_the_required_check() {
+        let ir = owner_test_ir("example/s4-fail", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let rendered = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let check = s4_job_block(&rendered, super::REQUIRED_CHECK);
+        for step in [
+            "Download expected work",
+            "Collect reported unit results",
+            "Score expected work against reported results",
+        ] {
+            let start = must_some(check.find(step), step);
+            let block = &check[start..];
+            let end = block.find("\n      - name: ").unwrap_or(block.len());
+            let block = &block[..end];
+            assert!(
+                !block.contains("continue-on-error"),
+                "{step} must fail the check, never tolerate: {block}"
+            );
+        }
+        let aggregate = must_some(check.find("velnor-workflow aggregate"), "aggregate script");
+        assert!(
+            check[..aggregate].contains("set -euo pipefail"),
+            "the aggregate step runs under fail-fast shell options: {check}"
+        );
+        assert!(
+            !check.contains("aggregate --expected") || !check.contains("|| true"),
+            "nothing swallows the aggregate exit status: {check}"
+        );
+    }
+
+    #[test]
+    fn result_collection_rejects_reused_evidence_without_a_decision() {
+        let ir = owner_test_ir("example/s4-reuse", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            super::REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains("reused_from"),
+            "collection names the refused reused-evidence field: {rendered}"
+        );
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            !kind.contains("reused_from"),
+            "no rendered producer emits reused results: {kind}"
+        );
+    }
+
+    #[test]
+    fn unit_jobs_emit_exactly_one_result_record_per_lane() {
+        let ir = owner_test_ir("example/s4-record", vec![rust_unit("rust", "crates/rust")]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        for (job, lane) in [("verify-github", "github"), ("verify-velnor", "velnor")] {
+            let block = s4_job_block(&kind, job);
+            assert_eq!(
+                block.matches("- name: Record unit result").count(),
+                1,
+                "{job} records exactly one result: {block}"
+            );
+            assert_eq!(
+                block.matches("- name: Upload unit result").count(),
+                1,
+                "{job} uploads exactly one result: {block}"
+            );
+            assert!(
+                block.contains("always()"),
+                "{job} records even when the checks fail: {block}"
+            );
+            assert!(
+                block.contains(&format!("VELNOR_RESULT_LANE: {lane}")),
+                "{job} pins the schema-1 lane vocabulary: {block}"
+            );
+            assert!(
+                block.contains("overwrite: true"),
+                "{job} retries overwrite the one record: {block}"
+            );
+            assert!(
+                block.contains("job.status"),
+                "{job} derives the outcome from the job status PR code cannot fake: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_split_lanes_record_exactly_once() {
+        let mut trusted = rust_unit("rust-trusted", "crates/trusted");
+        trusted.requires_trusted = true;
+        let ir = owner_test_ir(
+            "example/s4-split",
+            vec![rust_unit("rust-plain", "crates/plain"), trusted],
+        );
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        let plain = s4_job_block(&kind, "verify-velnor");
+        let gated = s4_job_block(&kind, "verify-velnor-trusted");
+        assert!(
+            plain.contains("inputs.unit_admission == 'velnor'")
+                && !plain.contains("velnor-trust-gated'"),
+            "the plain job records only plain dispatches: {plain}"
+        );
+        assert!(
+            gated.contains("inputs.unit_admission == 'velnor-trust-gated'"),
+            "the trusted job records only trusted dispatches: {gated}"
+        );
+        assert_eq!(
+            kind.matches("- name: Record unit result").count(),
+            3,
+            "one record step per lane job across the split: {kind}"
+        );
+    }
 }
 
 /// The units a snapshot-carrying unit compiles: the unit itself plus the
@@ -1696,6 +2426,26 @@ fn collapsed_checks_env(offline: FeatureCoverage) -> String {
     }
     env.push_str(mise_auto_install_env());
     env
+}
+
+/// Export the sccache defaults after setup for the selected member. Collapsed
+/// jobs cannot use [`render_job_env`] because one job serves members with
+/// mutually exclusive MBX and sccache transports; `GITHUB_ENV` carries the
+/// selected member's values to every later command without assigning empty
+/// wrapper variables to MBX members.
+fn render_collapsed_sccache_env_step(
+    output: &mut String,
+    sccache: FeatureCoverage,
+    mbx_input: &str,
+) {
+    if !sccache.any {
+        return;
+    }
+    let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
+    output.push_str(&prefix_step_block_with_if(
+        block,
+        sccache.absent_gate(mbx_input).as_deref(),
+    ));
 }
 
 fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
@@ -2829,10 +3579,22 @@ fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
 fn aggregate_concurrency_block(
     ir: &WorkflowIr,
     kind: WorkflowKind,
-    cancel_in_progress: &str,
+    cancel_in_progress: bool,
 ) -> String {
     let group = aggregate_concurrency_group(ir, kind);
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
+}
+
+/// PR aggregates may be superseded while they are waiting on a dependency.
+/// Keep their callers and required mirrors out of the cancelled run while
+/// retaining the explicit result/admission predicates below the status guard.
+/// Main and nightly aggregates must finish their publishing and alert paths.
+fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
+    if cancel_in_progress {
+        "!cancelled()"
+    } else {
+        "always()"
+    }
 }
 
 fn aggregate_triggers(
@@ -2841,7 +3603,7 @@ fn aggregate_triggers(
     runners: RunnerMode,
     automatic: RunnerMode,
     default_dispatch_runner: &str,
-) -> (&'static str, &'static str, String, &'static str) {
+) -> (&'static str, &'static str, String, bool) {
     match kind {
         WorkflowKind::PullRequest => (
             "CI / PR",
@@ -2857,7 +3619,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "true",
+            true,
         ),
         WorkflowKind::Main => (
             "CI / Main",
@@ -2874,7 +3636,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "false",
+            false,
         ),
         WorkflowKind::Nightly => (
             "Nightly",
@@ -2890,7 +3652,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "false",
+            false,
         ),
     }
 }
@@ -2958,6 +3720,8 @@ pub(crate) mod lane_input {
     pub(crate) const MISE_RUNNER: &str = "mise_runner";
     /// The Mr. Boxington snapshot compatibility digest.
     pub(crate) const MBX_COMPAT: &str = "mbx_compat";
+    /// `true` when the selected unit uses Mr. Boxington instead of sccache.
+    pub(crate) const MBX_ENABLED: &str = "mbx_enabled";
     /// Newline-separated `hashFiles` patterns of the snapshot dependency segment.
     pub(crate) const MBX_DEPENDENCY_FILES: &str = "mbx_dependency_files";
     /// Newline-separated `hashFiles` patterns of the snapshot freshness segment.
@@ -3007,11 +3771,16 @@ pub(crate) mod lane_input {
     /// Comma-separated prepared-tool need records (`tool:digest:producers`)
     /// the lane restores for the unit; empty when it needs none.
     pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
+    /// Comma-separated validation phases the unit verifies through
+    /// (`fmt,clippy,test,doctest`); empty when the unit keeps the single
+    /// legacy checks step.
+    pub(crate) const VALIDATION_PHASES: &str = "validation_phases";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
         MISE_TOOLS,
         MISE_RUNNER,
+        MBX_ENABLED,
         MBX_COMPAT,
         MBX_DEPENDENCY_FILES,
         MBX_FRESHNESS_FILES,
@@ -3033,6 +3802,7 @@ pub(crate) mod lane_input {
         UNIT_DEPENDENCIES,
         UNIT_ADMISSION,
         PREPARED_TOOLS,
+        VALIDATION_PHASES,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -3043,6 +3813,7 @@ pub(crate) mod lane_input {
         matches!(
             name,
             MISE_RUNNER
+                | MBX_ENABLED
                 | CARGO_FETCH_SKIP_WHEN_WARM
                 | CARGO_NET_OFFLINE
                 | POLICY_RUNTIME
@@ -3111,6 +3882,7 @@ pub(crate) struct SnapshotFacts {
 pub(crate) struct LaneStepFacts {
     pub(crate) mise_tools: Vec<String>,
     pub(crate) mise_runner: bool,
+    pub(crate) mbx_enabled: bool,
     pub(crate) mbx: Option<SnapshotFacts>,
     pub(crate) cargo_bin_tools: Vec<String>,
     pub(crate) tool_version: Option<String>,
@@ -3130,6 +3902,9 @@ pub(crate) struct LaneStepFacts {
     pub(crate) unit_admission: LaneAdmission,
     /// Prepared-tool need records the lane restores for the unit.
     pub(crate) prepared_tools: Vec<String>,
+    /// The validation phases the unit verifies through, in step order;
+    /// empty when the unit keeps the single legacy checks step.
+    pub(crate) validation_phases: Vec<ValidationPhase>,
 }
 
 impl LaneStepFacts {
@@ -3141,6 +3916,9 @@ impl LaneStepFacts {
         }
         if self.mise_runner {
             values.push((lane_input::MISE_RUNNER, "true".to_owned()));
+        }
+        if self.mbx_enabled {
+            values.push((lane_input::MBX_ENABLED, "true".to_owned()));
         }
         if let Some(mbx) = &self.mbx {
             values.push((lane_input::MBX_COMPAT, mbx.compatibility.clone()));
@@ -3212,6 +3990,12 @@ impl LaneStepFacts {
         if !self.prepared_tools.is_empty() {
             values.push((lane_input::PREPARED_TOOLS, self.prepared_tools.join(",")));
         }
+        if !self.validation_phases.is_empty() {
+            values.push((
+                lane_input::VALIDATION_PHASES,
+                ValidationPhase::id_list(&self.validation_phases).join(","),
+            ));
+        }
         values
     }
 }
@@ -3238,6 +4022,12 @@ impl FeatureCoverage {
     /// carries it.
     fn gate(self, input: &str) -> Option<String> {
         (self.any && !self.all).then(|| lane_input::present_gate(input))
+    }
+
+    /// The gate for a boolean feature's complement when only some members
+    /// carry it. This keeps the alternative transport member-scoped too.
+    fn absent_gate(self, input: &str) -> Option<String> {
+        (self.any && !self.all).then(|| format!("inputs.{input} == false"))
     }
 }
 
@@ -3579,6 +4369,7 @@ impl WorkflowIr {
             nodes,
             &mut output,
             kind != WorkflowKind::PullRequest,
+            cancel_in_progress,
             contracts,
         );
         if kind == WorkflowKind::Nightly {
@@ -3589,6 +4380,7 @@ impl WorkflowIr {
                 true,
                 "nightly-required",
                 true,
+                cancel_in_progress,
             );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
@@ -3599,6 +4391,7 @@ impl WorkflowIr {
                 kind != WorkflowKind::PullRequest,
                 REQUIRED_CHECK,
                 false,
+                cancel_in_progress,
             );
         }
         while output.ends_with("\n\n") {
@@ -3618,7 +4411,7 @@ impl WorkflowIr {
             self.automatic,
             &self.default_dispatch_runner,
         );
-        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, "false");
+        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
         let default_runner = match self.runners {
             RunnerMode::Github => "github",
@@ -3757,6 +4550,7 @@ impl WorkflowIr {
         file: &str,
         sample_unit: &str,
         include_policy: bool,
+        cancel_in_progress: bool,
     ) {
         let caller = self.prepare_cargo_required_caller(file);
         let mut needs = vec!["plan".to_owned()];
@@ -3764,7 +4558,7 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -3801,6 +4595,7 @@ impl WorkflowIr {
         caller: &UnitLaneCaller,
         include_policy: bool,
         extra_needs: &[String],
+        cancel_in_progress: bool,
     ) {
         let lane = caller.lane;
         let mut needs = vec!["plan".to_owned()];
@@ -3816,7 +4611,7 @@ impl WorkflowIr {
             velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units),
         );
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -3864,6 +4659,7 @@ impl WorkflowIr {
         nodes: &[GraphNode],
         output: &mut String,
         include_policy: bool,
+        cancel_in_progress: bool,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
         let mut prepare_cargo_files = BTreeSet::new();
@@ -3875,7 +4671,13 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                self.render_prepare_cargo_caller(output, file, unit_id, include_policy);
+                self.render_prepare_cargo_caller(
+                    output,
+                    file,
+                    unit_id,
+                    include_policy,
+                    cancel_in_progress,
+                );
             }
             for caller in self.unit_lane_callers(unit, file, contracts) {
                 let extra_needs = if self.runners == RunnerMode::Velnor
@@ -3886,7 +4688,14 @@ impl WorkflowIr {
                 } else {
                     Vec::new()
                 };
-                self.render_unit_lane_caller(output, unit, &caller, include_policy, &extra_needs);
+                self.render_unit_lane_caller(
+                    output,
+                    unit,
+                    &caller,
+                    include_policy,
+                    &extra_needs,
+                    cancel_in_progress,
+                );
                 if caller.lane == RunnerMode::Velnor {
                     previous_velnor_caller = Some(caller.job_id.clone());
                 }
@@ -3933,6 +4742,10 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the required gate has independent plan, policy, simulation, and cancellation inputs"
+    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -3941,6 +4754,7 @@ impl WorkflowIr {
         include_policy: bool,
         check_name: &str,
         simulate_failure: bool,
+        cancel_in_progress: bool,
     ) {
         let callers = self.required_callers(nodes, contracts);
         let mut needs = vec!["plan".to_owned()];
@@ -3957,17 +4771,36 @@ impl WorkflowIr {
             other => yaml_scalar(other),
         };
         let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!(
+                "{} && ({})",
+                aggregate_job_guard(cancel_in_progress),
+                self.velnor_control_plane_expression()
+            )
         } else {
-            "always()".to_owned()
+            aggregate_job_guard(cancel_in_progress).to_owned()
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n",
             needs.join(", "),
             self.runner_for(self.control_plane_lane()),
+        );
+        // The aggregate scores first, the shell verdict re-confirms after:
+        // conjunction, so either side failing fails the check. A hosted
+        // control plane downloads the verified plan-artifact runtime; a
+        // Velnor control plane rides the image runtime, which carries the
+        // aggregate once the fleet ships it.
+        let runtime_steps =
+            workflow_runtime_download(self.control_plane_lane(), &self.workflow_revision);
+        output.push_str(&render_aggregate_score_steps(
+            &runtime_steps,
+            self.pins.download_artifact,
+        ));
+        let _ = write!(
+            output,
+            "      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}",
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -4001,9 +4834,13 @@ impl WorkflowIr {
         render_required_caller_verdicts(output, &callers);
         if check_name == REQUIRED_CHECK {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-                format!("always() && ({})", self.velnor_control_plane_expression())
+                format!(
+                    "{} && ({})",
+                    aggregate_job_guard(cancel_in_progress),
+                    self.velnor_control_plane_expression()
+                )
             } else {
-                "always()".to_owned()
+                aggregate_job_guard(cancel_in_progress).to_owned()
             };
             let _ = writeln!(
                 output,
@@ -4164,6 +5001,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             // header for a feature most repositories never declare.
             if *name == lane_input::PREPARED_TOOLS
                 && !members.iter().any(|unit| !unit.prepared_tools.is_empty())
+            {
+                continue;
+            }
+            // The validation-phases input is declared only when a member is
+            // phased: an unconditional declaration would rewrite every kind
+            // header for a feature only phased rust units use.
+            if *name == lane_input::VALIDATION_PHASES
+                && !members.iter().any(|unit| unit.has_phases())
             {
                 continue;
             }
@@ -4442,6 +5287,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ));
         render_ci_selection_end_marker(output);
         self.render_collapsed_lane_steps(output, lane, members, contracts)?;
+        // Exactly one record per dispatch: the job records only dispatches of
+        // its own admission class (vacuous when the lane is unsplit, the
+        // trust partition when it splits), plus its executor partition when
+        // the kind splits one. Sibling jobs run the same collapsed steps for
+        // the dispatch but stay silent here, so the aggregate never sees a
+        // duplicate key.
+        let mut record_gate = format!(
+            "always() && inputs.unit_admission == '{}'",
+            LaneAdmission::for_unit(lane, members[0]).info_id()
+        );
+        match apple {
+            None => {}
+            Some(true) => record_gate.push_str(" && inputs.apple_executor"),
+            Some(false) => record_gate.push_str(" && inputs.apple_executor != true"),
+        }
+        output.push_str(&render_unit_result_steps(
+            self.pins.upload_artifact,
+            lane.as_str(),
+            &record_gate,
+        ));
         output.push('\n');
         Ok(())
     }
@@ -4472,6 +5337,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             && tools.contains(&ToolRequirement::Mise)
             && mise_tools.is_empty()
             && commands_invoke_mise(unit);
+        let mbx_enabled = tools.contains(&ToolRequirement::MrBoxington);
         let mbx = (github_lane && tools.contains(&ToolRequirement::MrBoxington))
             .then(|| unit_snapshot_facts(self, unit));
         let cargo_bin_tools = if github_lane {
@@ -4525,6 +5391,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         LaneStepFacts {
             mise_tools,
             mise_runner,
+            mbx_enabled,
             mbx,
             cargo_bin_tools,
             tool_version,
@@ -4547,11 +5414,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             apple_executor: github_lane && unit.platform.requires_apple(),
             unit_dependencies: unit.depends_on.clone(),
             unit_admission: LaneAdmission::for_unit(lane, unit),
-            prepared_tools: unit
-                .prepared_tools
-                .iter()
-                .map(super::prepared_tools::need_record)
-                .collect(),
+            prepared_tools: super::prepared_tools::need_records(&unit.prepared_tools),
+            validation_phases: unit.runnable_phases(),
         }
     }
 
@@ -4664,6 +5528,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             saves.into_iter().next().unwrap_or(false)
         };
+        // Schema-1 is exempt from the toolchain matrix: schema 1 is frozen
+        // (no new `both`-pipeline surfaces), so per-unit channels stay a
+        // schema-2 feature and this unanimity check stays fail-closed. A v1
+        // kind whose members disagree on the pin keeps refusing here instead
+        // of rendering legs.
         let toolchain = {
             let pins = members
                 .iter()
@@ -4687,6 +5556,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                                     | ToolRequirement::Nextest
                                     | ToolRequirement::CargoDeny
                                     | ToolRequirement::CargoAudit
+                                    // MBX and sccache are mutually exclusive
+                                    // per-member transports, not kind-level
+                                    // tools. Their setup is gated below from
+                                    // the selected member's typed input.
+                                    | ToolRequirement::MrBoxington
+                                    | ToolRequirement::Sccache
                             )
                         })
                         .collect::<BTreeSet<_>>()
@@ -4746,7 +5621,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
             output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER));
         }
-        if kind_tools.contains(&ToolRequirement::MrBoxington) {
+        let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
+        if mbx.any {
+            let mut block = String::new();
             if github_lane {
                 let (cache_key, restore_keys) = input_snapshot(
                     UNIT_SNAPSHOT_NAMESPACE,
@@ -4754,10 +5631,23 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     lane_input::MBX_DEPENDENCY_FILES,
                     lane_input::MBX_FRESHNESS_FILES,
                 );
-                self.render_mbx_github_step(output, &cache_key, &restore_keys);
+                self.render_mbx_github_step(&mut block, &cache_key, &restore_keys);
             } else {
-                self.render_mbx_local_step(output);
+                self.render_mbx_local_step(&mut block);
             }
+            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED));
+        }
+        let sccache =
+            FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
+        if github_lane && sccache.any {
+            let mut block = String::new();
+            let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
+            self.render_kind_level_tool_steps(&mut block, lane, &sccache_tools, cache_save);
+            output.push_str(&prefix_step_block_with_if(
+                &block,
+                sccache.absent_gate(lane_input::MBX_ENABLED).as_deref(),
+            ));
+            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED);
         }
         if github_lane && kind_tools.contains(&ToolRequirement::Bun) {
             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
@@ -4887,13 +5777,60 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
         // Verification. No pin-fetch step: the tool fetches the declared pin
         // itself before closure verification, so no lane needs its own.
+        // Units with validation phases verify through one step per runnable
+        // phase behind `run --phase`; units without keep the single legacy
+        // step. A kind mixing both gates each side on the dispatched unit's
+        // `validation_phases` input. Every step shares the job's checkout,
+        // caches, and unit log (phase steps append; the legacy step owns
+        // the log when it is the only checks step).
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let token_env = docker_build_token_env_for_members(lane, members);
-        let _ = writeln!(
-            output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
-        );
+        let phased = FeatureCoverage::over(&facts, |facts| !facts.validation_phases.is_empty());
+        let rendered_phases = ValidationPhase::RUNNABLE
+            .iter()
+            .filter(|phase| {
+                facts
+                    .iter()
+                    .any(|facts| facts.validation_phases.contains(phase))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for (index, phase) in rendered_phases.iter().enumerate() {
+            let coverage =
+                FeatureCoverage::over(&facts, |facts| facts.validation_phases.contains(phase));
+            let gate = (coverage.any && !coverage.all)
+                .then(|| lane_input::contains_gate(lane_input::VALIDATION_PHASES, phase.as_str()));
+            let started = if index == 0 {
+                format!("{checks_started_marker}\n")
+            } else {
+                String::new()
+            };
+            let ended = if index + 1 == rendered_phases.len() {
+                format!("{checks_ended_marker}\n")
+            } else {
+                String::new()
+            };
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: {}\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{started}          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --phase {} 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{ended}          exit $rc",
+                phase.step_name(),
+                phase.as_str(),
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+        if !phased.all {
+            let gate = phased
+                .any
+                .then(|| format!("inputs.{} == ''", lane_input::VALIDATION_PHASES));
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
 
         // Stage-1 candidate packaging, after the checks that build the
         // binary it reuses: only the hosted job of the generator crate's
@@ -5462,21 +6399,24 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             )
         };
         let base_sha = self.base_sha_expression();
-        // Both-mode planning consumes the admitted lanes: a velnor-only
-        // dispatch plans a velnor-only selection, so units the Velnor lane
-        // cannot run stay unselected (and green under the required gate)
-        // instead of failing a selection they can never satisfy.
-        // Single-lane modes plan unfiltered, as before. The dispatch
-        // `runner` input carries the manual selection; automatic events
-        // fall back to the configured automatic lanes.
-        let lanes_env = if self.runners == RunnerMode::Both {
-            format!(
-                "          VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}\n",
-                self.automatic.as_str()
-            )
-        } else {
-            String::new()
-        };
+        // Planning consumes the admitted lanes, so the expected-work scope
+        // always equals the scheduled lane scope: a velnor-only dispatch
+        // plans a velnor-only selection, so units the Velnor lane cannot
+        // run stay unselected (and green under the required gate) instead
+        // of failing a selection they can never satisfy — and a single-lane
+        // workflow plans only its lane instead of defaulting to both and
+        // failing the aggregate on phantom entries no job can report. The
+        // dispatch `runner` input carries the manual selection; automatic
+        // events fall back to the configured automatic lanes (which the
+        // lane gating in `lane_event_expression` reads from the same
+        // source). Single-lane dispatch inputs offer only that lane, so the
+        // expression collapses to the static scope there; a smuggled
+        // foreign value plans entries no lane job reports, and the
+        // aggregate fails those closed.
+        let lanes_env = format!(
+            "          VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}\n",
+            self.automatic.as_str()
+        );
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
             "      base_sha: ${{ steps.plan.outputs.base_sha }}".to_owned(),
@@ -5493,15 +6433,31 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
             ));
         }
+        // Presence-only no-work marker: `planned_no_work` is `true` or
+        // absent, never `false`. Consumers MUST branch
+        // `needs.plan.outputs.planned_no_work == 'true'` for the no-work
+        // path; any other value (including absent) means the plan selected
+        // work. Nothing branches yet: the aggregate tolerates explicit
+        // no-work itself, so the marker is proof, not control flow.
+        outputs.push(
+            "      # Presence-only no-work marker: `planned_no_work` is `true` or absent,\n      # never `false`. Consumers MUST branch\n      # `needs.plan.outputs.planned_no_work == 'true'` for the no-work path;\n      # any other value (including absent) means the plan selected work."
+                .to_owned(),
+        );
+        outputs.push("      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned());
+        outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
         let _ = writeln!(
             output,
-            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          {expected_work_env}: {expected_work_file}\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::control_job_name("Planning"),
             self.runner_for(runners),
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
+            expected_work_env = EXPECTED_WORK_FILE_ENV,
+            expected_work_file = EXPECTED_WORK_FILE,
+            expected_work_dir = EXPECTED_WORK_DIR,
         );
+        output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
         if runners != RunnerMode::Velnor {
             output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
         }
@@ -6313,7 +7269,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         &self,
         output: &mut String,
         runners: RunnerMode,
-        _stable: bool,
+        cancel_in_progress: bool,
         include_policy: bool,
     ) {
         let display_name = yaml_scalar(REQUIRED_CHECK);
@@ -6347,9 +7303,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
         }
         let gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!(
+                "{} && ({})",
+                aggregate_job_guard(cancel_in_progress),
+                self.velnor_control_plane_expression()
+            )
         } else {
-            "always()".to_owned()
+            aggregate_job_guard(cancel_in_progress).to_owned()
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
@@ -6377,9 +7337,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         render_required_caller_verdicts(output, &callers);
         let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!(
+                "{} && ({})",
+                aggregate_job_guard(cancel_in_progress),
+                self.velnor_control_plane_expression()
+            )
         } else {
-            "always()".to_owned()
+            aggregate_job_guard(cancel_in_progress).to_owned()
         };
         let _ = writeln!(
             output,

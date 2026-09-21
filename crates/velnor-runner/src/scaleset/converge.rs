@@ -59,6 +59,31 @@ pub trait WorkerLane {
     ///
     /// [rac]: crate::scaleset::capacity::release_after_cleanup
     fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error>;
+
+    /// Finish cancellation after an uncertain acquire was later confirmed
+    /// acquired. No second wire message is required because the completion
+    /// was already durably recorded as `canceled_pending`.
+    fn note_canceled(&mut self, _request_id: i64) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Reconcile live workers during an idle poll. Implementations may
+    /// throttle this call; it is the progress clock when GitHub sends no
+    /// messages. The default keeps lightweight/test lanes stateless.
+    fn idle_tick(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Whether the lane still owns terminal cleanup for `request_id` — a
+    /// worker row exists that the terminal path visits. The idle path
+    /// releases a `Terminal`+held orphan's permit only when the lane
+    /// disowns it (no worker row: nothing to clean, and a completed job
+    /// emits no further messages, so the occupancy would leak forever).
+    /// Defaults to owned: lanes that track no workers keep the
+    /// terminal-handler-owns-cleanup design.
+    fn owns_terminal_cleanup(&self, _request_id: i64) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
 }
 
 /// Image digests pinned for one provision. d1b owns the pin values; the
@@ -149,6 +174,8 @@ pub fn local_population(store: &DemandStore, scale_set_id: i32) -> Result<u32> {
             DemandState::AcquireIntent,
             DemandState::Acquired,
             DemandState::Uncertain,
+            DemandState::CanceledPending,
+            DemandState::CanceledAcquired,
             DemandState::ProvisionIntent,
         ],
     )?;

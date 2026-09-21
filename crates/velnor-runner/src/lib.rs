@@ -62,10 +62,6 @@ mod mise;
 /// `install_args` tokens are tool keys the committed lock pins. Re-exported so
 /// the generator's contract test proves its output passes this gate.
 pub use mise::{is_valid_install_arg_token, lock_tool_keys, validate_install_args_against_lock};
-#[cfg(any(test, feature = "test-support"))]
-pub mod native_demand;
-#[cfg(not(any(test, feature = "test-support")))]
-mod native_demand;
 pub mod node;
 mod ops;
 #[cfg(any(test, feature = "test-support"))]
@@ -73,7 +69,7 @@ pub mod permit_guard;
 #[cfg(not(any(test, feature = "test-support")))]
 mod permit_guard;
 mod plan;
-mod platform;
+pub mod platform;
 mod preflight;
 pub mod protocol;
 mod release;

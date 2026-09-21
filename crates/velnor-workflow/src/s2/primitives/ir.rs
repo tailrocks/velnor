@@ -18,23 +18,119 @@ use super::{
     CacheBackend, GraphNode, Pins, ProviderJob, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
     MUTABLE_MOUNT_HOST_DIR,
 };
-use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap, CONTROL_PLANE_PROVIDER};
+use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap};
 use crate::s2::reuse::REQUIRED_CHECK;
+use crate::s2::scan::swift::XCODEGEN_TOOL;
 use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
     kind_unit_workflow_file, nested_unit_workflow_file, prepare_cargo_caller_job_id,
-    provider_supports_unit, render_mr_boxington_store_budget_step, rendered_cache_values,
-    rust_dependency_needs, stack_group_job_id, unit_group, unit_group_job_id,
-    unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
+    product_dependency_needs, provider_supports_unit, render_mr_boxington_store_budget_step,
+    rendered_cache_values, rust_dependency_needs, stack_group_job_id, unit_group,
+    unit_group_job_id, unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
     yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RustNeeds, RustToolchain,
-    SelectionFieldSources, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
-    OPEN_TOFU_VERSION,
+    SelectionFieldSources, Unit, UnitKind, ValidationPhase, XcodeToolchain, GENERATED_HEADER,
+    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
 pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+
+/// The plan job's expected-work artifact, by exact name. Same-run threading:
+/// the plan job uploads it, `ci-required` downloads it by this exact name
+/// from the same run, and the aggregate's SHA binding proves it is this
+/// plan's file before scoring anything.
+pub(crate) const EXPECTED_WORK_ARTIFACT: &str = "velnor-expected-work";
+
+/// The workspace-relative expected-work directory: the plan step creates it
+/// before invoking `plan`, so the runtime's write never needs a
+/// pre-existing dir — including under the pinned older product.
+pub(crate) const EXPECTED_WORK_DIR: &str = ".velnor-ci-expected-work";
+
+/// The workspace-relative expected-work file: the plan step writes it here
+/// (via [`EXPECTED_WORK_FILE_ENV`]) and the upload step publishes this path.
+/// It always lives directly inside [`EXPECTED_WORK_DIR`].
+pub(crate) const EXPECTED_WORK_FILE: &str = ".velnor-ci-expected-work/expected-work.json";
+
+/// The env var binding `plan` to its expected-work file. Spelled identically
+/// to the runtime's read; an older runtime ignores it and the upload step
+/// then fails the plan job loudly via `if-no-files-found`.
+pub(crate) const EXPECTED_WORK_FILE_ENV: &str = "VELNOR_EXPECTED_WORK_FILE";
+
+/// The per-record result artifact prefix. One artifact per concluded
+/// `(unit, provider)`: `{RESULT_ARTIFACT_PREFIX}{unit}-{provider}`.
+pub(crate) const RESULT_ARTIFACT_PREFIX: &str = "velnor-result-";
+
+/// The workspace-relative directory holding one record file per concluded
+/// `(unit, provider)` — in unit jobs the single file this job wrote, in
+/// `ci-required` the merged download of every record.
+pub(crate) const RESULT_DIR: &str = ".velnor-ci-results";
+
+/// The workspace-relative collected results file the aggregate scores: the
+/// merge of every downloaded record, or the empty set when no unit ran.
+pub(crate) const COLLECTED_RESULTS_FILE: &str = ".velnor-ci-results.json";
+
+/// The plan job's expected-work upload: the aggregate's half of the
+/// plan/aggregate cut. `if-no-files-found: error` keeps a plan that wrote no
+/// file (an older runtime, a truncated step) red instead of silently
+/// unbound.
+fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
+    format!(
+        "      - name: Publish expected work\n        uses: {upload_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_FILE}\n          if-no-files-found: error\n          retention-days: 7\n"
+    )
+}
+
+/// The `ci-required` aggregate steps, rendered before the shell verdict step.
+///
+/// Conjunction, never replacement: the aggregate verdict AND the shell
+/// verdict must both pass. The shell reasons over `needs.*.result` plus the
+/// admission predicates and guards the controls the aggregate cannot see
+/// (plan/policy/admission prerequisites, malformed plan outputs, the
+/// expected-callers contract); the aggregate reasons over SHA-bound expected
+/// work plus per-record evidence the shell cannot see (duplicates, matrix
+/// completeness, prerequisite gating). Either side failing fails the check,
+/// so no previously-failing case newly passes.
+///
+/// `runtime_steps` provisions the `velnor-workflow` binary via the verified
+/// plan-artifact download. The results download tolerates zero artifacts — a
+/// no-work plan runs no unit jobs — because the aggregate fails a real-work
+/// plan with zero records anyway; every other step fails the check.
+fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
+    format!(
+        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+    )
+}
+
+/// The record tail of one collapsed provider verify job: exactly one result
+/// record per concluded `(unit, provider)`.
+///
+/// Collection discipline (exactly-once across retries, providers, and
+/// splits): the record step runs `always()` on the job's own class gate only
+/// (`record_gate`: the dispatched unit's trust partition when local
+/// providers split one), so exactly one provider job of the kind records
+/// each dispatch; the upload overwrites its exact-name artifact, so a
+/// retried job replaces its one record instead of doubling it; and the
+/// aggregate still rejects duplicate keys, so a second producer of the same
+/// record fails closed instead of merging silently.
+///
+/// The outcome derives from `job.status`, which unit code cannot fake: the
+/// checks steps `exit` nonzero on failure, every live checks path runs at
+/// least one checks step for the dispatched unit, and anything but an
+/// all-green job records `failure` (`cancelled` stays `cancelled`). A
+/// skipped job records nothing, and the aggregate fails the missing record
+/// unless the plan expected no work. Records carry no `matrix` (the planner
+/// writes empty matrices: one unmatrixed verdict per provider) and no
+/// `reused_from` (no live reuse path; collection rejects any).
+fn render_unit_result_steps(
+    upload_artifact_pin: &str,
+    provider: &str,
+    record_gate: &str,
+) -> String {
+    format!(
+        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          mkdir -p {RESULT_DIR}\n          jq -n --arg unit \"$VELNOR_RESULT_UNIT\" --arg lane \"$VELNOR_RESULT_LANE\" --arg outcome \"$outcome\" '{{results: [{{unit: $unit, lane: $lane, outcome: $outcome}}]}}' > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
+    )
+}
 
 /// The snapshot namespace the unit-provider compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
@@ -72,35 +168,43 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::process::Command;
 
     use super::{
-        provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
-        ProviderSet, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
+        explicit_toolchain_step_id, provider_input, unit_owns_workflow_crate, GraphNode, Pins,
+        ProviderAdmission, ProviderId, ProviderSet, RequiredCaller, RustNeeds, RustToolchain, Unit,
+        UnitKind, WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
     };
+    use crate::s2::platform::{NamedProduct, Prerequisite};
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
     };
 
     #[test]
-    fn dispatch_admission_matches_each_provider_by_comma_boundary() {
-        let ir = owner_test_ir("example/owner", Vec::new());
-        for provider in ProviderId::ALL {
+    fn dispatch_admission_selects_the_static_universe_without_an_input() {
+        let mut ir = owner_test_ir("example/owner", Vec::new());
+        ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
+        // A manual provider admits dispatches only, with no provider input
+        // to match: the comma boundary the old matcher needed is gone with
+        // the input.
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
             let expression =
                 ir.provider_admission_expression(ProviderAdmission::Provider(provider));
+            assert_eq!(
+                expression, "github.event_name == 'workflow_dispatch'",
+                "{provider:?} admits dispatches only: {expression}"
+            );
             assert!(
-                expression.contains(&format!(
-                    "contains(format(',{{0}},', github.event.inputs.providers), ',{},')",
-                    provider.as_str()
-                )),
-                "{provider:?} dispatch matches by comma boundary: {expression}"
+                !expression.contains("inputs.providers"),
+                "{provider:?} matches no input: {expression}"
             );
         }
         let hosted =
             ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::GithubHosted));
-        assert!(
-            !hosted.contains(",github-self-hosted,)"),
-            "github-hosted must not match inside github-self-hosted: {hosted}"
+        assert_eq!(
+            hosted, "true",
+            "an automatic provider admits every event: {hosted}"
         );
     }
 
@@ -143,14 +247,14 @@ mod tests {
         ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
         let hosted =
             ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::GithubHosted));
-        assert!(
-            hosted.contains("github.event_name != 'workflow_dispatch'"),
-            "an automatic provider runs automatic events: {hosted}"
+        assert_eq!(
+            hosted, "true",
+            "an automatic provider runs every event: {hosted}"
         );
         let velnor =
             ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::Velnor));
-        assert!(
-            velnor.contains("|| (false)"),
+        assert_eq!(
+            velnor, "github.event_name == 'workflow_dispatch'",
             "a manual provider skips automatic events: {velnor}"
         );
         let trusted = ir
@@ -159,12 +263,17 @@ mod tests {
             trusted.contains("github.event.pull_request.head.repo.fork"),
             "a trusted-only class gates on the event: {trusted}"
         );
+        assert!(
+            trusted.contains("github.event_name == 'workflow_dispatch'"),
+            "a manual trusted-only class still admits dispatches only: {trusted}"
+        );
     }
 
     /// One hand-built Rust unit: the id is fixture-local, the root decides
     /// ownership of the generator crate.
     fn rust_unit(id: &str, root: &str) -> Unit {
         Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -173,6 +282,8 @@ mod tests {
             watch: Vec::new(),
             pr_commands: vec!["cargo test --locked".to_owned()],
             full_commands: vec!["cargo test --locked".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -183,6 +294,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -209,12 +321,233 @@ mod tests {
         unit
     }
 
+    /// One hand-built Rust unit carrying the joined native pack, mirroring
+    /// what the scan appends to a `BoltFFI` producer.
+    fn boltffi_unit(id: &str) -> Unit {
+        let mut unit = rust_unit(id, "libs/bridge-ffi");
+        unit.pr_commands
+            .push("cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned());
+        unit.full_commands
+            .push("cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned());
+        unit
+    }
+
+    #[test]
+    fn boltffi_need_installs_the_locked_tool_id() {
+        let unit = boltffi_unit("rust-producer");
+        assert!(super::needs_boltffi(&unit));
+        assert!(!super::needs_boltffi(&rust_unit("rust-plain", ".")));
+        let mut across_separator = rust_unit("rust-echo", ".");
+        across_separator.pr_commands = vec!["echo boltffi && make pack".to_owned()];
+        assert!(!super::needs_boltffi(&across_separator));
+        let lock = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        assert_eq!(
+            super::mise_tool_ids(&unit, &lock),
+            vec![super::BOLTFFI_TOOL.to_owned()]
+        );
+        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock).is_empty());
+    }
+
+    #[test]
+    fn boltffi_validation_refuses_an_unpinned_pack() {
+        let unit = boltffi_unit("rust-producer");
+        let pinned = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        assert!(
+            super::validate_boltffi_tools_are_locked(std::slice::from_ref(&unit), &pinned).is_ok()
+        );
+        let plain = rust_unit("rust-plain", ".");
+        assert!(super::validate_boltffi_tools_are_locked(
+            std::slice::from_ref(&plain),
+            &BTreeSet::new()
+        )
+        .is_ok());
+        let missing = BTreeSet::from(["rust".to_owned()]);
+        let error = must_err(
+            super::validate_boltffi_tools_are_locked(std::slice::from_ref(&unit), &missing),
+            "unpinned pack must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("rust-producer"), "{message}");
+        assert!(message.contains(super::BOLTFFI_TOOL), "{message}");
+        assert!(message.contains("rust"), "{message}");
+    }
+
+    /// One hand-built `XcodeGen` unit: the generate command the scan emits,
+    /// with the stamped tool id the scan derives for it.
+    fn xcodegen_unit(id: &str) -> Unit {
+        let mut unit = rust_unit(id, "client");
+        unit.kind = UnitKind::Swift;
+        unit.label = format!("Apple app ({id}, XcodeGen)");
+        unit.platform = crate::s2::provider::Platform::MacosArm64;
+        unit.pr_commands =
+            vec!["cd -- 'client' && xcodegen generate --spec 'project.yml'".to_owned()];
+        unit.full_commands.clone_from(&unit.pr_commands);
+        unit.mise_tools = vec![super::XCODEGEN_TOOL.to_owned()];
+        unit
+    }
+
+    #[test]
+    fn xcodegen_need_installs_the_locked_tool_id() {
+        let unit = xcodegen_unit("swift-xcodegen-app");
+        assert!(super::needs_xcodegen(&unit));
+        assert!(!super::needs_xcodegen(&rust_unit("rust-plain", ".")));
+        let mut qualified = rust_unit("rust-path", ".");
+        qualified.pr_commands = vec!["/opt/mise/shims/xcodegen generate".to_owned()];
+        assert!(super::needs_xcodegen(&qualified));
+        let lock = BTreeSet::from([super::XCODEGEN_TOOL.to_owned()]);
+        assert_eq!(
+            super::mise_tool_ids(&unit, &lock),
+            vec![super::XCODEGEN_TOOL.to_owned()]
+        );
+        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock).is_empty());
+        // A generation-config override that replaces the stamped tools
+        // cannot drop the install: detection re-adds the id.
+        let mut overridden = unit;
+        overridden.mise_tools = vec!["cargo-binstall".to_owned()];
+        assert_eq!(
+            super::mise_tool_ids(&overridden, &lock),
+            vec![super::XCODEGEN_TOOL.to_owned(), "cargo-binstall".to_owned()]
+        );
+    }
+
+    #[test]
+    fn xcodegen_validation_refuses_an_unpinned_generate() {
+        let unit = xcodegen_unit("swift-xcodegen-app");
+        let pinned = BTreeSet::from([super::XCODEGEN_TOOL.to_owned()]);
+        assert!(
+            super::validate_xcodegen_tools_are_locked(std::slice::from_ref(&unit), &pinned).is_ok()
+        );
+        let plain = rust_unit("rust-plain", ".");
+        assert!(super::validate_xcodegen_tools_are_locked(
+            std::slice::from_ref(&plain),
+            &BTreeSet::new()
+        )
+        .is_ok());
+        let missing = BTreeSet::from(["rust".to_owned()]);
+        let error = must_err(
+            super::validate_xcodegen_tools_are_locked(std::slice::from_ref(&unit), &missing),
+            "unpinned generate must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("swift-xcodegen-app"), "{message}");
+        assert!(message.contains(super::XCODEGEN_TOOL), "{message}");
+        assert!(message.contains("rust"), "{message}");
+    }
+
+    /// The rendered `Set up Mise tools` step block: the step header through
+    /// the last `with:` line, for cross-kind equality.
+    fn mise_step_block(workflow: &str) -> &str {
+        let start = must_some(
+            workflow.find("      - name: Set up Mise tools\n"),
+            "workflow carries the mise step",
+        );
+        let tail = &workflow[start..];
+        let end = tail
+            .find("\n      - name: ")
+            .map_or(tail.len(), |offset| offset + 1);
+        &tail[..end]
+    }
+
+    #[test]
+    fn swift_kind_renders_the_mise_step_exactly_when_tools_are_declared() {
+        let mut ir = owner_test_ir("example/fixture", vec![xcodegen_unit("swift-xcodegen-app")]);
+        ir.mise_lock_keys = BTreeSet::from([super::XCODEGEN_TOOL.to_owned()]);
+        let swift = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            swift.contains("install_args: ${{ inputs.mise_tools }}"),
+            "the Swift job installs the caller's tool list: {swift}"
+        );
+        // Rust parity: one Swift member with tools renders the same step
+        // block one Rust member with tools renders.
+        let mut rust = rust_unit("rust-widget", "crates/widget");
+        rust.mise_tools = vec!["cargo-binstall".to_owned()];
+        let mut rust_ir = owner_test_ir("example/fixture", vec![rust]);
+        rust_ir.mise_present = true;
+        let rust_workflow = must_some(
+            must_ok(
+                rust_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "rust kind reusable renders",
+            ),
+            "rust kind has members",
+        )
+        .1;
+        assert_eq!(
+            mise_step_block(&swift),
+            mise_step_block(&rust_workflow),
+            "rust and swift provision tools through the identical step"
+        );
+        // Iff: a Swift member without tools renders no mise step at all.
+        let mut bare = rust_unit("swift-package-native", "native");
+        bare.kind = UnitKind::Swift;
+        bare.platform = crate::s2::provider::Platform::MacosArm64;
+        let bare_ir = owner_test_ir("example/fixture", vec![bare]);
+        let bare_workflow = must_some(
+            must_ok(
+                bare_ir.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            !bare_workflow.contains("name: Set up Mise"),
+            "a Swift job without tools provisions nothing: {bare_workflow}"
+        );
+    }
+
+    #[test]
+    fn swift_consumer_provisions_its_guarded_rebuild_tools() {
+        // The join prepends the producer's pack recipe to the consumer's
+        // commands behind the transport-ready marker; the consumer job must
+        // install what that recipe needs even though the consumer declares
+        // no tools itself.
+        let rebuild = "MACOSX_DEPLOYMENT_TARGET='16.0' boltffi -v pack apple".to_owned();
+        let guarded = crate::s2::platform::guarded_rebuild_command(
+            "VELNOR_PRODUCT_RUST_BRIDGE_FFI__BRIDGECORE_READY",
+            std::slice::from_ref(&rebuild),
+        );
+        let mut consumer = rust_unit("swift-package-app", "native");
+        consumer.kind = UnitKind::Swift;
+        consumer.label = "Swift package (native)".to_owned();
+        consumer.platform = crate::s2::provider::Platform::MacosArm64;
+        consumer.pr_commands.insert(0, guarded.clone());
+        consumer.full_commands.insert(0, guarded);
+        assert!(super::needs_boltffi(&consumer));
+        let ir = owner_test_ir("example/fixture", vec![consumer]);
+        let unit = &ir.units[0];
+        let contract = ir.contract_for(unit, None);
+        let facts = ir.unit_provider_facts(unit, &contract, ProviderId::GithubHosted);
+        assert_eq!(
+            facts.mise_tools,
+            vec![super::BOLTFFI_TOOL.to_owned()],
+            "the rebuild recipe's tool rides the caller's mise inputs"
+        );
+        let workflow = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            workflow.contains("- name: Set up Mise tools"),
+            "the Swift consumer job installs its rebuild tools: {workflow}"
+        );
+    }
+
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
         WorkflowIr {
             default_branch: "main".to_owned(),
             providers: ProviderId::ALL.into_iter().collect(),
             automatic_providers: ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             ci_required: true,
             repository: repository.to_owned(),
@@ -229,6 +562,72 @@ mod tests {
             pins: Pins::resolved(),
             mise_lock_keys: BTreeSet::new(),
             declared_ruleset_contexts: String::new(),
+            rust_pin: None,
+        }
+    }
+
+    fn aggregate_fixture_nodes(ir: &WorkflowIr) -> Vec<GraphNode> {
+        ir.units
+            .iter()
+            .map(|unit| GraphNode::Unit {
+                unit_id: unit.id.clone(),
+                job_id: stack_group_job_id(unit.kind),
+                name: sidebar_group_name(unit),
+                file: nested_unit_workflow_file(unit),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pull_request_aggregate_cancellation_guard_preserves_status_contract() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let mut ir = owner_test_ir(
+            "example/cancellation",
+            vec![rust_unit("rust-root", "crates/root"), leaf],
+        );
+        ir.rust_needs = RustNeeds::DependencyClosure;
+        let nodes = aggregate_fixture_nodes(&ir);
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let expected_callers = ir.required_callers(&nodes, None).len();
+        assert_eq!(
+            pr.matches("if: ${{ !cancelled() &&").count(),
+            expected_callers,
+            "every rendered PR caller carries the cancellation guard"
+        );
+        assert!(
+            pr.contains("if: ${{ !cancelled() && needs.plan.result == 'success'"),
+            "PR callers keep the explicit plan-success prerequisite after the cancellation guard"
+        );
+        assert!(
+            pr.contains("result == 'skipped'"),
+            "dependency skips remain an explicit caller condition"
+        );
+        assert!(
+            pr.contains("expected CI job") && pr.contains("cancelled)") && pr.contains("skipped)"),
+            "the required gate retains explicit failed, cancelled, and skipped verdicts"
+        );
+        assert!(
+            pr.contains("cancel-in-progress: true")
+                && pr.contains("ci-required:\n    name:")
+                && pr.contains("if: ${{ !cancelled() }}"),
+            "PR concurrency and required checks use the cancellation-aware aggregate guard"
+        );
+
+        for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
+            let stable = ir.render_nested(kind, &nodes, None);
+            assert!(
+                stable.contains("cancel-in-progress: false"),
+                "{kind:?} keeps cancellation disabled"
+            );
+            assert!(
+                !stable.contains("if: ${{ !cancelled()"),
+                "{kind:?} keeps publishing/alert jobs on the always-running path"
+            );
+            assert!(
+                stable.contains("if: ${{ always()"),
+                "{kind:?} retains its always-running aggregate checks"
+            );
         }
     }
 
@@ -265,6 +664,225 @@ mod tests {
                 !output.contains("prepared-tool"),
                 "undeclared provisioning on {provider:?} mentions no prepared tool"
             );
+        }
+    }
+
+    #[test]
+    fn full_history_facts_travel_per_invocation_and_render_unquoted() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
+        for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+            let deep_facts =
+                ir.unit_provider_facts(&deep, &ir.default_unit_contract(&deep, true), provider);
+            let shallow_facts = ir.unit_provider_facts(
+                &shallow,
+                &ir.default_unit_contract(&shallow, true),
+                provider,
+            );
+            assert!(
+                deep_facts.full_history,
+                "{provider:?} carries the deep unit's flag"
+            );
+            assert!(
+                !shallow_facts.full_history,
+                "{provider:?} leaves the shallow unit shallow"
+            );
+            let deep_values = deep_facts.input_values();
+            assert!(
+                deep_values.contains(&(provider_input::FULL_HISTORY, "true".to_owned())),
+                "{provider:?} passes the flag for the deep unit: {deep_values:?}"
+            );
+            assert!(
+                !shallow_facts
+                    .input_values()
+                    .iter()
+                    .any(|(name, _)| *name == provider_input::FULL_HISTORY),
+                "{provider:?} omits the flag for the shallow unit"
+            );
+            let rendered = super::render_caller_inputs(&deep_values);
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line == "      full_history: true"),
+                "{provider:?} renders the boolean unquoted: {rendered}"
+            );
+        }
+        let bare = super::ProviderStepFacts::default();
+        assert!(
+            !bare
+                .input_values()
+                .iter()
+                .any(|(name, _)| *name == provider_input::FULL_HISTORY),
+            "default facts omit the flag"
+        );
+    }
+
+    #[test]
+    fn kind_header_declares_full_history_only_when_a_member_needs_it() {
+        let shallow_ir = owner_test_ir(
+            "example/full-history",
+            vec![rust_unit("rust-a", "crates/a")],
+        );
+        let shallow = must_some(
+            must_ok(
+                shallow_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "shallow kind renders",
+            ),
+            "shallow kind has members",
+        )
+        .1;
+        assert!(
+            !shallow.contains("full_history"),
+            "a kind with no deep member declares nothing: {shallow}"
+        );
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let mixed_ir = owner_test_ir(
+            "example/full-history",
+            vec![deep, rust_unit("rust-shallow", "crates/shallow")],
+        );
+        let mixed = must_some(
+            must_ok(
+                mixed_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "mixed kind renders",
+            ),
+            "mixed kind has members",
+        )
+        .1;
+        let declaration =
+            "      full_history:\n        required: false\n        type: boolean\n        default: false";
+        assert!(
+            mixed.contains(declaration),
+            "a kind with a deep member declares the boolean flag: {mixed}"
+        );
+        assert_eq!(
+            mixed.matches("full_history:").count(),
+            1,
+            "the flag is declared exactly once: {mixed}"
+        );
+        assert_eq!(
+            provider_input::declaration(provider_input::FULL_HISTORY),
+            declaration,
+            "the declaration helper pins the exact bytes"
+        );
+    }
+
+    #[test]
+    fn collapsed_checkout_stays_byte_identical_without_deep_members() {
+        let unit = rust_unit("rust-a", "crates/a");
+        let ir = owner_test_ir("example/full-history", vec![unit.clone()]);
+        let mut output = String::new();
+        must_ok(
+            ir.render_collapsed_provider_verify_job(
+                &mut output,
+                &[&unit],
+                None,
+                ProviderId::GithubHosted,
+                "verify",
+                "Verify",
+                "ubuntu-24.04",
+                None,
+            ),
+            "shallow job renders",
+        );
+        assert!(
+            !output.contains("fetch-depth"),
+            "a shallow job carries no fetch-depth key: {output}"
+        );
+        let checkout = format!(
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+            ir.pins.checkout
+        );
+        assert!(
+            output.contains(&checkout),
+            "the shallow checkout keeps today's exact bytes: {output}"
+        );
+    }
+
+    #[test]
+    fn mixed_kind_renders_one_flipped_fetch_depth_expression_per_checkout() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow]);
+        let mut output = String::new();
+        must_ok(
+            ir.render_collapsed_provider_verify_job(
+                &mut output,
+                &[&deep],
+                None,
+                ProviderId::GithubHosted,
+                "verify",
+                "Verify",
+                "ubuntu-24.04",
+                None,
+            ),
+            "deep job renders",
+        );
+        // The caller invokes once per (unit, provider), so one expression
+        // serves mixed kinds; the operand order is load-bearing because 0 is
+        // falsy in GitHub Actions expressions.
+        let checkout = format!(
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}\n          fetch-depth: ${{{{ inputs.full_history == false && 1 || 0 }}}}",
+            ir.pins.checkout
+        );
+        assert!(
+            output.contains(&checkout),
+            "the deep checkout pins the exact flipped expression: {output}"
+        );
+        assert!(
+            !output.contains("inputs.full_history && 0"),
+            "never the falsy-0 form, which yields 1 in both cases: {output}"
+        );
+        let rendered = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "mixed kind renders",
+            ),
+            "mixed kind has members",
+        )
+        .1;
+        assert!(
+            rendered.contains("fetch-depth: ${{ inputs.full_history == false && 1 || 0 }}"),
+            "the kind reusable carries the flipped expression: {rendered}"
+        );
+        assert!(
+            !rendered.contains("inputs.full_history && 0"),
+            "the kind reusable never carries the falsy-0 form: {rendered}"
+        );
+    }
+
+    #[test]
+    fn callers_pass_full_history_only_on_deep_unit_call_jobs() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
+        let file = nested_unit_workflow_file(&deep);
+        for (unit, expect) in [(&deep, true), (&shallow, false)] {
+            let callers = ir.unit_provider_callers(unit, &file, None);
+            assert!(!callers.is_empty(), "unit {} renders call jobs", unit.id);
+            for caller in &callers {
+                let mut output = String::new();
+                ir.render_unit_provider_caller(&mut output, unit, caller, false, &[], false);
+                if expect {
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line == "      full_history: true"),
+                        "the deep unit's {} call job passes unquoted true: {output}",
+                        caller.job_id
+                    );
+                } else {
+                    assert!(
+                        !output.contains("full_history"),
+                        "the shallow unit's {} call job passes nothing: {output}",
+                        caller.job_id
+                    );
+                }
+            }
         }
     }
 
@@ -348,6 +966,289 @@ mod tests {
         );
     }
 
+    fn transport_product(name: &str, outputs: &[&str]) -> NamedProduct {
+        NamedProduct {
+            name: name.to_owned(),
+            outputs: outputs.iter().map(ToString::to_string).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn transport_edge(producer: &str, product: &str) -> Prerequisite {
+        Prerequisite {
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Producer with one transportable product and one output-less product,
+    /// plus a consumer that needs both. The output-less edge always rebuilds
+    /// locally; only the declared-outputs edge rides the artifact transport.
+    fn transport_fixture() -> (Unit, Unit) {
+        let mut producer = rust_unit("rust-ffi", "crates/ffi");
+        producer.products = vec![
+            transport_product("xcframework", &["native/out/lib.xcframework"]),
+            transport_product("sourceless", &[]),
+        ];
+        let mut consumer = rust_unit("rust-app", "crates/app");
+        consumer.prerequisites = vec![
+            transport_edge("rust-ffi", "xcframework"),
+            transport_edge("rust-ffi", "sourceless"),
+        ];
+        (producer, consumer)
+    }
+
+    #[test]
+    fn kind_reusable_transports_eligible_products_between_members() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            kind.contains("product_provides:"),
+            "the kind header declares the provides input"
+        );
+        assert!(
+            kind.contains("product_transport_ready:"),
+            "the kind header declares the readiness input"
+        );
+        assert!(
+            kind.contains("Download product velnor-product-rust-ffi--xcframework"),
+            "the consumer downloads the eligible product"
+        );
+        assert!(
+            kind.contains("Verify product velnor-product-rust-ffi--xcframework"),
+            "the consumer verifies the downloaded product"
+        );
+        assert!(
+            kind.contains("Stage product velnor-product-rust-ffi--xcframework"),
+            "the producer stages the eligible product"
+        );
+        assert!(
+            kind.contains("Upload product velnor-product-rust-ffi--xcframework"),
+            "the producer uploads the staged product"
+        );
+        assert!(
+            kind.contains("rust-ffi/xcframework:true"),
+            "the consumer block gates on the caller-evaluated verdict"
+        );
+        assert!(
+            !kind.contains("velnor-product-rust-ffi--sourceless"),
+            "an output-less product rides no artifact"
+        );
+    }
+
+    #[test]
+    fn transport_facts_pass_records_only_on_hosted() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer.clone()]);
+        let hosted = ir.unit_provider_facts(
+            &consumer,
+            &ir.default_unit_contract(&consumer, true),
+            ProviderId::GithubHosted,
+        );
+        let values = hosted.input_values();
+        let (_, verdicts) = must_some(
+            values
+                .iter()
+                .find(|(name, _)| *name == provider_input::PRODUCT_TRANSPORT_READY),
+            &format!("the hosted caller passes readiness verdicts: {values:?}"),
+        );
+        assert!(
+            verdicts.contains("rust-ffi/xcframework:${{ needs.")
+                && verdicts.contains(".result == 'success' }}"),
+            "the verdict names the edge and the producer job result: {verdicts}"
+        );
+        assert!(
+            !verdicts.contains("sourceless"),
+            "an output-less edge carries no verdict: {verdicts}"
+        );
+        let consumer_provides = values
+            .iter()
+            .find(|(name, _)| *name == provider_input::PRODUCT_PROVIDES);
+        assert!(
+            consumer_provides.is_none(),
+            "a pure consumer provides no products: {values:?}"
+        );
+        let maker_facts = ir.unit_provider_facts(
+            &ir.units[0],
+            &ir.default_unit_contract(&ir.units[0], true),
+            ProviderId::GithubHosted,
+        );
+        let maker_values = maker_facts.input_values();
+        let record = maker_values
+            .iter()
+            .find(|(name, _)| *name == provider_input::PRODUCT_PROVIDES);
+        assert_eq!(
+            record.map(|(_, value)| value.as_str()),
+            Some("rust-ffi/xcframework"),
+            "the hosted caller passes the producer record: {maker_values:?}"
+        );
+        // Local providers share the workspace: no records, no readiness.
+        for provider in [ProviderId::Velnor, ProviderId::GithubSelfHosted] {
+            let local = ir.unit_provider_facts(
+                &consumer,
+                &ir.default_unit_contract(&consumer, true),
+                provider,
+            );
+            let local_values = local.input_values();
+            assert!(
+                !local_values
+                    .iter()
+                    .any(|(name, _)| *name == provider_input::PRODUCT_PROVIDES
+                        || *name == provider_input::PRODUCT_TRANSPORT_READY),
+                "{provider:?} passes no transport records: {local_values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_reusable_without_products_declares_no_transport_inputs() {
+        let ir = owner_test_ir("example/no-transport", vec![rust_unit("rust", ".")]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            !kind.contains("product_provides") && !kind.contains("product_transport_ready"),
+            "a product-less kind declares no transport inputs"
+        );
+        assert!(
+            !kind.contains("velnor-product-"),
+            "a product-less kind renders no transport steps"
+        );
+    }
+
+    #[test]
+    fn collapsed_rust_members_gate_mbx_per_member() {
+        let mbx_unit = rust_unit("rust-mbx", "crates/mbx");
+        let mut disabled_unit = rust_unit("rust-disabled", "crates/disabled");
+        disabled_unit.mbx = Some(false);
+        let mut ir = owner_test_ir("example/mbx-gating", vec![mbx_unit, disabled_unit]);
+        ir.mr_boxington = true;
+
+        let kind = must_render_kind(&ir);
+        assert_eq!(
+            kind.matches("Set up Mr. Boxington").count(),
+            ProviderId::ALL.len(),
+            "each provider keeps the MBX setup block"
+        );
+        assert!(
+            kind.contains("if: ${{ inputs.mbx_enabled }}"),
+            "mixed members gate MBX on the selected member"
+        );
+        assert!(
+            kind.contains("if: ${{ inputs.mbx_enabled == false }}"),
+            "mixed members gate the sccache alternative on the selected member"
+        );
+        assert!(
+            kind.contains(
+                "- name: Configure sccache environment\n        if: ${{ inputs.mbx_enabled == false }}"
+            ),
+            "mixed members gate the sccache environment on the selected member"
+        );
+        assert!(
+            kind.contains(
+                "          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\""
+            ),
+            "sccache exports share one redirect so shellcheck accepts the generated block"
+        );
+        assert!(
+            !kind.contains("echo 'CARGO_INCREMENTAL=0' >> \"$GITHUB_ENV\""),
+            "sccache exports do not use individual redirects"
+        );
+        for assignment in [
+            "CARGO_INCREMENTAL=0",
+            "RUSTC_WRAPPER=sccache",
+            "SCCACHE_GHA_ENABLED=true",
+        ] {
+            assert!(
+                kind.contains(&format!("echo '{assignment}'")),
+                "mixed sccache members export {assignment}: {kind}"
+            );
+        }
+        assert!(
+            kind.contains("hashFiles(inputs.mbx_dependency_files)"),
+            "MBX members keep their per-member snapshot key inputs"
+        );
+
+        for (unit, enabled) in [(&ir.units[0], true), (&ir.units[1], false)] {
+            for provider in ProviderId::ALL {
+                let facts =
+                    ir.unit_provider_facts(unit, &ir.default_unit_contract(unit, true), provider);
+                assert_eq!(facts.mbx_enabled, enabled, "{provider:?} / {}", unit.id);
+                let values = facts.input_values();
+                assert_eq!(
+                    values.iter().any(|(name, value)| {
+                        *name == provider_input::MBX_ENABLED && value == "true"
+                    }),
+                    enabled,
+                    "typed MBX input for {provider:?} / {}",
+                    unit.id
+                );
+                assert_eq!(
+                    facts.mbx.is_some(),
+                    provider == ProviderId::GithubHosted && enabled,
+                    "hosted snapshot facts for {provider:?} / {}",
+                    unit.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_rust_all_mbx_keeps_ungated_mbx_setup() {
+        let mut ir = owner_test_ir(
+            "example/mbx-all",
+            vec![
+                rust_unit("rust-a", "crates/a"),
+                rust_unit("rust-b", "crates/b"),
+            ],
+        );
+        ir.mr_boxington = true;
+
+        let kind = must_render_kind(&ir);
+        assert_eq!(
+            kind.matches("Set up Mr. Boxington").count(),
+            ProviderId::ALL.len()
+        );
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+        assert!(!kind.contains("Set up sccache"));
+    }
+
+    #[test]
+    fn collapsed_rust_all_disabled_omits_mbx_and_keeps_sccache() {
+        for global_mbx in [true, false] {
+            let mut disabled = rust_unit("rust-disabled", "crates/disabled");
+            disabled.mbx = Some(false);
+            let mut ir = owner_test_ir("example/mbx-none", vec![disabled]);
+            ir.mr_boxington = global_mbx;
+
+            let kind = must_render_kind(&ir);
+            assert!(!kind.contains("Set up Mr. Boxington"));
+            assert_eq!(kind.matches("Set up sccache").count(), 1);
+            assert_eq!(
+                kind.matches("Configure sccache environment").count(),
+                1,
+                "the all-disabled job configures sccache once"
+            );
+            assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
+            assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+            let facts = ir.unit_provider_facts(
+                &ir.units[0],
+                &ir.default_unit_contract(&ir.units[0], true),
+                ProviderId::GithubHosted,
+            );
+            assert!(!facts.mbx_enabled);
+            assert!(facts.mbx.is_none());
+            assert!(
+                facts
+                    .input_values()
+                    .iter()
+                    .all(|(name, _)| *name != provider_input::MBX_ENABLED),
+                "disabled members pass no MBX input"
+            );
+        }
+    }
+
     fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
         let mut flagged = Vec::new();
         for unit in &ir.units {
@@ -384,12 +1285,170 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_err<T: std::fmt::Debug, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(value) => panic!("{context}: unexpectedly succeeded with {value:?}"),
+            Err(error) => error,
+        }
+    }
+
     fn must_render_kind(ir: &WorkflowIr) -> String {
         let rendered = must_ok(
             ir.render_kind_unit_workflow(UnitKind::Rust, None),
             "rust kind reusable renders",
         );
         must_some(rendered, "rust kind has members").1
+    }
+
+    fn required_gate_script(ir: &WorkflowIr, nodes: &[GraphNode], include_policy: bool) -> String {
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            nodes,
+            None,
+            &mut rendered,
+            include_policy,
+            REQUIRED_CHECK,
+            false,
+            false,
+        );
+        // The aggregate steps precede the verdict step; anchor on the
+        // verdict step's name so the fixture executes the shell verdict, not
+        // the collection script.
+        let script = must_some(
+            rendered
+                .split_once("- name: Validate generated stack results")
+                .and_then(|(_, step)| step.split_once("        run: |\n"))
+                .map(|(_, body)| body.split("\n  required:\n").next().unwrap_or(body)),
+            "required gate script",
+        );
+        script
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn run_required_gate(
+        script: &str,
+        policy_result: Option<&str>,
+        selected_units: &str,
+        callers: &[RequiredCaller],
+        nonempty_selection: bool,
+    ) -> bool {
+        let mut needs = serde_json::Map::new();
+        needs.insert("plan".to_owned(), serde_json::json!({"result": "success"}));
+        if let Some(result) = policy_result {
+            needs.insert("policy".to_owned(), serde_json::json!({"result": result}));
+        }
+        for caller in callers {
+            let result = if nonempty_selection
+                && !caller.prerequisite
+                && caller.provider == ProviderId::GithubHosted
+            {
+                "success"
+            } else {
+                "skipped"
+            };
+            needs.insert(caller.job_id.clone(), serde_json::json!({"result": result}));
+        }
+        let output = must_ok(
+            Command::new("bash")
+                .args(["-euo", "pipefail", "-c", script])
+                .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
+                .env("SELECTED_UNITS", selected_units)
+                .env("PLAN_DIGEST", "synthetic-plan-digest")
+                .env("EXCLUDED", "[]")
+                .env(
+                    "EXPECTED_CALLERS",
+                    super::required_execution_contract(callers),
+                )
+                .env("PROVIDER_ADMITTED_GITHUB_HOSTED", "true")
+                .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED", "true")
+                .env("PROVIDER_ADMITTED_VELNOR", "true")
+                .env("PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED", "true")
+                .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED", "true")
+                .env("PROVIDER_ADMITTED_VELNOR_TRUSTED", "true")
+                .env("PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED", "true")
+                .output(),
+            "bash and jq execute the rendered gate",
+        );
+        output.status.success()
+    }
+
+    #[test]
+    fn required_controls_drive_needs_and_strict_policy_verdicts() {
+        let unit = rust_unit("rust", "crates/rust");
+        let ir = owner_test_ir("example/required-controls", vec![unit.clone()]);
+        let nodes = vec![GraphNode::Unit {
+            unit_id: unit.id.clone(),
+            job_id: stack_group_job_id(unit.kind),
+            name: sidebar_group_name(&unit),
+            file: nested_unit_workflow_file(&unit),
+        }];
+        let callers = ir.required_callers(&nodes, None);
+        let script = required_gate_script(&ir, &nodes, true);
+        assert!(script.contains("result=\"$(result_for_job plan)\""));
+        assert!(script.contains("result=\"$(result_for_job policy)\""));
+
+        for (nonempty_selection, selected_units) in [
+            (false, "[]"),
+            (
+                true,
+                r#"[{"unit_id":"rust","providers":["github-hosted"]}]"#,
+            ),
+        ] {
+            assert!(
+                run_required_gate(
+                    &script,
+                    Some("success"),
+                    selected_units,
+                    &callers,
+                    nonempty_selection,
+                ),
+                "successful policy must pass for {selected_units}"
+            );
+            for result in ["failure", "cancelled", "skipped"] {
+                assert!(
+                    !run_required_gate(
+                        &script,
+                        Some(result),
+                        selected_units,
+                        &callers,
+                        nonempty_selection,
+                    ),
+                    "policy {result} must fail for {selected_units}"
+                );
+            }
+            assert!(
+                !run_required_gate(&script, None, selected_units, &callers, nonempty_selection,),
+                "missing policy must fail for {selected_units}"
+            );
+        }
+        assert!(
+            !run_required_gate(&script, Some("success"), "{malformed-plan", &callers, false,),
+            "malformed selected-unit plan must fail closed"
+        );
+
+        for selected_units in [
+            r#"[{"unit_id":"unknown","providers":["github-hosted"]}]"#,
+            r#"[{"unit_id":"rust","providers":["unknown"]}]"#,
+            r#"[{"unit_id":"rust","providers":[]}]"#,
+            r#"[{"unit_id":"rust","providers":["github-hosted","github-hosted"]}]"#,
+            r#"[{"unit_id":"rust","providers":["github-hosted"]},{"unit_id":"rust","providers":["github-hosted"]}]"#,
+            r#"[{"unit_id":"rust","providers":[1]}]"#,
+        ] {
+            assert!(
+                !run_required_gate(&script, Some("success"), selected_units, &callers, true,),
+                "unmapped or duplicate selected obligation must fail closed: {selected_units}"
+            );
+        }
+
+        let pull_request_script = required_gate_script(&ir, &nodes, false);
+        assert!(!pull_request_script.contains("result_for_job policy"));
     }
 
     /// One job's body from a rendered workflow. Job bodies indent past two
@@ -433,7 +1492,7 @@ mod tests {
         );
         let swift_workflow = must_some(swift_rendered, "swift kind has members").1;
         assert!(
-            swift_workflow.contains("runs-on: macos-15"),
+            swift_workflow.contains("runs-on: macos-26"),
             "{swift_workflow}"
         );
         assert!(
@@ -450,8 +1509,540 @@ mod tests {
             "{rust_workflow}"
         );
         assert!(
-            !rust_workflow.contains("runs-on: macos-15"),
+            !rust_workflow.contains("runs-on: macos-15")
+                && !rust_workflow.contains("runs-on: macos-26"),
             "{rust_workflow}"
+        );
+    }
+
+    /// One macOS Rust member (a `BoltFFI` producer) beside Linux Rust
+    /// members: the collapsed hosted jobs split by executor, so the Linux
+    /// units stay on the hosted selector instead of following the one
+    /// macOS member onto the Apple image.
+    fn mixed_platform_rust_units() -> Vec<Unit> {
+        let mut producer = boltffi_unit("rust-bridge-ffi");
+        producer.platform = crate::s2::provider::Platform::MacosArm64;
+        vec![
+            rust_unit("rust-widget", "crates/widget"),
+            producer,
+            rust_unit("rust-gadget", "crates/gadget"),
+        ]
+    }
+
+    #[test]
+    fn mixed_platform_rust_kind_splits_hosted_jobs_by_executor() {
+        let ir = owner_test_ir("example/fixture", mixed_platform_rust_units());
+        // Facts level: only the (hosted, macOS) pair sets the flag.
+        for unit in &ir.units {
+            let contract = ir.contract_for(unit, None);
+            let hosted = ir.unit_provider_facts(unit, &contract, ProviderId::GithubHosted);
+            assert_eq!(
+                hosted.apple_executor,
+                unit.id == "rust-bridge-ffi",
+                "{} sets the executor flag only on macOS",
+                unit.id
+            );
+            for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+                assert!(
+                    !ir.unit_provider_facts(unit, &contract, provider)
+                        .apple_executor,
+                    "local providers never set the executor flag: {} on {provider:?}",
+                    unit.id
+                );
+            }
+        }
+        // Render level: one job per executor, each admitting only its own
+        // callers at the job gate and the result record alike.
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            "rust kind reusable renders",
+        );
+        let workflow = must_some(rendered, "rust kind has members").1;
+        assert!(
+            workflow.contains(
+                "      apple_executor:\n        required: false\n        type: boolean\n        default: false"
+            ),
+            "the header declares the executor flag: {workflow}"
+        );
+        let default = job_block(&workflow, "verify-github-hosted");
+        assert!(
+            default.contains("runs-on: ubuntu-24.04"),
+            "Linux units stay on the hosted selector: {default}"
+        );
+        assert!(
+            default.contains("inputs.apple_executor != true"),
+            "the default job admits only default callers: {default}"
+        );
+        assert!(
+            default.contains("if: ${{ always() && inputs.apple_executor != true }}"),
+            "the default job records only default dispatches: {default}"
+        );
+        let apple = job_block(&workflow, "verify-github-hosted-apple");
+        assert!(
+            apple.contains("runs-on: macos-26"),
+            "the macOS unit takes the Apple image: {apple}"
+        );
+        assert!(
+            apple.contains("inputs.apple_executor }}"),
+            "the Apple job admits only Apple callers: {apple}"
+        );
+        assert!(
+            apple.contains("if: ${{ always() && inputs.apple_executor }}"),
+            "the Apple job records only Apple dispatches: {apple}"
+        );
+        // Caller level: exactly the macOS hosted caller passes the flag.
+        let nodes = aggregate_fixture_nodes(&ir);
+        for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
+            let rendered = ir.render_nested(kind, &nodes, None);
+            assert_eq!(
+                rendered.matches("apple_executor: true").count(),
+                1,
+                "exactly the macOS hosted caller passes the flag on {kind:?}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn apple_rust_job_bootstraps_the_runtime_through_setup_action() {
+        // The plan job publishes the runtime artifact only for its own
+        // Linux executor, so the Apple partition of a Rust kind must
+        // bootstrap the pinned runtime through the setup action instead of
+        // downloading an artifact no job publishes for macOS. The kind
+        // reusable serves whole-plan and affected-scope callers alike, so
+        // one render proves both.
+        let ir = owner_test_ir("example/fixture", mixed_platform_rust_units());
+        let workflow = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "rust kind reusable renders",
+            ),
+            "rust kind has members",
+        )
+        .1;
+        let apple = job_block(&workflow, "verify-github-hosted-apple");
+        assert!(
+            apple.contains("setup-velnor-workflow"),
+            "the Apple Rust job bootstraps the pinned runtime itself: {apple}"
+        );
+        assert!(
+            !apple.contains("Download Velnor workflow runtime"),
+            "the Apple Rust job must not download the Linux-built plan artifact: {apple}"
+        );
+        let default = job_block(&workflow, "verify-github-hosted");
+        assert!(
+            default.contains("Download Velnor workflow runtime"),
+            "the Linux Rust job keeps consuming the plan artifact: {default}"
+        );
+        assert!(
+            !default.contains("setup-velnor-workflow"),
+            "the Linux Rust job needs no setup action: {default}"
+        );
+        // A uniform Apple kind keeps the setup acquisition it always had.
+        let uniform = owner_test_ir(
+            "example/fixture",
+            vec![xcode_swift_unit("swift-package-native", "native", "26.6")],
+        );
+        let swift = must_some(
+            must_ok(
+                uniform.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        let hosted = job_block(&swift, "verify-github-hosted");
+        assert!(
+            hosted.contains("setup-velnor-workflow")
+                && !hosted.contains("Download Velnor workflow runtime"),
+            "a uniform Apple kind bootstraps through the setup action: {hosted}"
+        );
+    }
+
+    #[test]
+    fn executor_split_keeps_unsplit_kinds_on_one_job() {
+        // All-Linux: the one hosted job on the selector, no executor clause.
+        let linux = owner_test_ir(
+            "example/fixture",
+            vec![
+                rust_unit("rust-a", "crates/a"),
+                rust_unit("rust-b", "crates/b"),
+            ],
+        );
+        let rendered = must_some(
+            must_ok(
+                linux.render_kind_unit_workflow(UnitKind::Rust, None),
+                "rust kind reusable renders",
+            ),
+            "rust kind has members",
+        )
+        .1;
+        assert!(rendered.contains("  verify-github-hosted:\n"), "{rendered}");
+        assert!(
+            !rendered.contains("verify-github-hosted-apple"),
+            "an unsplit kind renders no Apple job: {rendered}"
+        );
+        let hosted = job_block(&rendered, "verify-github-hosted");
+        assert!(hosted.contains("runs-on: ubuntu-24.04"), "{hosted}");
+        assert!(
+            !hosted.contains("apple_executor"),
+            "an unsplit job carries no executor clause: {hosted}"
+        );
+        // All-macOS: the same one job, on the Apple image, no clause.
+        let mut apple_a = rust_unit("swift-a", "a");
+        apple_a.kind = UnitKind::Swift;
+        apple_a.platform = crate::s2::provider::Platform::MacosArm64;
+        let mut apple_b = rust_unit("swift-b", "b");
+        apple_b.kind = UnitKind::Swift;
+        apple_b.platform = crate::s2::provider::Platform::MacosArm64;
+        let macos = owner_test_ir("example/fixture", vec![apple_a, apple_b]);
+        let rendered = must_some(
+            must_ok(
+                macos.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift kind reusable renders",
+            ),
+            "swift kind has members",
+        )
+        .1;
+        assert!(
+            !rendered.contains("verify-github-hosted-apple"),
+            "a uniform Apple kind renders no second job: {rendered}"
+        );
+        let hosted = job_block(&rendered, "verify-github-hosted");
+        assert!(hosted.contains("runs-on: macos-26"), "{hosted}");
+        assert!(
+            !hosted.contains("apple_executor"),
+            "a uniform Apple job carries no executor clause: {hosted}"
+        );
+    }
+
+    #[test]
+    fn executor_split_is_deterministic() {
+        let render = |units| {
+            let ir = owner_test_ir("example/fixture", units);
+            must_some(
+                must_ok(
+                    ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                    "rust kind reusable renders",
+                ),
+                "rust kind has members",
+            )
+            .1
+        };
+        let first = render(mixed_platform_rust_units());
+        let second = render(mixed_platform_rust_units());
+        assert_eq!(first, second, "identical members render identical bytes");
+        let mut reordered = mixed_platform_rust_units();
+        reordered.rotate_right(1);
+        assert_eq!(
+            first,
+            render(reordered),
+            "member order never leaks into the split render"
+        );
+    }
+
+    fn xcode_swift_unit(id: &str, root: &str, version: &str) -> Unit {
+        let mut unit = rust_unit(id, root);
+        unit.kind = UnitKind::Swift;
+        unit.label = format!("Swift package ({root})");
+        unit.platform = crate::s2::provider::Platform::MacosArm64;
+        unit.xcode = Some(XcodeToolchain {
+            version: version.to_owned(),
+        });
+        unit
+    }
+
+    #[test]
+    fn xcode_pin_renders_probe_step_on_hosted_swift() {
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![xcode_swift_unit("swift-package-native", "native", "26.6")],
+        );
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(workflow.contains("- name: Select Xcode 26.6"), "{workflow}");
+        assert!(workflow.contains("DEVELOPER_DIR="), "{workflow}");
+        assert!(workflow.contains("xcodebuild -version"), "{workflow}");
+    }
+
+    /// A fake `/Applications` tree plus `xcodebuild`/`swift` shims that
+    /// executes the exact rendered probe script.
+    struct ProbeStage {
+        root: std::path::PathBuf,
+    }
+
+    impl ProbeStage {
+        fn create(name: &str) -> Self {
+            static NEXT_STAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "velnor-xcode-probe-{name}-{}-{}",
+                std::process::id(),
+                NEXT_STAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            must_ok(
+                std::fs::create_dir_all(root.join("Applications")),
+                "stage Applications",
+            );
+            must_ok(std::fs::create_dir_all(root.join("bin")), "stage bin");
+            for tool in ["xcodebuild", "swift"] {
+                let shim = root.join("bin").join(tool);
+                must_ok(
+                    std::fs::write(&shim, format!("#!/bin/sh\necho fake-{tool}\n")),
+                    "stage tool shim",
+                );
+                Self::make_executable(&shim);
+            }
+            Self { root }
+        }
+
+        fn make_executable(path: &std::path::Path) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                must_ok(
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)),
+                    "stage shim is executable",
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+            }
+        }
+
+        fn install_versioned(&self, name: &str) {
+            must_ok(
+                std::fs::create_dir_all(
+                    self.root
+                        .join("Applications")
+                        .join(format!("{name}.app/Contents/Developer")),
+                ),
+                "stage versioned Xcode",
+            );
+        }
+
+        fn install_unversioned(&self, version: &str) {
+            let dir = self
+                .root
+                .join("Applications")
+                .join("Xcode.app/Contents/Developer/usr/bin");
+            must_ok(std::fs::create_dir_all(&dir), "stage Xcode.app");
+            let stub = dir.join("xcodebuild");
+            must_ok(
+                std::fs::write(
+                    &stub,
+                    format!("#!/bin/sh\necho 'Xcode {version}'\necho 'Build version TEST'\n"),
+                ),
+                "stage Xcode.app xcodebuild",
+            );
+            Self::make_executable(&stub);
+        }
+
+        fn run(&self, pin: &str) -> (bool, String, String, String) {
+            let script = WorkflowIr::xcode_probe_script(pin).replace(
+                "/Applications",
+                &self.root.join("Applications").to_string_lossy(),
+            );
+            let path = format!(
+                "{}:{}",
+                self.root.join("bin").to_string_lossy(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let env_file = self.root.join("github-env.txt");
+            let output = must_ok(
+                Command::new("bash")
+                    .args(["-c", &script])
+                    .env("PATH", path)
+                    .env("GITHUB_ENV", &env_file)
+                    .output(),
+                "bash executes the probe",
+            );
+            let env = std::fs::read_to_string(&env_file).unwrap_or_default();
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                env,
+            )
+        }
+    }
+
+    impl Drop for ProbeStage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn xcode_probe_selects_exact_prefix_and_unversioned() {
+        let stage = ProbeStage::create("exact");
+        stage.install_versioned("Xcode_26.6");
+        stage.install_versioned("Xcode_26.6.1");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "exact match wins: {stderr}");
+        assert!(
+            env.contains("DEVELOPER_DIR=") && env.contains("Xcode_26.6.app/Contents/Developer"),
+            "exact Xcode_26.6.app is exported, not the newer prefix or Xcode.app: {env}"
+        );
+
+        let stage = ProbeStage::create("prefix");
+        stage.install_versioned("Xcode_26.6.1");
+        stage.install_versioned("Xcode_26.6.2");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "newest prefix match wins: {stderr}");
+        assert!(
+            env.contains("Xcode_26.6.2.app/Contents/Developer"),
+            "newest prefix Xcode_26.6.2.app is exported: {env}"
+        );
+
+        let stage = ProbeStage::create("unversioned");
+        stage.install_unversioned("26.6.1");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "version-matching Xcode.app is accepted: {stderr}");
+        assert!(
+            env.contains("Xcode.app/Contents/Developer"),
+            "Xcode.app is exported: {env}"
+        );
+    }
+
+    #[test]
+    fn xcode_probe_fails_closed_with_diagnostic() {
+        let stage = ProbeStage::create("mismatch");
+        stage.install_versioned("Xcode_27.0");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, _) = stage.run("26.6");
+        assert!(!success, "a wrong-version Xcode.app is refused");
+        assert!(
+            stderr.contains("::error::no installed Xcode matches pin 26.6"),
+            "refusal names the pin: {stderr}"
+        );
+
+        let stage = ProbeStage::create("empty");
+        let (success, _, stderr, _) = stage.run("26.6");
+        assert!(!success, "no installed Xcode fails");
+        assert!(
+            stderr.contains("::error::no installed Xcode matches pin 26.6"),
+            "an empty tree reports the diagnostic instead of dying silently: {stderr}"
+        );
+    }
+
+    #[test]
+    fn xcode_probe_selects_through_globs_without_ls_pipelines() {
+        let script = WorkflowIr::xcode_probe_script("26.6");
+        for forbidden in ["ls ", "| grep", "grep ", "| sort", "| tail"] {
+            assert!(
+                !script.contains(forbidden),
+                "the probe must select through globs, never by parsing ls ({forbidden}): {script}"
+            );
+        }
+        assert!(
+            script.contains("for candidate in \"/Applications/Xcode_${want}\"*.app")
+                && script.contains("for candidate in /Applications/*"),
+            "glob loops select the newest prefix match and list the install diagnostic: {script}"
+        );
+        // Selection order is exact match, newest prefix match, matching
+        // unversioned install, error: the staged behavioral tests prove the
+        // behavior; the branch order pins the shape.
+        let exact = must_some(
+            script.find("if [ -d \"/Applications/Xcode_${want}.app\" ]; then"),
+            "probe keeps its exact-match branch",
+        );
+        let prefix = must_some(
+            script.find("for candidate in \"/Applications/Xcode_${want}\"*.app"),
+            "probe keeps its prefix-match branch",
+        );
+        let unversioned = must_some(
+            script.find("Xcode.app/Contents/Developer/usr/bin/xcodebuild -version"),
+            "probe keeps its unversioned fallback",
+        );
+        let error = must_some(
+            script.find("::error::no installed Xcode matches pin"),
+            "probe keeps its error diagnostic",
+        );
+        assert!(
+            exact < prefix && prefix < unversioned && unversioned < error,
+            "probe branches keep selection order: {script}"
+        );
+    }
+
+    #[test]
+    fn swift_without_xcode_pin_renders_no_probe_step() {
+        let mut swift = rust_unit("swift-package-native", "native");
+        swift.kind = UnitKind::Swift;
+        swift.platform = crate::s2::provider::Platform::MacosArm64;
+        let ir = owner_test_ir("example/fixture", vec![swift]);
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(!workflow.contains("Select Xcode"), "{workflow}");
+    }
+
+    #[test]
+    fn disagreeing_xcode_pins_fail_swift_render() {
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![
+                xcode_swift_unit("swift-package-a", "a", "26.6"),
+                xcode_swift_unit("swift-package-b", "b", "26.7"),
+            ],
+        );
+        let error = must_err(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "members disagree on the Xcode pin",
+        );
+        assert!(error.to_string().contains("Xcode toolchain pin"), "{error}");
+    }
+
+    #[test]
+    fn apple_cache_purposes_enable_actions_cache_and_render() {
+        let cache = |purpose| {
+            Some(crate::s2::CacheSpec {
+                key_files: vec!["Package.swift".to_owned(), "mise.lock".to_owned()],
+                paths: vec!["~/.swiftpm".to_owned()],
+                purpose,
+                mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
+            })
+        };
+        let mut package = rust_unit("swift-package-native", "native");
+        package.kind = UnitKind::Swift;
+        package.platform = crate::s2::provider::Platform::MacosArm64;
+        package.cache = cache(crate::s2::CachePurpose::SwiftPmSources);
+        let mut scheme = rust_unit("swift-xcodeproj-app", "native");
+        scheme.kind = UnitKind::Swift;
+        scheme.platform = crate::s2::provider::Platform::MacosArm64;
+        scheme.cache = cache(crate::s2::CachePurpose::XcodeIntermediates);
+        let ir = owner_test_ir("example/fixture", vec![package, scheme]);
+        for unit in &ir.units {
+            assert!(
+                crate::s2::primitives::CacheBackend::Detected.provider_enables_actions_cache(
+                    crate::s2::provider::ProviderId::GithubHosted,
+                    &ir,
+                    unit,
+                ),
+                "apple cache enables restore/save steps: {}",
+                unit.id
+            );
+        }
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(
+            workflow.contains("Restore unit cache"),
+            "swift cache renders a restore step: {workflow}"
+        );
+        assert!(
+            workflow.contains("-swift-${{ hashFiles(inputs.cache_key_files) }}"),
+            "swift cache keeps the kind-level key segment: {workflow}"
         );
     }
 
@@ -1197,6 +2788,639 @@ mod tests {
             "no caller passes the flag"
         );
     }
+
+    #[test]
+    fn plan_job_threads_expected_work_and_maps_no_work_outputs() {
+        let ir = owner_test_ir("example/s4-plan", vec![rust_unit("rust", "crates/rust")]);
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        assert!(
+            plan.contains("VELNOR_EXPECTED_WORK_FILE: .velnor-ci-expected-work/expected-work.json"),
+            "the plan step binds the expected-work file path: {plan}"
+        );
+        assert!(
+            plan.contains("name: velnor-expected-work\n"),
+            "the plan job publishes the expected-work artifact under its exact name: {plan}"
+        );
+        assert!(
+            plan.contains(
+                "path: .velnor-ci-expected-work/expected-work.json\n          if-no-files-found: error"
+            ),
+            "a missing expected-work file fails the plan job loudly, never silently: {plan}"
+        );
+        assert!(
+            plan.contains("planned_no_work: ${{ steps.plan.outputs.planned_no_work }}"),
+            "the plan job maps the no-work marker output: {plan}"
+        );
+        assert!(
+            plan.contains("no_work_reason: ${{ steps.plan.outputs.no_work_reason }}"),
+            "the plan job maps the no-work reason output: {plan}"
+        );
+    }
+
+    #[test]
+    fn plan_job_scopes_expected_work_providers_to_scheduled_universe() {
+        // The plan scope must equal the scheduled provider scope: a narrowed
+        // universe that plans unfiltered writes phantom entries for
+        // unscheduled providers, and the aggregate fails closed on records
+        // no job can report. There is no `providers` dispatch input —
+        // manual dispatches select the static universe — so the plan
+        // carries the static automatic set, which under the singleton
+        // visibility policy is exactly the scheduled universe.
+        let mut ir = owner_test_ir(
+            "example/s4-plan-providers",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        ir.providers = ProviderSet::from([ProviderId::GithubHosted]);
+        ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        assert!(
+            plan.contains("VELNOR_PROVIDERS: github-hosted\n"),
+            "a single-provider universe plans only its provider: {plan}"
+        );
+        assert!(
+            !plan.contains("inputs.providers"),
+            "no dispatch provider input exists to narrow by: {plan}"
+        );
+    }
+
+    #[test]
+    fn plan_step_creates_expected_work_dir_before_invoking_plan() {
+        // The pinned product predates the runtime's own parent creation, so
+        // the branch-controlled render prepares the dir for the old binary.
+        let ir = owner_test_ir(
+            "example/s4-plan-mkdir",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        let mkdir = must_some(
+            plan.find(&format!("mkdir -p {}\n", super::EXPECTED_WORK_DIR)),
+            "expected-work dir creation",
+        );
+        let invoke = must_some(
+            plan.find("velnor-workflow plan --config"),
+            "plan invocation",
+        );
+        assert!(
+            mkdir < invoke,
+            "the plan step creates the expected-work dir before invoking plan: {plan}"
+        );
+        assert_eq!(
+            super::EXPECTED_WORK_FILE,
+            format!("{}/expected-work.json", super::EXPECTED_WORK_DIR),
+            "the env-bound file stays inside the created dir",
+        );
+    }
+
+    #[test]
+    fn no_work_branch_contract_is_presence_only() {
+        let ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
+            let surface = ir.render_nested(kind, &nodes, None);
+            assert!(
+                surface.contains("never `false`"),
+                "{kind:?} documents the presence-only marker contract: {surface}"
+            );
+            // The contract comment itself names the legal comparison; only
+            // code lines count as branches.
+            let code = surface
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.contains("planned_no_work == 'false'"),
+                "{kind:?} never branches on the impossible `false` value: {surface}"
+            );
+            assert!(
+                !code.contains("planned_no_work ==") && !code.contains("planned_no_work !="),
+                "{kind:?} branches nowhere on the marker: the aggregate tolerates no-work itself: {surface}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_check_scores_aggregate_before_the_shell_verdict() {
+        let ir = owner_test_ir(
+            "example/s4-required",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains("name: velnor-expected-work\n"),
+            "ci-required downloads the expected-work artifact by exact name: {rendered}"
+        );
+        assert!(
+            rendered.contains("pattern: velnor-result-*"),
+            "ci-required collects every per-unit result artifact: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "velnor-workflow aggregate --expected .velnor-ci-expected-work/expected-work.json --results .velnor-ci-results.json"
+            ),
+            "ci-required scores collected results against expected work: {rendered}"
+        );
+        assert!(
+            rendered.contains("BASE_SHA: ${{ needs.plan.outputs.base_sha }}")
+                && rendered.contains("HEAD_SHA: ${{ needs.plan.outputs.head_sha }}"),
+            "the aggregate binds the plan identity from this run's plan outputs: {rendered}"
+        );
+        let aggregate = must_some(
+            rendered.find("velnor-workflow aggregate"),
+            "aggregate invocation",
+        );
+        let verdict = must_some(
+            rendered.find("Validate generated stack results"),
+            "shell verdict step",
+        );
+        assert!(
+            aggregate < verdict,
+            "the aggregate scores before the shell verdict re-confirms: {rendered}"
+        );
+        assert!(
+            rendered.contains("plan_expects"),
+            "the shell verdict still evaluates every caller against the plan: {rendered}"
+        );
+    }
+
+    #[test]
+    fn record_step_creates_result_dir_before_first_write() {
+        let steps = super::render_unit_result_steps(
+            "actions/upload-artifact@pinned",
+            "github-hosted",
+            "always()",
+        );
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let write = must_some(
+            steps.find("> \".velnor-ci-results/result-"),
+            "first result write",
+        );
+        assert!(
+            mkdir < write,
+            "the record step creates the result dir before writing: {steps}"
+        );
+        assert!(
+            steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github-hosted.json"),
+            "the upload publishes exactly what the record step wrote: {steps}"
+        );
+    }
+
+    #[test]
+    fn collect_step_creates_result_dir_before_first_read() {
+        let steps = super::render_aggregate_score_steps("", "actions/download-artifact@pinned");
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let glob = must_some(
+            steps.find("files=(.velnor-ci-results/result-*.json)"),
+            "result glob",
+        );
+        assert!(
+            mkdir < glob,
+            "the collect step creates the result dir before globbing: {steps}"
+        );
+    }
+
+    #[test]
+    fn aggregate_wiring_leaves_the_shell_verdict_verbatim() {
+        let ir = owner_test_ir(
+            "example/s4-verbatim",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let mut verdicts = String::new();
+        super::render_required_caller_verdicts(&mut verdicts, &callers);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains(&verdicts),
+            "the per-caller verdict block renders byte-for-byte beside the aggregate: {rendered}"
+        );
+    }
+
+    #[test]
+    fn aggregate_failure_can_fail_the_required_check() {
+        let ir = owner_test_ir("example/s4-fail", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let rendered = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let check = job_block(&rendered, REQUIRED_CHECK);
+        for step in [
+            "Download expected work",
+            "Collect reported unit results",
+            "Score expected work against reported results",
+        ] {
+            let start = must_some(check.find(step), step);
+            let block = &check[start..];
+            let end = block.find("\n      - name: ").unwrap_or(block.len());
+            let block = &block[..end];
+            assert!(
+                !block.contains("continue-on-error"),
+                "{step} must fail the check, never tolerate: {block}"
+            );
+        }
+        let aggregate = must_some(check.find("velnor-workflow aggregate"), "aggregate script");
+        assert!(
+            check[..aggregate].contains("set -euo pipefail"),
+            "the aggregate step runs under fail-fast shell options: {check}"
+        );
+        assert!(
+            !check.contains("aggregate --expected") || !check.contains("|| true"),
+            "nothing swallows the aggregate exit status: {check}"
+        );
+    }
+
+    #[test]
+    fn result_collection_rejects_reused_evidence_without_a_decision() {
+        let ir = owner_test_ir("example/s4-reuse", vec![rust_unit("rust", "crates/rust")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            REQUIRED_CHECK,
+            false,
+            false,
+        );
+        assert!(
+            rendered.contains("reused_from"),
+            "collection names the refused reused-evidence field: {rendered}"
+        );
+        let kind = must_render_kind(&ir);
+        assert!(
+            !kind.contains("reused_from"),
+            "no rendered producer emits reused results: {kind}"
+        );
+    }
+
+    #[test]
+    fn unit_jobs_emit_exactly_one_result_record_per_provider() {
+        let ir = owner_test_ir("example/s4-record", vec![rust_unit("rust", "crates/rust")]);
+        let kind = must_render_kind(&ir);
+        for (job, provider) in [
+            ("verify-github-hosted", "github-hosted"),
+            ("verify-github-self-hosted", "github-self-hosted"),
+            ("verify-velnor", "velnor"),
+        ] {
+            let block = job_block(&kind, job);
+            assert_eq!(
+                block.matches("- name: Record unit result").count(),
+                1,
+                "{job} records exactly one result: {block}"
+            );
+            assert_eq!(
+                block.matches("- name: Upload unit result").count(),
+                1,
+                "{job} uploads exactly one result: {block}"
+            );
+            assert!(
+                block.contains("always()"),
+                "{job} records even when the checks fail: {block}"
+            );
+            assert!(
+                block.contains(&format!("VELNOR_RESULT_LANE: {provider}")),
+                "{job} pins the schema-3 provider vocabulary: {block}"
+            );
+            assert!(
+                block.contains("overwrite: true"),
+                "{job} retries overwrite the one record: {block}"
+            );
+            assert!(
+                block.contains("job.status"),
+                "{job} derives the outcome from the job status PR code cannot fake: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_split_providers_record_exactly_once() {
+        let mut trusted = rust_unit("rust-trusted", "crates/trusted");
+        trusted.trust = crate::s2::provider::TrustReq::TrustedOnly;
+        let ir = owner_test_ir(
+            "example/s4-split",
+            vec![rust_unit("rust-plain", "crates/plain"), trusted],
+        );
+        let kind = must_render_kind(&ir);
+        let plain = job_block(&kind, "verify-velnor");
+        let gated = job_block(&kind, "verify-velnor-trusted");
+        assert!(
+            plain.contains("inputs.unit_trust == 'untrusted-ok'"),
+            "the plain job records only plain dispatches: {plain}"
+        );
+        assert!(
+            gated.contains("inputs.unit_trust == 'trusted-only'"),
+            "the trusted job records only trusted dispatches: {gated}"
+        );
+        assert_eq!(
+            kind.matches("- name: Record unit result").count(),
+            5,
+            "one record step per provider job across the split: {kind}"
+        );
+    }
+
+    /// The repository pin, as the scan parses it: channel plus the file's
+    /// own components, targets, and profile.
+    fn pin_toolchain() -> RustToolchain {
+        RustToolchain {
+            channel: "1.91.1".to_owned(),
+            components: vec!["clippy".to_owned(), "rustfmt".to_owned()],
+            targets: vec!["wasm32-unknown-unknown".to_owned()],
+            profile: Some("minimal".to_owned()),
+        }
+    }
+
+    /// A declared per-unit channel: a bare channel string with no pin facts.
+    fn declared_toolchain(channel: &str) -> RustToolchain {
+        RustToolchain {
+            channel: channel.to_owned(),
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        }
+    }
+
+    /// A hosted-only IR over `units` with the recorded pin: multi-channel
+    /// coverage renders without the local providers the matrix refuses.
+    fn matrix_test_ir(units: Vec<Unit>, rust_pin: Option<RustToolchain>) -> WorkflowIr {
+        let mut ir = owner_test_ir("example/toolchain-matrix", units);
+        ir.providers = BTreeSet::from([ProviderId::GithubHosted]);
+        ir.automatic_providers = BTreeSet::from([ProviderId::GithubHosted]);
+        ir.rust_pin = rust_pin;
+        ir
+    }
+
+    fn caller_toolchain(ir: &WorkflowIr, unit: &Unit) -> Option<String> {
+        ir.unit_provider_callers(unit, "ci-unit-rust.yml", None)
+            .iter()
+            .find_map(|caller| {
+                caller
+                    .inputs
+                    .iter()
+                    .find(|(name, _)| *name == provider_input::TOOLCHAIN)
+                    .map(|(_, value)| value.clone())
+            })
+    }
+
+    #[test]
+    fn single_channel_kind_carries_no_toolchain_input() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        let mut second = rust_unit("rust-second", "crates/second");
+        second.toolchain = Some(pin.clone());
+        let ir = matrix_test_ir(vec![primary.clone(), second], Some(pin));
+        let kind = must_render_kind(&ir);
+        assert!(
+            !kind.contains("inputs.toolchain"),
+            "a single-channel kind provisions without any input: {kind}"
+        );
+        assert!(
+            !kind.contains("toolchain:\n        required: false"),
+            "a single-channel kind declares no toolchain input: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install --profile minimal"),
+            "the pin leg keeps the file-driven install: {kind}"
+        );
+        assert!(
+            caller_toolchain(&ir, &primary).is_none(),
+            "single-channel callers pass no toolchain input"
+        );
+    }
+
+    #[test]
+    fn two_channel_kind_renders_one_gated_leg_per_channel() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![primary.clone(), msrv.clone()], Some(pin));
+        let kind = must_render_kind(&ir);
+        // The callee declares the leg input; each caller passes its unit's
+        // own channel. No `strategy.matrix`: callers already fan out one job
+        // per unit, so a matrix would run every unit on every channel.
+        assert!(
+            kind.contains("      toolchain:\n        required: false\n        type: string"),
+            "the kind reusable declares the toolchain input: {kind}"
+        );
+        assert!(
+            !kind.contains("strategy:") && !kind.contains("matrix."),
+            "legs ride per-unit inputs, never a multiplied matrix: {kind}"
+        );
+        assert_eq!(
+            caller_toolchain(&ir, &primary).as_deref(),
+            Some("1.91.1"),
+            "the primary caller passes the pin channel"
+        );
+        assert_eq!(
+            caller_toolchain(&ir, &msrv).as_deref(),
+            Some("1.88.0"),
+            "the MSRV caller passes its declared channel"
+        );
+        // The pin leg: file-driven, gated, today's cache key and step id.
+        assert!(
+            kind.contains("if: ${{ inputs.toolchain == '1.91.1' }}"),
+            "the pin leg gates on its channel: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install --profile minimal\n"),
+            "the pin leg keeps the file-driven install: {kind}"
+        );
+        // The MSRV leg: explicit install, leg-suffixed key and step id, and
+        // the export that retargets every later plain `cargo` invocation.
+        assert!(
+            kind.contains("if: ${{ inputs.toolchain == '1.88.0' }}"),
+            "the MSRV leg gates on its channel: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install '1.88.0' --profile 'minimal'\n"),
+            "the MSRV leg installs its channel explicitly: {kind}"
+        );
+        assert!(
+            kind.contains("key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-1.88.0"),
+            "the MSRV leg keys its cache on the channel: {kind}"
+        );
+        assert!(
+            kind.contains("id: rustup-toolchain-1-88-0"),
+            "the MSRV leg restores under its own step id: {kind}"
+        );
+        assert!(
+            kind.contains("steps.rustup-toolchain-1-88-0.outputs.cache-hit != 'true'"),
+            "the MSRV save gate reads its own leg's cache-hit: {kind}"
+        );
+        assert!(
+            kind.contains("echo \"RUSTUP_TOOLCHAIN=1.88.0\" >> \"$GITHUB_ENV\""),
+            "the MSRV leg retargets later cargo invocations: {kind}"
+        );
+        assert!(
+            !kind.contains("+1.88.0"),
+            "both legs run plain commands, never `cargo +toolchain`: {kind}"
+        );
+    }
+
+    #[test]
+    fn declared_pin_channel_joins_the_pin_leg() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        // A bare declaration equal to the pin channel is still the pin leg:
+        // the file's own facts provision it, not the bare declaration.
+        let mut alias = rust_unit("rust-alias", "crates/primary");
+        alias.toolchain = Some(declared_toolchain("1.91.1"));
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![primary, alias, msrv], Some(pin));
+        let kind = must_render_kind(&ir);
+        // Two legs, each gating its restore/provision/save steps on its own
+        // channel: the alias rides the pin leg instead of a third.
+        let pin_gates = kind.matches("inputs.toolchain == '1.91.1'").count();
+        let msrv_gates = kind.matches("inputs.toolchain == '1.88.0'").count();
+        assert!(
+            pin_gates > 0 && pin_gates == msrv_gates,
+            "two symmetric legs, no third: {kind}"
+        );
+        assert!(
+            kind.contains("rustup target add 'wasm32-unknown-unknown'"),
+            "the pin leg provisions the file's targets: {kind}"
+        );
+    }
+
+    #[test]
+    fn channel_collision_refuses() {
+        let pin = pin_toolchain();
+        let mut first = rust_unit("rust-first", "crates/first");
+        first.toolchain = Some(RustToolchain {
+            targets: vec!["wasm32-unknown-unknown".to_owned()],
+            ..declared_toolchain("1.88.0")
+        });
+        let mut second = rust_unit("rust-second", "crates/second");
+        second.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![first, second], Some(pin));
+        let error = must_err(
+            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            "one channel with two toolchains must fail",
+        );
+        assert!(
+            error.to_string().contains("1.88.0"),
+            "the refusal names the collided channel: {error}"
+        );
+    }
+
+    #[test]
+    fn explicit_step_ids_sanitize_and_dedupe() {
+        let mut taken = BTreeSet::from(["rustup-toolchain".to_owned()]);
+        assert_eq!(
+            explicit_toolchain_step_id("1.88.0", &mut taken),
+            "rustup-toolchain-1-88-0"
+        );
+        assert_eq!(
+            explicit_toolchain_step_id("1-88-0", &mut taken),
+            "rustup-toolchain-1-88-0-2",
+            "channels that sanitize alike still restore under disjoint ids"
+        );
+        assert_eq!(
+            explicit_toolchain_step_id("nightly", &mut taken),
+            "rustup-toolchain-nightly"
+        );
+    }
+
+    #[test]
+    fn matrix_on_a_local_provider_refuses_at_render() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        // The full provider universe: the local jobs cannot provision legs.
+        let mut ir = owner_test_ir("example/toolchain-local", vec![primary, msrv]);
+        ir.rust_pin = Some(pin);
+        let error = must_err(
+            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            "a matrix on a local provider must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("cannot provision per-leg toolchains"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn unknown_pin_renders_every_leg_explicitly() {
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(declared_toolchain("stable"));
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![primary, msrv], None);
+        let kind = must_render_kind(&ir);
+        assert!(
+            kind.contains("rustup toolchain install 'stable' --profile 'minimal'"),
+            "without a recorded pin no leg may assume the file: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install '1.88.0' --profile 'minimal'"),
+            "without a recorded pin no leg may assume the file: {kind}"
+        );
+        assert!(
+            !kind.contains("Restore Rust toolchain\n"),
+            "without a recorded pin no leg renders the file-driven block: {kind}"
+        );
+    }
+
+    #[test]
+    fn literal_provision_follows_the_unit_leg() {
+        let pin = pin_toolchain();
+        let mut pinned = rust_unit("rust", "crates/primary");
+        pinned.toolchain = Some(pin.clone());
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![pinned.clone(), msrv.clone()], Some(pin));
+        let mut file_driven = String::new();
+        ir.render_tool_provisioning(&mut file_driven, ProviderId::GithubHosted, &pinned, true);
+        assert!(
+            file_driven.contains("rustup toolchain install --profile minimal\n"),
+            "the pin leg provisions file-driven: {file_driven}"
+        );
+        let mut explicit = String::new();
+        ir.render_tool_provisioning(&mut explicit, ProviderId::GithubHosted, &msrv, true);
+        assert!(
+            explicit.contains("rustup toolchain install '1.88.0' --profile 'minimal'"),
+            "a non-pin leg provisions explicitly: {explicit}"
+        );
+        assert!(
+            explicit.contains("echo \"RUSTUP_TOOLCHAIN=1.88.0\" >> \"$GITHUB_ENV\""),
+            "a non-pin leg retargets later cargo invocations: {explicit}"
+        );
+    }
 }
 
 /// The units a snapshot-carrying unit compiles: the unit itself plus the
@@ -1350,6 +3574,7 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         payload: "mbx",
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: config_rust_toolchain(config),
+        xcode: None,
         host_image: config
             .selectors
             .get(&ProviderId::GithubHosted)
@@ -1400,6 +3625,7 @@ fn snapshot_compatibility(
         },
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: unit.toolchain.clone(),
+        xcode: unit.xcode.clone(),
         host_image: ir
             .selectors
             .get(&provider)
@@ -1717,12 +3943,27 @@ fn render_cache_outcome_report_inputs(
     if provider.is_local() {
         if let Some(layers) = &facts.host_warm_layers {
             let _ = writeln!(output, "          host_warm_layers: {layers}");
+            // The Velnor lane has no restore steps to observe; the host-warm
+            // list is the declaration, so the classifier reports listed
+            // layers as declared-but-unobserved instead of disabled.
+            let _ = writeln!(output, "          cache_declared_layers: {layers}");
         }
         return;
     }
+    let declared = facts
+        .layers
+        .iter()
+        .map(|layer| layer.report_input_prefix())
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = writeln!(output, "          cache_declared_layers: {declared}");
     for layer in &facts.layers {
         let input_prefix = layer.report_input_prefix();
         let step_id = layer.step_id();
+        let _ = writeln!(
+            output,
+            "          cache_{input_prefix}_outcome: ${{{{ steps.{step_id}.outcome }}}}"
+        );
         if *layer == ReportedCacheLayer::Mbx {
             let _ = writeln!(
                 output,
@@ -1863,6 +4104,26 @@ fn collapsed_checks_env(offline: FeatureCoverage) -> String {
     env
 }
 
+/// Export the sccache defaults after setup for the selected member. Collapsed
+/// jobs cannot use a per-unit job env because one job serves members with
+/// mutually exclusive MBX and sccache transports; `GITHUB_ENV` carries the
+/// selected member's values to every later command without assigning empty
+/// wrapper variables to MBX members.
+fn render_collapsed_sccache_env_step(
+    output: &mut String,
+    sccache: FeatureCoverage,
+    mbx_input: &str,
+) {
+    if !sccache.any {
+        return;
+    }
+    let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
+    output.push_str(&prefix_step_block_with_if(
+        block,
+        sccache.absent_gate(mbx_input).as_deref(),
+    ));
+}
+
 /// Every command the unit runs, on either provider: the scan-derived base
 /// commands plus every provider-specific override a repo-owned config declared.
 /// A unit may pin commands per provider only — its base vectors then stay empty —
@@ -1878,6 +4139,14 @@ fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
 pub(crate) fn unit_runs_workflow_plain_check(unit: &Unit) -> bool {
     unit_commands(unit).any(|command| command.contains("--plain --check"))
 }
+
+/// The D19 pin-fetch commands every hosted job that runs the generator's
+/// `--plain --check` renders before its checks: resolve the declared pin
+/// from the generation config and fetch the commit when the shallow
+/// checkout lacks it, so the guard's `closure_of_tree(pin)` reads from
+/// local history. The collapsed provider job and the release legs share
+/// these lines so the two paths cannot drift.
+pub(crate) const D19_PIN_FETCH_COMMANDS: &str = "          pin=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{40})\".*/\\1/p' .github-gen/velnor-workflow.toml | head -n 1)\"\n          test \"$pin\" != '' || { echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }\n          if ! git cat-file -e \"$pin^{commit}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\"\n          fi";
 
 /// Whether the unit owns the generator crate itself: a Rust unit rooted at
 /// the generator crate's manifest directory. The scan mints one unit per
@@ -2100,6 +4369,85 @@ pub(crate) fn render_pinned_toolchain_steps(
     }
 }
 
+/// Render one explicit-channel provision leg of a multi-channel Rust kind:
+/// restore the leg-suffixed `~/.rustup` cache, install the leg's channel by
+/// name, and export `RUSTUP_TOOLCHAIN` so every later cargo invocation —
+/// fetch, checks, tool installs — resolves to the leg instead of the pin
+/// file the checkout carries. The pin leg keeps the file-driven install
+/// above; only legs whose channel differs from the pin render here.
+///
+/// The cache key names the channel instead of hashing the pin files: every
+/// leg checks out the same pin file, so a file hash would collide across
+/// legs and restore another channel's toolchain state.
+pub(crate) fn render_explicit_toolchain_steps(
+    output: &mut String,
+    cache_restore: &str,
+    cache_save: &str,
+    toolchain: &RustToolchain,
+    step_id: &str,
+    save_gate: Option<&str>,
+) {
+    let (paths, _) = rendered_cache_values(&CacheSpec {
+        key_files: Vec::new(),
+        paths: vec!["~/.rustup".to_owned()],
+        purpose: CachePurpose::Toolchains,
+        mbx_output_cache_justification: None,
+        mutable_mount_seed: false,
+    });
+    let channel = crate::s2::shell_quote(&toolchain.channel);
+    let key = format!(
+        "velnor-rustup-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}",
+        toolchain.channel
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Restore Rust toolchain ({})\n        id: {step_id}\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}",
+        toolchain.channel
+    );
+    // A declared channel carries no components, targets, or profile of its
+    // own: the leg provisions it with a minimal profile, so pin-only
+    // components can never leak onto a channel that lacks them. Targets are
+    // qualified with `--toolchain`: the checkout's pin file still resolves
+    // every unqualified rustup invocation to the pin channel.
+    let profile = toolchain.profile.as_deref().unwrap_or("minimal");
+    let mut install = format!(
+        "rustup toolchain install {channel} --profile {}",
+        crate::s2::shell_quote(profile)
+    );
+    for component in &toolchain.components {
+        let _ = write!(install, " -c {}", crate::s2::shell_quote(component));
+    }
+    let _ = writeln!(
+        output,
+        "      - name: Provision Rust toolchain ({})\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}",
+        toolchain.channel
+    );
+    if !toolchain.targets.is_empty() {
+        let targets = toolchain
+            .targets
+            .iter()
+            .map(|target| crate::s2::shell_quote(target))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            output,
+            "          rustup target add --toolchain {channel} {targets}"
+        );
+    }
+    let _ = writeln!(
+        output,
+        "          echo \"RUSTUP_TOOLCHAIN={}\" >> \"$GITHUB_ENV\"",
+        toolchain.channel
+    );
+    if let Some(save_gate) = save_gate {
+        let _ = writeln!(
+            output,
+            "      - name: Save Rust toolchain ({})\n        if: {save_gate}\n        uses: {cache_save}\n        with:\n          path: |\n{paths}\n          key: {key}",
+            toolchain.channel
+        );
+    }
+}
+
 /// Trusted GitHub Actions cache save gate for unit lanes: default-branch push,
 /// schedule, and default-branch `workflow_dispatch`. Excludes every
 /// `pull_request` variant and `merge_group` (D7, D8).
@@ -2145,11 +4493,61 @@ pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<St
     if needs_nextest(unit) {
         push_mise_tool(&mut tools, nextest_tool_id(lock_keys).to_owned());
     }
+    if needs_boltffi(unit) {
+        push_mise_tool(&mut tools, BOLTFFI_TOOL.to_owned());
+    }
+    if needs_xcodegen(unit) {
+        push_mise_tool(&mut tools, XCODEGEN_TOOL.to_owned());
+    }
     for declared in &unit.mise_tools {
         push_mise_tool(&mut tools, declared.clone());
     }
     tools
 }
+
+/// Whether any of the unit's commands drive `XcodeGen` project generation.
+/// The scan stamps the id onto `XcodeGen` units directly; detection keeps
+/// the install list correct when a generation-config override replaces the
+/// stamped tools without it. One predicate feeds both the mise install
+/// list and the lock validation, so the two can never disagree about
+/// what a unit needs.
+pub(crate) fn needs_xcodegen(unit: &Unit) -> bool {
+    unit_commands(unit).any(|command| {
+        command
+            .split_whitespace()
+            .any(|token| token == "xcodegen" || token.ends_with("/xcodegen"))
+    })
+}
+
+/// Whether any of the unit's commands drive the `BoltFFI` pack the native join
+/// appends to a producing Rust unit. One predicate feeds both the mise
+/// install list and the lock validation, so the two can never disagree
+/// about what a unit needs.
+pub(crate) fn needs_boltffi(unit: &Unit) -> bool {
+    unit_commands(unit).any(|command| {
+        let mut seen_boltffi = false;
+        command.split_whitespace().any(|token| {
+            // Shell separators start a new simple command: a `pack` past
+            // one belongs to whatever follows, not to the earlier `boltffi`.
+            if matches!(token, "&&" | "||" | ";" | "|") {
+                seen_boltffi = false;
+                return false;
+            }
+            if seen_boltffi {
+                token == "pack"
+            } else {
+                seen_boltffi = token == "boltffi" || token.ends_with("/boltffi");
+                false
+            }
+        })
+    })
+}
+
+/// The single mise spelling the `BoltFFI` CLI pins under: the cargo backend
+/// serving the `boltffi_cli` crate, as evidenced by the `mise.lock` key.
+/// `mise --locked` requires install args to equal the lock keys byte for
+/// byte, so validation refuses any other state before rendering.
+pub(crate) const BOLTFFI_TOOL: &str = "cargo:boltffi_cli";
 
 pub(crate) fn needs_cargo_deny(unit: &Unit) -> bool {
     unit_commands(unit)
@@ -2242,6 +4640,60 @@ pub(crate) fn validate_nextest_tools_are_locked(
             let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
             return Err(GeneratorError::usage(format!(
                 "unit {} runs cargo-nextest but mise.lock pins neither {QUALIFIED_NEXTEST_TOOL} nor {BARE_NEXTEST_TOOL}; install one and re-lock so install_args match the lock, known keys: {known}",
+                unit.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a unit that needs `BoltFFI` while the root lock does not pin its
+/// tool id: rendering anything else would emit `install_args` the runner's
+/// own lock check rejects, and unlike nextest there is no cargo-bin
+/// fallback, so an absent lock fails here rather than at pack time.
+///
+/// # Errors
+/// Returns a usage error naming the first unit whose `BoltFFI` need the lock
+/// does not pin, with every key the lock does pin.
+pub(crate) fn validate_boltffi_tools_are_locked(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if lock_keys.contains(BOLTFFI_TOOL) {
+        return Ok(());
+    }
+    for unit in units {
+        if needs_boltffi(unit) {
+            let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(GeneratorError::usage(format!(
+                "unit {} runs boltffi pack but mise.lock does not pin {BOLTFFI_TOOL}; pin it and re-lock so install_args match the lock, known keys: {known}",
+                unit.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a unit that runs `XcodeGen` while the root lock does not pin its
+/// tool id: rendering anything else would emit `install_args` the runner's
+/// own lock check rejects, and like `BoltFFI` there is no fallback, so an
+/// absent lock fails here rather than at install time on the runner.
+///
+/// # Errors
+/// Returns a usage error naming the first unit whose `XcodeGen` need the lock
+/// does not pin, with every key the lock does pin.
+pub(crate) fn validate_xcodegen_tools_are_locked(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if lock_keys.contains(XCODEGEN_TOOL) {
+        return Ok(());
+    }
+    for unit in units {
+        if needs_xcodegen(unit) {
+            let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(GeneratorError::usage(format!(
+                "unit {} runs xcodegen generate but mise.lock does not pin {XCODEGEN_TOOL}; pin it and re-lock so install_args match the lock, known keys: {known}",
                 unit.id
             )));
         }
@@ -2529,6 +4981,26 @@ fn render_mutable_mount_seed_restore_from_input(
     render_seed_restore_steps(output, ir, &paths, &key, &restore_keys, checks_env);
 }
 
+/// The seed restore for a concrete `(provider, unit)` job such as a release
+/// leg: the same steps and the same snapshot grammar as the collapsed
+/// provider job's input-driven restore, with the paths and all three
+/// segments rendered literally from the unit. The key matches the unit
+/// provider job's key for the same pair, so release legs share its seed.
+pub(crate) fn render_mutable_mount_seed_restore_for_unit(
+    output: &mut String,
+    ir: &WorkflowIr,
+    provider: ProviderId,
+    unit: &Unit,
+    checks_env: &str,
+) {
+    let Some(cache) = unit.cache.as_ref() else {
+        return;
+    };
+    let (key, restore_keys) = unit_snapshot(ir, unit, provider, DOCKER_SEED_SNAPSHOT_NAMESPACE);
+    let (paths, _) = rendered_cache_values(cache);
+    render_seed_restore_steps(output, ir, &paths, &key, &restore_keys, checks_env);
+}
+
 fn render_seed_restore_steps(
     output: &mut String,
     ir: &WorkflowIr,
@@ -2662,7 +5134,8 @@ pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) providers: ProviderSet,
     pub(crate) automatic_providers: ProviderSet,
-    pub(crate) default_dispatch_providers: ProviderSet,
+    // NOTE: no `default_dispatch_providers`. Manual dispatches select the
+    // static universe; there is no dispatch-side provider input to default.
     pub(crate) selectors: SelectorMap,
     pub(crate) ci_required: bool,
     pub(crate) repository: String,
@@ -2684,6 +5157,9 @@ pub(crate) struct WorkflowIr {
     /// Tool keys the root `mise.lock` pins. Detected `install_args` resolve
     /// their spelling from these; empty when the scan root has no lock.
     pub(crate) mise_lock_keys: BTreeSet<String>,
+    /// The repository's own parsed Rust pin: the file-driven provision leg.
+    /// A unit leg whose channel differs provisions explicitly instead.
+    pub(crate) rust_pin: Option<RustToolchain>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2814,6 +5290,24 @@ pub(crate) struct RequiredCaller {
     pub(crate) prerequisite: bool,
 }
 
+/// A control-plane job the aggregate required check must both depend on and
+/// verify. Keep this list separate from unit callers: a control obligation is
+/// selected by workflow construction (for example, `policy` exists on main
+/// and nightly but not pull requests), while a unit obligation is selected by
+/// the affected plan and provider admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RequiredControl {
+    job_id: &'static str,
+}
+
+fn required_controls(include_policy: bool) -> Vec<RequiredControl> {
+    let mut controls = vec![RequiredControl { job_id: "plan" }];
+    if include_policy {
+        controls.push(RequiredControl { job_id: "policy" });
+    }
+    controls
+}
+
 /// The plan-JSON needle both the aggregate callers and the kind reusables
 /// match with `contains(...)`: bare quotes, exactly as the plan output spells
 /// the `unit_id` member. One spelling shared by both emitters so they cannot
@@ -2832,25 +5326,16 @@ fn aggregate_selected_unit_selector(unit_id: &str) -> String {
     )
 }
 
+/// The `workflow_dispatch` inputs: scope and base ref only. There is
+/// deliberately no provider input — manual dispatches select the static
+/// universe, so no alternate-provider dispatch input can exist.
 fn workflow_dispatch_inputs(
     default_scope: &str,
     default_branch: &str,
     extra_inputs: &str,
-    providers: &ProviderSet,
-    default_dispatch_providers: &ProviderSet,
 ) -> String {
-    let universe = providers
-        .iter()
-        .map(ProviderId::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let default_providers = default_dispatch_providers
-        .iter()
-        .map(ProviderId::as_str)
-        .collect::<Vec<_>>()
-        .join(",");
     format!(
-        "  workflow_dispatch:\n    inputs:\n      providers:\n        description: Comma-separated provider subset of [{universe}]\n        required: false\n        default: {default_providers}\n        type: string\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
+        "  workflow_dispatch:\n    inputs:\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
     )
 }
 
@@ -2891,33 +5376,37 @@ fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
 fn aggregate_concurrency_block(
     ir: &WorkflowIr,
     kind: WorkflowKind,
-    cancel_in_progress: &str,
+    cancel_in_progress: bool,
 ) -> String {
     let group = aggregate_concurrency_group(ir, kind);
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
 }
 
+/// PR aggregates may be superseded while they are waiting on a dependency.
+/// Keep their callers and required mirrors out of the cancelled run while
+/// retaining the explicit result/admission predicates below the status guard.
+/// Main and nightly aggregates must finish their publishing and alert paths.
+fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
+    if cancel_in_progress {
+        "!cancelled()"
+    } else {
+        "always()"
+    }
+}
+
 fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
-    providers: &ProviderSet,
-    default_dispatch_providers: &ProviderSet,
-) -> (&'static str, &'static str, String, &'static str) {
+) -> (&'static str, &'static str, String, bool) {
     match kind {
         WorkflowKind::PullRequest => (
             "CI / PR",
             "CI / PR",
             format!(
                 "on:\n  pull_request:\n{}",
-                workflow_dispatch_inputs(
-                    "affected",
-                    default_branch,
-                    "",
-                    providers,
-                    default_dispatch_providers,
-                )
+                workflow_dispatch_inputs("affected", default_branch, "",)
             ),
-            "true",
+            true,
         ),
         WorkflowKind::Main => (
             "CI / Main",
@@ -2925,15 +5414,9 @@ fn aggregate_triggers(
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
                 yaml_scalar(default_branch),
-                workflow_dispatch_inputs(
-                    "full",
-                    default_branch,
-                    "",
-                    providers,
-                    default_dispatch_providers,
-                )
+                workflow_dispatch_inputs("full", default_branch, "",)
             ),
-            "false",
+            false,
         ),
         WorkflowKind::Nightly => (
             "Nightly",
@@ -2944,11 +5427,9 @@ fn aggregate_triggers(
                     "full",
                     default_branch,
                     "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
-                    providers,
-                    default_dispatch_providers,
                 )
             ),
-            "false",
+            false,
         ),
     }
 }
@@ -3016,6 +5497,8 @@ pub(crate) mod provider_input {
     pub(crate) const MISE_RUNNER: &str = "mise_runner";
     /// The Mr. Boxington snapshot compatibility digest.
     pub(crate) const MBX_COMPAT: &str = "mbx_compat";
+    /// `true` when the selected unit uses Mr. Boxington instead of sccache.
+    pub(crate) const MBX_ENABLED: &str = "mbx_enabled";
     /// Newline-separated `hashFiles` patterns of the snapshot dependency segment.
     pub(crate) const MBX_DEPENDENCY_FILES: &str = "mbx_dependency_files";
     /// Newline-separated `hashFiles` patterns of the snapshot freshness segment.
@@ -3069,11 +5552,31 @@ pub(crate) mod provider_input {
     /// Comma-separated prepared-tool need records (`tool:digest:producers`)
     /// the provider restores for the unit; empty when it needs none.
     pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
+    /// Comma-separated transport records (`producer/product`) the unit
+    /// publishes as artifacts; empty when it produces nothing.
+    pub(crate) const PRODUCT_PROVIDES: &str = "product_provides";
+    /// Comma-separated `{record}:{verdict}` pairs, one per transportable
+    /// prerequisite edge; the caller evaluates each producer job's result
+    /// inline because the callee cannot read the caller's `needs`.
+    pub(crate) const PRODUCT_TRANSPORT_READY: &str = "product_transport_ready";
+    /// Comma-separated validation phases the unit verifies through
+    /// (`fmt,clippy,test,doctest`); empty when the unit keeps the single
+    /// legacy checks step.
+    pub(crate) const VALIDATION_PHASES: &str = "validation_phases";
+    /// `true` when the unit's checkout must clone full history instead of
+    /// the default depth-1 shallow clone. Diff-aware gates (merge-base
+    /// against the base SHA) need ancestry the shallow checkout lacks.
+    pub(crate) const FULL_HISTORY: &str = "full_history";
+    /// The Rust channel the selected unit verifies under. Declared only when
+    /// the kind spans more than one channel; every caller of such a kind
+    /// passes its unit's channel so the provision legs gate on it.
+    pub(crate) const TOOLCHAIN: &str = "toolchain";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
         MISE_TOOLS,
         MISE_RUNNER,
+        MBX_ENABLED,
         MBX_COMPAT,
         MBX_DEPENDENCY_FILES,
         MBX_FRESHNESS_FILES,
@@ -3091,11 +5594,17 @@ pub(crate) mod provider_input {
         HOST_WARM_LAYERS,
         POLICY_RUNTIME,
         CANDIDATE_PUBLISH,
+        APPLE_EXECUTOR,
         UNIT_PLATFORM,
         UNIT_TRUST,
         UNIT_DEPENDENCIES,
         UNIT_ADMISSION,
         PREPARED_TOOLS,
+        PRODUCT_PROVIDES,
+        PRODUCT_TRANSPORT_READY,
+        VALIDATION_PHASES,
+        FULL_HISTORY,
+        TOOLCHAIN,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -3106,11 +5615,13 @@ pub(crate) mod provider_input {
         matches!(
             name,
             MISE_RUNNER
+                | MBX_ENABLED
                 | CARGO_FETCH_SKIP_WHEN_WARM
                 | CARGO_NET_OFFLINE
                 | POLICY_RUNTIME
                 | CANDIDATE_PUBLISH
                 | APPLE_EXECUTOR
+                | FULL_HISTORY
         )
     }
 
@@ -3152,6 +5663,87 @@ pub(crate) mod provider_input {
     }
 }
 
+/// The distinct Rust channels a unit set verifies under. More than one means
+/// the kind file carries the `toolchain` input and provisions one leg per
+/// channel; one or zero keeps today's single file-driven provision.
+fn rust_toolchain_channels<'a>(units: impl Iterator<Item = &'a Unit>) -> BTreeSet<&'a str> {
+    units
+        .filter(|unit| unit.kind == UnitKind::Rust)
+        .filter_map(|unit| unit.toolchain.as_ref().map(|pin| pin.channel.as_str()))
+        .collect()
+}
+
+/// Group a collapsed provider job's members into provision legs, in channel
+/// order: one leg per distinct channel, each leg carrying the toolchain its
+/// provision block installs. A channel that matches the repository pin
+/// renders the pin's own file facts — a declared bare channel equal to the
+/// pin simply joins the pin leg — while any other channel requires every
+/// member on it to agree exactly, or generation refuses the contradiction.
+///
+/// The error is the disagreement fragment the caller wraps: members that mix
+/// pinned and unpinned toolchains, or that disagree within one channel.
+fn toolchain_leg_groups(
+    members: &[&Unit],
+    pin: Option<&RustToolchain>,
+) -> Result<Vec<RustToolchain>, String> {
+    let mut by_channel: BTreeMap<&str, Vec<&RustToolchain>> = BTreeMap::new();
+    let mut saw_unpinned = false;
+    for unit in members {
+        match unit.toolchain.as_ref() {
+            None => saw_unpinned = true,
+            Some(toolchain) => by_channel
+                .entry(toolchain.channel.as_str())
+                .or_default()
+                .push(toolchain),
+        }
+    }
+    if saw_unpinned && !by_channel.is_empty() {
+        return Err("the Rust toolchain pin".to_owned());
+    }
+    let mut legs = Vec::new();
+    for (channel, toolchains) in &by_channel {
+        if let Some(pin) = pin
+            && pin.channel == *channel
+        {
+            legs.push(pin.clone());
+        } else if toolchains
+            .iter()
+            .all(|candidate| *candidate == toolchains[0])
+        {
+            legs.push(toolchains[0].clone());
+        } else {
+            return Err(format!("the Rust toolchain pin for channel `{channel}`"));
+        }
+    }
+    Ok(legs)
+}
+
+/// The restore-step id of an explicit provision leg: the pinned leg keeps
+/// `rustup-toolchain`, and every other leg suffixes it with its sanitized
+/// channel so the save gate reads its own step's `cache-hit`. Step ids admit
+/// only letters, digits, `_`, and `-`; anything else folds to `-`, with a
+/// numeric suffix when two channels sanitize alike.
+fn explicit_toolchain_step_id(channel: &str, taken: &mut BTreeSet<String>) -> String {
+    let sanitized: String = channel
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut candidate = format!("rustup-toolchain-{sanitized}");
+    let mut suffix = 2;
+    while taken.contains(&candidate) {
+        candidate = format!("rustup-toolchain-{sanitized}-{suffix}");
+        suffix += 1;
+    }
+    taken.insert(candidate.clone());
+    candidate
+}
+
 /// The snapshot identity of one unit on one namespace, split into the parts
 /// a caller passes through inputs: the compatibility digest, the dependency
 /// inputs, and the freshness (state) inputs.
@@ -3174,6 +5766,7 @@ pub(crate) struct SnapshotFacts {
 pub(crate) struct ProviderStepFacts {
     pub(crate) mise_tools: Vec<String>,
     pub(crate) mise_runner: bool,
+    pub(crate) mbx_enabled: bool,
     pub(crate) mbx: Option<SnapshotFacts>,
     pub(crate) cargo_bin_tools: Vec<String>,
     pub(crate) tool_version: Option<String>,
@@ -3188,16 +5781,33 @@ pub(crate) struct ProviderStepFacts {
     pub(crate) host_warm_layers: Vec<&'static str>,
     pub(crate) policy_runtime: bool,
     pub(crate) candidate_publish: bool,
+    pub(crate) apple_executor: bool,
     pub(crate) platform: String,
     pub(crate) trust: String,
     pub(crate) unit_dependencies: Vec<String>,
     pub(crate) unit_admission: ProviderAdmission,
     /// Prepared-tool need records the provider restores for the unit.
     pub(crate) prepared_tools: Vec<String>,
+    /// Transport records (`producer/product`) the unit publishes; hosted only.
+    pub(crate) product_provides: Vec<String>,
+    /// Caller-evaluated readiness verdicts, one per transportable edge.
+    pub(crate) product_transport_ready: Option<String>,
+    /// The validation phases the unit verifies through, in step order;
+    /// empty when the unit keeps the single legacy checks step.
+    pub(crate) validation_phases: Vec<ValidationPhase>,
+    /// Whether the unit's checkout clones full history. Provider-independent:
+    /// the same value travels per (unit, provider) invocation.
+    pub(crate) full_history: bool,
+    /// The Rust channel the unit verifies under. Set only when the unit's
+    /// kind spans more than one channel; single-channel kinds provision the
+    /// pin without any input.
+    pub(crate) toolchain: Option<String>,
 }
 
 impl ProviderStepFacts {
     /// The `with:` values a caller passes: one entry per non-empty fact.
+    /// Tailed groups (transport, verification selectors) live in their own
+    /// push helpers so this list stays under the line budget.
     pub(crate) fn input_values(&self) -> Vec<(&'static str, String)> {
         let mut values = Vec::new();
         if !self.mise_tools.is_empty() {
@@ -3205,6 +5815,9 @@ impl ProviderStepFacts {
         }
         if self.mise_runner {
             values.push((provider_input::MISE_RUNNER, "true".to_owned()));
+        }
+        if self.mbx_enabled {
+            values.push((provider_input::MBX_ENABLED, "true".to_owned()));
         }
         if let Some(mbx) = &self.mbx {
             values.push((provider_input::MBX_COMPAT, mbx.compatibility.clone()));
@@ -3269,6 +5882,9 @@ impl ProviderStepFacts {
         if self.candidate_publish {
             values.push((provider_input::CANDIDATE_PUBLISH, "true".to_owned()));
         }
+        if self.apple_executor {
+            values.push((provider_input::APPLE_EXECUTOR, "true".to_owned()));
+        }
         // Cache keys always carry the platform/trust segments, so every
         // caller passes them unconditionally.
         values.push((provider_input::UNIT_PLATFORM, self.platform.clone()));
@@ -3289,7 +5905,41 @@ impl ProviderStepFacts {
                 self.prepared_tools.join(","),
             ));
         }
+        self.push_transport_values(&mut values);
+        self.push_verification_values(&mut values);
         values
+    }
+
+    /// The tail `with:` values, in declaration order: the unit's validation
+    /// phases, its full-history checkout flag, plus its toolchain channel
+    /// when the kind spans more than one.
+    fn push_verification_values(&self, values: &mut Vec<(&'static str, String)>) {
+        if !self.validation_phases.is_empty() {
+            values.push((
+                provider_input::VALIDATION_PHASES,
+                ValidationPhase::id_list(&self.validation_phases).join(","),
+            ));
+        }
+        if self.full_history {
+            values.push((provider_input::FULL_HISTORY, "true".to_owned()));
+        }
+        if let Some(channel) = &self.toolchain {
+            values.push((provider_input::TOOLCHAIN, channel.clone()));
+        }
+    }
+
+    /// The transport `with:` values: the records this unit publishes, plus
+    /// the caller-evaluated readiness verdicts when it consumes any.
+    fn push_transport_values(&self, values: &mut Vec<(&'static str, String)>) {
+        if !self.product_provides.is_empty() {
+            values.push((
+                provider_input::PRODUCT_PROVIDES,
+                self.product_provides.join(","),
+            ));
+        }
+        if let Some(ready) = &self.product_transport_ready {
+            values.push((provider_input::PRODUCT_TRANSPORT_READY, ready.clone()));
+        }
     }
 }
 
@@ -3315,6 +5965,12 @@ impl FeatureCoverage {
     /// carries it.
     fn gate(self, input: &str) -> Option<String> {
         (self.any && !self.all).then(|| provider_input::present_gate(input))
+    }
+
+    /// The gate for a boolean feature's complement when only some members
+    /// carry it. This keeps the alternative transport member-scoped too.
+    fn absent_gate(self, input: &str) -> Option<String> {
+        (self.any && !self.all).then(|| format!("inputs.{input} == false"))
     }
 }
 
@@ -3377,6 +6033,29 @@ fn render_required_admission_env(workflow: &WorkflowIr, callers: &[RequiredCalle
     output
 }
 
+/// The canonical execution obligations the aggregate check may validate. The
+/// plan is untrusted workflow output, so the gate must reject a unit/provider
+/// pair that the renderer did not emit a caller for instead of silently
+/// ignoring it. Keep this contract derived from the same callers used for the
+/// needs list and the per-caller verdicts.
+fn required_execution_contract(callers: &[RequiredCaller]) -> String {
+    let obligations = callers
+        .iter()
+        .filter(|caller| !caller.prerequisite)
+        .map(|caller| {
+            serde_json::json!({
+                "unit_id": caller.unit_id,
+                "provider": caller.provider.as_str(),
+                "job_id": caller.job_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    match serde_json::to_string(&obligations) {
+        Ok(contract) => contract,
+        Err(_) => "null".to_owned(),
+    }
+}
+
 /// The per-caller verdict block of the required check: strict expected-set
 /// comparison against the frozen plan.
 ///
@@ -3418,6 +6097,17 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
             "          if {expected_condition}; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"${admitted}\" == true ]]; then\n              case \"$result\" in\n                success) ;;\n                skipped) echo \"expected {noun} {job_id} was skipped: a skipped expected result cannot pass\" >&2; exit 1 ;;\n                cancelled) echo \"expected {noun} {job_id} was cancelled: a cancelled expected result cannot pass\" >&2; exit 1 ;;\n                *) echo \"expected {noun} {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                skipped) ;;\n                *) echo \"selected {noun} {job_id} ran outside its provider admission ({admitted}=${admitted}): $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              skipped) ;;\n              success) echo \"unexpected {noun} {job_id} succeeded outside the expected set: the plan did not declare it\" >&2; exit 1 ;;\n              *) echo \"unexpected {noun} {job_id} ran outside the expected set: $result\" >&2; exit 1 ;;\n            esac\n          fi"
         );
     }
+}
+
+/// One collapsed provider job awaiting render: the provider, its
+/// trust/executor partition members, the owned identity strings, and the
+/// executor partition (`None` when the provider does not split).
+struct CollapsedProviderJob<'a> {
+    provider: ProviderId,
+    members: Vec<&'a Unit>,
+    job_id: String,
+    display: String,
+    apple: Option<bool>,
 }
 
 #[allow(dead_code)]
@@ -3489,7 +6179,6 @@ impl WorkflowIr {
             default_branch: config.default_branch.clone(),
             providers: config.providers.clone(),
             automatic_providers: config.automatic_providers.clone(),
-            default_dispatch_providers: config.default_dispatch_providers.clone(),
             selectors: config.selectors.clone(),
             ci_required: config.ci_required,
             repository: config.repository.clone(),
@@ -3504,6 +6193,7 @@ impl WorkflowIr {
             units: config.units.clone(),
             pins: Pins::resolved(),
             mise_lock_keys: config.mise_lock_keys.clone(),
+            rust_pin: config.rust_pin.clone(),
         }
     }
 
@@ -3529,18 +6219,14 @@ impl WorkflowIr {
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
-            kind,
-            &self.default_branch,
-            &self.providers,
-            &self.default_dispatch_providers,
-        );
+        let (workflow_name, run_name, triggers, cancel_in_progress) =
+            aggregate_triggers(kind, &self.default_branch);
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
         );
-        // Planning and policy are control plane: always hosted.
+        // Planning and policy are control plane.
         let mut plan = String::new();
         self.render_plan(&mut plan);
         output.push_str(&plan);
@@ -3551,6 +6237,7 @@ impl WorkflowIr {
             nodes,
             &mut output,
             kind != WorkflowKind::PullRequest,
+            cancel_in_progress,
             contracts,
         );
         if kind == WorkflowKind::Nightly {
@@ -3561,6 +6248,7 @@ impl WorkflowIr {
                 true,
                 "nightly-required",
                 true,
+                cancel_in_progress,
             );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
@@ -3571,6 +6259,7 @@ impl WorkflowIr {
                 kind != WorkflowKind::PullRequest,
                 REQUIRED_CHECK,
                 false,
+                cancel_in_progress,
             );
         }
         while output.ends_with("\n\n") {
@@ -3583,30 +6272,24 @@ impl WorkflowIr {
     /// `workflow_dispatch` on ci-main is trusted for mbx saves; schedule alone is not.
     pub(crate) fn render_nightly_dispatcher(&self) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, _) = aggregate_triggers(
-            WorkflowKind::Nightly,
-            &self.default_branch,
-            &self.providers,
-            &self.default_dispatch_providers,
-        );
-        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, "false");
+        let (workflow_name, run_name, triggers, _) =
+            aggregate_triggers(WorkflowKind::Nightly, &self.default_branch);
+        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
-        let default_providers = self
-            .default_dispatch_providers
-            .iter()
-            .map(ProviderId::as_str)
-            .collect::<Vec<_>>()
-            .join(",");
-        let runner = self.runs_on_yaml(CONTROL_PLANE_PROVIDER);
-        let dispatch_if = "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure";
-        let simulate_if = "github.event_name == 'workflow_dispatch' && inputs.simulate_failure";
+        let runner = self.runs_on_yaml(self.control_plane_provider());
+        let dispatch_if = self.control_plane_gated_condition(
+            "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure",
+        );
+        let simulate_if = self.control_plane_gated_condition(
+            "github.event_name == 'workflow_dispatch' && inputs.simulate_failure",
+        );
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
         );
         let _ = writeln!(
             output,
-            "  dispatch-ci-main:\n    name: {}\n    if: ${{{{ {dispatch_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    permissions:\n      actions: write\n      contents: read\n    steps:\n      - name: Dispatch ci-main on default branch\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          GITHUB_REPOSITORY: ${{{{ github.repository }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DISPATCH_PROVIDERS: ${{{{ github.event.inputs.providers || '{default_providers}' }}}}\n          DISPATCH_SCOPE: ${{{{ github.event.inputs.scope || 'full' }}}}\n          DISPATCH_BASE_SHA: ${{{{ github.event.inputs.base_sha || format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          gh workflow run ci-main.yml \\\n            -R \"$GITHUB_REPOSITORY\" \\\n            --ref \"$DEFAULT_BRANCH\" \\\n            -f providers=\"$DISPATCH_PROVIDERS\" \\\n            -f scope=\"$DISPATCH_SCOPE\" \\\n            -f base_sha=\"$DISPATCH_BASE_SHA\"",
+            "  dispatch-ci-main:\n    name: {}\n    if: ${{{{ {dispatch_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    permissions:\n      actions: write\n      contents: read\n    steps:\n      - name: Dispatch ci-main on default branch\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          GITHUB_REPOSITORY: ${{{{ github.repository }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DISPATCH_SCOPE: ${{{{ github.event.inputs.scope || 'full' }}}}\n          DISPATCH_BASE_SHA: ${{{{ github.event.inputs.base_sha || format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          gh workflow run ci-main.yml \\\n            -R \"$GITHUB_REPOSITORY\" \\\n            --ref \"$DEFAULT_BRANCH\" \\\n            -f scope=\"$DISPATCH_SCOPE\" \\\n            -f base_sha=\"$DISPATCH_BASE_SHA\"",
             crate::s2::control_job_name("Dispatch ci-main"),
         );
         let _ = writeln!(
@@ -3689,7 +6372,7 @@ impl WorkflowIr {
             .iter()
             .copied()
             .find(|provider| provider.is_local())
-            .unwrap_or(CONTROL_PLANE_PROVIDER);
+            .unwrap_or_else(|| self.control_plane_provider());
         let selected_by = self.prepare_cargo_selected_by(file);
         RequiredCaller {
             job_id: prepare_cargo_caller_job_id().to_owned(),
@@ -3707,6 +6390,7 @@ impl WorkflowIr {
         file: &str,
         sample_unit: &str,
         include_policy: bool,
+        cancel_in_progress: bool,
     ) {
         let caller = self.prepare_cargo_required_caller(file);
         let mut needs = vec!["plan".to_owned()];
@@ -3714,7 +6398,7 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -3751,6 +6435,7 @@ impl WorkflowIr {
         caller: &UnitProviderCaller,
         include_policy: bool,
         extra_needs: &[String],
+        cancel_in_progress: bool,
     ) {
         let provider = caller.provider;
         let mut needs = vec!["plan".to_owned()];
@@ -3765,8 +6450,12 @@ impl WorkflowIr {
             &mut needs,
             rust_dependency_needs(provider, unit, self.rust_needs, &self.units),
         );
+        append_unique_needs(
+            &mut needs,
+            product_dependency_needs(provider, unit, &self.units),
+        );
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -3779,6 +6468,13 @@ impl WorkflowIr {
             );
         }
         for dependency in rust_dependency_needs(provider, unit, self.rust_needs, &self.units) {
+            conditions.push(format!(
+                "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
+            ));
+        }
+        // A skipped or failed producer means no artifact: the consumer's
+        // guarded rebuild covers it, so the caller still runs.
+        for dependency in product_dependency_needs(provider, unit, &self.units) {
             conditions.push(format!(
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
@@ -3812,6 +6508,7 @@ impl WorkflowIr {
         nodes: &[GraphNode],
         output: &mut String,
         include_policy: bool,
+        cancel_in_progress: bool,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
         let mut prepare_cargo_files = BTreeSet::new();
@@ -3823,7 +6520,13 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                self.render_prepare_cargo_caller(output, file, unit_id, include_policy);
+                self.render_prepare_cargo_caller(
+                    output,
+                    file,
+                    unit_id,
+                    include_policy,
+                    cancel_in_progress,
+                );
             }
             for caller in self.unit_provider_callers(unit, file, contracts) {
                 let extra_needs = if self.serial_stack_groups && caller.provider.is_local() {
@@ -3837,6 +6540,7 @@ impl WorkflowIr {
                     &caller,
                     include_policy,
                     &extra_needs,
+                    cancel_in_progress,
                 );
                 if caller.provider.is_local() {
                     previous_local_caller = Some(caller.job_id.clone());
@@ -3886,6 +6590,10 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the required gate has independent plan, policy, simulation, and cancellation inputs"
+    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -3894,12 +6602,14 @@ impl WorkflowIr {
         include_policy: bool,
         check_name: &str,
         simulate_failure: bool,
+        cancel_in_progress: bool,
     ) {
+        let controls = required_controls(include_policy);
         let callers = self.required_callers(nodes, contracts);
-        let mut needs = vec!["plan".to_owned()];
-        if include_policy {
-            needs.push("policy".to_owned());
-        }
+        let mut needs = controls
+            .iter()
+            .map(|control| control.job_id.to_owned())
+            .collect::<Vec<_>>();
         needs.extend(callers.iter().map(|caller| caller.job_id.clone()));
         let display_name = match check_name {
             REQUIRED_CHECK => yaml_scalar(REQUIRED_CHECK),
@@ -3910,11 +6620,29 @@ impl WorkflowIr {
         let selected_units = github_expression("needs.plan.outputs.units");
         let plan_digest = github_expression("needs.plan.outputs.plan_digest");
         let excluded = github_expression("needs.plan.outputs.excluded");
+        let expected_callers = required_execution_contract(&callers);
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n",
+            self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
             needs.join(", "),
-            self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            self.runs_on_yaml(self.control_plane_provider()),
+        );
+        // The aggregate scores first, the shell verdict re-confirms after:
+        // conjunction, so either side failing fails the check. A hosted
+        // control plane downloads the verified plan-artifact runtime the
+        // plan publishes for this download; a local control plane scores
+        // with the ambient fleet runtime, like every other local job.
+        let runtime_steps =
+            workflow_runtime_download(self.control_plane_provider(), &self.workflow_revision);
+        output.push_str(&render_aggregate_score_steps(
+            &runtime_steps,
+            self.pins.download_artifact,
+        ));
+        let _ = write!(
+            output,
+            "      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
+            yaml_scalar(&expected_callers),
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -3929,6 +6657,9 @@ impl WorkflowIr {
         }
         output.push_str(
             "          if [[ -z \"$PLAN_DIGEST\" ]]; then\n            echo \"plan did not freeze a plan digest: the expected set has no identity\" >&2\n            exit 1\n          fi\n          echo \"verdict binds plan digest $PLAN_DIGEST\"\n          result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }\n          plan_expects() {\n            [[ \"$(jq -r --arg unit \"$1\" --arg provider \"$2\" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<\"$SELECTED_UNITS\")\" -gt 0 ]]\n          }\n",
+        );
+        output.push_str(
+            "          if ! jq -e --argjson expected \"$EXPECTED_CALLERS\" '($expected | type == \"array\") and all($expected[]; type == \"object\" and (.unit_id | type) == \"string\" and (.provider | type) == \"string\" and (.job_id | type) == \"string\")' -n; then\n            echo \"generated required-caller contract is malformed\" >&2\n            exit 1\n          fi\n          if ! jq -e --argjson expected \"$EXPECTED_CALLERS\" 'type == \"array\" and (map(.unit_id) | unique | length) == length and all(.[]; . as $entry | ($entry | type) == \"object\" and ($entry.unit_id | type) == \"string\" and ($entry.unit_id | length) > 0 and ($entry.providers | type) == \"array\" and ($entry.providers | length) > 0 and (($entry.providers | map(type == \"string\" and length > 0) | all)) and (($entry.providers | unique | length) == ($entry.providers | length)) and all($entry.providers[]; . as $provider | any($expected[]; .unit_id == $entry.unit_id and .provider == $provider)))' <<<\"$SELECTED_UNITS\" >/dev/null; then\n            echo \"plan selected-unit output contains an unknown, duplicate, empty, or unmapped obligation\" >&2\n            exit 1\n          fi\n          if ! jq -e 'type == \"object\"' <<<\"$NEEDS_JSON\" >/dev/null; then\n            echo \"workflow needs output is malformed\" >&2\n            exit 1\n          fi\n",
         );
         // The prerequisite trigger: the unit is expected on any local
         // provider, whose stores the prerequisite warms. The local set is
@@ -3948,10 +6679,8 @@ impl WorkflowIr {
                 "          plan_expects_local() {{\n            [[ \"$(jq -r --arg unit \"$1\" '[.[] | select(.unit_id == $unit) | .providers[] | select({local_alternation})] | length' <<<\"$SELECTED_UNITS\")\" -gt 0 ]]\n          }}",
             );
         }
-        for job in needs
-            .iter()
-            .filter(|job| matches!(job.as_str(), "plan" | "policy"))
-        {
+        for control in &controls {
+            let job = control.job_id;
             let _ = writeln!(
                 output,
                 "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
@@ -3961,9 +6690,10 @@ impl WorkflowIr {
         if check_name == REQUIRED_CHECK {
             let _ = writeln!(
                 output,
-                "  required:\n    name: {}\n    if: ${{{{ always() }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                "  required:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
                 crate::s2::control_job_name("Required"),
-                self.runs_on_yaml(CONTROL_PLANE_PROVIDER)
+                self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
+                self.runs_on_yaml(self.control_plane_provider())
             );
         }
     }
@@ -3975,11 +6705,12 @@ impl WorkflowIr {
         if_override: Option<&str>,
     ) {
         let if_condition = if_override.map_or_else(|| "always()".to_owned(), str::to_owned);
+        let if_condition = self.control_plane_gated_condition(&if_condition);
         let _ = writeln!(
             output,
             "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
             crate::s2::control_job_name("Nightly red-to-signal"),
-            self.runs_on_yaml(CONTROL_PLANE_PROVIDER)
+            self.runs_on_yaml(self.control_plane_provider())
         );
         let bad_body = format!(
             r#"          body="{needs_job} result: $NIGHTLY_RESULT
@@ -4056,6 +6787,46 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 continue;
             }
+            // The transport inputs likewise stay out of headers whose
+            // members neither produce nor consume build products.
+            if *name == provider_input::PRODUCT_PROVIDES
+                && !members.iter().any(|unit| {
+                    unit.products
+                        .iter()
+                        .any(super::product_transport::transport_eligible)
+                })
+            {
+                continue;
+            }
+            if *name == provider_input::PRODUCT_TRANSPORT_READY
+                && !members.iter().any(|unit| !unit.prerequisites.is_empty())
+            {
+                continue;
+            }
+            // The validation-phases input is declared only when a member is
+            // phased: an unconditional declaration would rewrite every kind
+            // header for a feature only phased rust units use.
+            if *name == provider_input::VALIDATION_PHASES
+                && !members.iter().any(|unit| unit.has_phases())
+            {
+                continue;
+            }
+            // The full-history input is declared only when a member needs
+            // it: an unconditional declaration would rewrite every kind
+            // header for a feature only diff-aware gates use.
+            if *name == provider_input::FULL_HISTORY
+                && !members.iter().any(|unit| unit.full_history)
+            {
+                continue;
+            }
+            // The toolchain input is declared only when the kind's members
+            // span more than one channel: a single-channel kind provisions
+            // the pin file-driven, exactly as before, byte for byte.
+            if *name == provider_input::TOOLCHAIN
+                && rust_toolchain_channels(members.iter().copied()).len() < 2
+            {
+                continue;
+            }
             let _ = writeln!(output, "{}", provider_input::declaration(name));
         }
         if !env.is_empty() {
@@ -4113,17 +6884,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// The job gate of a collapsed provider job: the provider the caller selected, the
     /// unit's membership in the plan's selection, and the provider's admission
     /// predicate. Membership is a single `contains` over `inputs.unit`, never
-    /// an enumeration of the kind's units.
+    /// an enumeration of the kind's units. A kind split across executors adds
+    /// the `apple_executor` clause, so each partition admits only its own
+    /// callers; an unsplit kind carries no clause.
     fn collapsed_provider_gate(
         &self,
         provider: ProviderId,
         admission: ProviderAdmission,
+        apple: Option<bool>,
     ) -> String {
-        format!(
+        let mut gate = format!(
             "inputs.provider == '{}' && contains(inputs.selected_units, format('\"unit_id\":\"{{0}}\"', inputs.unit)) && ({})",
             provider.as_str(),
             self.provider_admission_expression(admission)
-        )
+        );
+        match apple {
+            None => {}
+            Some(true) => gate.push_str(" && inputs.apple_executor"),
+            Some(false) => gate.push_str(" && inputs.apple_executor != true"),
+        }
+        gate
     }
 
     fn collapsed_timeout_minutes(
@@ -4168,9 +6948,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     /// Render the collapsed provider jobs of one kind: one job per (provider,
-    /// trust) class that has members. Hosted members share one job; local
-    /// providers split trusted-only members into their own job so the
-    /// trusted-event gate stays per-job.
+    /// trust) class that has members. Hosted members share one job unless the
+    /// kind splits across executors; local providers split trusted-only
+    /// members into their own job so the trusted-event gate stays per-job.
     fn render_collapsed_kind_verify_job(
         &self,
         output: &mut String,
@@ -4180,22 +6960,53 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if members.is_empty() {
             return Ok(());
         }
-        // Collect (provider, trust split, job id, display name) first so the
-        // owned strings outlive each render call.
-        let mut jobs: Vec<(ProviderId, Vec<&Unit>, String, String)> = Vec::new();
+        // Collect the jobs first so the owned strings outlive each render
+        // call.
+        let mut jobs: Vec<CollapsedProviderJob<'_>> = Vec::new();
         for provider in &self.providers {
             let provider = *provider;
             if provider == ProviderId::GithubHosted {
                 let hosted = self.collapsed_provider_members(members, contracts, provider, None);
-                if hosted.is_empty() {
-                    continue;
+                // A kind split across executors (portable units beside macOS
+                // units) renders one collapsed job per executor: a single
+                // `runs-on` cannot serve both. An unsplit kind keeps the one
+                // job it has always rendered. Each partition samples its own
+                // members for the runner and admits only its own callers, so
+                // one macOS member can no longer route the kind's Linux units
+                // onto the macOS image.
+                let (apple, default): (Vec<_>, Vec<_>) = hosted
+                    .into_iter()
+                    .partition(|unit| unit.platform == crate::s2::provider::Platform::MacosArm64);
+                let split = !apple.is_empty() && !default.is_empty();
+                if !default.is_empty() {
+                    jobs.push(CollapsedProviderJob {
+                        provider,
+                        members: default,
+                        job_id: "verify-github-hosted".to_owned(),
+                        display: "GitHub · hosted".to_owned(),
+                        apple: split.then_some(false),
+                    });
                 }
-                jobs.push((
-                    provider,
-                    hosted,
-                    "verify-github-hosted".to_owned(),
-                    "GitHub · hosted".to_owned(),
-                ));
+                if !apple.is_empty() {
+                    let (job_id, display) = if split {
+                        (
+                            "verify-github-hosted-apple".to_owned(),
+                            "GitHub · hosted · Apple".to_owned(),
+                        )
+                    } else {
+                        (
+                            "verify-github-hosted".to_owned(),
+                            "GitHub · hosted".to_owned(),
+                        )
+                    };
+                    jobs.push(CollapsedProviderJob {
+                        provider,
+                        members: apple,
+                        job_id,
+                        display,
+                        apple: split.then_some(true),
+                    });
+                }
                 continue;
             }
             for trusted in [false, true] {
@@ -4214,23 +7025,39 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 } else {
                     provider.as_str().to_owned()
                 };
-                jobs.push((provider, split, job_id, display));
+                jobs.push(CollapsedProviderJob {
+                    provider,
+                    members: split,
+                    job_id,
+                    display,
+                    apple: None,
+                });
             }
         }
-        for (provider, split, job_id, display) in &jobs {
-            // macOS-platform members only exist on hosted, and need the
-            // GitHub-owned macOS image instead of the Linux selector.
-            let macos = *provider == ProviderId::GithubHosted
-                && split
+        for job in &jobs {
+            // macOS-platform members only exist on hosted partitions, and
+            // need the GitHub-owned macOS image instead of the Linux
+            // selector. Each partition is executor-homogeneous, so sampling
+            // any member selects the partition's runner.
+            let macos = job.provider == ProviderId::GithubHosted
+                && job
+                    .members
                     .iter()
                     .any(|unit| unit.platform == crate::s2::provider::Platform::MacosArm64);
             let runs_on = if macos {
                 yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)
             } else {
-                self.runs_on_yaml(*provider)
+                self.runs_on_yaml(job.provider)
             };
             self.render_collapsed_provider_verify_job(
-                output, split, contracts, *provider, job_id, display, &runs_on,
+                output,
+                &job.members,
+                contracts,
+                job.provider,
+                &job.job_id,
+                &job.display,
+                &runs_on,
+                job.apple,
             )?;
         }
         Ok(())
@@ -4250,7 +7077,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// caller's inputs.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the job identity (provider, id, display name, runner) is passed explicitly per provider job"
+        reason = "the job identity (provider, id, display name, runner, executor partition) is passed explicitly per provider job"
     )]
     fn render_collapsed_provider_verify_job(
         &self,
@@ -4261,12 +7088,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         job_id: &str,
         display_name: &str,
         runs_on: &str,
+        apple: Option<bool>,
     ) -> Result<(), GeneratorError> {
         // Every member of a collapsed job shares one admission class
         // (`collapsed_provider_members` splits local providers by trust), so the
         // first member's class is the job's.
-        let gate = self
-            .collapsed_provider_gate(provider, ProviderAdmission::for_unit(provider, members[0]));
+        let gate = self.collapsed_provider_gate(
+            provider,
+            ProviderAdmission::for_unit(provider, members[0]),
+            apple,
+        );
         let display_name = yaml_scalar(display_name);
         let _ = writeln!(
             output,
@@ -4275,9 +7106,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         output.push_str("    steps:\n");
         render_ci_job_started_marker(output);
+        // The caller invokes once per (unit, provider) and passes
+        // `full_history` per invocation, so one expression serves mixed
+        // kinds: deep legs clone full history, shallow legs stay depth-1.
+        // The operand order is load-bearing: number 0 is FALSY in GitHub
+        // Actions expressions, so `inputs.full_history && 0 || 1` yields 1
+        // in both cases and would silently keep deep legs shallow. The
+        // flipped form below yields 0 for deep legs and 1 otherwise.
+        let fetch_depth = if members.iter().any(|unit| unit.full_history) {
+            "\n          fetch-depth: ${{ inputs.full_history == false && 1 || 0 }}"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}{fetch_depth}",
             self.pins.checkout
         );
         Self::render_unit_dependency_info_step(output);
@@ -4297,6 +7140,32 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ));
         render_ci_selection_end_marker(output);
         self.render_collapsed_provider_steps(output, provider, members, contracts)?;
+        // Exactly one record per dispatch: an unsplit hosted provider job
+        // records every dispatch; local providers split by trust, so each
+        // job records only dispatches of its own partition, plus its
+        // executor partition when the kind splits one. Sibling jobs run the
+        // same collapsed steps for the dispatch but stay silent here, so the
+        // aggregate never sees a duplicate key. The `==` form fails closed
+        // on a missing input (no record, and the aggregate fails the missing
+        // record) instead of recording for an unknown dispatch.
+        let mut record_gate = if provider.is_local() {
+            format!(
+                "always() && inputs.unit_trust == '{}'",
+                members[0].trust.as_str()
+            )
+        } else {
+            "always()".to_owned()
+        };
+        match apple {
+            None => {}
+            Some(true) => record_gate.push_str(" && inputs.apple_executor"),
+            Some(false) => record_gate.push_str(" && inputs.apple_executor != true"),
+        }
+        output.push_str(&render_unit_result_steps(
+            self.pins.upload_artifact,
+            provider.as_str(),
+            &record_gate,
+        ));
         output.push('\n');
         Ok(())
     }
@@ -4312,17 +7181,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     ) -> ProviderStepFacts {
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mise_tools = if hosted {
-            if tools.contains(&ToolRequirement::Mise) {
-                mise_tool_ids(unit, &self.mise_lock_keys)
-            } else {
-                Vec::new()
-            }
-        } else if tools.contains(&ToolRequirement::Mise) {
-            velnor_mise_install_tool_ids(unit, &self.mise_lock_keys)
-        } else {
-            Vec::new()
-        };
+        let mise_tools =
+            Self::mise_tool_ids_for_provider(hosted, &tools, unit, &self.mise_lock_keys);
         let mise_runner = hosted
             && tools.contains(&ToolRequirement::Mise)
             && mise_tools.is_empty()
@@ -4384,6 +7244,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ProviderStepFacts {
             mise_tools,
             mise_runner,
+            mbx_enabled: tools.contains(&ToolRequirement::MrBoxington),
             mbx,
             cargo_bin_tools,
             tool_version,
@@ -4403,12 +7264,97 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && !self.repository.is_empty()
                 && self.repository == crate::s2::workflow_setup_action_repository()
                 && unit_owns_workflow_crate(unit),
+            apple_executor: hosted && unit.platform == crate::s2::provider::Platform::MacosArm64,
             platform: unit.platform.as_str().to_owned(),
             trust: unit.trust.as_str().to_owned(),
             unit_dependencies: unit.depends_on.clone(),
             unit_admission: ProviderAdmission::for_unit(provider, unit),
             prepared_tools: super::prepared_tools::need_records(&unit.prepared_tools),
+            product_provides: Self::transport_provides(unit, provider),
+            product_transport_ready: Self::transport_ready(&self.units, unit, provider),
+            validation_phases: unit.runnable_phases(),
+            full_history: unit.full_history,
+            toolchain: Self::toolchain_fact_for_kind(&self.units, unit),
         }
+    }
+
+    /// The channel fact a caller passes for `unit`: the unit's own channel,
+    /// but only when its kind spans more than one — the header declares the
+    /// input under the same predicate, so the two sides always agree.
+    fn toolchain_fact_for_kind(units: &[Unit], unit: &Unit) -> Option<String> {
+        if unit.kind != UnitKind::Rust {
+            return None;
+        }
+        if rust_toolchain_channels(units.iter()).len() < 2 {
+            return None;
+        }
+        unit.toolchain.as_ref().map(|pin| pin.channel.clone())
+    }
+
+    /// The mise tool ids one unit installs on `hosted`: the hosted spell
+    /// for GitHub runners, the Velnor install spell for local lanes.
+    fn mise_tool_ids_for_provider(
+        hosted: bool,
+        tools: &BTreeSet<ToolRequirement>,
+        unit: &Unit,
+        lock_keys: &BTreeSet<String>,
+    ) -> Vec<String> {
+        if hosted {
+            if tools.contains(&ToolRequirement::Mise) {
+                mise_tool_ids(unit, lock_keys)
+            } else {
+                Vec::new()
+            }
+        } else if tools.contains(&ToolRequirement::Mise) {
+            velnor_mise_install_tool_ids(unit, lock_keys)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The transport records one unit publishes on `provider`: its eligible
+    /// products. Hosted only; local providers share the workspace.
+    fn transport_provides(unit: &Unit, provider: ProviderId) -> Vec<String> {
+        if provider != ProviderId::GithubHosted {
+            return Vec::new();
+        }
+        unit.products
+            .iter()
+            .filter(|product| super::product_transport::transport_eligible(product))
+            .map(|product| super::product_transport::transport_record(&unit.id, &product.name))
+            .collect()
+    }
+
+    /// The caller-evaluated readiness verdicts for one unit's transportable
+    /// prerequisite edges on `provider`, or `None` when no edge can ride
+    /// the transport and the consumer always rebuilds.
+    fn transport_ready(units: &[Unit], unit: &Unit, provider: ProviderId) -> Option<String> {
+        if provider != ProviderId::GithubHosted {
+            return None;
+        }
+        let mut edges = Vec::new();
+        for prerequisite in &unit.prerequisites {
+            let Some(producer) = units
+                .iter()
+                .find(|candidate| candidate.id == prerequisite.producer)
+            else {
+                continue;
+            };
+            let eligible = producer.products.iter().any(|product| {
+                product.name == prerequisite.product
+                    && super::product_transport::transport_eligible(product)
+            });
+            if eligible && provider_supports_unit(provider, producer) {
+                edges.push((
+                    super::product_transport::transport_record(
+                        &prerequisite.producer,
+                        &prerequisite.product,
+                    ),
+                    unit_job_id(provider, &prerequisite.producer),
+                ));
+            }
+        }
+        super::product_transport::ready_records(&edges)
     }
 
     /// Whether the collapsed provider job renders the cargo-fetch phase at all:
@@ -4469,6 +7415,103 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
+    /// The union of product-consumer steps across the collapsed provider's
+    /// members: one download+verify block per distinct transportable
+    /// prerequisite edge, gated on the caller-evaluated `{record}:true`
+    /// verdict. The verdict varies per run, so every block carries its
+    /// gate; members whose producer did not run skip the block and their
+    /// guarded rebuild covers the product. Hosted only.
+    fn render_collapsed_product_consumer_steps(&self, output: &mut String, members: &[&Unit]) {
+        let mut union: BTreeMap<String, (String, &crate::s2::platform::NamedProduct)> =
+            BTreeMap::new();
+        for member in members {
+            for prerequisite in &member.prerequisites {
+                let Some(product) = self.units.iter().find_map(|unit| {
+                    if unit.id != prerequisite.producer {
+                        return None;
+                    }
+                    unit.products
+                        .iter()
+                        .find(|product| product.name == prerequisite.product)
+                }) else {
+                    continue;
+                };
+                if !super::product_transport::transport_eligible(product) {
+                    continue;
+                }
+                let record = super::product_transport::transport_record(
+                    &prerequisite.producer,
+                    &prerequisite.product,
+                );
+                union
+                    .entry(record)
+                    .or_insert_with(|| (prerequisite.producer.clone(), product));
+            }
+        }
+        for (record, (producer, product)) in &union {
+            let gate = provider_input::contains_gate(
+                provider_input::PRODUCT_TRANSPORT_READY,
+                &format!("{record}:true"),
+            );
+            let marker = crate::s2::platform::transport_marker(producer, &product.name);
+            let block = super::product_transport::render_consumer_block(
+                self.pins.download_artifact,
+                producer,
+                product,
+                &marker,
+            );
+            output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
+        }
+    }
+
+    /// The union of product-producer steps across the collapsed provider's
+    /// members: one stage+upload block per distinct eligible product, after
+    /// the checks that build it. A failed check skips the upload, so no
+    /// artifact ever certifies a red producer. Hosted only.
+    fn render_collapsed_product_producer_steps(&self, output: &mut String, members: &[&Unit]) {
+        let mut union: BTreeMap<String, (String, &crate::s2::platform::NamedProduct)> =
+            BTreeMap::new();
+        for member in members {
+            for product in &member.products {
+                if !super::product_transport::transport_eligible(product) {
+                    continue;
+                }
+                let record = super::product_transport::transport_record(&member.id, &product.name);
+                union
+                    .entry(record)
+                    .or_insert_with(|| (member.id.clone(), product));
+            }
+        }
+        if union.is_empty() {
+            return;
+        }
+        let member_records: Vec<BTreeSet<String>> = members
+            .iter()
+            .map(|unit| {
+                unit.products
+                    .iter()
+                    .filter(|product| super::product_transport::transport_eligible(product))
+                    .map(|product| {
+                        super::product_transport::transport_record(&unit.id, &product.name)
+                    })
+                    .collect()
+            })
+            .collect();
+        for (record, (producer, product)) in &union {
+            let shared = member_records
+                .iter()
+                .all(|records| records.contains(record));
+            let gate = (!shared)
+                .then(|| provider_input::contains_gate(provider_input::PRODUCT_PROVIDES, record));
+            let block = super::product_transport::render_producer_block(
+                self.pins.upload_artifact,
+                producer,
+                product,
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+    }
+
     /// The single step block of a collapsed provider job. Every unit-specific
     /// value is an `inputs.*` reference; a feature only some members carry
     /// renders behind an input presence gate.
@@ -4518,13 +7561,32 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             saves.into_iter().next().unwrap_or(false)
         };
-        let toolchain = {
+        // One provision leg per channel: a single leg renders today's
+        // file-driven provision untouched, while several legs render one
+        // gated block each. Local providers provision no toolchain at all,
+        // so a matrix there would verify every leg under the image's
+        // toolchain instead — refused here as well as at load validation.
+        let toolchain_legs = toolchain_leg_groups(members, self.rust_pin.as_ref())
+            .map_err(|what| disagreement(&what))?;
+        if provider.is_local() && toolchain_legs.len() > 1 {
+            let channels = toolchain_legs
+                .iter()
+                .map(|leg| leg.channel.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(GeneratorError::usage(format!(
+                "collapsed {} provider job for {} units spans more than one toolchain channel ({channels}), but a local provider cannot provision per-leg toolchains",
+                provider.as_str(),
+                kind.label(),
+            )));
+        }
+        let xcode = {
             let pins = members
                 .iter()
-                .map(|unit| unit.toolchain.clone())
+                .map(|unit| unit.xcode.clone())
                 .collect::<Vec<_>>();
             if pins.iter().any(|pin| pin != &pins[0]) {
-                return Err(disagreement("the Rust toolchain pin"));
+                return Err(disagreement("the Xcode toolchain pin"));
             }
             pins.into_iter().next().flatten()
         };
@@ -4541,6 +7603,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                                     | ToolRequirement::Nextest
                                     | ToolRequirement::CargoDeny
                                     | ToolRequirement::CargoAudit
+                                    // MBX and sccache are mutually exclusive
+                                    // per-member transports, not kind-level
+                                    // tools. Their setup is gated below from
+                                    // the selected member's typed input.
+                                    | ToolRequirement::MrBoxington
+                                    | ToolRequirement::Sccache
                             )
                         })
                         .collect::<BTreeSet<_>>()
@@ -4577,10 +7645,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_velnor_mise_install_from_input(&mut block);
             output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS));
         }
-        if !local_skips_pinned_rust_toolchain(provider)
-            && let Some(toolchain) = &toolchain
+        if !local_skips_pinned_rust_toolchain(provider) && !toolchain_legs.is_empty() {
+            if toolchain_legs.len() == 1 {
+                self.render_rust_toolchain_steps(output, &toolchain_legs[0], cache_save);
+            } else {
+                self.render_toolchain_matrix_legs(output, &toolchain_legs, cache_save);
+            }
+        }
+        if hosted
+            && kind == UnitKind::Swift
+            && let Some(xcode) = &xcode
         {
-            self.render_rust_toolchain_steps(output, toolchain, cache_save);
+            Self::render_xcode_toolchain_step(output, xcode);
         }
         if hosted && mise_tools.any {
             let trusted = trusted_cache_save_expression(&self.default_branch);
@@ -4603,7 +7679,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
             output.push_str(&gated(block, mise_runner, provider_input::MISE_RUNNER));
         }
-        if kind_tools.contains(&ToolRequirement::MrBoxington) {
+        let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
+        if mbx.any {
+            let mut block = String::new();
             if hosted {
                 let (cache_key, restore_keys) = input_snapshot(
                     UNIT_SNAPSHOT_NAMESPACE,
@@ -4611,10 +7689,23 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     provider_input::MBX_DEPENDENCY_FILES,
                     provider_input::MBX_FRESHNESS_FILES,
                 );
-                self.render_mbx_github_step(output, &cache_key, &restore_keys);
+                self.render_mbx_github_step(&mut block, &cache_key, &restore_keys);
             } else {
-                self.render_mbx_local_step(output);
+                self.render_mbx_local_step(&mut block);
             }
+            output.push_str(&gated(block, mbx, provider_input::MBX_ENABLED));
+        }
+        let sccache =
+            FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
+        if hosted && sccache.any {
+            let mut block = String::new();
+            let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
+            self.render_kind_level_tool_steps(&mut block, provider, &sccache_tools, cache_save);
+            output.push_str(&prefix_step_block_with_if(
+                &block,
+                sccache.absent_gate(provider_input::MBX_ENABLED).as_deref(),
+            ));
+            render_collapsed_sccache_env_step(output, sccache, provider_input::MBX_ENABLED);
         }
         if hosted && kind_tools.contains(&ToolRequirement::Bun) {
             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
@@ -4776,18 +7867,72 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             let _ = writeln!(
                 output,
-                "      - name: Fetch D19 pin history\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for pin fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          pin=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' .github-gen/velnor-workflow.toml | head -n 1)\"\n          test \"$pin\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          if ! git cat-file -e \"$pin^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\"\n          fi",
+                "      - name: Fetch D19 pin history\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for pin fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n{D19_PIN_FETCH_COMMANDS}",
             );
         }
 
-        // Verification.
+        // Verified product transport: download and install the producer's
+        // artifact before the checks consume it. The verify step exports
+        // the ready marker the guarded rebuild reads.
+        if hosted {
+            self.render_collapsed_product_consumer_steps(output, members);
+        }
+
+        // Verification. Units with validation phases verify through one
+        // step per runnable phase behind `run --phase`; units without keep
+        // the single legacy step. A kind mixing both gates each side on the
+        // dispatched unit's `validation_phases` input. Every step shares the
+        // job's checkout, caches, and unit log (phase steps append; the
+        // legacy step owns the log when it is the only checks step).
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let token_env = docker_build_token_env_for_members(members);
-        let _ = writeln!(
-            output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
-        );
+        let phased = FeatureCoverage::over(&facts, |facts| !facts.validation_phases.is_empty());
+        let rendered_phases = ValidationPhase::RUNNABLE
+            .iter()
+            .filter(|phase| {
+                facts
+                    .iter()
+                    .any(|facts| facts.validation_phases.contains(phase))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for (index, phase) in rendered_phases.iter().enumerate() {
+            let coverage =
+                FeatureCoverage::over(&facts, |facts| facts.validation_phases.contains(phase));
+            let gate = (coverage.any && !coverage.all).then(|| {
+                provider_input::contains_gate(provider_input::VALIDATION_PHASES, phase.as_str())
+            });
+            let started = if index == 0 {
+                format!("{checks_started_marker}\n")
+            } else {
+                String::new()
+            };
+            let ended = if index + 1 == rendered_phases.len() {
+                format!("{checks_ended_marker}\n")
+            } else {
+                String::new()
+            };
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: {}\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{started}          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --phase {} 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{ended}          exit $rc",
+                phase.step_name(),
+                phase.as_str(),
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+        if !phased.all {
+            let gate = phased
+                .any
+                .then(|| format!("inputs.{} == ''", provider_input::VALIDATION_PHASES));
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
 
         // Stage-1 candidate packaging, after the checks that build the
         // binary it reuses: only the hosted job of the generator crate's
@@ -4800,6 +7945,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 candidate,
                 provider_input::CANDIDATE_PUBLISH,
             ));
+        }
+
+        // Product publication: stage and upload the built products after
+        // the checks that produced them.
+        if hosted {
+            self.render_collapsed_product_producer_steps(output, members);
         }
 
         // Cache collection.
@@ -5022,14 +8173,30 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if provider != ProviderId::GithubHosted {
             return;
         }
-        // Manual dispatch jobs bootstrap the pinned runtime themselves. Apple
-        // jobs cannot consume a Linux-built plan artifact even when Planning
-        // is hosted.
-        if unit.kind == UnitKind::Swift {
+        // Manual dispatch jobs bootstrap the pinned runtime themselves. The
+        // setup acquisition serves every job the Linux-built plan artifact
+        // cannot: Apple jobs, whose executor never matches what the hosted
+        // plan publishes, and Swift jobs, which stay executor-uniform and
+        // set the runtime up wherever they land. A macOS Rust unit (a
+        // `BoltFFI` producer the join forced onto macOS) bootstraps
+        // through the setup action exactly like a Swift unit, while other
+        // Linux units keep the plan download. Collapsed partitions are
+        // executor-homogeneous, so the sampled member represents the job.
+        if unit.kind == UnitKind::Swift
+            || unit.platform == crate::s2::provider::Platform::MacosArm64
+        {
             self.render_workflow_runtime_setup(output, provider);
         } else {
             self.render_workflow_runtime_download(output, provider);
         }
+    }
+
+    /// The control-plane provider for this surface: hosted when the universe
+    /// contains it, otherwise the canonical-first local provider. Under the
+    /// visibility policy the universe is a singleton, so this is exactly the
+    /// visibility provider.
+    pub(crate) fn control_plane_provider(&self) -> ProviderId {
+        crate::s2::provider::control_plane_provider(&self.providers)
     }
 
     /// The `runs-on:` YAML value routing one provider to its selector. Pure
@@ -5043,26 +8210,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn render_plan(&self, output: &mut String) {
-        // Planning is control plane: always hosted. GitHub planning pins
-        // `uses:` to SOURCE_REV. `rev:` uses a context-gated `${{ github.sha }}`
+        // Planning is control plane. Hosted planning pins `uses:` to
+        // SOURCE_REV. `rev:` uses a context-gated `${{ github.sha }}`
         // with a static fallback when this repository owns the setup action.
+        let control_plane = self.control_plane_provider();
         let runtime_setup = crate::s2::workflow_runtime_setup_with_install_rev(
-            ProviderId::GithubHosted,
+            control_plane,
             &self.repository,
             &self.workflow_revision,
             &crate::s2::workflow_setup_install_rev(&self.repository, &self.workflow_revision),
         );
         let base_sha = self.base_sha_expression();
-        // The dispatch `providers` input carries the manual selection (a
-        // comma-separated subset of the universe); automatic events fall back
-        // to the configured automatic set. An omitted or empty dispatch input
-        // is falsy, so it falls back to the automatic set too.
+        // Every event selects the static automatic set: there is no provider
+        // input to read.
         let automatic = self
             .automatic_providers
             .iter()
             .map(ProviderId::as_str)
             .collect::<Vec<_>>()
             .join(",");
+        // A local control plane never plans untrusted events: fork and bot
+        // pull requests skip planning (and therefore the whole aggregate),
+        // exactly like any other local job without a trusted event.
+        let gate = self.control_plane_event_gate();
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
             "      base_sha: ${{ steps.plan.outputs.base_sha }}".to_owned(),
@@ -5082,32 +8252,53 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
             ));
         }
+        // Presence-only no-work marker: `planned_no_work` is `true` or
+        // absent, never `false`. Consumers MUST branch
+        // `needs.plan.outputs.planned_no_work == 'true'` for the no-work
+        // path; any other value (including absent) means the plan selected
+        // work. Nothing branches yet: the aggregate tolerates explicit
+        // no-work itself, so the marker is proof, not control flow.
+        outputs.push(
+            "      # Presence-only no-work marker: `planned_no_work` is `true` or absent,\n      # never `false`. Consumers MUST branch\n      # `needs.plan.outputs.planned_no_work == 'true'` for the no-work path;\n      # any other value (including absent) means the plan selected work."
+                .to_owned(),
+        );
+        outputs.push("      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned());
+        outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
         let _ = writeln!(
             output,
-            "  plan:\n    name: {}\n    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || '{automatic}' }}}}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::s2::control_job_name("Planning"),
-            self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            self.runs_on_yaml(self.control_plane_provider()),
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
             trusted = Self::trusted_event_expression(),
+            expected_work_env = EXPECTED_WORK_FILE_ENV,
+            expected_work_file = EXPECTED_WORK_FILE,
+            expected_work_dir = EXPECTED_WORK_DIR,
         );
-        // Only hosted unit jobs download the Planning artifact; a universe
-        // without the hosted provider would publish an orphan nobody
-        // consumes.
-        if self.providers.contains(&ProviderId::GithubHosted) {
+        output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
+        // The runtime artifact feeds hosted consumers only: hosted unit
+        // jobs and the hosted aggregate download it for their verified
+        // runtime. A local control plane plans ambient — no setup step, so
+        // no `steps.runtime` closure for Prepare to check — and every
+        // local job runs the fleet binary, so the plan publishes only for
+        // a hosted control plane and never orphans an artifact.
+        if control_plane == ProviderId::GithubHosted {
             output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
         }
     }
 
     pub(crate) fn render_policy(&self, output: &mut String) {
+        let local = self.control_plane_provider().is_local();
+        let gate = local.then(|| crate::s2::control_plane_trusted_gate(&self.default_branch));
         output.push_str(&crate::s2::policy_job(&crate::s2::PolicyJobSpec {
             name: "Policy",
             revision: &self.workflow_revision,
-            runner: &self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            runner: &self.runs_on_yaml(self.control_plane_provider()),
             repository: &self.repository,
-            cache_backend: "github",
-            trusted_gate: None,
+            cache_backend: if local { "local" } else { "github" },
+            trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
             declared_ruleset_contexts: &self.declared_ruleset_contexts,
         }));
@@ -5119,34 +8310,45 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// trusted. The plan step renders the same predicate into
     /// `VELNOR_EVENT_TRUSTED`, so the planner and the gates agree by
     /// construction.
-    fn trusted_event_expression() -> String {
-        "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))"
-            .to_owned()
+    pub(crate) fn trusted_event_expression() -> String {
+        crate::s2::TRUSTED_EVENT_EXPRESSION.to_owned()
     }
 
-    /// A `workflow_dispatch` that selects `provider`, on any ref.
+    /// The `if:` line a local control-plane job carries: the trusted-event
+    /// predicate, parenthesized exactly as the policy gate matcher expects.
+    /// Hosted control planes need no gate and render nothing.
+    fn control_plane_event_gate(&self) -> String {
+        if self.control_plane_provider().is_local() {
+            format!(
+                "    if: ${{{{ ({}) }}}}\n",
+                Self::trusted_event_expression()
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    /// Conjoin a job's functional `if:` condition with the trusted-event
+    /// predicate on a local control plane. The functional side stays inside
+    /// its own parentheses so the gate matcher verifies the shape without
+    /// parsing expressions. Hosted control planes keep the condition as is.
+    fn control_plane_gated_condition(&self, condition: &str) -> String {
+        if self.control_plane_provider().is_local() {
+            format!("({condition}) && ({})", Self::trusted_event_expression())
+        } else {
+            condition.to_owned()
+        }
+    }
+
+    /// A `workflow_dispatch` selecting `provider`, on any ref.
     ///
     /// Dispatch is not ref-gated: GitHub only accepts a dispatch from an
     /// actor with write access and only onto a ref of this repository, which
     /// is the same authorship a same-repository pull-request head carries.
-    /// The comma-boundary match keeps `github-hosted` from matching inside
-    /// `github-self-hosted` and accepts any subset string the planner's
-    /// strict parse would accept.
-    fn dispatch_provider_expression(provider: ProviderId) -> String {
-        format!(
-            "github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',{},')",
-            provider.as_str()
-        )
-    }
-
-    /// An automatic event (anything but dispatch) selecting `provider` when
-    /// the automatic set includes it.
-    fn automatic_provider_expression(&self, provider: ProviderId) -> String {
-        if self.automatic_providers.contains(&provider) {
-            "github.event_name != 'workflow_dispatch'".to_owned()
-        } else {
-            "false".to_owned()
-        }
+    /// There is no provider input to match: dispatches select the static
+    /// universe.
+    fn dispatch_provider_expression() -> &'static str {
+        "github.event_name == 'workflow_dispatch'"
     }
 
     fn base_sha_expression(&self) -> String {
@@ -5183,17 +8385,28 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     return "false".to_owned();
                 }
                 locals.sort();
+                locals.dedup();
+                if locals.len() == 1 {
+                    return locals.swap_remove(0);
+                }
                 format!("({})", locals.join(") || ("))
             }
             ProviderAdmission::Provider(provider)
             | ProviderAdmission::ProviderTrusted(provider) => {
-                let event = format!(
-                    "({}) || ({})",
-                    Self::dispatch_provider_expression(provider),
-                    self.automatic_provider_expression(provider)
-                );
+                // Dispatches select the static universe, so the event side is
+                // a tautology for automatic providers and dispatch-only
+                // otherwise. Render the collapsed form, never `(A) || (!A)`.
+                let event = if self.automatic_providers.contains(&provider) {
+                    "true".to_owned()
+                } else {
+                    Self::dispatch_provider_expression().to_owned()
+                };
                 if admission.trusted_only() {
-                    format!("({event}) && ({})", Self::trusted_event_expression())
+                    if event == "true" {
+                        format!("({})", Self::trusted_event_expression())
+                    } else {
+                        format!("({event}) && ({})", Self::trusted_event_expression())
+                    }
                 } else {
                     event
                 }
@@ -5207,6 +8420,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .iter()
             .map(|unit| unit.kind)
             .collect::<BTreeSet<_>>();
+        let gate = self.control_plane_event_gate();
         for kind in kinds {
             let group_id = stack_group_job_id(kind);
             let group_name = crate::s2::control_job_name(crate::s2::provider_kind_label(kind));
@@ -5218,8 +8432,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             };
             let _ = writeln!(
                 output,
-                "    needs: {needs}\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
-                self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+                "    needs: {needs}\n{gate}    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
+                self.runs_on_yaml(self.control_plane_provider()),
                 unit_group(kind),
             );
             for unit in self.units.iter().filter(|unit| unit.kind == kind) {
@@ -5232,8 +8446,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 let child_name = yaml_scalar(child_label);
                 let _ = writeln!(
                     output,
-                    "  {child_id}:\n    name: {child_name}\n    needs: [{group_id}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit runner jobs\n        run: echo 'crate group ready'\n",
-                    self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+                    "  {child_id}:\n    name: {child_name}\n    needs: [{group_id}]\n{gate}    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit runner jobs\n        run: echo 'crate group ready'\n",
+                    self.runs_on_yaml(self.control_plane_provider()),
                 );
             }
         }
@@ -5304,7 +8518,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // the repository declares them and the job installs them. This path
         // must not depend on the Rust-scoped `mise_present` flag — docs,
         // Homebrew, and other non-Rust units carry their own `mise_tools`.
-        if !unit.mise_tools.is_empty() || commands_invoke_mise(unit) {
+        // Detected recipe needs provision the same way: a consumer whose
+        // guarded rebuild packs `BoltFFI`, or a unit whose commands drive
+        // `XcodeGen` past a generation-config override that replaced the
+        // stamped tools, needs the mise step even with empty `mise_tools`.
+        // (`nextest` stays out: without `mise_present` its Rust units fall
+        // back to the cargo-bin install instead of mise.)
+        if !unit.mise_tools.is_empty()
+            || commands_invoke_mise(unit)
+            || needs_boltffi(unit)
+            || needs_xcodegen(unit)
+        {
             tools.insert(ToolRequirement::Mise);
         }
         tools
@@ -5333,13 +8557,126 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let save_gate = cache_save.then(|| {
             format!("({trusted_cache}) && steps.rustup-toolchain.outputs.cache-hit != 'true'")
         });
-        render_pinned_toolchain_steps(
+        // The pin leg provisions file-driven, exactly as before; a leg whose
+        // channel differs from the recorded pin provisions explicitly,
+        // because the checkout's pin file would resolve a file-driven
+        // install to the wrong channel. An unknown pin keeps the file-driven
+        // shape: hand-built configs record none, and a declared channel
+        // without a pin file has no Rust sources to verify (the scan
+        // refuses pin-less Rust repositories), so its checks fail at
+        // runtime regardless of which toolchain provisions.
+        if self
+            .rust_pin
+            .as_ref()
+            .is_none_or(|pin| pin.channel == toolchain.channel)
+        {
+            render_pinned_toolchain_steps(
+                output,
+                self.pins.cache_restore,
+                self.pins.cache_save,
+                toolchain,
+                save_gate.as_deref(),
+            );
+        } else {
+            render_explicit_toolchain_steps(
+                output,
+                self.pins.cache_restore,
+                self.pins.cache_save,
+                toolchain,
+                "rustup-toolchain",
+                save_gate.as_deref(),
+            );
+        }
+    }
+
+    /// The provision legs of a multi-channel collapsed provider job: the pin
+    /// leg keeps the file-driven block, every other channel renders an
+    /// explicit block, and each block gates on the caller's `toolchain`
+    /// input. Legs render in channel order with disjoint restore-step ids,
+    /// so each save gate reads its own leg's `cache-hit`.
+    fn render_toolchain_matrix_legs(
+        &self,
+        output: &mut String,
+        legs: &[RustToolchain],
+        cache_save: bool,
+    ) {
+        let trusted_cache = trusted_cache_save_expression(&self.default_branch);
+        let mut taken = BTreeSet::from(["rustup-toolchain".to_owned()]);
+        for leg in legs {
+            let pin_leg = self
+                .rust_pin
+                .as_ref()
+                .is_some_and(|pin| pin.channel == leg.channel);
+            let step_id = if pin_leg {
+                "rustup-toolchain".to_owned()
+            } else {
+                explicit_toolchain_step_id(&leg.channel, &mut taken)
+            };
+            let save_gate = cache_save.then(|| {
+                format!("({trusted_cache}) && steps.{step_id}.outputs.cache-hit != 'true'")
+            });
+            let mut block = String::new();
+            if pin_leg {
+                render_pinned_toolchain_steps(
+                    &mut block,
+                    self.pins.cache_restore,
+                    self.pins.cache_save,
+                    leg,
+                    save_gate.as_deref(),
+                );
+            } else {
+                render_explicit_toolchain_steps(
+                    &mut block,
+                    self.pins.cache_restore,
+                    self.pins.cache_save,
+                    leg,
+                    &step_id,
+                    save_gate.as_deref(),
+                );
+            }
+            let gate = format!("inputs.{} == '{}'", provider_input::TOOLCHAIN, leg.channel);
+            output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
+        }
+    }
+
+    /// The hosted-provider Xcode contract: select the installed Xcode
+    /// matching the repository's `.xcode-version` pin, fail closed when no
+    /// installed Xcode matches, and export `DEVELOPER_DIR` so every later
+    /// step uses the same toolchain instead of the image default. An exact
+    /// `Xcode_<pin>.app` match wins; otherwise the newest installed
+    /// `Xcode_<pin>*.app` is selected; otherwise an unversioned
+    /// `Xcode.app` is accepted only when its reported version matches the
+    /// pin. Every fallible probe pipeline ends in `|| true`: under
+    /// `set -euo pipefail` a bare failing substitution would kill the step
+    /// before the diagnostic runs. Local providers own their Xcode
+    /// installation and skip this step.
+    fn render_xcode_toolchain_step(output: &mut String, xcode: &XcodeToolchain) {
+        let _ = writeln!(
             output,
-            self.pins.cache_restore,
-            self.pins.cache_save,
-            toolchain,
-            save_gate.as_deref(),
+            "      - name: Select Xcode {}\n        run: |{}",
+            xcode.version(),
+            Self::xcode_probe_script(xcode.version()).lines().fold(
+                String::new(),
+                |mut indented, line| {
+                    indented.push_str("\n          ");
+                    indented.push_str(line);
+                    indented
+                }
+            ),
         );
+    }
+
+    /// The `Select Xcode` probe body, factored out so behavioral tests
+    /// execute the exact script the workflow renders. Selection never parses
+    /// `ls` output: the glob expands in sorted order, so the last directory
+    /// assigned is the newest prefix match, exactly what `sort | tail -n 1`
+    /// over `ls -d` computed. The `[ -d ]` guard skips the unexpanded
+    /// literal when nothing matches (and any non-directory a stray `*.app`
+    /// file would otherwise select as a bogus `DEVELOPER_DIR`).
+    fn xcode_probe_script(pin: &str) -> String {
+        format!(
+            "set -euo pipefail\nwant=\"{pin}\"\ndir=\"\"\nif [ -d \"/Applications/Xcode_${{want}}.app\" ]; then\n  dir=\"/Applications/Xcode_${{want}}.app\"\nelse\n  for candidate in \"/Applications/Xcode_${{want}}\"*.app; do\n    [ -d \"$candidate\" ] || continue\n    dir=\"$candidate\"\n  done\nfi\nif [ -z \"$dir\" ] && [ -d /Applications/Xcode.app ]; then\n  found=\"$(/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version 2>/dev/null | head -n 1 | awk '{{print $2}}' || true)\"\n  case \"$found\" in\n    \"$want\"|\"$want\".*) dir=/Applications/Xcode.app ;;\n  esac\nfi\nif [ -z \"$dir\" ]; then\n  echo \"::error::no installed Xcode matches pin $want\" >&2\n  for candidate in /Applications/*; do\n    case \"$candidate\" in\n      *[Xx][Cc][Oo][Dd][Ee]*) echo \"${{candidate##*/}}\" ;;\n    esac\n  done || true\n  exit 1\nfi\necho \"DEVELOPER_DIR=$dir/Contents/Developer\" >> \"$GITHUB_ENV\"\nexport DEVELOPER_DIR=\"$dir/Contents/Developer\"\nxcodebuild -version\nswift --version"
+        )
     }
 
     /// The cargo-bin tools a hosted provider installs through the pinned

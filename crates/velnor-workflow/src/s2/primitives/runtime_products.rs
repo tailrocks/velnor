@@ -33,8 +33,9 @@ use crate::s2::closure::{
     product_tag, CI_FEATURES, CLOSURE_PATHS, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
 };
 use crate::s2::{
-    config_rust_toolchain, workflow_setup_action_repository, yaml_scalar, ActionPin,
-    GeneratorError, ProjectConfig, RustToolchain, GENERATED_HEADER, HOSTED_WORKFLOW_RUNTIME_HOME,
+    config_rust_toolchain, control_plane_gate, workflow_setup_action_repository, yaml_scalar,
+    ActionPin, GeneratorError, ProjectConfig, RustToolchain, GENERATED_HEADER,
+    HOSTED_WORKFLOW_RUNTIME_HOME, MACOS_HOSTED_RUNS_ON,
 };
 
 /// The workflow file the producer renders into. Consumers pin this path in
@@ -70,7 +71,6 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// silently reselect them.
 const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
-const MACOS_ARM64_RUNNER: &str = "macos-15";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
@@ -135,7 +135,7 @@ fn platforms() -> [Platform; 3] {
         Platform {
             os: "macOS",
             arch: "ARM64",
-            runner: MACOS_ARM64_RUNNER,
+            runner: MACOS_HOSTED_RUNS_ON,
         },
     ]
 }
@@ -171,7 +171,18 @@ pub(crate) fn runtime_products_content(
     if config.repository != workflow_setup_action_repository() {
         return Ok(None);
     }
-    let hosted_runs_on = crate::s2::hosted_runs_on(config)?;
+    let control_plane_runs_on = crate::s2::control_plane_runner(config)?;
+    let gate = control_plane_gate(config);
+    // The closure job has no functional condition of its own: a local
+    // control plane gates it on trusted events, a hosted one renders no
+    // `if:` line at all rather than a vacuous `if: true`.
+    let closure_gate = gate
+        .is_local()
+        .then(|| gate.as_job_condition("true"))
+        .map(|condition| format!("    if: {condition}\n"))
+        .unwrap_or_default();
+    let build_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
+    let publish_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
     let repository = workflow_setup_action_repository();
     let owner = product_owner(repository);
     // The toolchain install is file-driven: the checkout's own
@@ -293,7 +304,7 @@ permissions:
 jobs:
   closure:
     name: Resolve runtime closure
-    runs-on: {closure_runner}
+{closure_gate}    runs-on: {closure_runner}
     timeout-minutes: 10
     outputs:
       closure: ${{{{ steps.closure.outputs.value }}}}
@@ -347,7 +358,7 @@ jobs:
   build:
     name: Build runtime (${{{{ matrix.os }}}}-${{{{ matrix.arch }}}})
     needs: closure
-    if: needs.closure.outputs.exists != 'true'
+    if: {build_gate}
     strategy:
       fail-fast: false
       matrix:
@@ -427,7 +438,7 @@ jobs:
   publish:
     name: Publish runtime products
     needs: [closure, build]
-    if: needs.closure.outputs.exists != 'true'
+    if: {publish_gate}
     runs-on: {publish_runner}
     timeout-minutes: 20
     permissions:
@@ -537,8 +548,11 @@ jobs:
         example_tag = example_tag(),
         default_branch = yaml_scalar(&config.default_branch),
         branch_ref = format!("refs/heads/{}", config.default_branch),
-        closure_runner = hosted_runs_on,
-        publish_runner = hosted_runs_on,
+        closure_runner = control_plane_runs_on,
+        publish_runner = control_plane_runs_on,
+        closure_gate = closure_gate,
+        build_gate = build_gate,
+        publish_gate = publish_gate,
         checkout = ActionPin::Checkout.reference(),
         attest = ActionPin::Attest.reference(),
         upload = ActionPin::UploadArtifact.reference(),
@@ -661,6 +675,7 @@ mod tests {
 
     fn unit() -> crate::s2::Unit {
         crate::s2::Unit {
+            xcode: None,
             id: "rust-example".to_owned(),
             label: "rust-example".to_owned(),
             kind: UnitKind::Rust,
@@ -669,6 +684,8 @@ mod tests {
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo check".to_owned()],
             full_commands: vec!["cargo check".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -684,6 +701,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -713,7 +731,6 @@ mod tests {
             default_branch: "main".to_owned(),
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             automatic_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             release_enabled: false,
             release_reason: String::new(),
@@ -725,6 +742,7 @@ mod tests {
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: vec![unit()],
             workflow_templates: BTreeMap::new(),
@@ -738,6 +756,7 @@ mod tests {
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
@@ -764,7 +783,7 @@ mod tests {
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-runtime-products-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(fs::create_dir_all(&root), "create test repository");
         must(
@@ -792,7 +811,13 @@ mod tests {
         let providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
         let shape = must(
-            crate::s2::scan::scan_shape(root, &providers, "main", &[]),
+            crate::s2::scan::scan_shape(
+                root,
+                &providers,
+                "main",
+                &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
+            ),
             "scan fixture",
         );
         let directory = root.join(crate::s2::config::GENERATION_CONFIG_PATH);
@@ -1258,7 +1283,7 @@ mod tests {
         for (os, arch, runner) in [
             ("Linux", "X64", LINUX_X64_RUNNER),
             ("Linux", "ARM64", LINUX_ARM64_RUNNER),
-            ("macOS", "ARM64", MACOS_ARM64_RUNNER),
+            ("macOS", "ARM64", MACOS_HOSTED_RUNS_ON),
         ] {
             assert!(
                 matrix.contains(&format!(
@@ -1289,12 +1314,16 @@ mod tests {
             fs::read_to_string(&mapping_file),
             "read the producer renderer",
         );
-        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER, MACOS_ARM64_RUNNER] {
+        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER] {
             assert!(
                 mapping_source.contains(&format!("\"{runner}\"")),
                 "the fixed mapping lives in the producer renderer: {runner}"
             );
         }
+        assert!(
+            mapping_source.contains("runner: MACOS_HOSTED_RUNS_ON"),
+            "the macOS builder reuses the hosted Apple runner contract: {mapping_source}"
+        );
         let root = must(
             std::process::Command::new("git")
                 .arg("-C")
@@ -1722,7 +1751,7 @@ mod tests {
         for (index, (name, body)) in bodies.iter().enumerate() {
             let path = std::env::temp_dir().join(format!(
                 "velnor-workflow-producer-shell-{index}-{}",
-                crate::s2::unique_suffix()
+                crate::unique_suffix()
             ));
             must(fs::write(&path, body), "write the shell body");
             let output = must(
@@ -1760,7 +1789,7 @@ mod tests {
         ] {
             let path = std::env::temp_dir().join(format!(
                 "velnor-workflow-producer-guard-{}",
-                crate::s2::unique_suffix()
+                crate::unique_suffix()
             ));
             must(fs::write(&path, guard), "write the guard body");
             let output = must(
@@ -1788,9 +1817,42 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "dc9c5d95a00c193a7c2332e348398ccd15f05df64252c863fa14558197b2843b";
+        const PINNED: &str = "a7b4721e9dbd7a19fb6fbbb51aca185678ebeb1b0b05b16be9c15d463ff39765";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
+    }
+
+    /// A local control plane gates every producer job on trusted events:
+    /// the closure job gains its only `if:`, and the build and publish jobs
+    /// conjoin the trusted predicate onto their existence check.
+    #[test]
+    fn local_control_plane_gates_every_producer_job() {
+        let mut config = owner_config(&["maintenance.yml"]);
+        config.providers =
+            std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
+        config.automatic_providers = config.providers.clone();
+        let content = must_some(
+            must(
+                runtime_products_content(&config),
+                "the owner renders the producer",
+            ),
+            "the owner renders the producer",
+        );
+        assert!(
+            content.contains("    if: (true) && ("),
+            "the closure job gains its only `if:` from the gate: {content}"
+        );
+        assert_eq!(
+            content
+                .matches("(needs.closure.outputs.exists != 'true') && (")
+                .count(),
+            2,
+            "build and publish conjoin the gate onto the existence check: {content}"
+        );
+        assert!(
+            !content.contains("if: true\n"),
+            "no vacuous gate renders: {content}"
+        );
     }
 }

@@ -71,30 +71,25 @@ fn write_rust_fixture(root: &Path, crates: usize) {
 }
 
 fn enable_approved_velnor_pull_requests(root: &Path) {
-    // The dogfood repository flipped to schema 2 (R2m): transplant the
-    // production Velnor placement from its provider selector into this
-    // schema-1 surface. The crate must never spell the estate's labels
-    // itself (see generic_surface_literals), so the values flow from the
-    // repository's own config at test time.
-    let approved = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github-gen/velnor-workflow.toml"),
-    )
-    .unwrap();
-    let selector = "[workflow.selectors.velnor]";
-    let mut in_selector = false;
+    // Transplant the production Velnor placement from the admitted estate
+    // boundary into this schema-1 surface. The crate must never spell the
+    // estate's labels itself (see generic_surface_literals), so the values
+    // flow from the estate module at test time.
+    let approved =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/estate.rs")).unwrap();
     let mut transplanted = None;
     for line in approved.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_selector = trimmed == selector;
-            continue;
-        }
-        if in_selector && trimmed.starts_with("runs_on =") {
-            transplanted = Some(trimmed.replacen("runs_on =", "velnor_labels =", 1));
+        if trimmed.starts_with("pub(crate) const APPROVED_VELNOR_RUNNER_LABELS") {
+            let labels = trimmed
+                .split_once(" = &[")
+                .map(|(_, tail)| tail.trim_end_matches("];"))
+                .expect("the estate labels read as a Rust array");
+            transplanted = Some(format!("velnor_labels = [{labels}]"));
             break;
         }
     }
-    let transplanted = transplanted.expect("the repository declares a velnor provider selector");
+    let transplanted = transplanted.expect("the estate declares approved velnor labels");
     let path = root.join(".github-gen/velnor-workflow.toml");
     let current = fs::read_to_string(&path).unwrap();
     let mut lines = current
@@ -1149,7 +1144,17 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
         !unit.contains("inputs.unit == '"),
         "the collapsed steps are rendered once, not once per unit"
     );
-    assert_eq!(unit.matches("- name: Run unit checks").count(), 2);
+    for step in ["Formatting check", "Clippy check", "Tests"] {
+        assert_eq!(
+            unit.matches(&format!("- name: {step}")).count(),
+            2,
+            "each phase step renders once per lane"
+        );
+    }
+    assert!(
+        !unit.contains("- name: Run unit checks"),
+        "phased units drop the legacy single checks step"
+    );
     let pr = generated.workflow("ci-pr.yml");
     for index in 0..8 {
         assert!(

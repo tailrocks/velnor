@@ -1095,11 +1095,17 @@ fn must_some<T>(value: Option<T>, context: &str) -> T {
 #[test]
 fn cli_requires_the_base_validator_revision() {
     let root = temporary_directory("cli-no-base");
+    // Hermetic: the empty lookup observes no ambient environment, so the
+    // missing-option error fires even when the job exports
+    // `VELNOR_WORKFLOW_POLICY_REVISION` (Preview exports it job-wide).
     let error = must_fail(
-        run_cli(&[
-            std::ffi::OsString::from("--workflow-root"),
-            root.as_os_str().to_owned(),
-        ]),
+        run_cli_with_env(
+            &[
+                std::ffi::OsString::from("--workflow-root"),
+                root.as_os_str().to_owned(),
+            ],
+            &|_| None,
+        ),
         "policy without a base revision",
     )
     .to_string();
@@ -1421,40 +1427,73 @@ fn candidate_manifest_source_prefers_flag_over_env() {
     // the `policy` CLI subprocess test in `velnor_first_ci.rs`, which owns
     // the child's environment.)
     assert_eq!(
-        candidate_manifest_source(Some("/flag/manifest.json")),
+        candidate_manifest_source_with_env(Some("/flag/manifest.json"), &|name| env::var_os(name)),
         Some(PathBuf::from("/flag/manifest.json"))
     );
     // An explicit empty flag disables the binding.
-    assert_eq!(candidate_manifest_source(Some("")), None);
-    // Without either source the env-slot candidate is disabled. Like
-    // `cli_requires_the_base_validator_revision`, this relies on the ambient
-    // test environment not exporting the variable.
-    assert_eq!(candidate_manifest_source(None), None);
+    assert_eq!(
+        candidate_manifest_source_with_env(Some(""), &|name| env::var_os(name)),
+        None
+    );
+    // Without either source the env-slot candidate is disabled. Hermetic:
+    // the empty lookup observes no ambient environment.
+    assert_eq!(candidate_manifest_source_with_env(None, &|_| None), None);
 }
 
 #[test]
 fn from_env_consent_mapping_is_fail_closed() {
+    // Hermetic: fixed lookups observe no ambient environment.
     // Without `--pin-build` the pin is never built, in every environment.
-    assert!(PinnedBinaryLookup::from_env(PIN_A, false, None).build_forbidden);
+    assert!(PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).build_forbidden);
     assert!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .build_forbidden
+        PinnedBinaryLookup::from_env_with(
+            PIN_A,
+            false,
+            Some(PathBuf::from("/manifest.json")),
+            &|_| None
+        )
+        .build_forbidden
     );
     // The explicit manifest survives; without one the environment fallback
-    // applies (unset in the ambient test environment, so `None` here).
+    // applies (`None` under the empty lookup).
     assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .candidate_manifest,
+        PinnedBinaryLookup::from_env_with(
+            PIN_A,
+            false,
+            Some(PathBuf::from("/manifest.json")),
+            &|_| None
+        )
+        .candidate_manifest,
         Some(PathBuf::from("/manifest.json"))
     );
     assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, None).candidate_manifest,
+        PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).candidate_manifest,
         None
     );
-    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`;
-    // setting process env needs `unsafe`, which this crate forbids, so that
-    // direction is pinned by the `--check` CLI subprocess test in
-    // `velnor_first_ci.rs`, which owns the child's environment.
+    // The environment fallback direction: a manifest in the environment
+    // binds the env-slot candidate.
+    let manifest_env = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| {
+        if name == VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV {
+            Some(std::ffi::OsString::from("/env/manifest.json"))
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        manifest_env.candidate_manifest,
+        Some(PathBuf::from("/env/manifest.json"))
+    );
+    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
+    // (also pinned end to end by the `--check` CLI subprocess test in
+    // `velnor_first_ci.rs`, which owns the child's environment).
+    let offline = PinnedBinaryLookup::from_env_with(PIN_A, true, None, &|name| {
+        if name == "CARGO_NET_OFFLINE" {
+            Some(std::ffi::OsString::from("true"))
+        } else {
+            None
+        }
+    });
+    assert!(offline.build_forbidden);
 }
 
 #[cfg(unix)]
@@ -1593,4 +1632,288 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
         !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
         "the sibling checkout carries no reusable workflows"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Complete-tree comparison
+// ---------------------------------------------------------------------------
+
+fn file_entry(content: &str, executable: bool) -> TreeEntry {
+    TreeEntry::File {
+        bytes: content.as_bytes().to_vec(),
+        executable,
+    }
+}
+
+fn link_entry(target: &str) -> TreeEntry {
+    TreeEntry::Symlink {
+        target: PathBuf::from(target),
+    }
+}
+
+fn compare(expected: &TreeEntry, found: Option<&TreeEntry>) -> Vec<String> {
+    let mut differences = Vec::new();
+    compare_tree_entry(
+        Path::new(".github/probe"),
+        expected,
+        found,
+        &mut differences,
+    );
+    differences
+}
+
+#[test]
+fn tree_comparison_names_every_drift_class() {
+    assert!(
+        compare(
+            &file_entry("same\n", false),
+            Some(&file_entry("same\n", false))
+        )
+        .is_empty(),
+        "identical files compare clean"
+    );
+    assert!(
+        compare(&file_entry("same\n", false), None)
+            .join("\n")
+            .contains("missing from the tree"),
+        "an absent path reports missing"
+    );
+    assert!(
+        compare(&file_entry("a\n", false), Some(&file_entry("b\n", false)))
+            .join("\n")
+            .contains("differs from the pinned render"),
+        "edited bytes report a diff"
+    );
+    assert!(
+        compare(
+            &file_entry("same\n", false),
+            Some(&file_entry("same\n", true))
+        )
+        .join("\n")
+        .contains("is executable in the tree"),
+        "a set execute bit reports mode drift"
+    );
+    assert!(
+        compare(&link_entry("AGENTS.md"), Some(&link_entry("AGENTS.md"))).is_empty(),
+        "an identical link compares clean"
+    );
+    assert!(
+        compare(&link_entry("AGENTS.md"), Some(&link_entry("other.md")))
+            .join("\n")
+            .contains("points at"),
+        "a retargeted link reports its target"
+    );
+    // The type-blindness regression: a regular file with identical bytes
+    // must not satisfy a link, and a link must not satisfy a file.
+    assert!(
+        compare(
+            &link_entry("AGENTS.md"),
+            Some(&file_entry("AGENTS.md", false))
+        )
+        .join("\n")
+        .contains("is a regular file in the tree but the pinned render has a symlink"),
+        "a file squatting a link reports mistyped"
+    );
+    assert!(
+        compare(
+            &file_entry("content\n", false),
+            Some(&link_entry("content"))
+        )
+        .join("\n")
+        .contains("is a symlink in the tree but the pinned render has a regular file"),
+        "a link squatting a file reports mistyped"
+    );
+    assert!(
+        compare(&file_entry("content\n", false), Some(&TreeEntry::Directory))
+            .join("\n")
+            .contains("is a directory in the tree"),
+        "a directory squatting a file reports mistyped"
+    );
+}
+
+#[test]
+fn exclude_hatch_covers_top_level_workflows_only() {
+    let excludes = BTreeSet::from(["hand.yml".to_owned()]);
+    assert!(
+        is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &excludes),
+        "a named top-level workflow is excluded"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/other.yml"), &excludes),
+        "an unnamed workflow is not excluded"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/nested/hand.yml"), &excludes),
+        "a nested path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/notes.txt"), &excludes),
+        "a non-workflow path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &BTreeSet::new()),
+        "no excludes means no hatch"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tree_collection_never_follows_symlinks() {
+    let root = temporary_directory("tree-collection");
+    let outside = temporary_directory("tree-collection-outside");
+    write(&outside.join("kept.txt"), "external bytes\n");
+    write(&root.join(".github/real.txt"), "real\n");
+    must(
+        std::os::unix::fs::symlink(outside.join("kept.txt"), root.join(".github/link.txt")),
+        "link outside the tree",
+    );
+    let mut entries = BTreeMap::new();
+    must(
+        collect_tree_entries(&root, &root.join(".github"), &mut entries),
+        "collect the tree",
+    );
+    assert_eq!(
+        entries.get(&PathBuf::from(".github/real.txt")),
+        Some(&file_entry("real\n", false)),
+        "a regular file collects by bytes"
+    );
+    let target_path = outside.join("kept.txt");
+    let target = must(
+        target_path.to_str().ok_or("non-utf8 temp path"),
+        "render the link target",
+    );
+    assert_eq!(
+        entries.get(&PathBuf::from(".github/link.txt")),
+        Some(&link_entry(target)),
+        "a link collects by target, never by the bytes it points at"
+    );
+    assert!(
+        !entries.values().any(|entry| matches!(entry,
+            TreeEntry::File { bytes, .. } if bytes == b"external bytes\n")),
+        "external bytes must not leak into the collection"
+    );
+    assert_eq!(
+        must(
+            stat_tree_entry(&root.join(".github/link.txt")),
+            "stat the link"
+        ),
+        Some(link_entry(target)),
+        "a single stat classifies the link itself"
+    );
+    assert_eq!(
+        must(
+            stat_tree_entry(&root.join(".github/absent.txt")),
+            "stat an absent path"
+        ),
+        None,
+        "an absent path stats as missing"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
+
+fn declared_tree(required_checks: &[&str]) -> DeclaredTree {
+    DeclaredTree {
+        pin: None,
+        repository: None,
+        default_branch: "main".to_owned(),
+        excludes: BTreeSet::new(),
+        velnor_policy: VelnorPolicyContract::default(),
+        required_checks: required_checks
+            .iter()
+            .map(|context| (*context).to_owned())
+            .collect(),
+        external_checks: Vec::new(),
+    }
+}
+
+const REQUIRED_CHECKS_PR_AGGREGATE: &str = "jobs:\n  ci-required:\n    name: ci-required\n";
+const REQUIRED_CHECKS_POLICY_ENTRYPOINT: &str = "jobs:\n  policy:\n    name: Policy\n";
+
+fn write_required_checks_fixture(root: &Path, entrypoint: bool) {
+    write(
+        &root.join(PULL_REQUEST_AGGREGATE),
+        REQUIRED_CHECKS_PR_AGGREGATE,
+    );
+    if entrypoint {
+        write(
+            &root.join(POLICY_ENTRYPOINT),
+            REQUIRED_CHECKS_POLICY_ENTRYPOINT,
+        );
+    }
+}
+
+#[test]
+fn required_checks_accepts_policy_from_the_entrypoint() {
+    let root = temporary_directory("required-checks-policy");
+    write_required_checks_fixture(&root, true);
+    let declared = declared_tree(&["ci-required", "Policy"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(
+        report.passed,
+        "{}: {}",
+        report.reason,
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_rejects_contexts_absent_from_both_workflows() {
+    let root = temporary_directory("required-checks-bogus");
+    write_required_checks_fixture(&root, true);
+    let declared = declared_tree(&["ci-required", "Policy", "bogus-context"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(!report.passed, "a bogus context must fail the rule");
+    assert!(
+        report
+            .details
+            .iter()
+            .any(|finding| finding.contains("bogus-context")),
+        "the rule names the absent context: {}",
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_has_no_hard_coded_policy_exemption() {
+    let root = temporary_directory("required-checks-no-entrypoint");
+    write_required_checks_fixture(&root, false);
+    let declared = declared_tree(&["Policy"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(
+        !report.passed,
+        "Policy without a rendered entrypoint must fail the rule"
+    );
+    assert!(
+        report
+            .details
+            .iter()
+            .any(|finding| finding.contains("Policy")),
+        "the rule names the absent context: {}",
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_passes_when_live_matches_declared_plus_entrypoint() {
+    let root = temporary_directory("required-checks-live");
+    write_required_checks_fixture(&root, true);
+    let mut declared = declared_tree(&["ci-required", "Policy"]);
+    declared.external_checks = vec!["DCO".to_owned()];
+    let live = vec![
+        "ci-required".to_owned(),
+        "DCO".to_owned(),
+        "Policy".to_owned(),
+    ];
+    let report = required_checks(&root, &declared, Some(&live));
+    assert!(
+        report.passed,
+        "{}: {}",
+        report.reason,
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
 }

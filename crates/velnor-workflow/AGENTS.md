@@ -21,6 +21,18 @@
   repository structure, and only then generate. Never hand-edit generated
   files under `.github`; change the generator or the repo's generation config
   and regenerate.
+- Plan change-aware MINIMAL work from the full event change set plus
+  discovered/declared deps: classify every changed path as OWNED (a unit
+  watches or reads it), OPAQUE (unowned but some unit resists proof),
+  UNKNOWN (impact undecidable), or IRRELEVANT (no watcher, no consumer).
+  Select-before-setup; schedule no workload for proven-irrelevant
+  changes; opaque and unknown keep the smallest sound scope with an
+  explicit reason naming the missing read contract. Declare unprovable
+  relations as typed read contracts (paths, script, unresolved) in repo
+  config; never execute repo code during static discovery. Explain
+  selection/fallback/cache/reuse with the plan; never silent skipping,
+  silent full, blanket exclusions, or repo-specific exceptions. Cover
+  every planning change with tests plus updated product docs.
 - Keep output byte-stable for identical (repository structure + generation
   config): regeneration must be reproducible, checkable, and fail closed when
   generated files drift.

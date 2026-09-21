@@ -78,6 +78,33 @@ velnor-workflow policy --workflow-root .
 velnor-workflow release verify-tag
 ```
 
+`plan` publishes the CI-selection plan to stdout and `$GITHUB_OUTPUT`, plus a
+selection file and an expected-work file when their environment paths are set.
+`CURRENT` output fields (`crates/velnor-workflow/src/runtime.rs:1739-1760,1774-1811`;
+schema-2 runtime adds JSON `units`, `unit_ids`, `plan_digest`, and `excluded`
+at `crates/velnor-workflow/src/s2/runtime.rs:1841-1871`):
+
+| Field | Shape | Meaning |
+| --- | --- | --- |
+| `scope` | `affected` or `full` | Scope the event resolved to. |
+| `base_sha`, `head_sha` | SHAs | Diff range the plan selected for. |
+| `units` | CSV unit ids (schema-1) or plan JSON (schema-2) | Selected units that must run. |
+| `unit_ids` | CSV unit ids (schema-2 only) | Same affected set as CSV for the selection file. |
+| `full_units` | CSV unit ids | Changed-plus-dependents subset that runs full scope. |
+| `plan_digest` | digest (schema-2 only) | Stable identity over the planned units and exclusions. |
+| `excluded` | JSON (schema-2 only) | Units excluded with per-unit provider and reason. |
+| `<kind>_matrix` | JSON array of `{unit, label}` | Per-kind caller matrix; empty for unselected kinds. |
+| `fallback_reason` | string, on fallback and opaque-narrowed selections | Why a fallback widened the selection: the full set, or the opaque subset an unmatched path conservatively selects; unmatched-path reasons also name the missing narrowing contract. Absent for proven-narrow plans. |
+| `planned_no_work` | `true`, only on no-work | Presence-only marker: `true` or absent, never `false`. |
+| `no_work_reason` | string, only on no-work | Why zero units were selected. |
+
+`run --scope affected` executes the units the selection file names; a
+validated empty selection reports
+`no_work_reason=CI selection artifact selects zero workload units; nothing to run`
+and exits successfully. Selection semantics, the reason channels, and the
+expected-work aggregate live in [change-aware
+planning](/concepts/change-aware-planning).
+
 `velnor-tools workflow-monitor` joins authoritative GitHub run state with
 read-only local Velnor observations. GitHub remains authoritative for the
 terminal result; local readiness, runner, slot, job, event, log, and outbox

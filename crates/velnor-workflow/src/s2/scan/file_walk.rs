@@ -112,13 +112,12 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
         if is_excluded_directory(&leading.to_string_lossy()) {
             continue;
         }
-        let absolute = root.join(relative);
-        let Ok(metadata) = fs::symlink_metadata(&absolute) else {
+        let Some(metadata) = tracked_file_metadata(root, relative) else {
             // Staged but deleted in the work tree: the detectors cannot read
             // it, so it cannot inform generation.
             continue;
         };
-        if metadata.is_dir() || metadata.file_type().is_symlink() {
+        if metadata.is_dir() {
             // Submodule git links and tracked symlinks are skipped exactly
             // like their walked counterparts.
             continue;
@@ -129,6 +128,26 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
         return Ok(None);
     }
     Ok(Some(files))
+}
+
+/// Inspect every path component without traversing a symlinked parent.
+fn tracked_file_metadata(root: &Path, relative: &Path) -> Option<fs::Metadata> {
+    let mut path = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            return None;
+        };
+        path.push(component);
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink() || components.peek().is_some() && !metadata.is_dir() {
+            return None;
+        }
+        if components.peek().is_none() {
+            return Some(metadata);
+        }
+    }
+    None
 }
 
 /// Generated `.github` content is output, not project input; the remaining
@@ -168,12 +187,25 @@ fn collect_files(
         if kind.is_symlink() {
             continue;
         }
+        // Parity with the git-index walk, which filters on the leading path
+        // component only: tool-output names stay excluded at the repository
+        // root, but nested content (committed fixtures under a nested `dist/`,
+        // ...) scans like any other input. `.git` metadata is never an input
+        // at any depth — the index never lists it, and a linked worktree's
+        // `.git` pointer file must not enter the scan either.
+        if name.as_ref() == ".git" {
+            continue;
+        }
+        let at_root = directory == root;
         if kind.is_dir() {
-            if is_excluded_directory(name.as_ref()) {
+            if at_root && is_excluded_directory(name.as_ref()) {
                 continue;
             }
             collect_files(root, &path, files)?;
         } else if kind.is_file() {
+            if at_root && is_excluded_directory(name.as_ref()) {
+                continue;
+            }
             let relative = path.strip_prefix(root).map_err(|error| {
                 GeneratorError::usage(format!("make repository path relative: {error}"))
             })?;
@@ -441,5 +473,120 @@ mod tests {
             files,
             vec!["nested/deep.txt".to_owned(), "present.txt".to_owned()]
         );
+    }
+
+    #[test]
+    fn physical_walk_matches_git_index_exclusion_depth() {
+        let root = scratch("exclusion-depth");
+        must(
+            fs::create_dir_all(root.join("dist")),
+            "create root dist directory",
+        );
+        must(
+            fs::write(root.join("dist/bundle.js"), "bundle"),
+            "write root dist file",
+        );
+        must(
+            fs::create_dir_all(root.join("target")),
+            "create root target directory",
+        );
+        must(
+            fs::write(root.join("target/app"), "app"),
+            "write root target file",
+        );
+        must(
+            fs::create_dir_all(root.join("pkg/dist")),
+            "create nested dist directory",
+        );
+        must(
+            fs::write(root.join("pkg/dist/data.txt"), "data"),
+            "write nested dist file",
+        );
+        must(
+            fs::create_dir_all(root.join("pkg/target")),
+            "create nested target directory",
+        );
+        must(
+            fs::write(root.join("pkg/target/lib.rlib"), "lib"),
+            "write nested target file",
+        );
+        must(
+            fs::write(root.join("pkg/main.rs"), "main"),
+            "write nested source",
+        );
+        must(
+            fs::create_dir_all(root.join("pkg/.git/objects")),
+            "create nested git directory",
+        );
+        must(
+            fs::write(root.join("pkg/.git/objects/pack"), "pack"),
+            "write nested git file",
+        );
+        must(
+            fs::write(root.join(".git"), "gitdir: elsewhere"),
+            "write worktree pointer file",
+        );
+
+        let mut files = must(repository_files(&root, &[]), "scan plain directory");
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "pkg/dist/data.txt".to_owned(),
+                "pkg/main.rs".to_owned(),
+                "pkg/target/lib.rlib".to_owned(),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_walks_skip_files_below_symlinked_parent_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("symlinked-tracked-parent");
+        let outside = scratch("symlinked-tracked-target");
+        git(&root, &["init", "-q"]);
+        git(&root, &["commit", "--allow-empty", "-qm", "seed"]);
+        must(
+            fs::create_dir_all(root.join("actions/foo/scripts")),
+            "create symlink fixture directory",
+        );
+        must(
+            fs::create_dir_all(outside.join("scripts")),
+            "create external fixture directory",
+        );
+        must(
+            fs::write(
+                root.join("actions/foo/action.yml"),
+                "runs:\n  using: node20\n  main: scripts/main.js\n",
+            ),
+            "write tracked action metadata",
+        );
+        must(
+            fs::write(root.join("actions/foo/scripts/main.js"), "tracked target\n"),
+            "write tracked action entrypoint",
+        );
+        must(
+            fs::write(outside.join("scripts/main.js"), "outside target\n"),
+            "write external action target",
+        );
+        git(&root, &["add", "actions/foo"]);
+        git(&root, &["commit", "-qm", "tracked action"]);
+
+        must(
+            fs::remove_dir_all(root.join("actions/foo/scripts")),
+            "remove action script directory before symlinking",
+        );
+        must(
+            symlink(outside.join("scripts"), root.join("actions/foo/scripts")),
+            "symlink action script parent",
+        );
+
+        let scanned = must(repository_files(&root, &[]), "skip symlinked tracked file");
+        assert!(!scanned.contains(&"actions/foo/scripts/main.js".to_owned()));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 }

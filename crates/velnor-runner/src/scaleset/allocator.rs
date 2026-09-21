@@ -30,7 +30,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use velnor_control::permit_ledger::{
-    AcquireOutcome, LedgerError, PermitLane, PermitLedger, PermitState, ReconcileReport,
+    deferred_wait, AcquireOutcome, LedgerError, PermitLane, PermitLedger, PermitState,
+    ReconcileReport, DEFERRED_WAIT_BUDGET,
 };
 
 /// Scale-set lane allocator over the shared host-wide ledger.
@@ -65,12 +66,21 @@ impl ScaleSetAllocator {
     /// * `Ok(Some(guard))` — granted (or duplicate delivery onto an
     ///   existing hold, in which case the guard owns nothing and its drop
     ///   releases nothing).
-    /// * `Ok(None)` — ledger full; the offer stays queued with its age.
-    /// * `Err` — storage failure, unconfigured ledger, or a generation
-    ///   that moved twice under one acquire (retry the poll).
+    /// * `Ok(None)` — ledger full, or older demand never yielded within
+    ///   the wait budget; the offer stays queued with its age.
+    /// * `Err` — storage failure or unconfigured ledger.
     pub fn acquire(&self, holder: &str) -> Result<Option<ScaleSetPermitGuard>, AllocatorError> {
         let mut ledger = PermitLedger::open(&self.ledger_path).map_err(AllocatorError::Storage)?;
-        for _ in 0..3 {
+        let observed = velnor_control::permit_ledger::unix_now();
+        ledger
+            .observe_demand(holder, PermitLane::ScaleSet, "", observed, observed)
+            .map_err(AllocatorError::Storage)?;
+        // Younger waiters must outlive the older attempts ahead of them
+        // (see DEFERRED_WAIT_BUDGET); every departure below parks its
+        // demand so it cannot head-block younger work.
+        let deadline = std::time::Instant::now() + DEFERRED_WAIT_BUDGET;
+        let mut deferred_attempts = 0u32;
+        loop {
             let generation = ledger.generation().map_err(AllocatorError::Storage)?;
             match ledger
                 .acquire(
@@ -95,12 +105,27 @@ impl ScaleSetAllocator {
                         holder,
                     )));
                 }
-                AcquireOutcome::Full => return Ok(None),
-                AcquireOutcome::StaleGeneration => continue,
+                AcquireOutcome::Full | AcquireOutcome::Closed => {
+                    park_departed(&mut ledger, holder);
+                    return Ok(None);
+                }
+                AcquireOutcome::Deferred => {
+                    if std::time::Instant::now() >= deadline {
+                        park_departed(&mut ledger, holder);
+                        return Ok(None);
+                    }
+                    std::thread::sleep(deferred_wait(deferred_attempts));
+                    deferred_attempts = deferred_attempts.saturating_add(1);
+                }
+                AcquireOutcome::StaleGeneration => {
+                    if std::time::Instant::now() >= deadline {
+                        park_departed(&mut ledger, holder);
+                        return Ok(None);
+                    }
+                }
                 AcquireOutcome::NotConfigured => return Err(AllocatorError::NotConfigured),
             }
         }
-        Err(AllocatorError::Contended)
     }
 
     /// Free capacity (`N − occupied`) across BOTH lanes — but only after
@@ -263,7 +288,26 @@ impl ScaleSetPermitGuard {
         if !self.owns_permit {
             return;
         }
-        self.transition_best_effort(PermitState::Uncertain);
+        match PermitLedger::open(&self.ledger_path) {
+            Ok(mut ledger) => match ledger.generation() {
+                Ok(generation) => {
+                    if let Err(error) = ledger.retain_uncertain(&self.holder, generation) {
+                        eprintln!(
+                            "Warning: uncertain scale-set permit retention failed for {}: {error}",
+                            self.holder
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "Warning: permit ledger generation read failed for {}: {error}",
+                    self.holder
+                ),
+            },
+            Err(error) => eprintln!(
+                "Warning: permit ledger open failed for {}: {error}",
+                self.holder
+            ),
+        }
     }
 }
 
@@ -272,9 +316,10 @@ impl Drop for ScaleSetPermitGuard {
         if self.disarmed || !self.owns_permit {
             return;
         }
-        // Every non-terminal return frees what this attempt spent. Never
-        // panics: drop runs on unwind paths too.
-        if let Err(error) = release_permit(&self.ledger_path, &self.holder) {
+        // Every non-terminal return makes this demand regrantable with its
+        // original age. The permit and demand transition share one
+        // transaction. Callers retain uncertain holds after cleanup fails.
+        if let Err(error) = release_permit_to_eligible(&self.ledger_path, &self.holder) {
             eprintln!(
                 "Warning: permit ledger release failed for {}: {error}",
                 self.holder
@@ -283,9 +328,24 @@ impl Drop for ScaleSetPermitGuard {
     }
 }
 
+/// Yield our queue place without losing our age: a departed waiter must
+/// not head-block younger demand. Best-effort: on storage failure the
+/// demand stays eligible (younger waiters defer to it) rather than
+/// failing the departure.
+fn park_departed(ledger: &mut PermitLedger, holder: &str) {
+    if let Err(error) = ledger.park_demand(holder) {
+        eprintln!("Warning: permit demand park failed for {holder}: {error}");
+    }
+}
+
 fn release_permit(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
-    let ledger = PermitLedger::open(ledger_path)?;
+    let mut ledger = PermitLedger::open(ledger_path)?;
     ledger.release(holder)
+}
+
+fn release_permit_to_eligible(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+    let mut ledger = PermitLedger::open(ledger_path)?;
+    ledger.release_to_eligible(holder)
 }
 
 /// Release one holder's permit from outside the acquiring attempt
@@ -312,8 +372,6 @@ pub enum AllocatorError {
     /// No `max_jobs` was ever configured: the daemon never opened the
     /// ledger. Acquiring without an authority would spend uncapped.
     NotConfigured,
-    /// The generation moved twice during one acquire; retry the poll.
-    Contended,
 }
 
 impl std::fmt::Display for AllocatorError {
@@ -323,10 +381,6 @@ impl std::fmt::Display for AllocatorError {
             Self::NotConfigured => write!(
                 f,
                 "no max_jobs configured; start the daemon before scale-set acquisition"
-            ),
-            Self::Contended => write!(
-                f,
-                "permit ledger generation moved twice during acquire; retry the poll"
             ),
         }
     }
@@ -491,18 +545,27 @@ mod tests {
         let allocator = ScaleSetAllocator::open(&path);
 
         // Set 7 spends the whole N; set 9 is refused (no per-set reserve).
-        let _a = allocator
+        let a = allocator
             .acquire(&permit_holder(7, 1))
             .unwrap()
             .expect("grants");
-        let _b = allocator
+        let b = allocator
             .acquire(&permit_holder(7, 2))
             .unwrap()
             .expect("grants");
         assert!(allocator.acquire(&permit_holder(9, 3)).unwrap().is_none());
-        drop(_a);
-        // One freed permit is spendable by the other set.
-        assert!(allocator.acquire(&permit_holder(9, 3)).unwrap().is_some());
+        // Confirm terminal cleanup for set 7/request 1. Drop would return
+        // that older demand to Eligible, so it would correctly win again.
+        a.release();
+        // The terminal demand no longer blocks set 9 from the freed slot.
+        let c = allocator
+            .acquire(&permit_holder(9, 3))
+            .unwrap()
+            .expect("freed permit is spendable by the other set");
+        assert_eq!(allocator.occupied().unwrap(), 2);
+        c.release();
+        b.release();
+        assert_eq!(allocator.occupied().unwrap(), 0);
     }
 
     #[test]

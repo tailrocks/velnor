@@ -1,6 +1,9 @@
 node_modules/
 .DS_Store
 dist/
+# s2 Swift-native fixture commits real `boltffi pack apple` outputs so the
+# e2e drift-selection test runs on a clean checkout.
+!crates/velnor-workflow/tests/fixtures-s2/swift-native/libs/bridge-ffi/dist/
 dist-ssr/
 build/
 target/

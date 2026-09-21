@@ -150,6 +150,12 @@ impl WorkerIdentity {
         format!("{OBJECT_PREFIX}-work-{}", self.ownership.slug())
     }
 
+    /// Tool cache volume name (shares the worker's workspace volume).
+    #[must_use]
+    pub fn tool_cache_volume(&self) -> String {
+        self.workspace_volume()
+    }
+
     /// DinD data volume name (`/var/lib/docker` inside the daemon).
     #[must_use]
     pub fn dind_data_volume(&self) -> String {
@@ -236,6 +242,10 @@ mod tests {
             "velnor-scaleset-work-s7-velnor-set-0007-2ad92676"
         );
         assert_eq!(
+            first.tool_cache_volume(),
+            "velnor-scaleset-work-s7-velnor-set-0007-2ad92676"
+        );
+        assert_eq!(
             first.dind_data_volume(),
             "velnor-scaleset-dindata-s7-velnor-set-0007-2ad92676"
         );
@@ -251,6 +261,7 @@ mod tests {
             assert_ne!(a.runner_container(), other.runner_container());
             assert_ne!(a.network(), other.network());
             assert_ne!(a.workspace_volume(), other.workspace_volume());
+            assert_ne!(a.tool_cache_volume(), other.tool_cache_volume());
             assert_ne!(a.dind_data_volume(), other.dind_data_volume());
         }
     }

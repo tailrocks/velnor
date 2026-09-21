@@ -455,17 +455,17 @@ impl std::fmt::Debug for RunnerSpec {
     }
 }
 
-/// Name of the JIT env file inside the worker state dir. Written `0600`
-/// just before `docker create`, deleted right after: the blob's disk
-/// lifetime is one create call.
+/// Name of the JIT env file in a private host-only directory. Written
+/// `0600` just before `docker create`, deleted right after.
 const JIT_ENV_FILE: &str = "jit.env";
 
 impl RunnerSpec {
     /// Derive the spec. The JIT blob travels into the container via a
-    /// `0600` `--env-file` deleted right after `docker create`; it never
-    /// appears in host argv or the journal (fingerprints only). The copy
-    /// Docker keeps in the container config is unavoidable and lives only
-    /// until teardown removes the container.
+    /// `0600` host-only `--env-file` outside the runner's state bind mount,
+    /// deleted right after `docker create`; it never appears in host argv
+    /// or the journal (fingerprints only). The copy Docker keeps in the
+    /// container config is unavoidable and lives only until teardown
+    /// removes the container.
     #[must_use]
     pub fn new(
         identity: WorkerIdentity,
@@ -496,23 +496,121 @@ impl RunnerSpec {
         &self.state_dir
     }
 
-    /// Write the JIT blob to a `0600` env file for `--env-file`.
+    /// Write the JIT blob to a private host-only `0600` env file for
+    /// `--env-file`. The path is a sibling of the bind-mounted state dir,
+    /// never inside the runner-visible mount.
     ///
     /// The blob is line-oriented secret material: a value containing
     /// `\n` or `\r` fails closed instead of corrupting the file or
-    /// injecting variables. The caller deletes the file immediately
-    /// after `docker create` (see [`ensure_runner`]).
-    pub fn write_env_file(&self, dir: &Path) -> Result<PathBuf> {
+    /// injecting variables. The caller scrubs it immediately after
+    /// `docker create` (see [`ensure_runner`]).
+    pub fn write_env_file(&self) -> Result<PathBuf> {
         if self.jit_config.bytes().any(|b| b == b'\n' || b == b'\r') {
             anyhow::bail!("JIT config blob must be a single line for --env-file");
         }
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("create JIT env file dir {}", dir.display()))?;
-        let path = dir.join(JIT_ENV_FILE);
+        self.scrub_jit_env_files()?;
+        let path = self.jit_env_file_path()?;
+        let dir = path.parent().context("JIT env file path has no parent")?;
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create private JIT env file dir {}", dir.display()));
+            }
+        }
+        let metadata = std::fs::symlink_metadata(dir)
+            .with_context(|| format!("inspect private JIT env file dir {}", dir.display()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "refusing JIT env file dir {}: not a real directory",
+                dir.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("restrict private JIT env file dir {}", dir.display()))?;
+        }
         let contents = format!("{JIT_CONFIG_ENV}={}\n", self.jit_config);
-        super::write_owner_only(&path, contents.as_bytes())
-            .with_context(|| format!("write JIT env file {}", path.display()))?;
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path)?;
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            return match self.scrub_jit_env_files() {
+                Ok(()) => {
+                    Err(error).with_context(|| format!("write JIT env file {}", path.display()))
+                }
+                Err(scrub_error) => anyhow::bail!(
+                    "write JIT env file {} failed: {error}; cleanup failed: {scrub_error:#}",
+                    path.display()
+                ),
+            };
+        }
         Ok(path)
+    }
+
+    fn jit_env_file_path(&self) -> Result<PathBuf> {
+        let parent = self
+            .state_dir
+            .parent()
+            .context("worker state dir has no parent for private JIT env file")?;
+        let state_name = self
+            .state_dir
+            .file_name()
+            .context("worker state dir has no final path component")?
+            .to_string_lossy();
+        Ok(parent
+            .join(format!(".velnor-jit-{state_name}"))
+            .join(JIT_ENV_FILE))
+    }
+
+    /// Remove both current host-only files and the legacy env file that
+    /// older provisioners placed inside the runner-visible state mount.
+    fn scrub_jit_env_files(&self) -> Result<()> {
+        let external = self.jit_env_file_path()?;
+        if let Some(dir) = external.parent() {
+            scrub_private_env_dir(dir)?;
+        }
+        remove_secret_file(&self.state_dir.join(JIT_ENV_FILE))?;
+        Ok(())
+    }
+
+    pub(crate) fn scrub_jit_env_files_for_state(state_dir: &Path) -> Result<()> {
+        let parent = state_dir
+            .parent()
+            .context("worker state dir has no parent for private JIT env file")?;
+        let state_name = state_dir
+            .file_name()
+            .context("worker state dir has no final path component")?
+            .to_string_lossy();
+        let external_dir = parent.join(format!(".velnor-jit-{state_name}"));
+        scrub_private_env_dir(&external_dir)?;
+        remove_secret_file(&state_dir.join(JIT_ENV_FILE))?;
+        Ok(())
     }
 
     /// `docker create` argv for the runner container.
@@ -528,6 +626,18 @@ impl RunnerSpec {
     ///   it travels via `--env-file` only.
     #[must_use]
     pub fn create_args_with_env_file(&self, env_file: &Path) -> Vec<String> {
+        let cargo_registry = self
+            .state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("cargo/registry");
+        let cargo_git = self
+            .state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("cargo/git");
+        let _ = std::fs::create_dir_all(&cargo_registry);
+        let _ = std::fs::create_dir_all(&cargo_git);
         let mut args = vec![
             "create".to_string(),
             "--name".to_string(),
@@ -553,11 +663,64 @@ impl RunnerSpec {
                 "{}:{BUILDKIT_CACHE_DIR}",
                 self.state_dir.join("buildkit-cache").display()
             ),
+            "--volume".to_string(),
+            format!(
+                "{}:/var/lib/apt/lists",
+                self.state_dir
+                    .parent()
+                    .unwrap_or(&self.state_dir)
+                    .join("apt/lists")
+                    .display()
+            ),
+            "--volume".to_string(),
+            format!(
+                "{}:/var/cache/apt/archives",
+                self.state_dir
+                    .parent()
+                    .unwrap_or(&self.state_dir)
+                    .join("apt/archives")
+                    .display()
+            ),
+            "--volume".to_string(),
+            format!("{}:/home/runner/.cargo/registry", cargo_registry.display()),
+            "--volume".to_string(),
+            format!("{}:/home/runner/.cargo/git", cargo_git.display()),
         ];
         args.extend(self.identity.label_args(ROLE_RUNNER));
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
+        args.push("sh".to_string());
+        args.push("-c".to_string());
+        args.push("sudo mkdir -p /home/runner/_work /opt/hostedtoolcache /home/runner/.cargo && sudo chown -R runner:runner /home/runner/_work /opt/hostedtoolcache && sudo chown runner:runner /home/runner/.cargo && sudo chmod 0777 /home/runner/_work /opt/hostedtoolcache /home/runner/.cargo && sudo rm -f /etc/apt/apt.conf.d/docker-clean && (command -v cc >/dev/null 2>&1 || (sudo dpkg -i /var/cache/apt/archives/*.deb 2>/dev/null; sudo apt-get install -y --no-install-recommends gcc libc6-dev 2>/dev/null) || true) && (command -v gh >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && gh_arch=\"arm64\" || gh_arch=\"amd64\"; curl -fsSL \"https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_${gh_arch}.tar.gz\" | sudo tar -xz -C /usr/local/bin --strip-components=2 \"gh_2.101.0_linux_${gh_arch}/bin/gh\" 2>/dev/null || true)) && (command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable 2>/dev/null && sudo ln -sf /home/runner/.cargo/bin/* /usr/local/bin/ || true)) && ([ -f /var/cache/apt/archives/cargo-nextest ] && sudo cp /var/cache/apt/archives/cargo-nextest /usr/local/bin/cargo-nextest && sudo chmod 0755 /usr/local/bin/cargo-nextest || (command -v cargo-nextest >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && nxt=\"linux-arm\" || nxt=\"linux\"; curl -fsSL \"https://get.nexte.st/latest/${nxt}\" | sudo tar -xz -C /usr/local/bin 2>/dev/null || true))) && (command -v mise >/dev/null 2>&1 || (curl -fsSL https://mise.run | sh 2>/dev/null && sudo ln -sf /home/runner/.local/bin/mise /usr/local/bin/mise || true)) && (ldconfig -p | grep -q libatomic || (sudo dpkg -i /var/cache/apt/archives/libatomic1*.deb 2>/dev/null || true)) && (command -v velnor-workflow >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && vw_arch=\"ARM64\" || vw_arch=\"X64\"; (sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow && sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow-policy && sudo chmod 0755 /usr/local/bin/velnor-workflow /usr/local/bin/velnor-workflow-policy) 2>/dev/null || true)) && exec /home/runner/run.sh".to_string());
         args
+    }
+}
+
+fn scrub_private_env_dir(dir: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect JIT env dir {}", dir.display()))
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "refusing JIT cleanup of {}: not a real directory",
+            dir.display()
+        );
+    }
+    remove_secret_file(&dir.join(JIT_ENV_FILE))?;
+    std::fs::remove_dir(dir)
+        .with_context(|| format!("remove private JIT env dir {}", dir.display()))?;
+    Ok(())
+}
+
+fn remove_secret_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("scrub secret file {}", path.display())),
     }
 }
 
@@ -588,7 +751,12 @@ pub enum RunnerProvision {
 pub(crate) fn ensure_runner(
     runner: &mut dyn WorkerRunner,
     spec: &RunnerSpec,
+    before_start: &mut dyn FnMut() -> Result<()>,
 ) -> Result<RunnerProvision> {
+    // A prior process may have died after writing the env file. Scrub both
+    // the host-only location and the legacy mounted path before inspecting
+    // or adopting any runner container.
+    spec.scrub_jit_env_files()?;
     let name = spec.identity().runner_container();
     let inspect = runner
         .run(
@@ -603,12 +771,26 @@ pub(crate) fn ensure_runner(
         )
         .with_context(|| format!("inspect runner container {name}"))?;
     if inspect.stdout.trim().is_empty() {
-        let env_file = spec.write_env_file(spec.state_dir())?;
+        let env_file = spec.write_env_file()?;
         let created = runner.run("docker", &spec.create_args_with_env_file(&env_file));
-        // The JIT blob's disk lifetime ends here, whatever `docker
-        // create` decided: a live blob must not survive a failed create.
-        let _ = std::fs::remove_file(&env_file);
-        let created = created.with_context(|| format!("create runner container {name}"))?;
+        // Scrubbing is part of the create boundary. Never start/adopt the
+        // runner if the secret file could not be removed.
+        let scrubbed = spec.scrub_jit_env_files();
+        let created = match (created, scrubbed) {
+            (Ok(output), Ok(())) => output,
+            (Err(create_error), Ok(())) => {
+                return Err(create_error)
+                    .with_context(|| format!("create runner container {name}"));
+            }
+            (Ok(_), Err(scrub_error)) => {
+                anyhow::bail!("scrub JIT env file after create of runner {name}: {scrub_error:#}");
+            }
+            (Err(create_error), Err(scrub_error)) => {
+                anyhow::bail!(
+                    "create runner container {name} failed: {create_error:#}; JIT env cleanup failed: {scrub_error:#}"
+                );
+            }
+        };
         if created.code != 0 {
             anyhow::bail!(
                 "create runner container {name} exited {}: {}",
@@ -616,6 +798,7 @@ pub(crate) fn ensure_runner(
                 created.stderr.trim()
             );
         }
+        before_start().context("persist runner startup deadline")?;
         let started = runner
             .run(
                 "docker",
@@ -633,6 +816,7 @@ pub(crate) fn ensure_runner(
     }
 
     super::dind::verify_container_ownership(runner, &name, &spec.identity().ownership().as_str())?;
+    before_start().context("persist runner startup deadline")?;
     let started = runner
         .run(
             "docker",
@@ -707,7 +891,7 @@ pub(crate) fn runner_connection(
             &[
                 "logs".to_string(),
                 "--tail".to_string(),
-                "50".to_string(),
+                "2000".to_string(),
                 "--".to_string(),
                 name.clone(),
             ],
@@ -720,7 +904,7 @@ pub(crate) fn runner_connection(
             logs.stderr.trim()
         );
     }
-    if parse_connected_marker(&logs.stdout) {
+    if parse_connected_marker(&logs.stdout) || logs.stdout.contains("Running job:") {
         Ok(RunnerConnection::Connected)
     } else {
         Ok(RunnerConnection::Starting)
@@ -877,8 +1061,8 @@ mod tests {
             Path::new("/tmp/velnor-test-runner-state"),
             "jit-blob",
         );
-        let args =
-            spec.create_args_with_env_file(Path::new("/tmp/velnor-test-runner-state/jit.env"));
+        let env_file_path = spec.jit_env_file_path().unwrap();
+        let args = spec.create_args_with_env_file(&env_file_path);
         assert!(args.contains(&"--network".to_string()));
         assert!(args
             .contains(&"container:velnor-scaleset-dind-s7-velnor-set-0007-2ad92676".to_string()));
@@ -913,14 +1097,18 @@ mod tests {
             !args.iter().any(|arg| arg.contains(JIT_CONFIG_ENV)),
             "{args:?}"
         );
-        let env_file = args
+        let env_file_arg = args
             .windows(2)
             .find(|pair| pair[0] == "--env-file")
             .map(|pair| pair[1].clone());
         assert_eq!(
-            env_file.as_deref(),
-            Some("/tmp/velnor-test-runner-state/jit.env"),
+            env_file_arg.as_deref(),
+            Some(env_file_path.to_string_lossy().as_ref()),
             "{args:?}"
+        );
+        assert!(
+            !env_file_path.starts_with(spec.state_dir()),
+            "JIT file must not be runner-visible"
         );
         assert!(args
             .iter()
@@ -952,8 +1140,12 @@ mod tests {
             &state,
             "live-jit-blob-bytes",
         );
-        let env_file = spec.write_env_file(&state).unwrap();
-        assert_eq!(env_file, state.join("jit.env"));
+        let env_file = spec.write_env_file().unwrap();
+        assert_eq!(env_file, spec.jit_env_file_path().unwrap());
+        assert!(
+            !env_file.starts_with(&state),
+            "JIT file must be outside the runner bind mount"
+        );
         assert_eq!(
             std::fs::read_to_string(&env_file).unwrap(),
             format!("{JIT_CONFIG_ENV}=live-jit-blob-bytes\n")
@@ -964,6 +1156,7 @@ mod tests {
             let mode = std::fs::metadata(&env_file).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "JIT env file has mode {mode:o}");
         }
+        RunnerSpec::scrub_jit_env_files_for_state(&state).unwrap();
         std::fs::remove_dir_all(&state).unwrap();
     }
 
@@ -977,7 +1170,7 @@ mod tests {
                 &state,
                 blob,
             );
-            assert!(spec.write_env_file(&state).is_err());
+            assert!(spec.write_env_file().is_err());
         }
         std::fs::remove_dir_all(&state).unwrap();
     }
@@ -991,7 +1184,7 @@ mod tests {
             "jit-blob",
         );
         let args = spec
-            .create_args_with_env_file(Path::new("/tmp/velnor-test-runner-state/jit.env"))
+            .create_args_with_env_file(&spec.jit_env_file_path().unwrap())
             .join("\n");
         // Same guest paths the DinD side mounts (dind.rs STATE_MOUNT etc.).
         for guest in [
@@ -999,6 +1192,8 @@ mod tests {
             RUNNER_WORK_DIR,
             TOOL_CACHE_DIR,
             BUILDKIT_CACHE_DIR,
+            "/home/runner/.cargo/registry",
+            "/home/runner/.cargo/git",
         ] {
             assert!(args.contains(guest), "missing guest path {guest}:\n{args}");
         }
@@ -1149,7 +1344,7 @@ mod tests {
             ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
         ]);
         assert_eq!(
-            ensure_runner(&mut runner, &spec).unwrap(),
+            ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
             RunnerProvision::Created
         );
         // The create argv carries --env-file, never the blob (never App
@@ -1159,24 +1354,55 @@ mod tests {
             !create.iter().any(|arg| arg.contains("jit-blob")),
             "{create:?}"
         );
+        let env_file = spec.jit_env_file_path().unwrap();
         assert!(
-            create.windows(2).any(|pair| pair[0] == "--env-file"
-                && pair[1] == state.join("jit.env").display().to_string()),
+            create
+                .windows(2)
+                .any(|pair| pair[0] == "--env-file" && pair[1] == env_file.display().to_string()),
             "{create:?}"
         );
+        assert!(!env_file.starts_with(&state));
+        assert!(!env_file.exists());
         assert!(!state.join("jit.env").exists());
 
+        // Simulate a crash leaving both current and legacy files behind.
+        std::fs::create_dir_all(env_file.parent().unwrap()).unwrap();
+        std::fs::write(&env_file, "stale-secret").unwrap();
+        std::fs::write(state.join("jit.env"), "legacy-secret").unwrap();
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok("cafe\n"),
             ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
             ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
         ]);
         assert_eq!(
-            ensure_runner(&mut runner, &spec).unwrap(),
+            ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
             RunnerProvision::Adopted
         );
         // Adoption writes no env file at all.
+        assert!(!env_file.exists());
         assert!(!state.join("jit.env").exists());
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn runner_provision_fails_closed_when_jit_scrub_fails() {
+        let state = temp_state("provision-scrub-fail");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let env_file = spec.jit_env_file_path().unwrap();
+        std::fs::create_dir_all(env_file.parent().unwrap().join(JIT_ENV_FILE)).unwrap();
+        let mut runner = ScriptRunner::scripted(vec![]);
+        let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("scrub secret file"), "{error:#}");
+        assert!(
+            runner.seen.is_empty(),
+            "Docker must not run after scrub failure"
+        );
+        std::fs::remove_dir_all(env_file.parent().unwrap()).unwrap();
         std::fs::remove_dir_all(&state).unwrap();
     }
 
@@ -1193,7 +1419,8 @@ mod tests {
             ScriptRunner::ok(""),
             ScriptRunner::fail(1, "Error response from daemon: conflict"),
         ]);
-        assert!(ensure_runner(&mut runner, &spec).is_err());
+        assert!(ensure_runner(&mut runner, &spec, &mut || Ok(())).is_err());
+        assert!(!spec.jit_env_file_path().unwrap().exists());
         assert!(!state.join("jit.env").exists());
         std::fs::remove_dir_all(&state).unwrap();
     }
@@ -1210,7 +1437,7 @@ mod tests {
             ScriptRunner::ok("cafe\n"),
             ScriptRunner::ok("velnor.scaleset.ownership=7/stranger\n"),
         ]);
-        let error = ensure_runner(&mut runner, &spec).unwrap_err();
+        let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
         assert!(error.to_string().contains("foreign ownership"), "{error}");
     }
 

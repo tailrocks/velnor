@@ -10,6 +10,7 @@
 
 pub mod evidence;
 pub mod fanout;
+pub mod workflow;
 
 pub use evidence::{
     CargoVersion, DeclaredOutputEvidence, OutputChange, OutputEvidence, OutputEvidenceManifest,
@@ -23,6 +24,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fmt, io, io::BufRead, str::FromStr};
 use thiserror::Error;
+pub use workflow::{
+    collect_workflow, parse_job_documents, parse_run_documents, render_workflow_summary,
+    write_workflow_csv, write_workflow_jsonl, ReferencedWorkflow, WorkflowCollectOptions,
+    WorkflowInputError, WorkflowJobInput, WorkflowJobRecord, WorkflowRunInput, WorkflowStepRecord,
+};
 
 const UNKNOWN: &str = "unknown";
 const ABSOLUTE_PATH_MARKER: &str = "<absolute-path>";

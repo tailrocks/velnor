@@ -4,24 +4,30 @@ title: "Velnor architecture"
 
 # Velnor architecture
 
-Velnor is a node-local execution system for GitHub Actions. GitHub remains the
-workflow scheduler and source of truth. Velnor provides ephemeral runner
-capacity, validates work, executes it in an explicitly selected backend, and
-reports the outcome.
+Velnor is a node-local control plane for GitHub Actions with two local
+execution lanes. GitHub remains the workflow scheduler and source of truth.
+The native lane uses Velnor runner slots and an explicitly selected Docker or
+Firecracker microVM backend. The optional Scale Set lane uses an official
+one-job Actions runner container paired with a private per-worker DinD daemon.
+Both local lanes share one host-wide permit ledger.
 
-Velnor does not maintain a competing workflow scheduler. A local queue cannot
-create GitHub work, and a Velnor node does not silently switch to another
-executor when its configured backend is unavailable.
+Velnor does not maintain a competing workflow scheduler. Its shared local
+queue orders eligible demand that Velnor has observed; it cannot create GitHub
+work or guarantee order from GitHub submission through job completion. The
+native lane does not silently switch backend when its configured backend is
+unavailable.
 
 ## Responsibility boundaries
 
 | Owner | Responsibilities |
 | --- | --- |
 | GitHub Actions | Workflow and job creation, runner matching, job payload authority, remote run state, hosted service APIs, and the user-facing workflow result. |
-| Velnor control plane | Node identity, capacity, admission decisions, local lifecycle state, bounded operational events, and recovery intent. |
-| Velnor runner | JIT registration, broker sessions, job acquisition, lease renewal, execution coordination, progress publishing, completion reporting, and cleanup. |
-| Execution backend | Isolation and process/container lifecycle for one validated job: Docker or Firecracker microVM. |
-| Operator | GitHub policy, labels, credentials, backend choice, service lifecycle, and interpretation of health and failure signals. |
+| Velnor control plane | Node identity, shared host capacity, fresh eligible demand ordering across local lanes, admission decisions, lifecycle state, bounded events, and recovery intent. |
+| Native Velnor runner | JIT registration, broker sessions, job acquisition, lease renewal, native job execution, progress publishing, completion reporting, and cleanup. |
+| Scale Set adapter | Scale Set registration and sessions, durable offer handling, shared-ledger acquisition, and official-worker lifecycle and cleanup. |
+| Native execution backend | Isolation and process/container lifecycle for a validated native job: Docker or Firecracker microVM. |
+| Scale Set worker | One official Actions runner container paired with its own private DinD daemon. |
+| Operator | GitHub policy, labels, credentials, native backend choice, optional Scale Set configuration, service lifecycle, and health/failure signals. |
 
 Velnor knows what it has registered, what it has accepted locally, what its
 capacity can run, and what it has sent or durably staged for GitHub. GitHub
@@ -36,40 +42,54 @@ flowchart LR
     GH[GitHub Actions]
     subgraph V[Velnor node]
         G[Guardian\nhealth and supervision]
-        C[Controller\ncapacity and lifecycle]
-        S[Runner slots\nJIT sessions]
-        A[Admission and plan]
-        B{Explicit backend}
+        C[Shared capacity\nand lifecycle]
+        L[(Permit ledger\nmax_jobs N + demand order)]
+        S[Native runner slots\nJIT sessions]
+        A[Native admission\nand plan]
+        B{Native backend}
         D[Docker]
         F[Firecracker microVM]
+        SS[Optional Scale Set\nadapter and session]
+        R[Official one-job\nrunner container]
+        DD[Private per-worker\nDinD daemon]
         J[(Journal and\ncompletion outbox)]
         O[Control API\nUnix sockets]
         X[velnorctl]
     end
     GH <--> S
-    C --> S
+    GH <--> SS
+    GH <--> R
+    C --> L
+    L --> S
+    L --> SS
     S --> A --> B
     B --> D
     B --> F
+    SS --> R --> DD
     S <--> J
+    SS <--> J
     C <--> J
     O <--> J
     X <--> O
     G -. monitors .-> C
 ```
 
-The daemon controller manages desired slot capacity and lifecycle. Each ready
-slot is an independent runner process with its own GitHub session. An acquired
-job runs in a transient job boundary beneath that slot. Controller restart does
-not by itself terminate surviving slot or active-job processes; generation and
-heartbeat checks prevent stale children from proving current readiness.
+In the native lane, the daemon manages desired slot capacity and lifecycle.
+Each ready slot is an independent runner process with its own GitHub session.
+An acquired job runs in a transient job boundary beneath that slot. Controller
+restart does not by itself terminate surviving slot or active-job processes;
+generation and heartbeat checks prevent stale children from proving current
+readiness. The Scale Set adapter uses the same host-wide permit ledger and
+persists deferred offers so they can resume on later or idle polls.
 
-Readiness is a proof, not merely a live process: local state must be writable,
-the selected backend must pass preflight, GitHub registration must be valid,
-and slot heartbeats must be fresh. Failure of any required condition makes the
-node unavailable or degraded rather than schedulable by implication.
+Native readiness is a proof, not merely a live process: local state must be
+writable, the selected backend must pass preflight, GitHub registration must
+be valid, and slot heartbeats must be fresh. The Scale Set lane has separate
+registration, session, and worker prerequisites. Failure of a required
+condition makes that lane unavailable or degraded rather than schedulable by
+implication.
 
-## End-to-end job flow
+## Native Velnor job flow
 
 ```mermaid
 sequenceDiagram
@@ -88,7 +108,7 @@ sequenceDiagram
     V->>R: Acquire full job payload
     V->>L: Claim identity and persist in-flight state
     V->>A: Validate policy, capabilities, actions, limits
-    A-->>V: Validated execution plan or rejection
+    A-->>V: Validated job execution plan or rejection
     V->>R: Renew job lease while active
     V->>E: Reserve, prepare, start, execute
     E-->>V: Step output, status, logs, artifacts
@@ -100,7 +120,7 @@ sequenceDiagram
     R-->>W: Update workflow and job state
 ```
 
-The important ordering is:
+This flow describes the native lane. Its important ordering is:
 
 1. GitHub creates the job and decides which labels and runner scope match.
 2. A Velnor slot learns of work through an authenticated broker session. REST
@@ -119,48 +139,80 @@ The important ordering is:
    payload locally, sends it to GitHub, records remote acknowledgement, then
    cleans local in-flight state.
 
+## Scale Set job flow
+
+The optional Scale Set lane uses GitHub's Scale Set session and the official
+Actions runner protocol. Velnor persists offered demand before acknowledging
+the Scale Set message. It grants fresh eligible demand through the shared
+permit ledger, then provisions one official runner container with a private
+DinD daemon for the acquired job. If the ledger has no free permit, the offer
+stays durably queued and a later message or idle poll can retry it; this is not
+the native broker-redelivery path. The permit remains held through terminal
+work and owned cleanup.
+
+Velnor orders permit admission by the oldest fresh eligible demand it has
+observed across both local lanes and scopes. GitHub still controls when offers
+arrive, which eligible runner receives a job, and actual job start/completion
+order. The shared local order is not GitHub submission-order FIFO.
+
 ## Initiators and transport types
 
 | Interaction | Initiator | Transport and behavior |
 | --- | --- | --- |
 | Workflow/job creation | GitHub | Internal GitHub scheduling. Velnor does not initiate it. |
-| Runner registration | Velnor | Authenticated HTTPS request for a JIT runner configuration; successful registration is an explicit response. |
-| Work delivery | Velnor | Authenticated long-poll to the broker. Empty responses mean idle; authentication and other non-success responses are failures. |
-| Busy acknowledgement | Velnor | Optional authenticated HTTPS request to the broker after receiving a job reference. |
-| Job acquisition | Velnor | Authenticated request/response to the Run Service. Transient failures retry; permanent failures end the session or job attempt. |
-| Lease renewal | Velnor | Repeated authenticated request/response while a job is active. |
-| Cancellation delivery | Velnor | Active-session broker polling. The runner matches the cancellation to its job. |
-| Step status and logs | Velnor | Authenticated uploads to Results Service and timeline/feed services; progress publishing is best effort and bounded. |
-| Completion | Velnor | Authenticated Run Service request/response carrying terminal result, outputs, and metadata. |
-| Workflow generation | `velnor-workflow` | Static repository scan, owned workflow/config rendering, affected-unit planning, policy, and release checks. It does not schedule GitHub work. |
+| Native runner registration | Native Velnor runner | Authenticated HTTPS request for a JIT runner configuration; successful registration is an explicit response. |
+| Scale Set registration | Scale Set adapter | Reconciles the configured runner group and Scale Set, then opens and maintains a Scale Set session. |
+| Native work delivery | Native Velnor runner | Authenticated long-poll to the broker. Empty responses mean idle; authentication and other non-success responses are failures. |
+| Scale Set messages | Scale Set adapter | Authenticated long-poll to the Scale Set session; offers and deferred demand are persisted before successful acknowledgement. |
+| Busy acknowledgement | Native Velnor runner | Optional authenticated HTTPS request to the broker after receiving a job reference. |
+| Native job acquisition | Native Velnor runner | Authenticated request/response to the Run Service. Transient failures retry; permanent failures end the session or job attempt. |
+| Scale Set job acquisition | Scale Set adapter | Acquires eligible offered requests through the Scale Set protocol after shared-ledger permits are committed. |
+| Native lease renewal | Native Velnor runner | Repeated authenticated request/response while a job is active. |
+| Native cancellation delivery | Native Velnor runner | Active-session broker polling. The runner matches the cancellation to its job. |
+| Native step status and logs | Native Velnor runner | Authenticated uploads to Results Service and timeline/feed services; progress publishing is best effort and bounded. |
+| Native completion | Native Velnor runner | Authenticated Run Service request/response carrying terminal result, outputs, and metadata. |
+| Scale Set job protocol | Official runner container | The unmodified official runner handles its job session, lease renewal, cancellation, status/log publishing, and completion with GitHub. |
+| Workflow generation | `velnor-workflow` | Static repository scan, owned workflow/config rendering, affected-unit planning ([change-aware planning](/concepts/change-aware-planning)), policy, and release checks. It does not schedule GitHub work. |
 | Workflow monitoring | `velnor-tools` | Read-only correlation of GitHub run state with Velnor control-plane evidence. GitHub owns the terminal result. |
 | Operator inspection | Operator | Local Unix-socket control API, local health files, metrics files, and bounded local logs, normally through `velnorctl`. |
 
-GitHub initiates scheduling and sends work requests. Velnor initiates every
-runner-side network operation after registration: it polls, acquires, renews,
-uploads, and completes. There is no inbound GitHub callback into the Velnor
-daemon in the normal runner flow.
+GitHub initiates scheduling and sends work requests. Velnor initiates its
+control-plane operations: native broker polling, Scale Set registration and
+polling, and Scale Set acquisition. After a Scale Set worker starts, the
+official runner initiates its own job-protocol requests to GitHub. There is no
+inbound GitHub callback into the Velnor daemon in the normal runner flow.
 
 ## Admission, execution, and isolation
 
-Admission resolves local, remote, and composite action requirements before
-side effects against a closed allowlist of action identities. An action that is
-not on the allowlist, an unpinned or invalid reference, an input outside an
-action's declared rules, a capability mismatch, a trust-policy violation, or a
-resource-bound failure is rejected closed. See
+Native admission resolves local, remote, and composite action requirements
+before side effects against a closed allowlist of action identities. An action
+that is not on the allowlist, an unpinned or invalid reference, an input outside
+an action's declared rules, a capability mismatch, a trust-policy violation,
+or a resource-bound failure is rejected closed. See
 [what Velnor does not support](/guides/execution#what-velnor-does-not-support).
 
-Docker uses the host Docker socket within the configured host and cgroup
-boundary. Firecracker uses KVM, verified artifacts, a jailer, isolated
-namespaces and networking, and a guest agent. Firecracker rejects host Docker
-socket access. The two paths are not interchangeable and there is no automatic
-fallback between them.
+Scale Set offer classification is separate. It uses the event name and
+owner/repository fields from the offer: unparseable events or missing
+owner/repository values, plus `pull_request` and `workflow_run` events, remain
+`unknown`; other parseable events with both nonempty owner and repository
+fields are `trusted`. Offers do not include the head-repository data needed to
+classify those fork-sensitive events.
 
-The job plan carries workspace, environment, services, outputs, masks, cache
-and artifact operations, and step execution data. Job credentials come from
-the acquired GitHub job payload; the operator registration credential is not
-substituted for job credentials. Credentials are excluded from reusable
-microVM snapshots and sanitized from operational evidence.
+In the native lane, Docker uses the host Docker socket within the configured
+host and cgroup boundary. Firecracker uses KVM, verified artifacts, a jailer,
+isolated namespaces and networking, and a guest agent. Firecracker rejects
+host Docker socket access. These native backends are not interchangeable and
+there is no automatic fallback between them. In the Scale Set lane, the
+official runner reaches only its paired private DinD daemon; it does not use
+the host Docker socket.
+
+For native jobs, the plan carries workspace, environment, services, outputs,
+masks, cache and artifact operations, and step execution data. Native job
+credentials come from the acquired GitHub payload; the operator registration
+credential is not substituted for them. For Scale Set jobs, Velnor supplies
+the JIT runner configuration and the official runner receives job credentials
+through its GitHub session. Credentials are excluded from reusable microVM
+snapshots and sanitized from operational evidence.
 
 ## Interruptions and recovery
 
@@ -169,23 +221,28 @@ or backoff according to operation. Authentication failures require credential
 recovery; missing runner registration requires session recreation. A node that
 cannot prove GitHub connectivity or routing readiness must not claim new work.
 
-During drain, idle slots deregister and stop at a poll boundary. Active jobs
-continue long enough to finish and report when possible. Stop escalation is
-bounded by service policy; active work is eventually terminated if the drain
-deadline expires.
+During native-lane drain, idle slots deregister and stop at a poll boundary.
+Native active jobs may be terminated if bounded service-stop escalation
+reaches its deadline. The Scale Set adapter stops polling. Healthy runner and
+DinD containers, durable demand, and held permits remain available for
+adoption after the daemon restarts; the native service drain deadline does not
+terminate healthy Scale Set work.
 
-Cancellation is checked separately for active jobs. One cancellation token per
-job carries two levels, `Requested` and `Forced`; each thing that can be
-terminated registers the level at which it may die, and is walked down a
+Native cancellation is checked separately for active jobs. One cancellation
+token per job carries two levels, `Requested` and `Forced`; each thing that can
+be terminated registers the level at which it may die, and is walked down a
 `SIGINT → SIGTERM → SIGKILL` ladder. Cancellation signals; removal is
 teardown's job. Malformed cancellation input is treated conservatively as
-cancellation. See [Cancellation](/guides/execution#cancellation).
+cancellation. The Scale Set lane delegates job cancellation to the official
+runner. See [Cancellation](/guides/execution#cancellation).
 
-Completion has a stronger durability contract than ordinary progress. Velnor
-records the terminal conclusion, writes the exact job/generation payload to a
-local outbox file, journals the intent and its digest, takes one durable send
-claim, and only then transports it. After a crash, recovery replays the same
-payload under the same claim rather than inventing a second completion.
+Native completion has a stronger durability contract than ordinary progress.
+Velnor records the terminal conclusion, writes the exact job/generation
+payload to a local outbox file, journals the intent and its digest, takes one
+durable send claim, and only then transports it. After a crash, recovery
+replays the same payload under the same claim rather than inventing a second
+completion. The Scale Set official runner reports its own job completion to
+GitHub; Velnor tracks the worker lifecycle and cleanup.
 
 The outbox is bounded rather than infinite. An entry ends in one of three ways:
 GitHub acknowledges it; the run service reports the job already terminal; or
@@ -198,28 +255,31 @@ Progress logs and telemetry are bounded operational evidence, not an archival
 record. Local projections may be incomplete after service recreation; durable
 events and completion intent are the stronger recovery evidence.
 
-## Cancellation difference from the upstream runner
+## Native cancellation
 
-Velnor follows the upstream GitHub Runner V2 shapes for broker sessions, job
-acquisition, lease renewal, and completion. Cancellation is modelled on
-upstream's split — the current step's own work dies on the cancel token, while
-the job and service containers are stopped later so `always()` and
-`cancelled()` post steps still have a container to run in.
+The Velnor-native runner follows the upstream GitHub Runner V2 shapes for
+broker sessions, job acquisition, lease renewal, and completion. Cancellation
+is modelled on upstream's split — the current step's host process group and
+Docker-action sidecars die on the cancel token, while the job and service
+containers are stopped later so `always()` and `cancelled()` post steps still
+have a container to run in.
 
-It is not yet fully equivalent. Only host process groups register as
-termination targets on the live path, so containers are terminated by name
-rather than through the ladder's escalation levels, and Firecracker
-cancellation is not wired end to end. Treat a cancellation as a Velnor
-termination and recovery event rather than assuming identical step-level
-cancellation semantics.
+The live native path registers host process groups, job and service
+containers, and Docker-action sidecars with the cancellation token. For
+Firecracker, the active job token registers the jailer process group as the
+termination fallback. A guest `Cancel` hook is also registered when a vsock
+cancel handle is available; without that handle, cancellation falls back to
+the jailer process group. Container and process-group targets use the signal
+ladder; the guest hook attempts graceful cancellation. Teardown owns resource
+removal.
 
 ## Operator mental model
 
 Use GitHub to answer: was the job created, what runner labels and scope does it
-require, and what state did GitHub accept? Use Velnor to answer: is a slot
-registered and ready, was the job admitted, which backend ran it, what local
-failure or capacity decision occurred, and whether completion is staged or
-acknowledged.
+require, and what state did GitHub accept? Use Velnor to answer: which lane is
+configured, is its runner or worker ready, was the job admitted, which native
+backend or official worker handled it, what capacity decision occurred, and
+whether completion is staged or acknowledged.
 
 For commands and current visibility limits, see the [interface reference](/reference/interface).
 For installation and service lifecycle, see the [operator guide](/guides/operator).

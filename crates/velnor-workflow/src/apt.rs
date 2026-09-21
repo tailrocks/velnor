@@ -20,11 +20,23 @@
 //! branches on a name.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Write as _};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+use std::os::fd::AsFd as _;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 
 use sha2::{Digest as _, Sha256};
 
@@ -739,13 +751,13 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// The hex SHA-256 of a file.
 pub(crate) fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
-    let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
+    let bytes = read_regular_file(path)?;
     Ok(sha256_hex(&bytes))
 }
 
 /// Read a JSON document, failing closed on IO or syntax errors.
 fn read_json(path: &Path) -> Result<serde_json::Value, GeneratorError> {
-    let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
+    let bytes = read_regular_file(path)?;
     serde_json::from_slice(&bytes).map_err(|error| {
         GeneratorError::usage(format!("{} is not valid JSON: {error}", path.display()))
     })
@@ -776,8 +788,12 @@ fn positive_field(document: &serde_json::Value, name: &str) -> Result<u64, Gener
 /// The bare digest a detached sidecar carries: the first whitespace-separated
 /// field, which must be 64 lowercase hex.
 fn sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
-    let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
-    let text = String::from_utf8(bytes)
+    let bytes = read_regular_file(path)?;
+    sidecar_digest_bytes(&bytes, path)
+}
+
+fn sidecar_digest_bytes(bytes: &[u8], path: &Path) -> Result<String, GeneratorError> {
+    let text = String::from_utf8(bytes.to_owned())
         .map_err(|_| GeneratorError::usage(format!("{} is not UTF-8", path.display())))?;
     let digest = text
         .split_whitespace()
@@ -794,14 +810,356 @@ fn sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
 
 /// Require a coherence input to exist.
 fn require_file(path: &Path) -> Result<(), GeneratorError> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(GeneratorError::usage(format!(
-            "required file missing: {}",
-            path.display()
-        )))
+    let _ = open_regular_file(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_path_nofollow(path: &Path, final_flags: rustix::fs::OFlags) -> std::io::Result<File> {
+    // macOS exposes temporary directories through the stable system aliases
+    // `/var` and `/tmp` (both may resolve to `/private/...`). Normalize only
+    // those fixed aliases; all caller-owned components still traverse with
+    // `O_NOFOLLOW` below and therefore cannot hide a parent symlink.
+    let mut normalized = path.to_owned();
+    for prefix in ["/var", "/tmp"] {
+        let prefix_path = Path::new(prefix);
+        if path.starts_with(prefix_path) {
+            let Some(rest) = path.strip_prefix(prefix_path).ok() else {
+                continue;
+            };
+            normalized = prefix_path.canonicalize()?.join(rest);
+            break;
+        }
     }
+    let path = normalized.as_path();
+    let directory_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW;
+    let base = if path.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut parent = File::from(
+        rustix::fs::openat(
+            rustix::fs::CWD,
+            base,
+            directory_flags,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => names.push(name),
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path traversal is not permitted",
+                ));
+            }
+        }
+    }
+    for (index, name) in names.iter().enumerate() {
+        let flags = if index + 1 == names.len() {
+            final_flags | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW
+        } else {
+            directory_flags
+        };
+        parent = File::from(
+            rustix::fs::openat(&parent, *name, flags, rustix::fs::Mode::empty())
+                .map_err(std::io::Error::from)?,
+        );
+    }
+    Ok(parent)
+}
+
+#[cfg(unix)]
+fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
+    open_path_nofollow(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+    )
+}
+
+#[cfg_attr(unix, allow(dead_code))]
+fn require_directory(path: &Path) -> Result<(), GeneratorError> {
+    #[cfg(unix)]
+    let file = open_directory_nofollow(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required directory missing: {}", path.display()))
+        } else if std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            GeneratorError::usage(format!(
+                "required directory is a symlink: {}",
+                path.display()
+            ))
+        } else {
+            GeneratorError::io("open required directory", path, &error)
+        }
+    })?;
+    #[cfg(not(unix))]
+    let file = OpenOptions::new().read(true).open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required directory missing: {}", path.display()))
+        } else {
+            GeneratorError::io("open required directory", path, &error)
+        }
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("stat required directory", path, &error))?;
+    if !metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "required path is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Open one input once, without following the final path component. The
+/// verifier consumes the returned descriptor, not a later path reopen. A
+/// selected artifact must be owned by this handoff directory (`nlink == 1`);
+/// accepting a hard link would let an outside writer mutate bytes after the
+/// path check and before verification.
+fn open_regular_file(path: &Path) -> Result<File, GeneratorError> {
+    #[cfg(unix)]
+    let file = open_path_nofollow(path, rustix::fs::OFlags::RDONLY).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required file missing: {}", path.display()))
+        } else if std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            GeneratorError::usage(format!("required file is a symlink: {}", path.display()))
+        } else {
+            GeneratorError::io("open required file", path, &error)
+        }
+    })?;
+    #[cfg(not(unix))]
+    let mut options = OpenOptions::new();
+    #[cfg(not(unix))]
+    options.read(true);
+    #[cfg(not(unix))]
+    let file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required file missing: {}", path.display()))
+        } else if std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            GeneratorError::usage(format!("required file is a symlink: {}", path.display()))
+        } else {
+            GeneratorError::io("open required file", path, &error)
+        }
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("stat required file", path, &error))?;
+    if !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "required path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    if metadata.nlink() != 1 {
+        return Err(GeneratorError::usage(format!(
+            "required file has multiple links: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Read one regular input through the descriptor that was validated for it.
+fn read_regular_file(path: &Path) -> Result<Vec<u8>, GeneratorError> {
+    let mut file = open_regular_file(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| GeneratorError::io("read required file", path, &error))?;
+    Ok(bytes)
+}
+
+/// Read one regular input relative to an already-open directory. The parent
+/// descriptor is the capability boundary: replacing the incoming pathname or
+/// one of its ancestors cannot redirect this open.
+#[cfg(unix)]
+fn read_regular_file_at(
+    directory: &File,
+    name: &str,
+    display: &Path,
+) -> Result<Vec<u8>, GeneratorError> {
+    let file = rustix::fs::openat(
+        directory,
+        name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| {
+        let error = std::io::Error::from(error);
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required file missing: {}", display.display()))
+        } else if error.kind() == std::io::ErrorKind::InvalidInput {
+            GeneratorError::usage(format!("required file is not safe: {}", display.display()))
+        } else {
+            GeneratorError::io("open required file", display, &error)
+        }
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("stat required file", display, &error))?;
+    if !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "required path is not a regular file: {}",
+            display.display()
+        )));
+    }
+    if metadata.nlink() != 1 {
+        return Err(GeneratorError::usage(format!(
+            "required file has multiple links: {}",
+            display.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .read_to_end(&mut bytes)
+        .map_err(|error| GeneratorError::io("read required file", display, &error))?;
+    Ok(bytes)
+}
+
+fn create_new_regular_file(
+    path: &Path,
+    bytes: &[u8],
+    operation: &'static str,
+) -> Result<(), GeneratorError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists
+            || std::fs::symlink_metadata(path).is_ok()
+        {
+            GeneratorError::usage(format!("{operation} destination already exists"))
+        } else {
+            GeneratorError::io(operation, path, &error)
+        }
+    })?;
+    file.write_all(bytes)
+        .map_err(|error| GeneratorError::io(operation, path, &error))?;
+    file.sync_all()
+        .map_err(|error| GeneratorError::io("sync file", path, &error))?;
+    #[cfg(unix)]
+    if file.metadata().map_or(0, |metadata| metadata.nlink()) != 1 {
+        return Err(GeneratorError::usage(format!(
+            "{operation} destination has multiple links"
+        )));
+    }
+    Ok(())
+}
+
+/// Create one regular file relative to a held directory descriptor.
+#[cfg(unix)]
+fn create_new_regular_file_at(
+    directory: &File,
+    name: &str,
+    bytes: &[u8],
+    operation: &'static str,
+    display: &Path,
+) -> Result<(), GeneratorError> {
+    let mut file = File::from(
+        rustix::fs::openat(
+            directory,
+            name,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::from_raw_mode(0o644),
+        )
+        .map_err(|error| {
+            let error = std::io::Error::from(error);
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                GeneratorError::usage(format!("{operation} destination already exists"))
+            } else {
+                GeneratorError::io(operation, display, &error)
+            }
+        })?,
+    );
+    file.write_all(bytes)
+        .map_err(|error| GeneratorError::io(operation, display, &error))?;
+    file.sync_all()
+        .map_err(|error| GeneratorError::io("sync file", display, &error))?;
+    if file.metadata().map_or(0, |metadata| metadata.nlink()) != 1 {
+        return Err(GeneratorError::usage(format!(
+            "{operation} destination has multiple links"
+        )));
+    }
+    Ok(())
+}
+
+/// Install bytes without following a pre-existing destination link. A staged
+/// immutable asset may already be present only when its bytes are identical;
+/// every other existing destination is a collision or an unsafe path.
+fn install_regular_file(
+    path: &Path,
+    bytes: &[u8],
+    operation: &'static str,
+) -> Result<(), GeneratorError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_new_regular_file(path, bytes, operation)
+        }
+        Err(error) => Err(GeneratorError::io("stat destination", path, &error)),
+        Ok(_) => {
+            let existing = read_regular_file(path)?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(GeneratorError::usage(format!(
+                    "{operation} destination differs from immutable input"
+                )))
+            }
+        }
+    }
+}
+
+/// Materialize a descriptor-verified input inside a private scratch directory
+/// before handing it to a pathname-based archive tool. The tool therefore
+/// cannot reopen the caller's mutable incoming path.
+fn materialize_verified_file(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError> {
+    let bytes = read_regular_file(path)?;
+    materialize_verified_bytes(&bytes)
+}
+
+fn materialize_verified_bytes(bytes: &[u8]) -> Result<(PathBuf, PathBuf), GeneratorError> {
+    let scratch = scratch_dir("verified-input")?;
+    let materialized = scratch.join("input");
+    #[cfg(unix)]
+    let result = open_directory_nofollow(&scratch)
+        .map_err(|error| GeneratorError::io("open materialization directory", &scratch, &error))
+        .and_then(|directory| {
+            create_new_regular_file_at(
+                &directory,
+                "input",
+                bytes,
+                "materialize verified input",
+                &materialized,
+            )
+        });
+    #[cfg(not(unix))]
+    let result = create_new_regular_file(&materialized, bytes, "materialize verified input");
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err(error);
+    }
+    Ok((scratch, materialized))
 }
 
 /// Whether a directory entry is a `.deb` file. The match is deliberately
@@ -813,18 +1171,64 @@ fn is_deb_file(name: &str) -> bool {
 }
 
 /// List the entries of a directory by file name.
-fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
+#[cfg(unix)]
+fn directory_entry_name(raw_name: &[u8], dir: &Path) -> Result<String, GeneratorError> {
+    OsString::from_vec(raw_name.to_owned())
+        .into_string()
+        .map_err(|_| {
+            GeneratorError::usage(format!(
+                "directory {} contains a non-UTF-8 entry",
+                dir.display()
+            ))
+        })
+}
+
+#[cfg(unix)]
+fn dir_names_from_file(directory: &File, dir: &Path) -> Result<Vec<String>, GeneratorError> {
     let mut names = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).map_err(|error| GeneratorError::io("list", dir, &error))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| GeneratorError::io("list", dir, &error))?;
-        if let Some(name) = entry.file_name().to_str() {
-            names.push(name.to_owned());
+    let mut entries = rustix::fs::Dir::read_from(directory)
+        .map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
+    while let Some(entry) = entries.read() {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
+        let raw_name = entry.file_name().to_bytes();
+        if raw_name == b"." || raw_name == b".." {
+            continue;
         }
+        let name = directory_entry_name(raw_name, dir)?;
+        names.push(name);
     }
     names.sort();
     Ok(names)
+}
+
+#[allow(clippy::needless_return)]
+fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
+    #[cfg(unix)]
+    {
+        let directory = open_directory_nofollow(dir)
+            .map_err(|error| GeneratorError::io("open directory for listing", dir, &error))?;
+        return dir_names_from_file(&directory, dir);
+    }
+    #[cfg(not(unix))]
+    {
+        let mut names = Vec::new();
+        require_directory(dir)?;
+        let entries =
+            std::fs::read_dir(dir).map_err(|error| GeneratorError::io("list", dir, &error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| GeneratorError::io("list", dir, &error))?;
+            let name = entry.file_name().into_string().map_err(|_| {
+                GeneratorError::usage(format!(
+                    "directory {} contains a non-UTF-8 entry",
+                    dir.display()
+                ))
+            })?;
+            names.push(name);
+        }
+        names.sort();
+        return Ok(names);
+    }
 }
 
 /// Run a fixed tool with fixed arguments: no shell, no config-derived program.
@@ -1063,76 +1467,128 @@ pub(crate) fn deb_control_field(
             "deb control field is not readable: {field_name}"
         )));
     }
-    let Some(deb_name) = deb.to_str() else {
-        return Err(GeneratorError::usage("deb path is not UTF-8"));
-    };
-    if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
-        let stdout = run_fixed(
-            "dpkg-deb",
-            &["-f".to_owned(), deb_name.to_owned(), field_name.to_owned()],
+    let (verified_root, verified_deb) = materialize_verified_file(deb)?;
+    let result = (|| {
+        let Some(deb_name) = verified_deb.to_str() else {
+            return Err(GeneratorError::usage("deb path is not UTF-8"));
+        };
+        if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
+            let stdout = run_fixed(
+                "dpkg-deb",
+                &["-f".to_owned(), deb_name.to_owned(), field_name.to_owned()],
+                None,
+                path_overlay,
+            )?;
+            return Ok(String::from_utf8_lossy(&stdout).trim().to_owned());
+        }
+        let members = run_fixed(
+            "ar",
+            &["t".to_owned(), deb_name.to_owned()],
             None,
             path_overlay,
         )?;
-        return Ok(String::from_utf8_lossy(&stdout).trim().to_owned());
-    }
-    let members = run_fixed(
-        "ar",
-        &["t".to_owned(), deb_name.to_owned()],
-        None,
-        path_overlay,
-    )?;
-    let control = String::from_utf8_lossy(&members)
-        .lines()
-        .find(|line| line.starts_with("control.tar"))
-        .ok_or_else(|| {
-            GeneratorError::usage(format!("deb {} has no control.tar member", deb.display()))
-        })?
-        .to_owned();
-    let payload = run_fixed(
-        "ar",
-        &["p".to_owned(), deb_name.to_owned(), control],
-        None,
-        path_overlay,
-    )?;
-    // Full extraction into a scratch directory, exactly like the oracle:
-    // control members name their file `control` with or without a `./`
-    // prefix depending on the producer, and name matching would guess.
-    let scratch = scratch_dir("deb-control")?;
-    let result = run_tar_stdin(
-        &["-x", "-C", scratch.to_str().unwrap_or("."), "-f", "-"],
-        &payload,
-        path_overlay,
-    )
-    .and_then(|()| {
-        let prefix = format!("{field_name}:");
-        std::fs::read_to_string(scratch.join("control"))
-            .map_err(|error| GeneratorError::io("read", &scratch.join("control"), &error))
-            .and_then(|text| {
-                text.lines()
-                    .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::trim))
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        GeneratorError::usage(format!(
-                            "deb {} has no {field_name} control field",
-                            deb.display()
-                        ))
-                    })
-            })
-    });
-    let _ = std::fs::remove_dir_all(&scratch);
+        let control = String::from_utf8_lossy(&members)
+            .lines()
+            .find(|line| line.starts_with("control.tar"))
+            .ok_or_else(|| {
+                GeneratorError::usage(format!("deb {} has no control.tar member", deb.display()))
+            })?
+            .to_owned();
+        let payload = run_fixed(
+            "ar",
+            &["p".to_owned(), deb_name.to_owned(), control],
+            None,
+            path_overlay,
+        )?;
+        // Full extraction into a scratch directory, exactly like the oracle:
+        // control members name their file `control` with or without a `./`
+        // prefix depending on the producer, and name matching would guess.
+        let scratch = scratch_dir("deb-control")?;
+        #[cfg(unix)]
+        let scratch_directory = open_directory_nofollow(&scratch).map_err(|error| {
+            GeneratorError::io("open control extraction directory", &scratch, &error)
+        })?;
+        validate_tar_payload(&payload, path_overlay)?;
+        #[cfg(unix)]
+        let result =
+            extract_tar_payload_in_directory(&payload, &scratch_directory, path_overlay, &scratch)
+                .and_then(|()| {
+                    let control_path = scratch.join("control");
+                    let text = String::from_utf8(read_regular_file_at(
+                        &scratch_directory,
+                        "control",
+                        &control_path,
+                    )?)
+                    .map_err(|_| {
+                        GeneratorError::usage(format!("{} is not UTF-8", control_path.display()))
+                    })?;
+                    let prefix = format!("{field_name}:");
+                    text.lines()
+                        .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+                        .map(|value| value.trim().to_owned())
+                        .ok_or_else(|| {
+                            GeneratorError::usage(format!(
+                                "deb {} has no {field_name} control field",
+                                deb.display()
+                            ))
+                        })
+                });
+        #[cfg(not(unix))]
+        let result = run_tar_stdin(
+            &["-x", "-C", scratch.to_str().unwrap_or("."), "-f", "-"],
+            &payload,
+            path_overlay,
+        )
+        .and_then(|()| {
+            let control_path = scratch.join("control");
+            let text = String::from_utf8(read_regular_file(&control_path)?).map_err(|_| {
+                GeneratorError::usage(format!("{} is not UTF-8", control_path.display()))
+            })?;
+            let prefix = format!("{field_name}:");
+            text.lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::trim))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "deb {} has no {field_name} control field",
+                        deb.display()
+                    ))
+                })
+        });
+        let _ = std::fs::remove_dir_all(&scratch);
+        result
+    })();
+    let _ = std::fs::remove_dir_all(&verified_root);
     result
 }
 
 /// A unique scratch directory under the system temp dir.
 fn scratch_dir(kind: &str) -> Result<PathBuf, GeneratorError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "apt-feed-{kind}-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).map_err(|error| GeneratorError::io("create", &dir, &error))?;
+    let dir = std::env::temp_dir().join(format!("apt-feed-{kind}-{}", uuid::Uuid::new_v4()));
+    #[cfg(unix)]
+    {
+        let parent = dir
+            .parent()
+            .ok_or_else(|| GeneratorError::usage("scratch directory has no parent"))?;
+        let parent_file = open_directory_nofollow(parent)
+            .map_err(|error| GeneratorError::io("open scratch parent", parent, &error))?;
+        rustix::fs::mkdirat(
+            &parent_file,
+            dir.file_name()
+                .ok_or_else(|| GeneratorError::usage("scratch directory has no name"))?,
+            rustix::fs::Mode::from_raw_mode(0o700),
+        )
+        .map_err(|error| {
+            GeneratorError::io(
+                "create scratch directory",
+                &dir,
+                &std::io::Error::from(error),
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(&dir)
+        .map_err(|error| GeneratorError::io("create scratch directory", &dir, &error))?;
     Ok(dir)
 }
 
@@ -1157,12 +1613,211 @@ fn tar_decompress_flag(payload: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Decode a package archive stream before the descriptor-bound Rust extractor
+/// consumes it. Compression tools only transform bytes; they never receive a
+/// destination path or permission to create files.
+fn tar_uncompressed_payload(
+    payload: &[u8],
+    path_overlay: Option<&Path>,
+) -> Result<Vec<u8>, GeneratorError> {
+    let Some(flag) = tar_decompress_flag(payload) else {
+        return Ok(payload.to_owned());
+    };
+    let (program, args): (&str, &[&str]) = match flag {
+        "-z" => ("gzip", &["-d", "-c"]),
+        "-j" => ("bzip2", &["-d", "-c"]),
+        "-J" => ("xz", &["-d", "-c"]),
+        "--zstd" => ("zstd", &["-d", "-c"]),
+        _ => return Err(GeneratorError::usage("unsupported archive compression")),
+    };
+    run_fixed(
+        program,
+        &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+        Some(payload),
+        path_overlay,
+    )
+}
+
+#[cfg(unix)]
+fn open_archive_child_directory(
+    parent: &File,
+    name: &str,
+    display: &Path,
+) -> Result<File, GeneratorError> {
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW;
+    match rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty()) {
+        Ok(file) => Ok(File::from(file)),
+        Err(error) => {
+            let error = std::io::Error::from(error);
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(GeneratorError::io(
+                    "open archive directory",
+                    display,
+                    &error,
+                ));
+            }
+            rustix::fs::mkdirat(parent, name, rustix::fs::Mode::from_raw_mode(0o755)).map_err(
+                |error| {
+                    GeneratorError::io(
+                        "create archive directory",
+                        display,
+                        &std::io::Error::from(error),
+                    )
+                },
+            )?;
+            File::from(
+                rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty()).map_err(
+                    |error| {
+                        GeneratorError::io(
+                            "open archive directory",
+                            display,
+                            &std::io::Error::from(error),
+                        )
+                    },
+                )?,
+            )
+            .metadata()
+            .map_err(|error| GeneratorError::io("stat archive directory", display, &error))
+            .and_then(|metadata| {
+                if metadata.is_dir() {
+                    Ok(())
+                } else {
+                    Err(GeneratorError::usage(format!(
+                        "archive parent is not a directory: {}",
+                        display.display()
+                    )))
+                }
+            })
+            .and_then(|()| {
+                // The parent descriptor is the stable capability; reopen via
+                // it, never through the mutable destination pathname.
+                rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty())
+                    .map(File::from)
+                    .map_err(|error| {
+                        GeneratorError::io(
+                            "reopen archive directory",
+                            display,
+                            &std::io::Error::from(error),
+                        )
+                    })
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+fn archive_parent_directory(
+    destination: &File,
+    components: &[&str],
+    display: &Path,
+) -> Result<File, GeneratorError> {
+    let mut parent = File::from(rustix::io::dup(destination.as_fd()).map_err(|error| {
+        GeneratorError::io(
+            "duplicate archive destination",
+            display,
+            &std::io::Error::from(error),
+        )
+    })?);
+    for component in components {
+        parent = open_archive_child_directory(&parent, component, display)?;
+    }
+    Ok(parent)
+}
+
+#[cfg(unix)]
+fn archive_path_components<'a>(
+    path: &'a Path,
+    display: &Path,
+) -> Result<Vec<&'a str>, GeneratorError> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("archive member path is not UTF-8"))?;
+    let dot_root = text == "./";
+    let text = text
+        .strip_prefix("./")
+        .unwrap_or(text)
+        .trim_end_matches('/');
+    if dot_root || text == "." {
+        return Ok(Vec::new());
+    }
+    if text.is_empty() || text.starts_with('/') {
+        return Err(GeneratorError::usage(format!(
+            "archive member path is not confined: {text}"
+        )));
+    }
+    let components = text
+        .split('/')
+        .filter(|component| *component != ".")
+        .collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| component.is_empty() || *component == "..")
+    {
+        return Err(GeneratorError::usage(format!(
+            "archive member path is not confined: {text} ({})",
+            display.display()
+        )));
+    }
+    Ok(components)
+}
+
+/// Extract a validated tar stream relative to a held directory descriptor.
+/// No archive member is ever handed to a pathname-based unpacker.
+#[cfg(unix)]
+fn extract_tar_payload_in_directory(
+    payload: &[u8],
+    destination: &File,
+    path_overlay: Option<&Path>,
+    display: &Path,
+) -> Result<(), GeneratorError> {
+    let payload = tar_uncompressed_payload(payload, path_overlay)?;
+    let mut archive = tar::Archive::new(std::io::Cursor::new(payload));
+    let entries = archive.entries().map_err(|error| {
+        GeneratorError::usage(format!("could not read archive entries: {error}"))
+    })?;
+    for entry in entries {
+        let mut entry = entry.map_err(|error| {
+            GeneratorError::usage(format!("could not read archive entry: {error}"))
+        })?;
+        let path = entry
+            .path()
+            .map_err(|error| {
+                GeneratorError::usage(format!("could not read archive path: {error}"))
+            })?
+            .into_owned();
+        let components = archive_path_components(&path, display)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            let _ = archive_parent_directory(destination, &components, display)?;
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(GeneratorError::usage(
+                "archive member type is not a regular file or directory",
+            ));
+        }
+        let (name, parents) = components
+            .split_last()
+            .ok_or_else(|| GeneratorError::usage("archive member has no name"))?;
+        let parent = archive_parent_directory(destination, parents, display)?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(|error| {
+            GeneratorError::usage(format!("could not read archive member: {error}"))
+        })?;
+        create_new_regular_file_at(&parent, name, &bytes, "extract archive member", display)?;
+    }
+    Ok(())
+}
+
 /// Run `tar` with fixed arguments and a piped archive payload.
-fn run_tar_stdin(
+fn run_tar_stdin_output(
     args: &[&str],
     payload: &[u8],
     path_overlay: Option<&Path>,
-) -> Result<(), GeneratorError> {
+) -> Result<Vec<u8>, GeneratorError> {
     let mut extract = Command::new("tar");
     let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 1);
     if let Some((first, rest)) = args.split_first() {
@@ -1207,7 +1862,111 @@ fn run_tar_stdin(
             output.status
         )));
     }
+    Ok(output.stdout)
+}
+
+#[cfg(not(unix))]
+fn run_tar_stdin(
+    args: &[&str],
+    payload: &[u8],
+    path_overlay: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    run_tar_stdin_output(args, payload, path_overlay).map(|_| ())
+}
+
+/// Reject archive names and member types before any pathname-based extraction.
+/// Only relative regular files and directories are accepted; symlinks,
+/// hardlinks, device nodes, FIFOs, and traversal names are never needed by a
+/// package identity tree and would make tar's destination semantics unsafe.
+fn validate_tar_payload(payload: &[u8], path_overlay: Option<&Path>) -> Result<(), GeneratorError> {
+    let names = run_tar_stdin_output(&["-t", "-f", "-"], payload, path_overlay)?;
+    let names = String::from_utf8(names)
+        .map_err(|_| GeneratorError::usage("archive member listing is not UTF-8"))?;
+    for raw_name in names.lines() {
+        let name = raw_name.strip_suffix('/').unwrap_or(raw_name);
+        let name = name.strip_prefix("./").unwrap_or(name);
+        if name.is_empty()
+            || name.starts_with('/')
+            || name
+                .split('/')
+                .any(|component| component.is_empty() || component == "..")
+        {
+            return Err(GeneratorError::usage(
+                "archive member path is not confined to the extraction directory",
+            ));
+        }
+    }
+    let details = run_tar_stdin_output(&["-t", "-v", "-f", "-"], payload, path_overlay)?;
+    let details = String::from_utf8(details)
+        .map_err(|_| GeneratorError::usage("archive member metadata is not UTF-8"))?;
+    for line in details.lines() {
+        let kind = line.as_bytes().first().copied();
+        if !matches!(kind, Some(b'd' | b'-')) {
+            return Err(GeneratorError::usage(
+                "archive member type is not a regular file or directory",
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Create a fresh extraction destination while rejecting a symlink or hard
+/// link at every parent boundary. Unix creation is relative to an opened
+/// parent descriptor, so a concurrent replacement cannot redirect mkdir.
+#[allow(clippy::needless_return)]
+fn prepare_extraction_destination(dest: &Path) -> Result<File, GeneratorError> {
+    if std::fs::symlink_metadata(dest).is_ok() {
+        return Err(GeneratorError::usage(
+            "archive extraction destination already exists",
+        ));
+    }
+    let parent = dest
+        .parent()
+        .ok_or_else(|| GeneratorError::usage("archive extraction destination has no parent"))?;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| GeneratorError::usage("archive extraction destination has no name"))?;
+    #[cfg(unix)]
+    {
+        let parent_file = open_directory_nofollow(parent)
+            .map_err(|error| GeneratorError::io("open extraction parent", parent, &error))?;
+        rustix::fs::mkdirat(&parent_file, name, rustix::fs::Mode::from_raw_mode(0o700)).map_err(
+            |error| {
+                let error = std::io::Error::from(error);
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    GeneratorError::usage("archive extraction destination already exists")
+                } else {
+                    GeneratorError::io("create extraction destination", dest, &error)
+                }
+            },
+        )?;
+        let directory = File::from(
+            rustix::fs::openat(
+                &parent_file,
+                name,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::CLOEXEC
+                    | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|error| {
+                GeneratorError::io(
+                    "open extraction destination",
+                    dest,
+                    &std::io::Error::from(error),
+                )
+            })?,
+        );
+        return Ok(directory);
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(dest)
+            .map_err(|error| GeneratorError::io("create extraction destination", dest, &error))?;
+        return File::open(dest)
+            .map_err(|error| GeneratorError::io("open extraction destination", dest, &error));
+    }
 }
 
 /// Extract a `.deb` data tree into `dest`.
@@ -1217,39 +1976,52 @@ pub(crate) fn deb_extract_data(
     backend: DebBackend,
     path_overlay: Option<&Path>,
 ) -> Result<(), GeneratorError> {
-    let (Some(deb_name), Some(dest_name)) = (deb.to_str(), dest.to_str()) else {
-        return Err(GeneratorError::usage("deb path is not UTF-8"));
-    };
-    std::fs::create_dir_all(dest).map_err(|error| GeneratorError::io("create", dest, &error))?;
-    if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
-        run_fixed(
-            "dpkg-deb",
-            &["-x".to_owned(), deb_name.to_owned(), dest_name.to_owned()],
-            None,
-            path_overlay,
-        )?;
-        return Ok(());
-    }
-    let members = run_fixed(
-        "ar",
-        &["t".to_owned(), deb_name.to_owned()],
-        None,
-        path_overlay,
-    )?;
-    let data = String::from_utf8_lossy(&members)
-        .lines()
-        .find(|line| line.starts_with("data.tar"))
-        .ok_or_else(|| {
-            GeneratorError::usage(format!("deb {} has no data.tar member", deb.display()))
-        })?
-        .to_owned();
-    let payload = run_fixed(
-        "ar",
-        &["p".to_owned(), deb_name.to_owned(), data],
-        None,
-        path_overlay,
-    )?;
-    run_tar_stdin(&["-x", "-C", dest_name, "-f", "-"], &payload, path_overlay)
+    let (verified_root, verified_deb) = materialize_verified_file(deb)?;
+    let result = (|| {
+        let (Some(deb_name), Some(dest_name)) = (verified_deb.to_str(), dest.to_str()) else {
+            return Err(GeneratorError::usage("deb path is not UTF-8"));
+        };
+        let payload = if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
+            run_fixed(
+                "dpkg-deb",
+                &["--fsys-tarfile".to_owned(), deb_name.to_owned()],
+                None,
+                path_overlay,
+            )?
+        } else {
+            let members = run_fixed(
+                "ar",
+                &["t".to_owned(), deb_name.to_owned()],
+                None,
+                path_overlay,
+            )?;
+            let data = String::from_utf8(members)
+                .map_err(|_| GeneratorError::usage("deb member listing is not UTF-8"))?
+                .lines()
+                .find(|line| line.starts_with("data.tar"))
+                .ok_or_else(|| {
+                    GeneratorError::usage(format!("deb {} has no data.tar member", deb.display()))
+                })?
+                .to_owned();
+            run_fixed(
+                "ar",
+                &["p".to_owned(), deb_name.to_owned(), data],
+                None,
+                path_overlay,
+            )?
+        };
+        validate_tar_payload(&payload, path_overlay)?;
+        let destination = prepare_extraction_destination(dest)?;
+        #[cfg(unix)]
+        {
+            let _ = dest_name;
+            extract_tar_payload_in_directory(&payload, &destination, path_overlay, dest)
+        }
+        #[cfg(not(unix))]
+        run_tar_stdin(&["-x", "-C", dest_name, "-f", "-"], &payload, path_overlay)
+    })();
+    let _ = std::fs::remove_dir_all(&verified_root);
+    result
 }
 
 /// Inputs to suite verification. `commit` is `None` for a stable run that
@@ -2256,8 +3028,9 @@ fn stage_package(
         .parent()
         .unwrap_or(destination)
         .join(canonical_pool_name(&contract.package, &version, &arch));
-    if expected.is_file() {
-        if sha256_file(&expected)? != sha256_file(deb)? {
+    let deb_bytes = read_regular_file(deb)?;
+    if std::fs::symlink_metadata(&expected).is_ok() {
+        if sha256_hex(&deb_bytes) != sha256_file(&expected)? {
             return Err(GeneratorError::usage(
                 "publish: canonical package identity collides with different bytes",
             ));
@@ -2267,8 +3040,7 @@ fn stage_package(
             std::fs::create_dir_all(parent)
                 .map_err(|error| GeneratorError::io("create", parent, &error))?;
         }
-        std::fs::copy(deb, &expected)
-            .map_err(|error| GeneratorError::io("stage", &expected, &error))?;
+        install_regular_file(&expected, &deb_bytes, "stage")?;
     }
     Ok((version, arch))
 }
@@ -3751,6 +4523,19 @@ mod tests {
         write_bytes(path, format!("{digest}  {}\n", path.display()).as_bytes());
     }
 
+    #[cfg(unix)]
+    fn make_symlink(target: &Path, link: &Path) {
+        must(
+            std::os::unix::fs::symlink(target, link),
+            "create fixture symlink",
+        );
+    }
+
+    #[cfg(unix)]
+    fn make_hard_link(target: &Path, link: &Path) {
+        must(std::fs::hard_link(target, link), "create fixture hard link");
+    }
+
     fn apt_spec() -> ReleaseSpec {
         ReleaseSpec {
             kind: "apt".to_owned(),
@@ -3817,6 +4602,40 @@ mod tests {
         assert_eq!(tar_decompress_flag(b"ustar payload"), None);
         assert_eq!(tar_decompress_flag(&[]), None);
         assert_eq!(tar_decompress_flag(&[0x1f]), None);
+    }
+
+    #[cfg(unix)]
+    fn tar_payload_with_member(name: &str) -> Vec<u8> {
+        let mut header = [0_u8; 512];
+        assert!(name.len() < 100);
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        header[124..136].copy_from_slice(b"00000000001\0");
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        let checksum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+        let checksum = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(checksum.as_bytes());
+        let mut payload = header.to_vec();
+        payload.push(b'x');
+        payload.extend(std::iter::repeat_n(0, 511));
+        payload.extend(std::iter::repeat_n(0, 1024));
+        payload
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_member_parent_traversal_is_rejected_before_extraction() {
+        let payload = tar_payload_with_member("../escaped");
+        let error = must_fail(
+            validate_tar_payload(&payload, None),
+            "reject traversal archive member",
+        );
+        assert!(error.contains("not confined"), "{error}");
     }
 
     #[test]
@@ -4526,6 +5345,74 @@ mod tests {
         deb
     }
 
+    #[cfg(unix)]
+    fn make_deb_with_parent_entry(dir: &Path, name: &str, symlink_parent: bool) -> PathBuf {
+        let work = dir.join(format!(".debwork-{name}"));
+        let control_dir = work.join("control");
+        let data_dir = work.join("data");
+        must(
+            std::fs::create_dir_all(&control_dir),
+            "malicious control dir",
+        );
+        must(
+            std::fs::create_dir_all(data_dir.join("usr/share")),
+            "malicious share dir",
+        );
+        write_bytes(
+            &control_dir.join("control"),
+            b"Package: example\nVersion: 1.2.3\nArchitecture: amd64\nMaintainer: Fixture <fixture@example.test>\nDescription: fixture\n",
+        );
+        if symlink_parent {
+            write_bytes(
+                &data_dir.join("outside/build-identity.json"),
+                b"outside identity\n",
+            );
+            must(
+                std::os::unix::fs::symlink("../../outside", data_dir.join("usr/share/app")),
+                "create malicious archive parent symlink",
+            );
+        } else {
+            write_bytes(&data_dir.join("usr/share/reference"), b"not a directory\n");
+            must(
+                std::fs::hard_link(
+                    data_dir.join("usr/share/reference"),
+                    data_dir.join("usr/share/app"),
+                ),
+                "create malicious archive parent hard link",
+            );
+        }
+        for (member, source) in [("control.tar.gz", &control_dir), ("data.tar.gz", &data_dir)] {
+            let status = must(
+                std::process::Command::new("tar")
+                    .args(["-czf"])
+                    .arg(work.join(member))
+                    .args(["-C"])
+                    .arg(source)
+                    .arg(".")
+                    .status(),
+                "tar malicious deb member",
+            );
+            assert!(status.success(), "tar {member} failed");
+        }
+        write_bytes(&work.join("debian-binary"), b"2.0\n");
+        let deb = dir.join(name);
+        let status = must(
+            std::process::Command::new("ar")
+                .args(["rcS"])
+                .arg(&deb)
+                .arg(work.join("control.tar.gz"))
+                .arg(work.join("data.tar.gz"))
+                .status(),
+            "ar malicious deb",
+        );
+        assert!(status.success(), "ar {name} failed");
+        must(
+            std::fs::remove_dir_all(&work),
+            "clean malicious deb workdir",
+        );
+        deb
+    }
+
     struct StableIncoming {
         dir: PathBuf,
         tag: String,
@@ -4663,6 +5550,124 @@ mod tests {
         );
         assert!(extract.join("usr/bin/example").is_file());
         assert!(extract.join("usr/share/app/build-identity.json").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incoming_directory_listing_rejects_non_utf8_entries() {
+        let dir = fixture_dir("incoming-non-utf8");
+        let error = must_fail(
+            directory_entry_name(b"invalid-\xff", &dir),
+            "reject non-UTF-8 incoming entry",
+        );
+        assert!(error.contains("non-UTF-8"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn incoming_directory_listing_rejects_a_real_non_utf8_entry() {
+        let dir = fixture_dir("incoming-real-non-utf8");
+        let raw_name = OsString::from_vec(b"invalid-\xff".to_vec());
+        let raw_path = dir.join(&raw_name);
+        must(
+            std::fs::write(&raw_path, b"fixture"),
+            "write invalid UTF-8 entry",
+        );
+        let error = must_fail(dir_names(&dir), "reject a real non-UTF-8 incoming entry");
+        assert!(error.contains("non-UTF-8"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_extracted_parent_symlink_and_hardlink_are_rejected() {
+        let root = fixture_dir("archive-parent-boundary");
+        let real = root.join("real");
+        must(
+            std::fs::create_dir(&real),
+            "create extracted real directory",
+        );
+        write_bytes(&real.join("identity.json"), b"{}");
+
+        let symlink_parent = root.join("symlink-parent");
+        make_symlink(&real, &symlink_parent);
+        assert!(
+            require_file(&symlink_parent.join("identity.json")).is_err(),
+            "archive verifier must reject a symlinked extracted parent"
+        );
+
+        let outside = root.join("outside");
+        write_bytes(&outside, b"not a directory");
+        let hardlink_parent = root.join("hardlink-parent");
+        make_hard_link(&outside, &hardlink_parent);
+        assert!(
+            require_file(&hardlink_parent.join("identity.json")).is_err(),
+            "archive verifier must reject a hardlinked regular parent"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_archive_symlink_and_hardlink_parents_fail_closed() {
+        for (name, symlink_parent) in [
+            ("example-parent-symlink.deb", true),
+            ("example-parent-hardlink.deb", false),
+        ] {
+            let dir = fixture_dir(if symlink_parent {
+                "deb-parent-symlink"
+            } else {
+                "deb-parent-hardlink"
+            });
+            let deb = make_deb_with_parent_entry(&dir, name, symlink_parent);
+            let extract = dir.join("extracted");
+            let error = must_fail(
+                deb_extract_data(&deb, &extract, DebBackend::ArTar, None),
+                "reject malicious parent archive",
+            );
+            assert!(error.contains("member type"), "{error}");
+            assert!(
+                !extract.exists(),
+                "unsafe archive created an extraction root"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_extraction_rejects_a_symlink_destination() {
+        let dir = fixture_dir("deb-destination-symlink");
+        let deb = make_deb(
+            &dir,
+            "example-destination-symlink.deb",
+            "example",
+            "1.2.3",
+            "amd64",
+            "example",
+            "app",
+            FIXTURE_COMMIT,
+            "1.2.3",
+            b"{}",
+            b"bytes",
+        );
+        let outside = dir.join("outside");
+        must(std::fs::create_dir(&outside), "create extraction outside");
+        write_bytes(&outside.join("marker"), b"untouched");
+        let destination = dir.join("extracted");
+        make_symlink(&outside, &destination);
+        let error = must_fail(
+            deb_extract_data(&deb, &destination, DebBackend::ArTar, None),
+            "reject symlink extraction destination",
+        );
+        assert!(error.contains("destination already exists"), "{error}");
+        assert_eq!(
+            must(std::fs::read(outside.join("marker")), "read marker"),
+            b"untouched"
+        );
+        assert!(!outside.join("usr").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

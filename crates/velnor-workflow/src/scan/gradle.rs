@@ -717,14 +717,8 @@ include(":real")
         use super::super::scan_shape;
         use crate::RunnerMode;
         use std::fs;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-gradle-scan-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root =
+            std::env::temp_dir().join(format!("velnor-gradle-scan-{}", crate::unique_suffix()));
         fs::create_dir_all(root.join("app/src")).unwrap();
         fs::create_dir_all(root.join("lib/src")).unwrap();
         fs::write(
@@ -778,14 +772,8 @@ include(":real")
         use super::super::scan_shape;
         use crate::RunnerMode;
         use std::fs;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-gradle-jooq-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root =
+            std::env::temp_dir().join(format!("velnor-gradle-jooq-{}", crate::unique_suffix()));
         fs::create_dir_all(root.join("domain")).unwrap();
         fs::write(root.join("settings.gradle.kts"), "include(\"domain\")\n").unwrap();
         fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
@@ -885,14 +873,8 @@ flyway { url = datasourceUrl }
         use super::super::scan_shape;
         use crate::RunnerMode;
         use std::fs;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-gradle-multidb-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root =
+            std::env::temp_dir().join(format!("velnor-gradle-multidb-{}", crate::unique_suffix()));
         fs::create_dir_all(root.join("domain")).unwrap();
         fs::create_dir_all(root.join("legacy-flyway")).unwrap();
         fs::write(

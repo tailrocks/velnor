@@ -1075,6 +1075,23 @@ fn deb_arch_matrix(config: &ProjectConfig, targets: &[String], guest: bool) -> O
     Some(matrix)
 }
 
+/// Step-level env exporting the cross C toolchain to Cargo and the C build
+/// scripts (`cc` et al.) for matrix jobs that compile `AArch64` Linux on
+/// the x64 builder. The toolchain install alone leaves Cargo on the host
+/// linker, and host-mode linking then rejects the `AArch64`-only link
+/// flags. Every variable is triple-scoped, so native rows ignore it;
+/// target sets without `AArch64` emit nothing.
+fn cross_linker_env(targets: &[String]) -> &'static str {
+    if targets
+        .iter()
+        .any(|target| target == "aarch64-unknown-linux-gnu")
+    {
+        "          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc\n          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc\n          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++\n          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar\n"
+    } else {
+        ""
+    }
+}
+
 fn hashfiles_expr(globs: &[String]) -> String {
     globs
         .iter()
@@ -1472,10 +1489,11 @@ fn render_release_metadata_job(
 /// release package itself is excluded: it builds separately below, runner
 /// binary only, so the guest agent is never rebuilt with a second identity
 /// (it arrives from the guest payload artifact instead).
-fn debian_sibling_build_steps(cargo_cmd: &str, package: &str) -> String {
-    let package = shell_quote(package);
+fn debian_sibling_build_steps(cargo_cmd: &str, release: &ReleaseSpec) -> String {
+    let package = shell_quote(&release.package);
+    let cross = cross_linker_env(&release.targets);
     format!(
-        "      - name: Build sibling binaries for the deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          metadata=\"$(cargo metadata --locked --no-deps --format-version 1)\"\n          while IFS= read -r sibling; do\n            [ -n \"$sibling\" ] || continue\n            if jq -e --arg p \"$sibling\" '.packages[] | select(.name == $p) | .features | has(\"release-build\")' <<<\"$metadata\" >/dev/null; then\n              features=\"--features release-build\"\n            else\n              features=\"\"\n            fi\n            # shellcheck disable=SC2086\n            {cargo_cmd} build --locked --release --package \"$sibling\" $features --target \"$TARGET\"\n          done < <(jq -r --arg release {package} '.packages[] | select(.name != $release) | select(.targets | map(.kind[]) | flatten | any(. == \"bin\")) | .name' <<<\"$metadata\" | sort -u)\n"
+        "      - name: Build sibling binaries for the deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: |\n          set -euo pipefail\n          metadata=\"$(cargo metadata --locked --no-deps --format-version 1)\"\n          while IFS= read -r sibling; do\n            [ -n \"$sibling\" ] || continue\n            if jq -e --arg p \"$sibling\" '.packages[] | select(.name == $p) | .features | has(\"release-build\")' <<<\"$metadata\" >/dev/null; then\n              features=\"--features release-build\"\n            else\n              features=\"\"\n            fi\n            # shellcheck disable=SC2086\n            {cargo_cmd} build --locked --release --package \"$sibling\" $features --target \"$TARGET\"\n          done < <(jq -r --arg release {package} '.packages[] | select(.name != $release) | select(.targets | map(.kind[]) | flatten | any(. == \"bin\")) | .name' <<<\"$metadata\" | sort -u)\n"
     )
 }
 
@@ -1490,19 +1508,20 @@ fn debian_identity_steps(
     kind: &str,
     crate_expr: &str,
     preview: bool,
+    metadata_dir: &str,
 ) -> String {
     let release_dir = shell_quote(release_dir);
     let repository = shell_quote(repository);
-    let tool = format!("metadata/{binary}-release-tool");
+    let tool = format!("\"$metadata_dir/{binary}-release-tool\"");
     let source_check = if preview {
-        "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' metadata/build-identity.json >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
+        "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' \"$metadata_dir/build-identity.json\" >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
     } else {
         ""
     };
     let commit_value = if preview {
         "\"$SOURCE_COMMIT\"".to_owned()
     } else {
-        "$(jq -er '.source_sha' metadata/build-identity.json)".to_owned()
+        "$(jq -er '.source_sha' \"$metadata_dir/build-identity.json\")".to_owned()
     };
     let record_check = if preview {
         format!(
@@ -1512,7 +1531,22 @@ fn debian_identity_steps(
         String::new()
     };
     format!(
-        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          test -s metadata/build-identity.json || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s metadata/manifest.json || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' metadata/build-identity.json >/dev/null\n          jq -e 'type == \"object\"' metadata/manifest.json >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp metadata/build-identity.json metadata/manifest.json {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum metadata/manifest.json | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' metadata/manifest.json)\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
+        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          test -s \"$metadata_dir/build-identity.json\" || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s \"$metadata_dir/manifest.json\" || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' \"$metadata_dir/build-identity.json\" >/dev/null\n          jq -e 'type == \"object\"' \"$metadata_dir/manifest.json\" >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp \"$metadata_dir/build-identity.json\" \"$metadata_dir/manifest.json\" {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum \"$metadata_dir/manifest.json\" | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' \"$metadata_dir/manifest.json\")\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
+    )
+}
+
+fn release_metadata_artifact_name(preview: bool) -> &'static str {
+    if preview {
+        "preview-metadata"
+    } else {
+        "release-metadata"
+    }
+}
+
+fn release_metadata_staging() -> (&'static str, &'static str) {
+    (
+        "${{ runner.temp }}/release-metadata",
+        "$RUNNER_TEMP/release-metadata",
     )
 }
 
@@ -1657,23 +1691,21 @@ fn render_identity_debian_job(
         )
     };
     let lane_env = identity_debian_lane_env(preview, version);
-    let metadata_artifact = if preview {
-        "preview-metadata"
-    } else {
-        "release-metadata"
-    };
+    let metadata_artifact = release_metadata_artifact_name(preview);
+    let (metadata_path, metadata_dir) = release_metadata_staging();
     let mut steps = format!(
-        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
+        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Install cross C toolchain\n        run: |\n          set -euo pipefail\n          if [ \"${{{{ matrix.arch }}}}\" = \"arm64\" ]; then\n            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or\n            # vendored openssl (sys/types.h / bits/libc-header-start.h).\n            sudo apt-get update\n            sudo apt-get install -y --no-install-recommends \\\n              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          fi\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: {metadata_path}\n",
     );
+    let cross = cross_linker_env(&release.targets);
     if preview {
         let _ = writeln!(
             steps,
-            "      - name: Build release runner binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {package} --bin {binary} --features release-build --target \"$TARGET\""
+            "      - name: Build release runner binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {package} --bin {binary} --features release-build --target \"$TARGET\""
         );
     } else {
         steps.push_str(&debian_reuse_release_steps(config, release));
     }
-    steps.push_str(&debian_sibling_build_steps(cargo_cmd, &release.package));
+    steps.push_str(&debian_sibling_build_steps(cargo_cmd, release));
     steps.push_str(&debian_identity_steps(
         &release_package_dir(config, &release.package),
         &release.binary,
@@ -1681,6 +1713,7 @@ fn render_identity_debian_job(
         kind,
         crate_expr,
         preview,
+        metadata_dir,
     ));
     if guest {
         steps.push_str(&debian_guest_steps(config, release, cargo_cmd));
@@ -3419,13 +3452,39 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let cargo_offline = checks_env(unit);
-    let _ = writeln!(
-        output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-        yaml_scalar(&unit.id),
-        yaml_scalar(&unit.id)
-    );
+    render_release_check_steps(output, unit, &verify_name, &cargo_offline);
     id
+}
+
+/// The checks steps of one release leg. Release legs know their unit
+/// statically: phased units verify through one step per runnable phase,
+/// like the collapsed jobs, while unphased units keep the single step.
+fn render_release_check_steps(
+    output: &mut String,
+    unit: &Unit,
+    verify_name: &str,
+    cargo_offline: &str,
+) {
+    let runnable = unit.runnable_phases();
+    if runnable.is_empty() {
+        let _ = writeln!(
+            output,
+            "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+            yaml_scalar(&unit.id),
+            yaml_scalar(&unit.id)
+        );
+    } else {
+        for phase in runnable {
+            let _ = writeln!(
+                output,
+                "      - name: {} ({verify_name})\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} --phase {}\n",
+                phase.step_name(),
+                yaml_scalar(&unit.id),
+                yaml_scalar(&unit.id),
+                phase.as_str(),
+            );
+        }
+    }
 }
 
 fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
@@ -3596,7 +3655,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let matrix_runner = release_matrix_runner(config, &release.targets);
     let _ = writeln!(
         output,
-        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Checkout\n        uses: {publish_checkout}\n        with:\n          persist-credentials: false\n{tag_check}      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
+        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Install cross C toolchain\n        run: |\n          set -euo pipefail\n          if [ \"${{{{ matrix.target }}}}\" = \"aarch64-unknown-linux-gnu\" ]; then\n            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or\n            # vendored openssl (sys/types.h / bits/libc-header-start.h).\n            sudo apt-get update\n            sudo apt-get install -y --no-install-recommends \\\n              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          fi\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Checkout\n        uses: {publish_checkout}\n        with:\n          persist-credentials: false\n{tag_check}      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
         yaml_scalar(&release.package),
@@ -3609,6 +3668,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         matrix_runner = matrix_runner,
         publish_checkout = ActionPin::Checkout.reference(),
         tag_check = TAG_IMMUTABILITY_STEP,
+        cross = cross_linker_env(&release.targets),
     );
     if let Some((prefix, build)) = output.split_once("\n  build:") {
         let build = build.replace(
@@ -3784,9 +3844,10 @@ fn inject_native_verify_outputs(
 
 fn inject_native_build_identity(output: &str, release: &ReleaseSpec) -> String {
     let build_step = format!(
-        "      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: mbx build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"",
+        "      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: mbx build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"",
         yaml_scalar(&release.package),
-        yaml_scalar(&release.binary)
+        yaml_scalar(&release.binary),
+        cross = cross_linker_env(&release.targets),
     );
     output.replace(
         &build_step,
@@ -4094,6 +4155,10 @@ fn render_docker_manifest_job(
 /// verified digest set by the single manifest job. One concurrency group
 /// per ref serializes publishers so a resume and a fresh publication can
 /// never interleave on the same tag.
+// Schema-1 is frozen: multi-image release is a schema-2 `[[release.image]]`
+// contract, so this publisher keeps its single scalar image.
+// Per-image `lfs` is likewise schema-2 only: schema-1 is frozen, so this
+// publisher keeps its shallow checkout without LFS objects.
 fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
     let mut manifest_needs = vec![
@@ -4956,6 +5021,7 @@ mod maintenance_lanes_tests {
             velnor_concurrency_group: None,
             velnor_serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::config::CacheGithubSection::default(),
@@ -5167,6 +5233,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use sha2::{Digest as _, Sha256};
 
@@ -5176,6 +5243,189 @@ mod tests {
     /// A fixed generator pin so the pinned render digests below never move
     /// with the commit that builds the test binary.
     const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    const EMITTED_RELEASE_TOOL_STUB: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 8 && "$1" == release && "$2" == emit && "$3" == --record ]] || exit 90
+record="$4"
+[[ "$5" == --binary ]] || exit 91
+binary="$6"
+[[ "$7" == --out ]] || exit 92
+out="$8"
+test -s "$record"
+test -s "$binary"
+cp "$record" "$out"
+"#;
+
+    fn emitted_stage_scripts(config: &ProjectConfig) -> (String, String, String, String) {
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let preview = super::render_preview(config, Some(release));
+        let stable = super::render_release(config, release);
+        (
+            yaml_run_step(
+                &preview,
+                "debian",
+                "Stage acyclic identity files packaged into the deb",
+            ),
+            yaml_run_step(
+                &stable,
+                "debian",
+                "Stage acyclic identity files packaged into the deb",
+            ),
+            yaml_run_step(&preview, "debian", "Stage the deb's own package record"),
+            yaml_run_step(&stable, "debian", "Stage the deb's own package record"),
+        )
+    }
+
+    fn initialize_emitted_checkout(checkout: &Path) {
+        let initialized = must(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(checkout)
+                .status(),
+            "initialize clean source checkout",
+        );
+        assert!(initialized.success());
+        let clean = must(
+            Command::new("git")
+                .args(["status", "--porcelain", "--untracked-files=all"])
+                .current_dir(checkout)
+                .output(),
+            "verify downloaded metadata leaves source clean",
+        );
+        assert!(clean.status.success());
+        assert!(clean.stdout.is_empty(), "metadata polluted source checkout");
+    }
+
+    #[cfg(unix)]
+    fn make_emitted_tool_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions =
+            must(fs::metadata(path), "read release tool permissions").permissions();
+        permissions.set_mode(0o755);
+        must(
+            fs::set_permissions(path, permissions),
+            "make emitted-stage release tool executable",
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn make_emitted_tool_executable(_path: &Path) {}
+
+    fn emitted_stage_fixture(
+        label: &str,
+        identity_source: &str,
+        include_manifest: bool,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "velnor emitted metadata {label} {}",
+            crate::unique_suffix()
+        ));
+        let checkout = root.join("checkout");
+        let runner_temp = root.join("runner temp [spaces]");
+        let metadata = runner_temp.join("release-metadata");
+        must(
+            fs::create_dir_all(&checkout),
+            "create emitted-stage checkout",
+        );
+        must(
+            fs::create_dir_all(&metadata),
+            "create emitted-stage metadata",
+        );
+        must(
+            fs::write(
+                metadata.join("build-identity.json"),
+                format!(r#"{{"source_sha":"{identity_source}","crate_version":"1.2.3"}}"#),
+            ),
+            "write emitted-stage build identity",
+        );
+        if include_manifest {
+            must(
+                fs::write(metadata.join("manifest.json"), r#"{"version":1}"#),
+                "write emitted-stage manifest",
+            );
+        }
+        initialize_emitted_checkout(&checkout);
+        let target = checkout.join("target/x86_64-unknown-linux-gnu/release");
+        must(fs::create_dir_all(&target), "create emitted-stage target");
+        must(
+            fs::write(target.join("example"), b"release binary fixture\n"),
+            "write emitted-stage binary",
+        );
+        let release_tool = metadata.join("example-release-tool");
+        must(
+            fs::write(&release_tool, EMITTED_RELEASE_TOOL_STUB),
+            "write emitted-stage release tool",
+        );
+        make_emitted_tool_executable(&release_tool);
+        (root, checkout, runner_temp)
+    }
+
+    fn execute_emitted_stage(
+        script: &str,
+        checkout: &Path,
+        runner_temp: &Path,
+        source_sha: &str,
+    ) -> std::process::ExitStatus {
+        must(
+            Command::new("bash")
+                .args(["-euo", "pipefail", "-c", script])
+                .current_dir(checkout)
+                .env("RUNNER_TEMP", runner_temp)
+                .env("SOURCE_COMMIT", source_sha)
+                .env("TARGET", "x86_64-unknown-linux-gnu")
+                .env("VERSION", "1.2.3")
+                .env("CRATE_VERSION", "1.2.3")
+                .status(),
+            "execute emitted metadata stage",
+        )
+    }
+
+    fn run_valid_emitted_stage(label: &str, stage: &str, record_stage: &str, source_sha: &str) {
+        let (root, checkout, runner_temp) = emitted_stage_fixture(label, source_sha, true);
+        let status = execute_emitted_stage(stage, &checkout, &runner_temp, source_sha);
+        assert!(status.success(), "{label} emitted stage failed: {status}");
+        assert!(checkout.join("release/build-identity.json").is_file());
+        assert!(checkout.join("release/manifest.json").is_file());
+        assert!(
+            !checkout.join("release-metadata").exists(),
+            "{label} metadata must remain outside the source checkout"
+        );
+        let record_stage = record_stage.replace("${{ matrix.arch }}", "amd64");
+        let status = execute_emitted_stage(&record_stage, &checkout, &runner_temp, source_sha);
+        assert!(
+            status.success(),
+            "{label} emitted package-record stage failed: {status}"
+        );
+        let record = checkout.join("release/package-record.json");
+        assert!(record.is_file(), "{label} emitted record is missing");
+        let record = must(fs::read_to_string(record), "read emitted package record");
+        assert!(
+            record.contains(source_sha),
+            "{label} record lost source identity"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn run_rejected_emitted_stage(
+        label: &str,
+        stage: &str,
+        identity_source: &str,
+        source_sha: &str,
+        include_manifest: bool,
+    ) {
+        let (root, checkout, runner_temp) =
+            emitted_stage_fixture(label, identity_source, include_manifest);
+        let status = execute_emitted_stage(stage, &checkout, &runner_temp, source_sha);
+        assert!(!status.success(), "{label} metadata must fail closed");
+        assert!(
+            !checkout.join("release/build-identity.json").exists(),
+            "{label} metadata must not stage identity files"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
         match result {
@@ -5239,6 +5489,60 @@ mod tests {
             workflow.get(start..end.unwrap_or(workflow.len())),
             &format!("{id} job bytes"),
         )
+    }
+
+    /// One complete step block from a generated job body, so env assertions
+    /// pin exports to the cross-compiling steps instead of merely the job.
+    fn yaml_step<'a>(job: &'a str, name: &str) -> &'a str {
+        let marker = format!("      - name: {name}");
+        let start = must_some(job.find(&marker), &format!("{name} step"));
+        let rest = &job[start..];
+        let end = rest[marker.len()..]
+            .find("\n      - name: ")
+            .map_or(rest.len(), |offset| marker.len() + offset);
+        must_some(rest.get(..end), &format!("{name} step bytes"))
+    }
+
+    /// Extract one complete emitted `run: |` body from a generated job. The
+    /// fixture executes this exact body; it must not reconstruct a similar
+    /// command from individual assertions because that could miss quoting or
+    /// path changes in the renderer.
+    fn yaml_run_step(workflow: &str, job: &str, name: &str) -> String {
+        let job = yaml_job(workflow, job);
+        let marker = format!("      - name: {name}");
+        let mut in_step = false;
+        let mut in_run = false;
+        let mut script = String::new();
+        for line in job.lines() {
+            if line == marker {
+                in_step = true;
+                continue;
+            }
+            if in_step && line.starts_with("      - name: ") {
+                break;
+            }
+            if !in_step {
+                continue;
+            }
+            if line == "        run: |" {
+                in_run = true;
+                continue;
+            }
+            if in_run {
+                if let Some(body) = line.strip_prefix("          ") {
+                    script.push_str(body);
+                    script.push('\n');
+                } else if line.is_empty() {
+                    script.push('\n');
+                } else {
+                    break;
+                }
+            }
+        }
+        assert!(in_step, "generated step is missing: {name}");
+        assert!(in_run, "generated step has no run body: {name}");
+        assert!(!script.is_empty(), "generated step body is empty: {name}");
+        script
     }
 
     fn assert_cache_retention_has_actions_write(workflow: &str) {
@@ -5458,6 +5762,8 @@ mod tests {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -5718,6 +6024,7 @@ mod tests {
             velnor_concurrency_group: None,
             velnor_serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::config::CacheGithubSection::default(),
@@ -5781,7 +6088,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "b40b9ceb38f5819446217faa76f424d26eee539b3bbe3dbd9f320ccecef224cf",
+                "11df400e5887ca8e517e85517fb5f1e3385f85ee804076d5ace072b47f47f317",
             ),
             (
                 "preview.yml",
@@ -5908,11 +6215,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "2cef6177dcabde81d31c57e62a02659d2801738a913dd0d1041ca5911c605b3a",
+                "aebcda490fb06b16894f4c2cc495ac87e82cc63a059eac21b3abc6f925622ec7",
             ),
             (
                 "preview.yml",
-                "b579999c9879f2dc10ea71ee260ebdb4e8355d24084370ad0b5e4ec9084b7de7",
+                "0c1ecdf5cf8708cee2f812509c6ef849c00e62a3d64aa181f69acd628f049655",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -5932,6 +6239,236 @@ mod tests {
             divergent.join("\n  ")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_identity_metadata_uses_external_quoted_paths() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let debian = yaml_job(&preview, "debian");
+        for marker in [
+            "path: ${{ runner.temp }}/release-metadata",
+            "metadata_dir=\"$RUNNER_TEMP/release-metadata\"",
+            "test -s \"$metadata_dir/build-identity.json\"",
+            "test -s \"$metadata_dir/manifest.json\"",
+            "sha256sum \"$metadata_dir/manifest.json\"",
+            "build identity source_sha != preview source commit",
+        ] {
+            assert!(
+                debian.contains(marker),
+                "quoted metadata path missing: {marker}\n{debian}"
+            );
+        }
+        assert!(
+            !debian.contains(" $metadata_dir/"),
+            "unquoted metadata path: {debian}"
+        );
+        assert!(
+            !debian.contains("path: metadata\n"),
+            "metadata must not enter the source checkout: {debian}"
+        );
+    }
+
+    #[test]
+    fn identity_debian_job_installs_the_cross_c_toolchain_for_arm64() {
+        // The arm64 row cross-compiles on the x64 runner, so without the
+        // cross C toolchain aws-lc-sys/openssl-sys fail to find
+        // aarch64-linux-gnu-gcc. Mirrors the guest-payload pattern.
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        for workflow in [
+            super::render_preview(&config, Some(release)),
+            super::render_release(&config, release),
+        ] {
+            let debian = yaml_job(&workflow, "debian");
+            assert!(
+                debian.contains("- name: Install cross C toolchain"),
+                "missing cross toolchain step:\n{debian}"
+            );
+            assert!(
+                debian.contains("[ \"${{ matrix.arch }}\" = \"arm64\" ]"),
+                "cross toolchain must gate on the arm64 row:\n{debian}"
+            );
+            assert!(
+                debian.contains(
+                    "gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross"
+                ),
+                "cross toolchain must carry the aarch64 sysroot:\n{debian}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_build_job_installs_the_cross_c_toolchain_for_arm64() {
+        // The aarch64 row cross-compiles on the x64 runner, so without the
+        // cross C toolchain aws-lc-sys/openssl-sys fail to find
+        // aarch64-linux-gnu-gcc. The build matrix keys rows by target, not
+        // arch, so the gate matches the full Linux target triple and macOS
+        // rows skip apt entirely.
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let build = yaml_job(&workflow, "build");
+        assert!(
+            build.contains("- name: Install cross C toolchain"),
+            "missing cross toolchain step:\n{build}"
+        );
+        assert!(
+            build.contains("[ \"${{ matrix.target }}\" = \"aarch64-unknown-linux-gnu\" ]"),
+            "cross toolchain must gate on the aarch64 Linux target:\n{build}"
+        );
+        assert!(
+            build
+                .contains("gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross"),
+            "cross toolchain must carry the aarch64 sysroot:\n{build}"
+        );
+    }
+
+    #[test]
+    fn debian_cross_build_steps_export_the_aarch64_linker() {
+        // The arm64 debian row cross-compiles on the x64 runner: the
+        // toolchain install alone leaves Cargo on the host linker, which
+        // rejects the AArch64-only link flags. Both cross-compiling steps
+        // carry the exports; the stable lane has no runner-binary step.
+        const EXPORTS: &[&str] = &[
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc",
+            "CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc",
+            "CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++",
+            "AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar",
+        ];
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let preview_debian = yaml_job(&preview, "debian");
+        for step in [
+            "Build release runner binary",
+            "Build sibling binaries for the deb",
+        ] {
+            let block = yaml_step(preview_debian, step);
+            for export in EXPORTS {
+                assert!(
+                    block.contains(export),
+                    "preview debian {step} misses {export}:\n{block}"
+                );
+            }
+        }
+        let stable = super::render_release(&config, release);
+        let stable_debian = yaml_job(&stable, "debian");
+        let block = yaml_step(stable_debian, "Build sibling binaries for the deb");
+        for export in EXPORTS {
+            assert!(
+                block.contains(export),
+                "stable debian sibling build misses {export}:\n{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_target_sets_omit_the_cross_linker_exports() {
+        // The exports exist only for AArch64 rows: a native-only target set
+        // renders no cross-linker variable on any release build step. The
+        // install step still names the toolchain package; only the step env
+        // variables are gated.
+        const EXPORTS: &[&str] = &[
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
+            "CC_aarch64_unknown_linux_gnu",
+            "CXX_aarch64_unknown_linux_gnu",
+            "AR_aarch64_unknown_linux_gnu",
+        ];
+        let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_mut() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        release.targets = vec!["x86_64-unknown-linux-gnu".to_owned()];
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let stable = super::render_release(&config, release);
+        for (lane, id, job) in [
+            ("preview", "debian", yaml_job(&preview, "debian")),
+            ("stable", "debian", yaml_job(&stable, "debian")),
+            ("stable", "build", yaml_job(&stable, "build")),
+        ] {
+            for export in EXPORTS {
+                assert!(
+                    !job.contains(export),
+                    "native-only {lane} {id} leaks {export}:\n{job}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn binary_release_build_exports_the_aarch64_linker() {
+        // The aarch64 tarball row cross-compiles on the x64 runner: the same
+        // missing-linker failure as the debian lane. The native identity
+        // injection still lands on the same step.
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        let workflow = super::render_release(&config, release);
+        let build = yaml_job(&workflow, "build");
+        let step = yaml_step(build, "Build release binary");
+        for export in [
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc",
+            "CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc",
+            "CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++",
+            "AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar",
+        ] {
+            assert!(
+                step.contains(export),
+                "release build misses {export}:\n{step}"
+            );
+        }
+        assert!(
+            step.contains("VELNOR_RELEASE_BUILD: \"1\""),
+            "native identity injection lost its anchor:\n{step}"
+        );
+        assert!(
+            step.contains("--features release-build"),
+            "native identity injection lost its anchor:\n{step}"
+        );
+    }
+
+    #[test]
+    fn native_identity_executes_complete_emitted_metadata_stages() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let (preview_stage, stable_stage, preview_record, stable_record) =
+            emitted_stage_scripts(&config);
+        run_valid_emitted_stage("preview", &preview_stage, &preview_record, "preview-source");
+        run_valid_emitted_stage("stable", &stable_stage, &stable_record, "stable-source");
+        run_rejected_emitted_stage(
+            "mismatch",
+            &preview_stage,
+            "different-source",
+            "expected-source",
+            true,
+        );
+        run_rejected_emitted_stage(
+            "missing",
+            &preview_stage,
+            "expected-source",
+            "expected-source",
+            false,
+        );
+        run_rejected_emitted_stage(
+            "missing-stable",
+            &stable_stage,
+            "expected-source",
+            "expected-source",
+            false,
+        );
     }
 
     /// Daemon and runtime delivery resolve exact identities, never a rolling

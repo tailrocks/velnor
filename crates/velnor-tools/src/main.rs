@@ -1,7 +1,12 @@
 mod audit_ci;
+mod evidence_check;
 mod fleet_policy;
 mod fleet_policy_client;
+mod g0_contract;
+mod g0_workflow;
+pub(crate) mod github_acquisition;
 mod lane_compare;
+mod live_authority;
 mod workflow_monitor;
 
 use anyhow::{bail, Context, Result};
@@ -72,6 +77,13 @@ enum CommandKind {
     AuditCi(audit_ci::AuditCiArgs),
     /// Compare GitHub and Velnor lanes (promoted alias of lane-compare).
     Compare(lane_compare::LaneCompareArgs),
+    /// Validate an external manifest, authoritative snapshot, and evidence envelope.
+    #[command(name = "evidence-check")]
+    EvidenceCheck(evidence_check::EvidenceCheckArgs),
+    /// Capture complete read-only GitHub facts into a local evidence directory.
+    G0LiveCollect(github_acquisition::live_cli::G0LiveCollectArgs),
+    /// Capture a bounded real GitHub sample into a local evidence directory.
+    G0LiveSample(github_acquisition::live_cli::G0LiveSampleArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
     /// Maintainer-only org-JIT fleet policy operations (Plan 039).
@@ -539,6 +551,9 @@ async fn main() -> Result<()> {
         CommandKind::CheckFixtureLanes(args) => check_fixture_lanes(args).await,
         CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
         CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
+        CommandKind::EvidenceCheck(args) => evidence_check::evidence_check(args).await,
+        CommandKind::G0LiveCollect(args) => github_acquisition::live_cli::run(args).await,
+        CommandKind::G0LiveSample(args) => github_acquisition::live_cli::run_sample(args).await,
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::FleetPolicy(args) => fleet_policy::fleet_policy(args.command).await,
     }
@@ -4759,6 +4774,36 @@ fn find_hardcoded_lane_strings(steps_yaml: &str, ctx: &str) -> Vec<String> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evidence_check_has_one_canonical_cli_name() {
+        let canonical = [
+            "velnor-tools",
+            "evidence-check",
+            "--stage",
+            "G0",
+            "--manifest",
+            "manifest.json",
+            "--snapshot",
+            "snapshot.json",
+            "--evidence",
+            "evidence.json",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(canonical),
+            Ok(Cli {
+                command: CommandKind::EvidenceCheck(_)
+            })
+        ));
+        for legacy in ["check-evidence", "evidence-verify", "verify-evidence"] {
+            let mut args = canonical.to_vec();
+            args[1] = legacy;
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "legacy command accepted: {legacy}"
+            );
+        }
+    }
 
     #[test]
     fn hardcoded_lane_context_window_survives_multibyte_chars() {

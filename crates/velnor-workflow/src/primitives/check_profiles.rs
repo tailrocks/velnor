@@ -592,24 +592,25 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
         if !profile.tools.is_empty() {
             let _ = writeln!(
                 output,
-                "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes install \"${{tools[@]}}\"",
+                "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes --locked install \"${{tools[@]}}\"",
                 yaml_scalar(&profile.tools.join(" "))
             );
         }
         return;
     }
-    if !profile.tools.is_empty() {
+    if profile.tools.is_empty() {
+        let _ = writeln!(
+            output,
+            "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false"
+        );
+    } else {
         let trusted = super::trusted_cache_save_expression(&config.default_branch);
         let _ = writeln!(
             output,
-            "      - name: Set up Mise tools\n        uses: {mise}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
+            "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
             yaml_scalar(&profile.tools.join(" "))
         );
     }
-    let _ = writeln!(
-        output,
-        "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false"
-    );
 }
 
 fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
@@ -717,6 +718,7 @@ mod tests {
             velnor_concurrency_group: None,
             velnor_serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: true,
             mise_lock_keys: std::collections::BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),
@@ -860,8 +862,16 @@ mod tests {
             workflow.contains("install_args: \"ripgrep cargo:example-tool\""),
             "{workflow}"
         );
+        assert_eq!(
+            workflow.matches(crate::ActionPin::Mise.reference()).count(),
+            1,
+            "one hosted profile owns one Mise bootstrap action: {workflow}"
+        );
         assert!(workflow.contains("MISE_TOOLS: ripgrep"), "{workflow}");
-        assert!(workflow.contains("mise --yes install"), "{workflow}");
+        assert!(
+            workflow.contains("mise --yes --locked install \"${tools[@]}\""),
+            "{workflow}"
+        );
         let mut bare_job = String::new();
         must(
             render_profile_job(&mut bare_job, &config, &config.check_profiles[2], None),

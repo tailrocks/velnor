@@ -1,3 +1,6 @@
+pub mod macos_power;
+pub use macos_power::{PowerAssertionGuard, PowerAssertionKind};
+
 use anyhow::{bail, Result};
 
 pub fn validate_arm_label_matches_host(labels: &[String], host_arch: &str) -> Result<()> {

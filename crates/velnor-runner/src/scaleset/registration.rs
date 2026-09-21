@@ -179,7 +179,7 @@ async fn get_or_create_by_name(
                 runner_group_name: group_name.to_owned(),
                 labels: desired_labels(&plan.labels),
                 runner_setting: RunnerSetting::default(),
-                created_on: String::new(),
+                created_on: "0001-01-01T00:00:00Z".to_string(),
                 runner_jit_config_url: String::new(),
                 statistics: None,
             };
@@ -336,6 +336,8 @@ mod tests {
             request_id: String::new(),
             message: "exists".into(),
             fault: Some(ScaleSetFault::Conflict),
+            status_fault: None,
+            api_exception: None,
         }));
         assert!(is_create_race(&conflict));
         let missing = ScaleSetError::RequestFailed(Box::new(crate::scaleset::RequestFailure {
@@ -346,6 +348,8 @@ mod tests {
             request_id: String::new(),
             message: "nope".into(),
             fault: Some(ScaleSetFault::NotFound),
+            status_fault: None,
+            api_exception: None,
         }));
         assert!(!is_create_race(&missing));
         assert!(!is_create_race(&ScaleSetError::Transport("down".into())));

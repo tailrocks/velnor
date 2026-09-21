@@ -16,10 +16,22 @@ inputs:
     description: Comma-separated Velnor host-warm cache layers
     required: false
     default: ""
+  cache_declared_layers:
+    description: Comma-separated cache layers the generator declared for this job
+    required: false
+    default: ""
+  cache_rustup_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
   cache_rustup_primary:
     required: false
     default: ""
   cache_rustup_matched:
+    required: false
+    default: ""
+  cache_mold_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
     required: false
     default: ""
   cache_mold_primary:
@@ -28,10 +40,18 @@ inputs:
   cache_mold_matched:
     required: false
     default: ""
+  cache_cargo_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
   cache_cargo_primary:
     required: false
     default: ""
   cache_cargo_matched:
+    required: false
+    default: ""
+  cache_mbx_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
     required: false
     default: ""
   cache_mbx_hit:
@@ -40,10 +60,51 @@ inputs:
   cache_mbx_primary:
     required: false
     default: ""
+  cache_mbx_matched:
+    description: Matched archive key, only when the cache producer explicitly exposes it
+    required: false
+    default: ""
+  cache_docker_seed_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
   cache_docker_seed_primary:
     required: false
     default: ""
   cache_docker_seed_matched:
+    required: false
+    default: ""
+  # Verification/save signals. No generator step renders these yet; they stay
+  # empty until a verification/save producer exists, and the classifier treats
+  # empty as unobserved rather than as a negative.
+  cache_rustup_verified:
+    required: false
+    default: ""
+  cache_rustup_saved:
+    required: false
+    default: ""
+  cache_mold_verified:
+    required: false
+    default: ""
+  cache_mold_saved:
+    required: false
+    default: ""
+  cache_cargo_verified:
+    required: false
+    default: ""
+  cache_cargo_saved:
+    required: false
+    default: ""
+  cache_mbx_verified:
+    required: false
+    default: ""
+  cache_mbx_saved:
+    required: false
+    default: ""
+  cache_docker_seed_verified:
+    required: false
+    default: ""
+  cache_docker_seed_saved:
     required: false
     default: ""
 
@@ -62,16 +123,33 @@ runs:
         VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}
         VELNOR_RUN_STARTED_AT: ${{ env.VELNOR_RUN_STARTED_AT }}
         VELNOR_JOB_QUEUED_AT: ${{ env.VELNOR_JOB_QUEUED_AT }}
+        VELNOR_CACHE_DECLARED_LAYERS: ${{ inputs.cache_declared_layers }}
+        VELNOR_CACHE_RUSTUP_OUTCOME: ${{ inputs.cache_rustup_outcome }}
         VELNOR_CACHE_RUSTUP_PRIMARY: ${{ inputs.cache_rustup_primary }}
         VELNOR_CACHE_RUSTUP_MATCHED: ${{ inputs.cache_rustup_matched }}
+        VELNOR_CACHE_RUSTUP_VERIFIED: ${{ inputs.cache_rustup_verified }}
+        VELNOR_CACHE_RUSTUP_SAVED: ${{ inputs.cache_rustup_saved }}
+        VELNOR_CACHE_MOLD_OUTCOME: ${{ inputs.cache_mold_outcome }}
         VELNOR_CACHE_MOLD_PRIMARY: ${{ inputs.cache_mold_primary }}
         VELNOR_CACHE_MOLD_MATCHED: ${{ inputs.cache_mold_matched }}
+        VELNOR_CACHE_MOLD_VERIFIED: ${{ inputs.cache_mold_verified }}
+        VELNOR_CACHE_MOLD_SAVED: ${{ inputs.cache_mold_saved }}
+        VELNOR_CACHE_CARGO_OUTCOME: ${{ inputs.cache_cargo_outcome }}
         VELNOR_CACHE_CARGO_PRIMARY: ${{ inputs.cache_cargo_primary }}
         VELNOR_CACHE_CARGO_MATCHED: ${{ inputs.cache_cargo_matched }}
+        VELNOR_CACHE_CARGO_VERIFIED: ${{ inputs.cache_cargo_verified }}
+        VELNOR_CACHE_CARGO_SAVED: ${{ inputs.cache_cargo_saved }}
+        VELNOR_CACHE_MBX_OUTCOME: ${{ inputs.cache_mbx_outcome }}
         VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}
         VELNOR_CACHE_MBX_PRIMARY: ${{ inputs.cache_mbx_primary }}
+        VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}
+        VELNOR_CACHE_MBX_VERIFIED: ${{ inputs.cache_mbx_verified }}
+        VELNOR_CACHE_MBX_SAVED: ${{ inputs.cache_mbx_saved }}
+        VELNOR_CACHE_DOCKER_SEED_OUTCOME: ${{ inputs.cache_docker_seed_outcome }}
         VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ inputs.cache_docker_seed_primary }}
         VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ inputs.cache_docker_seed_matched }}
+        VELNOR_CACHE_DOCKER_SEED_VERIFIED: ${{ inputs.cache_docker_seed_verified }}
+        VELNOR_CACHE_DOCKER_SEED_SAVED: ${{ inputs.cache_docker_seed_saved }}
       run: |
         set -uo pipefail
         max_telemetry_seconds=$((7 * 24 * 60 * 60))
@@ -184,73 +262,111 @@ runs:
         if [[ -z "$job_name" ]]; then
           job_name="unknown"
         fi
-        classify_gha_cache() {
-          local primary="${1:-}" matched="${2:-}"
-          if [[ -z "$primary" && -z "$matched" ]]; then
-            return 0
-          fi
-          if [[ -z "$matched" ]]; then
-            echo cold
-          elif [[ "$primary" == "$matched" ]]; then
-            echo exact
-          else
-            echo prefix
-          fi
-        }
-        host_warm_layer() {
+        # Whether the generator declared this layer for the job. An undeclared
+        # layer with any evidence contradicts the plan; an undeclared layer
+        # without evidence is disabled, not cold.
+        layer_declared() {
           local layer="$1"
-          local layers="${VELNOR_HOST_WARM_LAYERS:-}"
-          [[ -n "$layers" ]] || return 1
-          [[ ",$layers," == *",$layer,"* ]]
+          local declared="${VELNOR_CACHE_DECLARED_LAYERS:-}"
+          [[ ",$declared," == *",$layer,"* ]]
         }
-        classify_mbx() {
-          if host_warm_layer mbx; then
-            echo host_warm
-            return
-          fi
-          local hit="${VELNOR_CACHE_MBX_HIT:-}"
-          if [[ "$hit" == "true" ]]; then
-            echo exact
-            return
-          fi
-          if [[ -s "$log" ]]; then
-            if grep -qiE 'exact hit' "$log"; then
-              echo exact
-              return
-            fi
-            if grep -qiE 'warm start' "$log"; then
-              echo prefix
-              return
-            fi
-            if grep -qiE '(^|[^a-z])miss([^a-z]|$)' "$log"; then
-              echo cold
-              return
-            fi
-          fi
-          if [[ "$hit" == "false" ]]; then
-            echo prefix
-            return
-          fi
-          echo cold
-        }
+        # One layer's restore/save lifecycle state. Mirrors the
+        # CacheLayerEvidence decision table in snapshot.rs: declaration,
+        # step completion, verification, key comparison, then save
+        # evidence. Contradictory evidence always yields unknown.
         cache_outcome_for() {
           local layer="$1"
-          local primary="${2:-}" matched="${3:-}"
-          if host_warm_layer "$layer"; then
-            echo host_warm
+          local outcome="${2:-}" hit="${3:-}" primary="${4:-}" matched="${5:-}"
+          local verified="${6:-}" saved="${7:-}"
+          if ! layer_declared "$layer"; then
+            if [[ -n "$outcome$hit$primary$matched$verified$saved" ]]; then
+              echo unknown
+            else
+              echo disabled
+            fi
             return
           fi
-          if [[ "$layer" == mbx ]]; then
-            classify_mbx
+          case "$outcome" in
+            skipped|failure|cancelled)
+              # The restore never completed, so it emitted no outputs. Any
+              # key evidence contradicts the outcome.
+              if [[ -n "$primary$matched$hit" ]]; then
+                echo unknown
+              else
+                echo not_run
+              fi
+              return
+              ;;
+            success|"") ;;
+            *) echo unknown; return ;;
+          esac
+          # Only a lowercase boolean is a hit signal; anything else is a
+          # corrupt producer output, not a miss.
+          case "$hit" in
+            ""|true|false) ;;
+            *) echo unknown; return ;;
+          esac
+          if [[ "$verified" == false ]]; then
+            echo invalid
             return
           fi
-          classify_gha_cache "$primary" "$matched"
+          if [[ -n "$primary" && -n "$matched" ]]; then
+            if [[ "$primary" == "$matched" ]]; then
+              # Equal keys contradict an explicit not-exact bit.
+              if [[ "$hit" == false ]]; then
+                echo unknown
+              else
+                echo exact
+              fi
+            elif [[ "$hit" == true ]]; then
+              # Differing keys contradict an explicit exact-hit bit.
+              echo unknown
+            else
+              echo compatible_seed
+            fi
+            return
+          fi
+          if [[ -n "$primary" ]]; then
+            # Mr. Boxington defines hit=true as an exact-key match and
+            # exposes the primary key, but not always a matched key.
+            # hit=false without a matched key is ambiguous: a seed the
+            # producer did not expose is indistinguishable from a miss.
+            case "$hit" in
+              true) echo exact; return ;;
+              false) echo unknown; return ;;
+            esac
+            # A miss that saved populates the cache for later runs; a miss
+            # without a save (an untrusted writer) leaves it cold.
+            if [[ "$saved" == true ]]; then
+              echo saved
+            else
+              echo miss
+            fi
+            return
+          fi
+          # A matched key without its primary key is incomplete producer
+          # evidence. Do not manufacture a seed result from it.
+          if [[ -n "$matched" ]]; then
+            echo unknown
+            return
+          fi
+          if [[ "$saved" == true ]]; then
+            echo saved
+          else
+            echo unknown
+          fi
         }
-        rustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}")"
-        mold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}")"
-        cargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}")"
-        mbx_outcome="$(cache_outcome_for mbx "" "")"
-        docker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}")"
+        cache_declarations_json='{"host_warm_layers":[]}'
+        if command -v jq >/dev/null 2>&1; then
+          cache_declarations_json="$(printf '%s' "${VELNOR_HOST_WARM_LAYERS:-}" | jq -Rsc \
+            'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | {host_warm_layers: .}' \
+            2>/dev/null || echo '{"host_warm_layers":[]}')"
+        fi
+        rustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_OUTCOME:-}" "" "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}" "${VELNOR_CACHE_RUSTUP_VERIFIED:-}" "${VELNOR_CACHE_RUSTUP_SAVED:-}")"
+        mold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_OUTCOME:-}" "" "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}" "${VELNOR_CACHE_MOLD_VERIFIED:-}" "${VELNOR_CACHE_MOLD_SAVED:-}")"
+        cargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_OUTCOME:-}" "" "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}" "${VELNOR_CACHE_CARGO_VERIFIED:-}" "${VELNOR_CACHE_CARGO_SAVED:-}")"
+        mbx_outcome="$(cache_outcome_for mbx "${VELNOR_CACHE_MBX_OUTCOME:-}" "${VELNOR_CACHE_MBX_HIT:-}" "${VELNOR_CACHE_MBX_PRIMARY:-}" "${VELNOR_CACHE_MBX_MATCHED:-}" "${VELNOR_CACHE_MBX_VERIFIED:-}" "${VELNOR_CACHE_MBX_SAVED:-}")"
+        docker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_OUTCOME:-}" "" "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}" "${VELNOR_CACHE_DOCKER_SEED_VERIFIED:-}" "${VELNOR_CACHE_DOCKER_SEED_SAVED:-}")"
         updating_index=0
         updating_git=0
         downloading_crates=0
@@ -290,7 +406,8 @@ runs:
               docker_seed: ($docker_seed | if length > 0 then . else null end)
             }' 2>/dev/null || echo '{}')"
         fi
-        cold_layers=()
+        miss_layers=()
+        invalid_layers=()
         for layer in rustup mold cargo mbx docker_seed; do
           outcome=""
           case "$layer" in
@@ -300,8 +417,11 @@ runs:
             mbx) outcome="$mbx_outcome" ;;
             docker_seed) outcome="$docker_seed_outcome" ;;
           esac
-          if [[ "$outcome" == cold ]]; then
-            cold_layers+=("$layer")
+          if [[ "$outcome" == miss ]]; then
+            miss_layers+=("$layer")
+          fi
+          if [[ "$outcome" == invalid ]]; then
+            invalid_layers+=("$layer")
           fi
         done
         report_json="$(jq -nc \
@@ -326,8 +446,9 @@ runs:
           --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
           --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
           --argjson cache_outcomes "$cache_outcomes_json" \
+          --argjson cache_declarations "$cache_declarations_json" \
           '{
-            schema_version: 1,
+            schema_version: 3,
             job: $job,
             log_present: $log_present,
             queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
@@ -343,6 +464,7 @@ runs:
             cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),
             total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),
             cache_outcomes: $cache_outcomes,
+            cache_declarations: $cache_declarations,
             origin_downloads: {
               updating_crates_io_index: $updating_index,
               updating_git: $updating_git,
@@ -375,6 +497,7 @@ runs:
           echo "| cache_outcomes.cargo | ${cargo_outcome:-n/a} |"
           echo "| cache_outcomes.mbx | ${mbx_outcome:-n/a} |"
           echo "| cache_outcomes.docker_seed | ${docker_seed_outcome:-n/a} |"
+          echo "| cache_declarations.host_warm_layers | ${VELNOR_HOST_WARM_LAYERS:-none} |"
           echo "| queue_seconds | ${queue:-unknown} |"
           echo "| runner_setup_seconds | ${runner_setup:-unknown} |"
           echo "| selection_transport_seconds | ${selection_transport:-unknown} |"
@@ -389,7 +512,10 @@ runs:
           echo "| downloading_crates | $downloading_crates |"
           echo "| compiling_lines | $compiling_count |"
         } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-        if ((${#cold_layers[@]} > 0)); then
-          echo "::warning::Cold cache layer(s): ${cold_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"
+        if ((${#miss_layers[@]} > 0)); then
+          echo "::warning::Cache miss layer(s): ${miss_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"
+        fi
+        if ((${#invalid_layers[@]} > 0)); then
+          echo "::warning::Invalid cache layer(s): ${invalid_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"
         fi
         exit 0

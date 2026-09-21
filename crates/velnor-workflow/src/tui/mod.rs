@@ -25,9 +25,9 @@ use termrock::style::{ColorCapability, DesignSystem};
 use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
 use super::{
-    apply_generated_write_plan, generated_files, plan_generated_write, scan_target, Checkout, Cli,
-    GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
-    RunnerMode, WriteOutcome,
+    apply_generated_write_plan, generated_files, generated_symlinks, plan_generated_write,
+    scan_target, Checkout, Cli, GeneratedWritePlan, GenerationInputs, GeneratorError,
+    ProjectConfig, RepositorySource, RunnerMode, WriteOutcome,
 };
 
 const MIN_WIDTH: u16 = 52;
@@ -544,7 +544,7 @@ impl App {
             );
             return;
         };
-        let plan = match plan_generated_write(output_root, &files, &inputs) {
+        let plan = match plan_generated_write(output_root, &files, &generated_symlinks(), &inputs) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());
@@ -577,6 +577,7 @@ impl App {
             }
         };
         let files_for_worker = files.clone();
+        let symlinks_for_worker = generated_symlinks();
         let dry_run = self.cli.dry_run;
         let check = self.cli.check;
         let force = self.cli.force;
@@ -599,6 +600,7 @@ impl App {
             let result = complete_generation(
                 &output_root,
                 &files_for_worker,
+                &symlinks_for_worker,
                 &inputs,
                 dry_run,
                 check,
@@ -663,24 +665,37 @@ impl App {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the review worker replays the exact write contract the plan was built with"
+)]
 fn complete_generation(
     output_root: &std::path::Path,
     files: &std::collections::BTreeMap<std::path::PathBuf, String>,
+    symlinks: &std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf>,
     inputs: &GenerationInputs,
     dry_run: bool,
     check: bool,
     force: bool,
     reviewed_plan: &GeneratedWritePlan,
 ) -> Result<GenerationCompletion, GeneratorError> {
-    let plan = plan_generated_write(output_root, files, inputs)?;
+    let plan = plan_generated_write(output_root, files, symlinks, inputs)?;
     if &plan != reviewed_plan {
         return Ok(GenerationCompletion::PlanChanged(plan));
     }
     if check && plan.has_drift() {
         return Ok(GenerationCompletion::CheckDrift(plan));
     }
-    let outcome =
-        apply_generated_write_plan(output_root, files, inputs, dry_run, check, force, &plan)?;
+    let outcome = apply_generated_write_plan(
+        output_root,
+        files,
+        symlinks,
+        inputs,
+        dry_run,
+        check,
+        force,
+        &plan,
+    )?;
     Ok(GenerationCompletion::Finished { outcome, plan })
 }
 
@@ -930,7 +945,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Synthetic generation inputs for tests that exercise the file plan
     /// directly instead of a scanned repository.
@@ -960,6 +974,8 @@ mod tests {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: dependencies
                 .iter()
                 .map(|dependency| (*dependency).to_owned())
@@ -1047,6 +1063,7 @@ mod tests {
             velnor_concurrency_group: None,
             velnor_serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::config::CacheGithubSection::default(),
@@ -1194,6 +1211,7 @@ mod tests {
             }],
             changed: Vec::new(),
             stale: Vec::new(),
+            unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: true,
             ownership_needs_refresh: true,
@@ -1225,6 +1243,7 @@ mod tests {
             }],
             changed: vec![PathBuf::from(".github/workflows/ci-pr.yml")],
             stale: Vec::new(),
+            unknown: Vec::new(),
             conflicts: vec![PathBuf::from(".github/workflows/ci-pr.yml")],
             ownership_present: true,
             ownership_needs_refresh: false,
@@ -1251,18 +1270,20 @@ mod tests {
 
     #[test]
     fn confirmation_rejects_filesystem_changes_after_review() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
         let root = std::env::temp_dir().join(format!(
-            "github-actions-unified-confirmation-{}-{nonce}",
-            std::process::id()
+            "github-actions-unified-confirmation-{}",
+            crate::unique_suffix()
         ));
         let relative = PathBuf::from(".github/workflows/ci-pr.yml");
         let content = format!("{}name: CI\n", crate::GENERATED_HEADER);
         let files = BTreeMap::from([(relative.clone(), content.clone())]);
         assert!(fs::create_dir_all(root.join(".github/workflows")).is_ok());
-        let reviewed = crate::plan_generated_write(&root, &files, &test_inputs());
+        let reviewed = crate::plan_generated_write(
+            &root,
+            &files,
+            &crate::generated_symlinks(),
+            &test_inputs(),
+        );
         assert!(reviewed.is_ok());
         let Some(reviewed) = reviewed.ok() else {
             return;
@@ -1272,6 +1293,7 @@ mod tests {
         let result = super::complete_generation(
             &root,
             &files,
+            &crate::generated_symlinks(),
             &test_inputs(),
             true,
             false,

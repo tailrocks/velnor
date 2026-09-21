@@ -3874,6 +3874,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "time",
 ]
 
 [[package]]
@@ -4066,8 +4067,11 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "url",
+ "uuid",
  "velnor-client",
  "velnor-model",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -4078,13 +4082,19 @@ dependencies = [
  "clap",
  "crossterm",
  "globset",
+ "libc",
  "noyalib",
+ "proc-macro2",
  "ratatui",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "syn 2.0.119",
+ "tar",
  "termrock",
  "toml",
+ "uuid",
  "velnor-runner",
 ]
 

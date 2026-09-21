@@ -57,8 +57,10 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
 serde_yaml = { package = "noyalib", version = "0.0.28", features = ["compat-serde-yaml"] }
 globset = "0.4.16"
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 rayon = "1.12.0"
 sha2 = "0.11"
+syn = { version = "2.0.119", features = ["full", "parsing"] }
 tar = "0.4.46"
 sigstore-sign = { version = "0.11.0", default-features = false, features = ["native-tls"] }
 thiserror = "2.0.12"

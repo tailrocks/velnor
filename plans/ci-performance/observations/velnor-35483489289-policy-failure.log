@@ -1,0 +1,64 @@
+2026-09-20T02:19:57.2056147Z ##[group]Run set -euo pipefail
+2026-09-20T02:19:57.2056461Z set -euo pipefail
+2026-09-20T02:19:57.2056731Z velnor-workflow policy \
+2026-09-20T02:19:57.2057027Z   --workflow-root "$WORKFLOW_ROOT" \
+2026-09-20T02:19:57.2057330Z   --head-sha "$HEAD_SHA" \
+2026-09-20T02:19:57.2057599Z   --base-sha "$BASE_SHA" \
+2026-09-20T02:19:57.2057974Z   --candidate-manifest "${VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}" \
+2026-09-20T02:19:57.2058407Z   --ruleset-contexts "$RULESET_CONTEXTS"
+2026-09-20T02:19:57.2079584Z shell: /usr/bin/bash -e {0}
+2026-09-20T02:19:57.2079859Z env:
+2026-09-20T02:19:57.2080268Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-candidate/velnor-workflow
+2026-09-20T02:19:57.2080974Z   VELNOR_WORKFLOW_CANDIDATE_MANIFEST: /home/runner/work/_temp/velnor-workflow-candidate/candidate-manifest.json
+2026-09-20T02:19:57.2081498Z   RULESET_CONTEXTS: DCO,Policy,ci-required
+2026-09-20T02:19:57.2081907Z   WORKFLOW_ROOT: /home/runner/work/velnor/velnor/policy-checkout
+2026-09-20T02:19:57.2082303Z   HEAD_SHA: f8ac97b1df38ae33c70fcc6f01bfc7a82e1890e9
+2026-09-20T02:19:57.2082644Z   BASE_SHA: 325719f1e05d3d46322c9fd3eeb9ad545e175638
+2026-09-20T02:19:57.2083051Z   VELNOR_WORKFLOW_POLICY_REVISION: 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
+2026-09-20T02:19:57.2083431Z ##[endgroup]
+2026-09-20T02:19:57.2429666Z error: workflow policy failed: generated-tree
+2026-09-20T02:19:57.2430770Z PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = 325719f1e05d3d46322c9fd3eeb9ad545e175638
+2026-09-20T02:19:57.2432832Z PASS pin-reachable          325719f1e05d3d46322c9fd3eeb9ad545e175638 is an ancestor of head f8ac97b1df38ae33c70fcc6f01bfc7a82e1890e9 (inherited from the base branch)
+2026-09-20T02:19:57.2434231Z PASS pin-monotonic          the declared pin descends from the base validator 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
+2026-09-20T02:19:57.2437881Z PASS entrypoint-pin         .github/workflows/ci-policy.yml acquires and exports the declared pin (2 literals)
+2026-09-20T02:19:57.2439001Z FAIL generated-tree         could not regenerate the tree with velnor-workflow at 325719f1e05d3d46322c9fd3eeb9ad545e175638
+2026-09-20T02:19:57.2441108Z        - VELNOR_WORKFLOW_PINNED_BINARY=/home/runner/work/_temp/velnor-workflow-candidate/velnor-workflow is not the declared pin: reports closure af47d1e21c7775e9598e32cc8d855dd3d8747142b42647782b0f306bd732a3e8, which is not the pin's closure
+2026-09-20T02:19:57.2442508Z PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+2026-09-20T02:19:57.2443371Z PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+2026-09-20T02:19:57.2444127Z PASS trusted-runners        every self-hosted job is gated on a trusted event and an approved runner
+2026-09-20T02:19:57.2444752Z PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+2026-09-20T02:19:57.2445297Z PASS workflow-structure     every workflow parses as GitHub would run it
+2026-09-20T02:19:57.2445934Z PASS required-checks        .github/workflows/ci-pr.yml emits [ci-required]; live ruleset requires [DCO, Policy, ci-required]
+2026-09-20T02:19:57.2446462Z policy: 11 rules, 1 failed
+2026-09-20T02:19:57.2456158Z ##[error]Process completed with exit code 1.
+2026-09-20T02:19:57.2564974Z Post job cleanup.
+2026-09-20T02:19:57.3365304Z [command]/usr/bin/git version
+2026-09-20T02:19:57.3419202Z git version 2.55.0
+2026-09-20T02:19:57.3459732Z Temporarily overriding HOME='/home/runner/work/_temp/83294927-9b03-4970-8216-2d6563627dac' before making global git config changes
+2026-09-20T02:19:57.3460751Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-20T02:19:57.3466153Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-setup-action
+2026-09-20T02:19:57.3494392Z Removing SSH command configuration
+2026-09-20T02:19:57.3501964Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-20T02:19:57.3533770Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-20T02:19:57.3742123Z Removing HTTP extra header
+2026-09-20T02:19:57.3743037Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-20T02:19:57.3766052Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-20T02:19:57.3967432Z Removing includeIf entries pointing to credentials config files
+2026-09-20T02:19:57.3976545Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-20T02:19:57.4004707Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-20T02:19:57.4354690Z Post job cleanup.
+2026-09-20T02:19:57.5206582Z [command]/usr/bin/git version
+2026-09-20T02:19:57.5254793Z git version 2.55.0
+2026-09-20T02:19:57.5290321Z Temporarily overriding HOME='/home/runner/work/_temp/c1fa2a6d-a409-414f-be5c-20ac0a8199c3' before making global git config changes
+2026-09-20T02:19:57.5291899Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-20T02:19:57.5299203Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+2026-09-20T02:19:57.5328499Z Removing SSH command configuration
+2026-09-20T02:19:57.5335237Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-20T02:19:57.5368062Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-20T02:19:57.5561247Z Removing HTTP extra header
+2026-09-20T02:19:57.5566464Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-20T02:19:57.5595257Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-20T02:19:57.5786236Z Removing includeIf entries pointing to credentials config files
+2026-09-20T02:19:57.5793401Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-20T02:19:57.5822830Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-20T02:19:57.6206960Z Cleaning up orphan processes

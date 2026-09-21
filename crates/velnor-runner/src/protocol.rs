@@ -93,7 +93,7 @@ pub enum BrokerErrorCategory {
 /// on this type (rather than in a wrapper) so the error chain keeps its
 /// shape and downstream `GitHubApiError` downcasts (credential refresh,
 /// quota/rate-limit hints) keep working untouched.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
     pub status: u16,
@@ -111,6 +111,20 @@ pub struct GitHubApiError {
     /// and every other `GitHubApiError` producer predates the taxonomy (see
     /// the remaining-untyped-sites list in `plans/2026-09-14-r0-798-corr.md`).
     pub(crate) category: Option<BrokerErrorCategory>,
+}
+
+impl fmt::Debug for GitHubApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubApiError")
+            .field("status", &self.status)
+            .field("action", &self.action)
+            .field("body", &"<redacted>")
+            .field("retry_after_seconds", &self.retry_after_seconds)
+            .field("rate_limit_reset_epoch", &self.rate_limit_reset_epoch)
+            .field("remaining", &self.remaining)
+            .field("category", &self.category)
+            .finish()
+    }
 }
 
 /// Boundary-produced category of a broker/completion failure, or `None`
@@ -600,13 +614,34 @@ pub fn github_api_quota_status(error: &anyhow::Error) -> Option<GitHubRateLimitS
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GitHubScope {
     pub original_url: String,
     pub hosted: bool,
     pub api_base_url: Url,
     pub jit_config_url: Url,
     runner_scope_path: String,
+}
+
+impl fmt::Debug for GitHubScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubScope")
+            .field(
+                "original_url",
+                &redacted_authenticated_url(&self.original_url),
+            )
+            .field("hosted", &self.hosted)
+            .field(
+                "api_base_url",
+                &redacted_authenticated_url(self.api_base_url.as_str()),
+            )
+            .field(
+                "jit_config_url",
+                &redacted_authenticated_url(self.jit_config_url.as_str()),
+            )
+            .field("runner_scope_path", &self.runner_scope_path)
+            .finish()
+    }
 }
 
 impl GitHubScope {
@@ -801,10 +836,19 @@ pub struct GitHubJitConfigRequest {
     pub work_folder: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct GitHubJitConfigResponse {
     pub runner: GitHubJitRunner,
     pub encoded_jit_config: String,
+}
+
+impl fmt::Debug for GitHubJitConfigResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubJitConfigResponse")
+            .field("runner", &self.runner)
+            .field("encoded_jit_config", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -838,11 +882,21 @@ pub struct RunnerGroup {
     pub default: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DecodedJitConfig {
     pub settings: DecodedJitRunnerSettings,
     pub credentials: DecodedJitCredentials,
     pub private_key_pem: String,
+}
+
+impl fmt::Debug for DecodedJitConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecodedJitConfig")
+            .field("settings", &self.settings)
+            .field("credentials", &"<redacted>")
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -914,7 +968,7 @@ fn deser_opt_i64_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>
     d.deserialize_any(Visitor)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct DecodedJitRunnerSettings {
     #[serde(
         default,
@@ -994,7 +1048,31 @@ pub struct DecodedJitRunnerSettings {
     pub disable_update: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+impl fmt::Debug for DecodedJitRunnerSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let server_url = self.server_url.as_deref().map(redacted_authenticated_url);
+        let server_url_v2 = self
+            .server_url_v2
+            .as_deref()
+            .map(redacted_authenticated_url);
+        let github_url = self.github_url.as_deref().map(redacted_authenticated_url);
+        f.debug_struct("DecodedJitRunnerSettings")
+            .field("agent_id", &self.agent_id)
+            .field("agent_name", &self.agent_name)
+            .field("pool_id", &self.pool_id)
+            .field("pool_name", &self.pool_name)
+            .field("server_url", &server_url)
+            .field("server_url_v2", &server_url_v2)
+            .field("github_url", &github_url)
+            .field("work_folder", &self.work_folder)
+            .field("use_v2_flow", &self.use_v2_flow)
+            .field("ephemeral", &self.ephemeral)
+            .field("disable_update", &self.disable_update)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct DecodedJitCredentials {
     #[serde(rename = "Scheme", alias = "scheme")]
     pub scheme: String,
@@ -1002,11 +1080,33 @@ pub struct DecodedJitCredentials {
     pub data: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for DecodedJitCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecodedJitCredentials")
+            .field("scheme", &self.scheme)
+            .field("data", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct OAuthJwtCredentials {
     pub client_id: String,
     pub authorization_url: String,
     pub private_key_pem: String,
+}
+
+impl fmt::Debug for OAuthJwtCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthJwtCredentials")
+            .field("client_id", &self.client_id)
+            .field(
+                "authorization_url",
+                &redacted_authenticated_url(&self.authorization_url),
+            )
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1019,7 +1119,7 @@ struct OAuthJwtClaims {
     exp: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthTokenResponse {
     #[serde(rename = "access_token")]
     pub access_token: Option<String>,
@@ -1033,10 +1133,34 @@ pub struct OAuthTokenResponse {
     pub error_description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for OAuthTokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthTokenResponse")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("error", &self.error)
+            .field("error_description", &self.error_description)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct OAuthAccessToken {
     pub token: String,
     pub expires_in: Option<std::time::Duration>,
+}
+
+impl fmt::Debug for OAuthAccessToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAccessToken")
+            .field("token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -1181,10 +1305,19 @@ fn build_client_assertion(credentials: &OAuthJwtCredentials) -> Result<String> {
     encode(&header, &claims, &key).context("sign OAuth client assertion")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunnerKeyPair {
     pub private_key_pem: String,
     pub public_key: TaskAgentPublicKey,
+}
+
+impl fmt::Debug for RunnerKeyPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunnerKeyPair")
+            .field("private_key_pem", &"<redacted>")
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 impl RunnerKeyPair {
@@ -1213,6 +1346,48 @@ pub(crate) struct GithubHttpResponse {
     pub(crate) headers: HeaderMap,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GithubContentsRequestError {
+    /// Sending a request or reading its response stream failed.
+    Transport(String),
+    /// The response body exceeds the caller's bounded-read limit.
+    /// `status` is the HTTP status when the caller already read it; `None`
+    /// when the envelope was too large to parse a status line.
+    BodyTooLarge {
+        max_body_bytes: usize,
+        status: Option<u16>,
+    },
+    /// The response body is not UTF-8, so the caller cannot parse its text format.
+    BodyInvalidUtf8 { status: Option<u16> },
+    /// Local configuration or response framing failed before a usable response existed.
+    Internal(String),
+}
+
+impl fmt::Display for GithubContentsRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(detail) => {
+                write!(formatter, "GitHub Contents transport failed: {detail}")
+            }
+            Self::BodyTooLarge { max_body_bytes, .. } => write!(
+                formatter,
+                "GitHub Contents response body exceeds {max_body_bytes} bytes"
+            ),
+            Self::BodyInvalidUtf8 { .. } => {
+                formatter.write_str("GitHub Contents response body is not valid UTF-8")
+            }
+            Self::Internal(detail) => {
+                write!(
+                    formatter,
+                    "GitHub Contents request failed internally: {detail}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for GithubContentsRequestError {}
+
 /// Read an authenticated raw GitHub Contents response through the selected
 /// host transport. Native mode keeps the existing blocking client; curl mode
 /// uses the typed argv/header-pipe path and never falls back to native.
@@ -1221,9 +1396,11 @@ pub(crate) fn github_contents_request(
     url: &str,
     bearer_token: &str,
     max_body_bytes: usize,
-) -> Result<GithubHttpResponse> {
-    let transport = github_http_transport()?;
-    validate_authenticated_url(url)?;
+) -> std::result::Result<GithubHttpResponse, GithubContentsRequestError> {
+    let transport = github_http_transport()
+        .map_err(|error| GithubContentsRequestError::Internal(format!("{error:#}")))?;
+    validate_authenticated_url(url)
+        .map_err(|error| GithubContentsRequestError::Internal(format!("{error:#}")))?;
     match transport {
         "native" => {
             let response = client
@@ -1233,16 +1410,16 @@ pub(crate) fn github_contents_request(
                 .header("X-GitHub-Api-Version", "2026-03-10")
                 .timeout(Duration::from_secs(GITHUB_CONTENTS_MAX_TIME_SECS))
                 .send()
-                .with_context(|| {
-                    format!(
-                        "send native GitHub Contents request {}",
+                .map_err(|error| {
+                    GithubContentsRequestError::Transport(format!(
+                        "send native GitHub Contents request {}: {error}",
                         redacted_authenticated_url(url)
-                    )
+                    ))
                 })?;
             let status = response.status().as_u16();
             let headers = response.headers().clone();
             let content_length = response.content_length();
-            let body = read_bounded_http_body(response, content_length, max_body_bytes)?;
+            let body = read_bounded_http_body(response, content_length, max_body_bytes, status)?;
             Ok(GithubHttpResponse {
                 status,
                 body,
@@ -1260,15 +1437,16 @@ pub(crate) fn github_contents_request(
                 "application/vnd.github.raw+json",
                 Some("2026-03-10"),
             )
-            .with_context(|| format!("build curl GitHub Contents request {redacted_url}"))?;
-            let response = run_curl_command(spec)
-                .with_context(|| format!("send curl GitHub Contents request {redacted_url}"))?;
-            if response.body.len() > max_body_bytes {
-                anyhow::bail!("GitHub Contents response exceeds {max_body_bytes} bytes");
-            }
-            Ok(response)
+            .map_err(|error| {
+                GithubContentsRequestError::Internal(format!(
+                    "build curl GitHub Contents request {redacted_url}: {error:#}"
+                ))
+            })?;
+            run_curl_contents_command(spec, max_body_bytes)
         }
-        other => bail!("github HTTP transport selector returned an unknown value: {other}"),
+        other => Err(GithubContentsRequestError::Internal(format!(
+            "github HTTP transport selector returned an unknown value: {other}"
+        ))),
     }
 }
 
@@ -1276,20 +1454,36 @@ pub(crate) fn read_bounded_http_body<R: Read>(
     reader: R,
     content_length: Option<u64>,
     max_body_bytes: usize,
-) -> Result<String> {
-    let max_body_bytes = u64::try_from(max_body_bytes).context("metadata body limit overflows")?;
-    if content_length.is_some_and(|length| length > max_body_bytes) {
-        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+    status: u16,
+) -> std::result::Result<String, GithubContentsRequestError> {
+    let max_body_bytes_u64 = u64::try_from(max_body_bytes).map_err(|error| {
+        GithubContentsRequestError::Internal(format!("metadata body limit overflows: {error}"))
+    })?;
+    if content_length.is_some_and(|length| length > max_body_bytes_u64) {
+        return Err(GithubContentsRequestError::BodyTooLarge {
+            max_body_bytes,
+            status: Some(status),
+        });
     }
     let mut body =
-        Vec::with_capacity(content_length.unwrap_or_default().min(max_body_bytes) as usize);
+        Vec::with_capacity(content_length.unwrap_or_default().min(max_body_bytes_u64) as usize);
     reader
-        .take(max_body_bytes.saturating_add(1))
-        .read_to_end(&mut body)?;
-    if body.len() > max_body_bytes as usize {
-        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+        .take(max_body_bytes_u64.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|error| {
+            GithubContentsRequestError::Transport(format!(
+                "read GitHub Contents response body: {error}"
+            ))
+        })?;
+    if body.len() > max_body_bytes {
+        return Err(GithubContentsRequestError::BodyTooLarge {
+            max_body_bytes,
+            status: Some(status),
+        });
     }
-    String::from_utf8(body).context("decode GitHub response body as UTF-8")
+    String::from_utf8(body).map_err(|_| GithubContentsRequestError::BodyInvalidUtf8 {
+        status: Some(status),
+    })
 }
 
 fn github_error_from_response(action: &str, response: GithubHttpResponse) -> anyhow::Error {
@@ -1590,6 +1784,21 @@ fn run_curl_oauth_form_command(args: Vec<OsString>, body: Vec<u8>) -> Result<Git
 }
 
 fn run_curl_command(spec: CurlCommandSpec) -> Result<GithubHttpResponse> {
+    let output = run_curl_command_output(spec).map_err(anyhow::Error::new)?;
+    parse_curl_response(&output)
+}
+
+fn run_curl_contents_command(
+    spec: CurlCommandSpec,
+    max_body_bytes: usize,
+) -> std::result::Result<GithubHttpResponse, GithubContentsRequestError> {
+    let output = run_curl_command_output(spec)?;
+    parse_curl_response_with_body_limit(&output, Some(max_body_bytes))
+}
+
+fn run_curl_command_output(
+    spec: CurlCommandSpec,
+) -> std::result::Result<Vec<u8>, GithubContentsRequestError> {
     let mut child = Command::new("curl")
         .args(spec.args)
         // The curl child does not need the operator token in its environment;
@@ -1600,48 +1809,82 @@ fn run_curl_command(spec: CurlCommandSpec) -> Result<GithubHttpResponse> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("spawn curl GitHub request")?;
+        .map_err(|error| {
+            GithubContentsRequestError::Internal(format!("spawn curl GitHub request: {error}"))
+        })?;
 
-    let mut header_stdin = child
-        .stdin
-        .take()
-        .context("open curl GitHub request header pipe")?;
+    let mut header_stdin = child.stdin.take().ok_or_else(|| {
+        GithubContentsRequestError::Internal(
+            "open curl GitHub request header pipe: stdin pipe is unavailable".to_string(),
+        )
+    })?;
     if let Err(error) = header_stdin.write_all(&spec.header_stdin) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(error).context("write curl GitHub request headers");
+        return Err(GithubContentsRequestError::Transport(format!(
+            "write curl GitHub request headers: {error}"
+        )));
     }
     drop(header_stdin);
 
-    let output = child
-        .wait_with_output()
-        .context("wait for curl GitHub request")?;
+    let output = child.wait_with_output().map_err(|error| {
+        GithubContentsRequestError::Transport(format!("wait for curl GitHub request: {error}"))
+    })?;
     if !output.status.success() {
         let exit = output
             .status
             .code()
             .map_or_else(|| "signal".to_owned(), |code| code.to_string());
-        bail!("curl GitHub request exited with status {exit}");
+        return Err(GithubContentsRequestError::Transport(format!(
+            "curl GitHub request exited with status {exit}"
+        )));
     }
-    parse_curl_response(&output.stdout)
+    Ok(output.stdout)
 }
 
 fn parse_curl_response(output: &[u8]) -> Result<GithubHttpResponse> {
+    parse_curl_response_with_body_limit(output, None).map_err(anyhow::Error::new)
+}
+
+fn parse_curl_response_with_body_limit(
+    output: &[u8],
+    max_body_bytes: Option<usize>,
+) -> std::result::Result<GithubHttpResponse, GithubContentsRequestError> {
     if output.len() > GITHUB_CURL_MAX_RESPONSE_BYTES {
-        bail!("curl GitHub response exceeded {GITHUB_CURL_MAX_RESPONSE_BYTES} bytes");
+        return Err(match max_body_bytes {
+            Some(max_body_bytes) => GithubContentsRequestError::BodyTooLarge {
+                max_body_bytes,
+                status: None,
+            },
+            None => GithubContentsRequestError::Internal(format!(
+                "curl GitHub response exceeded {GITHUB_CURL_MAX_RESPONSE_BYTES} bytes"
+            )),
+        });
     }
 
     let mut offset = 0;
     let (status, headers) = loop {
-        let remaining = output
-            .get(offset..)
-            .context("curl GitHub response ended before headers")?;
+        let remaining = output.get(offset..).ok_or_else(|| {
+            GithubContentsRequestError::Internal(
+                "curl GitHub response ended before headers".to_string(),
+            )
+        })?;
         if !remaining.starts_with(b"HTTP/") {
-            bail!("curl GitHub response is missing an HTTP status line");
+            return Err(GithubContentsRequestError::Internal(
+                "curl GitHub response is missing an HTTP status line".to_string(),
+            ));
         }
-        let (header_end, separator_len) = curl_header_terminator(remaining)
-            .context("curl GitHub response headers are not terminated")?;
-        let (status, headers) = parse_curl_header_block(&remaining[..header_end])?;
+        let (header_end, separator_len) = curl_header_terminator(remaining).ok_or_else(|| {
+            GithubContentsRequestError::Internal(
+                "curl GitHub response headers are not terminated".to_string(),
+            )
+        })?;
+        let (status, headers) =
+            parse_curl_header_block(&remaining[..header_end]).map_err(|error| {
+                GithubContentsRequestError::Internal(format!(
+                    "parse curl GitHub response headers: {error:#}"
+                ))
+            })?;
         offset = offset
             .saturating_add(header_end)
             .saturating_add(separator_len);
@@ -1651,13 +1894,24 @@ fn parse_curl_response(output: &[u8]) -> Result<GithubHttpResponse> {
         break (status, headers);
     };
 
-    let body = String::from_utf8(
-        output
-            .get(offset..)
-            .context("curl GitHub response body offset is invalid")?
-            .to_vec(),
-    )
-    .context("decode curl GitHub response body as UTF-8")?;
+    let body = output.get(offset..).ok_or_else(|| {
+        GithubContentsRequestError::Internal(
+            "curl GitHub response body offset is invalid".to_string(),
+        )
+    })?;
+    if let Some(max_body_bytes) = max_body_bytes
+        && body.len() > max_body_bytes
+    {
+        return Err(GithubContentsRequestError::BodyTooLarge {
+            max_body_bytes,
+            status: Some(status),
+        });
+    }
+    let body = String::from_utf8(body.to_vec()).map_err(|_| {
+        GithubContentsRequestError::BodyInvalidUtf8 {
+            status: Some(status),
+        }
+    })?;
     Ok(GithubHttpResponse {
         status,
         body,
@@ -3910,7 +4164,7 @@ pub struct TaskAgentPool {
     pub is_internal: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TaskAgentSession {
     #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -3922,6 +4176,18 @@ pub struct TaskAgentSession {
     pub use_fips_encryption: bool,
     #[serde(rename = "encryptionKey", skip_serializing_if = "Option::is_none")]
     pub encryption_key: Option<TaskAgentSessionKey>,
+}
+
+impl fmt::Debug for TaskAgentSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskAgentSession")
+            .field("session_id", &self.session_id)
+            .field("owner_name", &self.owner_name)
+            .field("agent", &self.agent)
+            .field("use_fips_encryption", &self.use_fips_encryption)
+            .field("encryption_key", &self.encryption_key)
+            .finish()
+    }
 }
 
 impl TaskAgentSession {
@@ -3957,12 +4223,21 @@ pub struct TaskAgentReference {
     pub os_description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TaskAgentSessionKey {
     #[serde(rename = "encrypted")]
     pub encrypted: bool,
     #[serde(rename = "value")]
     pub value: String,
+}
+
+impl fmt::Debug for TaskAgentSessionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskAgentSessionKey")
+            .field("encrypted", &self.encrypted)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4092,19 +4367,37 @@ impl TaskAgentPublicKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AgentSession {
     pub session_id: String,
     pub encryption_key: Option<EncryptionKey>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl fmt::Debug for AgentSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentSession")
+            .field("session_id", &self.session_id)
+            .field("encryption_key", &self.encryption_key)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EncryptionKey {
     pub encrypted: bool,
     pub value_base64: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptionKey")
+            .field("encrypted", &self.encrypted)
+            .field("value_base64", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskAgentMessage {
     #[serde(default, rename = "messageId")]
     pub message_id: i64,
@@ -4114,6 +4407,17 @@ pub struct TaskAgentMessage {
     pub body: String,
     #[serde(rename = "iv", skip_serializing_if = "Option::is_none")]
     pub iv_base64: Option<String>,
+}
+
+impl fmt::Debug for TaskAgentMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskAgentMessage")
+            .field("message_id", &self.message_id)
+            .field("message_type", &self.message_type)
+            .field("body", &"<redacted>")
+            .field("iv_base64", &self.iv_base64)
+            .finish()
+    }
 }
 
 pub const RUNNER_JOB_REQUEST: &str = "RunnerJobRequest";
@@ -4191,12 +4495,26 @@ pub struct RunServiceTelemetry {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RunServiceVariableValue {
     #[serde(rename = "value")]
     pub value: String,
     #[serde(rename = "isSecret")]
     pub is_secret: bool,
+}
+
+impl fmt::Debug for RunServiceVariableValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = if self.is_secret {
+            "<redacted>"
+        } else {
+            self.value.as_str()
+        };
+        f.debug_struct("RunServiceVariableValue")
+            .field("value", &value)
+            .field("is_secret", &self.is_secret)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4368,12 +4686,28 @@ impl JobCompletedEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct JobOutputValue {
     #[serde(default, rename = "value", skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     #[serde(default, rename = "isSecret")]
     pub is_secret: bool,
+}
+
+impl fmt::Debug for JobOutputValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobOutputValue")
+            .field(
+                "value",
+                &if self.is_secret {
+                    self.value.as_ref().map(|_| "<redacted>")
+                } else {
+                    self.value.as_deref()
+                },
+            )
+            .field("is_secret", &self.is_secret)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4586,6 +4920,26 @@ pub enum TaskResult {
     Skipped,
     #[serde(rename = "abandoned", alias = "Abandoned")]
     Abandoned,
+}
+
+impl TaskResult {
+    /// Parse a wire `result` string into the protocol enum.
+    ///
+    /// `actions/runner` serializes the C# enum PascalCase while Velnor
+    /// canonicalizes lowercase; both spellings arrive on the wire, so
+    /// this mirrors the serde `rename` + `alias` pairs above exactly.
+    /// Unknown spellings return `None` and never guess.
+    #[must_use]
+    pub fn parse_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "succeeded" | "Succeeded" => Some(Self::Succeeded),
+            "failed" | "Failed" => Some(Self::Failed),
+            "canceled" | "Canceled" => Some(Self::Canceled),
+            "skipped" | "Skipped" => Some(Self::Skipped),
+            "abandoned" | "Abandoned" => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -7476,6 +7830,109 @@ mod tests {
                 .unwrap(),
             "2"
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn contents_request_types_native_and_curl_failures() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _transport_guard = runtime.block_on(crate::test_support::github_http_transport_env());
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let serve_response = |status: u16, body: Vec<u8>| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let reason = match status {
+                    200 => "OK",
+                    503 => "Service Unavailable",
+                    _ => "Test Response",
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                let _ = stream.write_all(&body);
+            });
+            (format!("http://{address}/contents"), server)
+        };
+
+        for transport in ["native", "curl"] {
+            // The test owns the process-wide environment lock.
+            unsafe { std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, transport) };
+
+            let closed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let closed_url = format!("http://{}/contents", closed_listener.local_addr().unwrap());
+            drop(closed_listener);
+            let transport_error = match github_contents_request(&client, &closed_url, "token", 4) {
+                Err(error) => error,
+                Ok(_) => panic!("{transport} request to a closed port unexpectedly succeeded"),
+            };
+            assert!(
+                matches!(&transport_error, GithubContentsRequestError::Transport(_)),
+                "{transport} transport error: {transport_error}"
+            );
+
+            let (status_url, status_server) = serve_response(503, b"unavailable".to_vec());
+            let status_response =
+                github_contents_request(&client, &status_url, "token", 16).unwrap();
+            status_server.join().unwrap();
+            assert_eq!(status_response.status, 503, "{transport} status response");
+
+            let (large_url, large_server) = serve_response(200, b"12345".to_vec());
+            let large_error = match github_contents_request(&client, &large_url, "token", 4) {
+                Err(error) => error,
+                Ok(_) => panic!("{transport} oversized response unexpectedly succeeded"),
+            };
+            large_server.join().unwrap();
+            assert_eq!(
+                large_error,
+                GithubContentsRequestError::BodyTooLarge {
+                    max_body_bytes: 4,
+                    status: Some(200),
+                },
+                "{transport} body limit"
+            );
+
+            let (utf8_url, utf8_server) = serve_response(200, vec![0xff]);
+            let utf8_error = match github_contents_request(&client, &utf8_url, "token", 4) {
+                Err(error) => error,
+                Ok(_) => panic!("{transport} invalid UTF-8 response unexpectedly succeeded"),
+            };
+            utf8_server.join().unwrap();
+            assert_eq!(
+                utf8_error,
+                GithubContentsRequestError::BodyInvalidUtf8 { status: Some(200) },
+                "{transport} invalid UTF-8"
+            );
+        }
+
+        // Invalid local transport configuration stays an internal failure.
+        unsafe { std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "unsupported") };
+        let internal_error = match github_contents_request(&client, "not a URL", "token", 4) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid transport configuration unexpectedly succeeded"),
+        };
+        assert!(matches!(
+            &internal_error,
+            GithubContentsRequestError::Internal(_)
+        ));
     }
 
     #[tokio::test]
@@ -10895,6 +11352,43 @@ mod tests {
     }
 
     #[test]
+    fn task_result_parse_wire_accepts_both_casings() {
+        for (raw, expected) in [
+            ("succeeded", TaskResult::Succeeded),
+            ("Succeeded", TaskResult::Succeeded),
+            ("failed", TaskResult::Failed),
+            ("Failed", TaskResult::Failed),
+            ("canceled", TaskResult::Canceled),
+            ("Canceled", TaskResult::Canceled),
+            ("skipped", TaskResult::Skipped),
+            ("Skipped", TaskResult::Skipped),
+            ("abandoned", TaskResult::Abandoned),
+            ("Abandoned", TaskResult::Abandoned),
+        ] {
+            assert_eq!(TaskResult::parse_wire(raw), Some(expected), "{raw}");
+            let parsed: TaskResult = serde_json::from_value(serde_json::json!(raw)).unwrap();
+            assert_eq!(
+                parsed, expected,
+                "serde must agree with parse_wire for {raw}"
+            );
+        }
+        for raw in [
+            "",
+            "cancelled",
+            "CANCELED",
+            "success",
+            " canceled",
+            "canceled ",
+        ] {
+            assert_eq!(TaskResult::parse_wire(raw), None, "{raw}");
+            assert!(
+                serde_json::from_value::<TaskResult>(serde_json::json!(raw)).is_err(),
+                "serde must reject what parse_wire rejects: {raw}"
+            );
+        }
+    }
+
+    #[test]
     fn builds_rs256_oauth_client_assertion() {
         let key_pair = RunnerKeyPair::generate().unwrap();
         let credentials = OAuthJwtCredentials {
@@ -11220,5 +11714,149 @@ mod tests {
         let error = error.downcast_ref::<GitHubApiError>().unwrap();
         assert!(error.body.len() <= 4099);
         assert!(error.body.ends_with('…'));
+    }
+
+    #[test]
+    fn protocol_debug_redacts_secrets_and_sanitizes_signed_urls() {
+        let scope = GitHubScope::parse(
+            "https://scope-user:scope-pass@github.com/org?token=scope-query-secret#scope-fragment-secret",
+        )
+        .unwrap();
+        let api_error = GitHubApiError {
+            status: 500,
+            action: "request".to_string(),
+            body: "api-body-secret".to_string(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+            remaining: None,
+            category: None,
+        };
+        let jit_response = GitHubJitConfigResponse {
+            runner: GitHubJitRunner {
+                id: 1,
+                name: "runner".to_string(),
+                os: "linux".to_string(),
+                status: "offline".to_string(),
+                busy: false,
+                labels: Vec::new(),
+                runner_group_id: None,
+                ephemeral: None,
+            },
+            encoded_jit_config: "encoded-jit-secret".to_string(),
+        };
+        let settings = DecodedJitRunnerSettings {
+            agent_id: None,
+            agent_name: None,
+            pool_id: None,
+            pool_name: None,
+            server_url: Some("https://server.example/agent?token=settings-url-secret".to_string()),
+            server_url_v2: None,
+            github_url: None,
+            work_folder: None,
+            use_v2_flow: false,
+            ephemeral: false,
+            disable_update: false,
+        };
+        let credentials: DecodedJitCredentials = serde_json::from_value(json!({
+            "Scheme": "OAuth",
+            "Data": { "token": "decoded-credential-secret" }
+        }))
+        .unwrap();
+        let decoded = DecodedJitConfig {
+            settings,
+            credentials,
+            private_key_pem: "decoded-private-key-secret".to_string(),
+        };
+        let oauth_jwt = OAuthJwtCredentials {
+            client_id: "client-id".to_string(),
+            authorization_url: "https://oauth.example/token?sig=oauth-url-secret".to_string(),
+            private_key_pem: "oauth-private-key-secret".to_string(),
+        };
+        let oauth_response = OAuthTokenResponse {
+            access_token: Some("oauth-response-token-secret".to_string()),
+            token_type: Some("bearer".to_string()),
+            expires_in: Some(300),
+            error: None,
+            error_description: None,
+        };
+        let oauth_access = OAuthAccessToken {
+            token: "oauth-access-token-secret".to_string(),
+            expires_in: Some(Duration::from_secs(300)),
+        };
+        let runner_key_pair = RunnerKeyPair {
+            private_key_pem: "runner-private-key-secret".to_string(),
+            public_key: TaskAgentPublicKey {
+                exponent: "AQAB".to_string(),
+                modulus: "public-modulus".to_string(),
+            },
+        };
+        let mut task_session = TaskAgentSession::new("owner", 1, "agent");
+        task_session.encryption_key = Some(TaskAgentSessionKey {
+            encrypted: true,
+            value: "task-session-key-secret".to_string(),
+        });
+        let agent_session = AgentSession {
+            session_id: "session-id".to_string(),
+            encryption_key: Some(EncryptionKey {
+                encrypted: true,
+                value_base64: "agent-session-key-secret".to_string(),
+            }),
+        };
+        let message = TaskAgentMessage {
+            message_id: 1,
+            message_type: RUNNER_JOB_REQUEST.to_string(),
+            body: "task-message-body-secret".to_string(),
+            iv_base64: Some("message-iv".to_string()),
+        };
+        let secret_variable = RunServiceVariableValue {
+            value: "secret-variable-value".to_string(),
+            is_secret: true,
+        };
+        let public_variable = RunServiceVariableValue {
+            value: "public-variable-value".to_string(),
+            is_secret: false,
+        };
+        let secret_output = JobOutputValue {
+            value: Some("secret-output-value".to_string()),
+            is_secret: true,
+        };
+        let public_output = JobOutputValue {
+            value: Some("public-output-value".to_string()),
+            is_secret: false,
+        };
+
+        let debug = format!(
+            "{scope:?} {api_error:?} {jit_response:?} {decoded:?} {oauth_jwt:?} \
+             {oauth_response:?} {oauth_access:?} {runner_key_pair:?} {task_session:?} \
+             {agent_session:?} {message:?} {secret_variable:?} {public_variable:?} \
+             {secret_output:?} {public_output:?}"
+        );
+
+        for secret in [
+            "scope-user",
+            "scope-pass",
+            "scope-query-secret",
+            "scope-fragment-secret",
+            "api-body-secret",
+            "encoded-jit-secret",
+            "settings-url-secret",
+            "decoded-credential-secret",
+            "decoded-private-key-secret",
+            "oauth-url-secret",
+            "oauth-private-key-secret",
+            "oauth-response-token-secret",
+            "oauth-access-token-secret",
+            "runner-private-key-secret",
+            "task-session-key-secret",
+            "agent-session-key-secret",
+            "task-message-body-secret",
+            "secret-variable-value",
+            "secret-output-value",
+        ] {
+            assert!(!debug.contains(secret), "Debug leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("public-variable-value"));
+        assert!(debug.contains("public-output-value"));
+        assert!(debug.contains("public-modulus"));
     }
 }

@@ -22,6 +22,7 @@ use velnor_model::{
     SCALESET_API_VERSION, SCALESET_ENDPOINT,
 };
 
+use crate::protocol::redacted_authenticated_url;
 use crate::scaleset::backoff::RetryPolicy;
 use crate::scaleset::config::GitHubConfig;
 use crate::scaleset::credentials::{
@@ -71,19 +72,30 @@ impl std::fmt::Debug for AdminToken {
         f.debug_struct("AdminToken")
             .field("authorization_header", &"<redacted>")
             .field("expires_at_epoch", &self.expires_at_epoch)
-            .field("url", &self.url)
+            .field("url", &redacted_authenticated_url(&self.url))
             .finish()
     }
 }
 
 /// Raw HTTP response: status + headers + BOM-stripped body (`sendRequest`).
-#[derive(Debug)]
 pub(crate) struct RawResponse {
     pub method: String,
     pub url: String,
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for RawResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawResponse")
+            .field("method", &self.method)
+            .field("url", &redacted_authenticated_url(&self.url))
+            .field("status", &self.status)
+            .field("headers", &"<redacted>")
+            .field("body", &"<redacted>")
+            .finish()
+    }
 }
 
 impl RawResponse {
@@ -122,7 +134,10 @@ struct ClientInner {
 impl std::fmt::Debug for ClientInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientInner")
-            .field("config", &self.config)
+            .field(
+                "config_url",
+                &redacted_authenticated_url(self.config.config_url.as_str()),
+            )
             .field("auth", &self.auth)
             .field("retry", &self.retry)
             .finish_non_exhaustive()
@@ -245,18 +260,12 @@ impl ScaleSetClient {
         let registration = self
             .get_runner_registration_token()
             .await
-            .map_err(|error| {
-                ScaleSetError::Local(format!(
-                    "failed to get runner registration token on refresh: {error}"
-                ))
-            })?;
+            .map_err(|error| error.context("failed to get runner registration token on refresh"))?;
         let connection = self
             .get_actions_service_admin_connection(&registration.token)
             .await
             .map_err(|error| {
-                ScaleSetError::Local(format!(
-                    "failed to get actions service admin connection on refresh: {error}"
-                ))
+                error.context("failed to get actions service admin connection on refresh")
             })?;
         let expires_at = admin_token_expires_at(&connection.admin_token).map_err(|error| {
             ScaleSetError::Local(format!(
@@ -289,9 +298,10 @@ impl ScaleSetClient {
         let bearer = if let Some(token) = self.inner.auth.token.as_deref() {
             format!("Bearer {token}")
         } else {
-            let access = self.fetch_access_token().await.map_err(|error| {
-                ScaleSetError::Local(format!("failed to fetch access token: {error}"))
-            })?;
+            let access = self
+                .fetch_access_token()
+                .await
+                .map_err(|error| error.context("failed to fetch access token"))?;
             format!("Bearer {}", access.token)
         };
         // Upstream sends an empty buffer as the POST body.
@@ -545,6 +555,9 @@ impl ScaleSetClient {
         let mut set = set.clone();
         ensure_labels(&mut set)?;
         apply_default_label_types(&mut set);
+        if set.created_on.is_empty() {
+            set.created_on = "0001-01-01T00:00:00Z".to_string();
+        }
         let body = serde_json::to_vec(&set).map_err(|error| {
             ScaleSetError::Local(format!("failed to marshal runner scale set: {error}"))
         })?;
@@ -565,6 +578,9 @@ impl ScaleSetClient {
     ) -> Result<RunnerScaleSet, ScaleSetError> {
         let mut set = set.clone();
         apply_default_label_types(&mut set);
+        if set.created_on.is_empty() {
+            set.created_on = "0001-01-01T00:00:00Z".to_string();
+        }
         let body = serde_json::to_vec(&set).map_err(|error| {
             ScaleSetError::Local(format!("failed to marshal runner scale set: {error}"))
         })?;
@@ -790,6 +806,9 @@ impl ScaleSetClient {
         build: impl Fn(&Client, Method, Url) -> reqwest::RequestBuilder,
     ) -> Result<RawResponse, ScaleSetError> {
         let mut attempt: u32 = 0;
+        let use_curl =
+            std::env::var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV).as_deref() == Ok("curl");
+        let timeout = self.inner.retry.timeout;
         loop {
             let request = build(&self.inner.http, method.clone(), url.clone())
                 .build()
@@ -800,47 +819,78 @@ impl ScaleSetClient {
                 })?;
             let method_name = request.method().to_string();
             let url_text = request.url().to_string();
-            match self.inner.http.execute(request).await {
-                Ok(response) => {
-                    let status = response.status();
-                    let headers = response.headers().clone();
-                    let body = response.bytes().await.map_err(|error| {
-                        ScaleSetError::Transport(format!(
-                            "failed to read the response body: {error}"
-                        ))
-                    })?;
-                    if RetryPolicy::retryable_status(status, admin_handshake)
-                        && self.inner.retry.may_retry(attempt)
-                    {
-                        let delay = self.retry_delay(status, &headers, attempt).await;
+
+            if use_curl {
+                match tokio::task::spawn_blocking(move || run_curl_raw_request(&request, timeout))
+                    .await
+                {
+                    Ok(Ok(response)) => {
+                        if RetryPolicy::retryable_status(response.status, admin_handshake)
+                            && self.inner.retry.may_retry(attempt)
+                        {
+                            let delay = self
+                                .retry_delay(response.status, &response.headers, attempt)
+                                .await;
+                            attempt += 1;
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        return Ok(response);
+                    }
+                    Ok(Err(_error)) if self.inner.retry.may_retry(attempt) => {
+                        let delay = self.inner.retry.delay_for_attempt(attempt);
                         attempt += 1;
                         tokio::time::sleep(delay).await;
-                        continue;
                     }
-                    return Ok(RawResponse {
-                        method: method_name,
-                        url: url_text,
-                        status,
-                        headers,
-                        body: trim_byte_order_mark(&body).to_vec(),
-                    });
+                    Ok(Err(error)) => return Err(error),
+                    Err(join_err) => {
+                        return Err(ScaleSetError::Transport(format!(
+                            "curl join error: {join_err}"
+                        )));
+                    }
                 }
-                // Mirror `DefaultRetryPolicy`: retry transport failures (connect,
-                // reset, timeout, DNS) but never malformed requests or
-                // redirect loops, which a retry cannot fix.
-                Err(error)
-                    if self.inner.retry.may_retry(attempt)
-                        && !error.is_builder()
-                        && !error.is_redirect() =>
-                {
-                    let delay = self.inner.retry.delay_for_attempt(attempt);
-                    attempt += 1;
-                    tokio::time::sleep(delay).await;
-                }
-                Err(error) => {
-                    return Err(ScaleSetError::Transport(format!(
-                        "failed to send request: {error}"
-                    )));
+            } else {
+                match self.inner.http.execute(request).await {
+                    Ok(response) => {
+                        let status = response.status();
+                        let headers = response.headers().clone();
+                        let body = response.bytes().await.map_err(|error| {
+                            ScaleSetError::Transport(format!(
+                                "failed to read the response body: {error}"
+                            ))
+                        })?;
+                        if RetryPolicy::retryable_status(status, admin_handshake)
+                            && self.inner.retry.may_retry(attempt)
+                        {
+                            let delay = self.retry_delay(status, &headers, attempt).await;
+                            attempt += 1;
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        return Ok(RawResponse {
+                            method: method_name,
+                            url: url_text,
+                            status,
+                            headers,
+                            body: trim_byte_order_mark(&body).to_vec(),
+                        });
+                    }
+                    // Mirror `DefaultRetryPolicy`: retry transient transport
+                    // failures, but not deadlines, malformed requests, redirect
+                    // loops, or TLS certificate validation errors.
+                    Err(error)
+                        if self.inner.retry.may_retry(attempt)
+                            && RetryPolicy::retryable_transport_error(&error) =>
+                    {
+                        let delay = self.inner.retry.delay_for_attempt(attempt);
+                        attempt += 1;
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(error) => {
+                        return Err(ScaleSetError::Transport(format!(
+                            "failed to send request: {error}"
+                        )));
+                    }
                 }
             }
         }
@@ -853,10 +903,166 @@ impl ScaleSetClient {
         attempt: u32,
     ) -> tokio::time::Duration {
         let backoff = self.inner.retry.delay_for_attempt(attempt);
-        let now = unix_now().unwrap_or(0);
-        let limited = RetryPolicy::rate_limit_delay(status, headers, now, backoff);
-        limited.min(self.inner.retry.wait_max.max(backoff))
+        RetryPolicy::retry_after_delay(status, headers, SystemTime::now()).unwrap_or(backoff)
     }
+}
+
+fn run_curl_raw_request(
+    request: &reqwest::Request,
+    timeout: std::time::Duration,
+) -> Result<RawResponse, ScaleSetError> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let temp_dir = std::env::temp_dir();
+    let id = uuid::Uuid::new_v4();
+    let header_in_path = temp_dir.join(format!("velnor-req-hdr-{id}.tmp"));
+    let header_out_path = temp_dir.join(format!("velnor-resp-hdr-{id}.tmp"));
+    let body_in_path = temp_dir.join(format!("velnor-req-body-{id}.tmp"));
+
+    let write_res = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&header_in_path)?;
+        for (name, val) in request.headers() {
+            if let Ok(v) = val.to_str() {
+                writeln!(file, "{}: {}", name.as_str(), v)?;
+            }
+        }
+        file.flush()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&header_in_path);
+        return Err(ScaleSetError::Local(format!(
+            "failed to write curl header file: {e}"
+        )));
+    }
+
+    let method_str = request.method().as_str();
+    let url_str = request.url().as_str();
+    let max_time_secs = timeout.as_secs().max(1);
+
+    let mut cmd = Command::new("curl");
+    cmd.arg("--disable")
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--request")
+        .arg(method_str)
+        .arg("--url")
+        .arg(url_str)
+        .arg("-H")
+        .arg(format!("@{}", header_in_path.display()))
+        .arg("--dump-header")
+        .arg(&header_out_path)
+        .arg("--max-time")
+        .arg(max_time_secs.to_string())
+        .arg("--retry")
+        .arg("0");
+
+    let body_bytes = request.body().and_then(|b| b.as_bytes());
+    let has_body = if let Some(bytes) = body_bytes {
+        if let Err(e) = std::fs::write(&body_in_path, bytes) {
+            let _ = std::fs::remove_file(&header_in_path);
+            let _ = std::fs::remove_file(&body_in_path);
+            return Err(ScaleSetError::Local(format!(
+                "failed to write curl body file: {e}"
+            )));
+        }
+        cmd.arg("--data-binary")
+            .arg(format!("@{}", body_in_path.display()));
+        true
+    } else {
+        false
+    };
+
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let spawn_res = cmd.spawn();
+    let child = match spawn_res {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = std::fs::remove_file(&header_in_path);
+            let _ = std::fs::remove_file(&header_out_path);
+            if has_body {
+                let _ = std::fs::remove_file(&body_in_path);
+            }
+            return Err(ScaleSetError::Transport(format!("spawn curl: {e}")));
+        }
+    };
+
+    let output_res = child.wait_with_output();
+    let _ = std::fs::remove_file(&header_in_path);
+    if has_body {
+        let _ = std::fs::remove_file(&body_in_path);
+    }
+
+    let output = match output_res {
+        Ok(output) => output,
+        Err(e) => {
+            let _ = std::fs::remove_file(&header_out_path);
+            return Err(ScaleSetError::Transport(format!("wait curl: {e}")));
+        }
+    };
+
+    let resp_headers_bytes = std::fs::read(&header_out_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&header_out_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ScaleSetError::Transport(format!(
+            "curl request {method_str} {url_str} exited with {}: {stderr}",
+            output.status
+        )));
+    }
+
+    let (status, headers) = parse_curl_headers(&resp_headers_bytes)?;
+
+    Ok(RawResponse {
+        method: method_str.to_string(),
+        url: url_str.to_string(),
+        status,
+        headers,
+        body: trim_byte_order_mark(&output.stdout).to_vec(),
+    })
+}
+
+fn parse_curl_headers(bytes: &[u8]) -> Result<(StatusCode, HeaderMap), ScaleSetError> {
+    let mut status = StatusCode::OK;
+    let mut headers = HeaderMap::new();
+
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("HTTP/") {
+            headers.clear();
+            let mut parts = line.split_whitespace();
+            parts.next(); // skip HTTP version
+            if let Some(code_str) = parts.next()
+                && let Ok(code) = code_str.parse::<u16>()
+                && let Ok(sc) = StatusCode::from_u16(code)
+            {
+                status = sc;
+            }
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim();
+            let v = v.trim();
+            if let (Ok(hname), Ok(hval)) = (
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                reqwest::header::HeaderValue::from_str(v),
+            ) {
+                headers.append(hname, hval);
+            }
+        }
+    }
+
+    Ok((status, headers))
 }
 
 /// Mirror of `setUserAgent`: the UA is JSON, `kind` is always `scaleset`.
@@ -998,13 +1204,13 @@ fn unexpected_status(response: &RawResponse) -> ScaleSetError {
     )
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct RegistrationToken {
     #[serde(default)]
     token: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct AdminConnectionWire {
     #[serde(default)]
     url: Option<String>,
@@ -1012,10 +1218,21 @@ struct AdminConnectionWire {
     token: Option<String>,
 }
 
-#[derive(Debug)]
 struct AdminConnection {
     actions_service_url: String,
     admin_token: String,
+}
+
+impl std::fmt::Debug for AdminConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminConnection")
+            .field(
+                "actions_service_url",
+                &redacted_authenticated_url(&self.actions_service_url),
+            )
+            .field("admin_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Header value for test doubles: expose the UA for assertion.
@@ -1116,7 +1333,7 @@ mod tests {
         let token = AdminToken {
             authorization_header: "Bearer live-admin-token".into(),
             expires_at_epoch: 2_000_000_000,
-            url: "https://actions.invalid/tenant".into(),
+            url: "https://actions.invalid/tenant?sig=admin-url-secret".into(),
         };
         let rendered = format!("{token:?}");
         assert!(
@@ -1124,6 +1341,7 @@ mod tests {
             "admin token Debug leaked: {rendered}"
         );
         assert!(rendered.contains("https://actions.invalid/tenant"));
+        assert!(!rendered.contains("admin-url-secret"), "{rendered}");
     }
 
     #[test]
@@ -1206,5 +1424,65 @@ mod tests {
         let rendered = format!("{token:?}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(!rendered.contains("live-admin-token-bytes"), "{rendered}");
+    }
+
+    #[test]
+    fn response_and_connection_debug_redact_protocol_secrets() {
+        let response = RawResponse {
+            method: "GET".into(),
+            url: "https://queue.example/messages?sig=url-secret".into(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            headers: HeaderMap::from_iter([(
+                reqwest::header::SET_COOKIE,
+                "session=header-secret".parse().unwrap(),
+            )]),
+            body: b"body-secret".to_vec(),
+        };
+        let rendered = format!("{response:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        for secret in ["url-secret", "header-secret", "body-secret"] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+
+        let connection = AdminConnection {
+            actions_service_url: "https://actions.example/tenant?sig=connection-url-secret".into(),
+            admin_token: "connection-token-secret".into(),
+        };
+        let rendered = format!("{connection:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains("connection-url-secret"), "{rendered}");
+        assert!(!rendered.contains("connection-token-secret"), "{rendered}");
+    }
+
+    #[test]
+    fn client_debug_redacts_credentials_in_config_url() {
+        let client = ScaleSetClient::new(
+            "https://github.com/octo-org?sig=config-url-secret",
+            ActionsAuth::pat("pat-secret".into()),
+            system_info(),
+            RetryPolicy::default(),
+        )
+        .unwrap();
+        let rendered = format!("{client:?}");
+        assert!(!rendered.contains("config-url-secret"), "{rendered}");
+        assert!(!rendered.contains("pat-secret"), "{rendered}");
+    }
+
+    #[test]
+    fn test_request_body_bytes() {
+        let client = reqwest::Client::new();
+        let req = client
+            .post("https://example.com")
+            .header(CONTENT_TYPE, "application/json")
+            .body(vec![1, 2, 3])
+            .build()
+            .unwrap();
+        assert_eq!(req.body().and_then(|b| b.as_bytes()), Some(&[1, 2, 3][..]));
+        assert_eq!(
+            req.headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
     }
 }

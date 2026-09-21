@@ -716,14 +716,8 @@ include(":real")
     fn workspace_scan_emits_wrapper_module_commands_and_depends_on() {
         use super::super::scan_shape;
         use std::fs;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-gradle-scan-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root =
+            std::env::temp_dir().join(format!("velnor-gradle-scan-{}", crate::unique_suffix()));
         fs::create_dir_all(root.join("app/src")).unwrap();
         fs::create_dir_all(root.join("lib/src")).unwrap();
         fs::write(
@@ -748,6 +742,7 @@ include(":real")
             &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         )
         .unwrap();
         let app = shape
@@ -782,14 +777,8 @@ include(":real")
     fn jooq_module_gets_postgres_service_and_schema_tasks() {
         use super::super::scan_shape;
         use std::fs;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-gradle-jooq-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root =
+            std::env::temp_dir().join(format!("velnor-gradle-jooq-{}", crate::unique_suffix()));
         fs::create_dir_all(root.join("domain")).unwrap();
         fs::write(root.join("settings.gradle.kts"), "include(\"domain\")\n").unwrap();
         fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
@@ -810,6 +799,7 @@ jooqCodegen(libs.postgresql)
             &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         )
         .unwrap();
         let domain = shape
@@ -894,14 +884,8 @@ flyway { url = datasourceUrl }
     fn workspace_postgres_service_creates_sibling_flyway_catalogs() {
         use super::super::scan_shape;
         use std::fs;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-gradle-multidb-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root =
+            std::env::temp_dir().join(format!("velnor-gradle-multidb-{}", crate::unique_suffix()));
         fs::create_dir_all(root.join("domain")).unwrap();
         fs::create_dir_all(root.join("legacy-flyway")).unwrap();
         fs::write(
@@ -936,6 +920,7 @@ flyway { url = datasourceUrl }
             &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         )
         .unwrap();
         let domain = shape

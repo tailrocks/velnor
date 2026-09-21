@@ -33,7 +33,7 @@ fn must_fail<T, E>(result: Result<T, E>, context: &str) -> E {
 fn temporary_directory(name: &str) -> PathBuf {
     let root = env::temp_dir().join(format!(
         "velnor-workflow-policy-{name}-{}",
-        crate::s2::unique_suffix()
+        crate::unique_suffix()
     ));
     must(fs::create_dir_all(&root), "create test directory");
     root
@@ -529,13 +529,17 @@ fn hosted_entrypoint(revision: &str) -> String {
             &crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         ),
         "scan entrypoint fixture",
     );
     let _ = fs::remove_dir_all(fixture);
     let mut config = ProjectConfig::from(shape);
     revision.clone_into(&mut config.workflow_revision);
-    crate::s2::render_policy_entrypoint(&config)
+    must(
+        crate::s2::render_policy_entrypoint(&config),
+        "render policy entrypoint",
+    )
 }
 
 fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
@@ -737,7 +741,7 @@ fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
 /// trusted-event conjunct.
 fn gated_trusted_job() -> String {
     format!(
-        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
+        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
     )
 }
 
@@ -813,32 +817,91 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     let _ = fs::remove_dir_all(ungated);
 }
 
-/// The generated provider gate admits a provider-selecting dispatch on any
-/// ref — dispatch authorship is write-authorized — or the automatic events,
-/// with the trusted-event conjunct. A dispatch selecting another provider is
-/// not this provider's gate.
+/// The generated provider gate is the bare trusted-event conjunct for an
+/// automatic provider, conjoined with the dispatch predicate for a manual
+/// one: a dispatch selects the static universe on any ref — dispatch
+/// authorship is write-authorized — and no input match survives.
 #[test]
 fn provider_gate_admits_dispatch_on_any_ref() {
     let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
-    for automatic in ["(github.event_name != 'workflow_dispatch')", "(false)"] {
-        let gate = format!(
-            "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || {automatic}) && {trusted} }}}}",
-        );
-        assert!(
-            is_generated_provider_gate(&gate, "velnor"),
-            "provider gate admitted: {gate}"
-        );
-        assert!(
-            !is_generated_provider_gate(&gate, "github-hosted"),
-            "a dispatch selecting Velnor is not the hosted gate: {gate}"
-        );
-    }
-    let github_only = format!(
-        "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
+    // An automatic provider renders the bare trusted-event conjunct.
+    let automatic = format!("${{{{ {trusted} }}}}");
+    assert!(
+        is_generated_provider_gate(&automatic, "velnor"),
+        "provider gate admitted: {automatic}"
+    );
+    // A manual provider conjoins it with the dispatch predicate: dispatches
+    // select the static universe on any ref, with no input to match.
+    let manual = format!("${{{{ (github.event_name == 'workflow_dispatch') && {trusted} }}}}");
+    assert!(
+        is_generated_provider_gate(&manual, "velnor"),
+        "provider gate admitted: {manual}"
+    );
+    // An input-matching gate is not generated: no input selects providers.
+    let input_match = format!(
+        "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
     );
     assert!(
-        !is_generated_provider_gate(&github_only, "velnor"),
-        "a dispatch selecting only the hosted provider is not a Velnor gate",
+        !is_generated_provider_gate(&input_match, "velnor"),
+        "an input-matching gate is not generated: {input_match}"
+    );
+}
+
+/// A top-level conjunction carrying the exact trusted-event predicate
+/// passes whatever the functional side narrows; near-misses fail: a
+/// top-level `||` widens past the conjunct, and an inexact predicate is
+/// not the predicate.
+#[test]
+fn trusted_conjunct_members_pass_and_near_misses_fail() {
+    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+    for gate in [
+        format!("${{{{ {trusted} }}}}"),
+        format!("${{{{ (needs.verify.outputs.mode == 'publish') && {trusted} }}}}"),
+        format!("${{{{ {trusted} && (needs.verify.outputs.mode == 'publish') }}}}"),
+        format!(
+            "${{{{ (github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) && {trusted} }}}}"
+        ),
+    ] {
+        assert!(
+            has_exact_trusted_conjunct(&gate),
+            "a conjunction carrying the predicate passes: {gate}"
+        );
+    }
+    for gate in [
+        // A top-level disjunction admits whatever the other side admits.
+        format!("${{{{ (needs.verify.outputs.mode == 'publish') || {trusted} }}}}"),
+        format!("${{{{ {trusted} && (needs.verify.outputs.mode == 'publish') || (github.event_name == 'push') }}}}"),
+        // Dropped Bot clause: not the predicate.
+        "${{ (!(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) }}".to_owned(),
+        // Double-wrapped: not the generated spelling.
+        format!("${{{{ (({trusted})) && (needs.verify.outputs.mode == 'publish') }}}}"),
+        // No trusted conjunct at all.
+        "${{ (needs.verify.outputs.mode == 'publish') }}".to_owned(),
+    ] {
+        assert!(
+            !has_exact_trusted_conjunct(&gate),
+            "a near-miss fails closed: {gate}"
+        );
+    }
+}
+
+/// The maintenance prune admission is a top-level `||` over `pull_request`,
+/// so the bare gate fails closed on a local lane; parenthesized and
+/// conjoined with the trusted-event predicate — the shape the renderer
+/// emits for local maintenance — it passes.
+#[test]
+fn maintenance_prune_gate_needs_the_trusted_conjunct_on_local_lanes() {
+    let functional = "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')";
+    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+    let bare = format!("${{{{ {functional} }}}}");
+    assert!(
+        !has_exact_trusted_conjunct(&bare),
+        "the bare prune admission fails closed: {bare}"
+    );
+    let gated = format!("${{{{ ({functional}) && {trusted} }}}}");
+    assert!(
+        has_exact_trusted_conjunct(&gated),
+        "the conjoined prune gate passes: {gated}"
     );
 }
 
@@ -941,11 +1004,17 @@ fn must_some<T>(value: Option<T>, context: &str) -> T {
 #[test]
 fn cli_requires_the_base_validator_revision() {
     let root = temporary_directory("cli-no-base");
+    // Hermetic: the empty lookup observes no ambient environment, so the
+    // missing-option error fires even when the job exports
+    // `VELNOR_WORKFLOW_POLICY_REVISION` (Preview exports it job-wide).
     let error = must_fail(
-        run_cli(&[
-            std::ffi::OsString::from("--workflow-root"),
-            root.as_os_str().to_owned(),
-        ]),
+        run_cli_with_env(
+            &[
+                std::ffi::OsString::from("--workflow-root"),
+                root.as_os_str().to_owned(),
+            ],
+            &|_| None,
+        ),
         "policy without a base revision",
     )
     .to_string();
@@ -1267,40 +1336,73 @@ fn candidate_manifest_source_prefers_flag_over_env() {
     // the `policy` CLI subprocess test in `velnor_first_ci.rs`, which owns
     // the child's environment.)
     assert_eq!(
-        candidate_manifest_source(Some("/flag/manifest.json")),
+        candidate_manifest_source_with_env(Some("/flag/manifest.json"), &|name| env::var_os(name)),
         Some(PathBuf::from("/flag/manifest.json"))
     );
     // An explicit empty flag disables the binding.
-    assert_eq!(candidate_manifest_source(Some("")), None);
-    // Without either source the env-slot candidate is disabled. Like
-    // `cli_requires_the_base_validator_revision`, this relies on the ambient
-    // test environment not exporting the variable.
-    assert_eq!(candidate_manifest_source(None), None);
+    assert_eq!(
+        candidate_manifest_source_with_env(Some(""), &|name| env::var_os(name)),
+        None
+    );
+    // Without either source the env-slot candidate is disabled. Hermetic:
+    // the empty lookup observes no ambient environment.
+    assert_eq!(candidate_manifest_source_with_env(None, &|_| None), None);
 }
 
 #[test]
 fn from_env_consent_mapping_is_fail_closed() {
+    // Hermetic: fixed lookups observe no ambient environment.
     // Without `--pin-build` the pin is never built, in every environment.
-    assert!(PinnedBinaryLookup::from_env(PIN_A, false, None).build_forbidden);
+    assert!(PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).build_forbidden);
     assert!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .build_forbidden
+        PinnedBinaryLookup::from_env_with(
+            PIN_A,
+            false,
+            Some(PathBuf::from("/manifest.json")),
+            &|_| None
+        )
+        .build_forbidden
     );
     // The explicit manifest survives; without one the environment fallback
-    // applies (unset in the ambient test environment, so `None` here).
+    // applies (`None` under the empty lookup).
     assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .candidate_manifest,
+        PinnedBinaryLookup::from_env_with(
+            PIN_A,
+            false,
+            Some(PathBuf::from("/manifest.json")),
+            &|_| None
+        )
+        .candidate_manifest,
         Some(PathBuf::from("/manifest.json"))
     );
     assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, None).candidate_manifest,
+        PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).candidate_manifest,
         None
     );
-    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`;
-    // setting process env needs `unsafe`, which this crate forbids, so that
-    // direction is pinned by the `--check` CLI subprocess test in
-    // `velnor_first_ci.rs`, which owns the child's environment.
+    // The environment fallback direction: a manifest in the environment
+    // binds the env-slot candidate.
+    let manifest_env = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| {
+        if name == VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV {
+            Some(std::ffi::OsString::from("/env/manifest.json"))
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        manifest_env.candidate_manifest,
+        Some(PathBuf::from("/env/manifest.json"))
+    );
+    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
+    // (also pinned end to end by the `--check` CLI subprocess test in
+    // `velnor_first_ci.rs`, which owns the child's environment).
+    let offline = PinnedBinaryLookup::from_env_with(PIN_A, true, None, &|name| {
+        if name == "CARGO_NET_OFFLINE" {
+            Some(std::ffi::OsString::from("true"))
+        } else {
+            None
+        }
+    });
+    assert!(offline.build_forbidden);
 }
 
 #[cfg(unix)]
@@ -1439,4 +1541,370 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
         !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
         "the sibling checkout carries no reusable workflows"
     );
+    assert!(
+        is_approved_local_action(crate::s2::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION),
+        "the owner package publisher resolves setup from its exact source checkout"
+    );
+    assert!(
+        !is_approved_local_action("./source/.github/actions/anything-else"),
+        "the source checkout allowance is the exact setup composite"
+    );
+    assert!(
+        !is_approved_local_action("./other-source/.github/actions/setup-velnor-workflow"),
+        "other checkout paths are not implicitly trusted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Complete-tree comparison
+// ---------------------------------------------------------------------------
+
+fn file_entry(content: &str, executable: bool) -> TreeEntry {
+    TreeEntry::File {
+        bytes: content.as_bytes().to_vec(),
+        executable,
+    }
+}
+
+fn link_entry(target: &str) -> TreeEntry {
+    TreeEntry::Symlink {
+        target: PathBuf::from(target),
+    }
+}
+
+fn compare(expected: &TreeEntry, found: Option<&TreeEntry>) -> Vec<String> {
+    let mut differences = Vec::new();
+    compare_tree_entry(
+        Path::new(".github/probe"),
+        expected,
+        found,
+        &mut differences,
+    );
+    differences
+}
+
+#[test]
+fn tree_comparison_names_every_drift_class() {
+    assert!(
+        compare(
+            &file_entry("same\n", false),
+            Some(&file_entry("same\n", false))
+        )
+        .is_empty(),
+        "identical files compare clean"
+    );
+    assert!(
+        compare(&file_entry("same\n", false), None)
+            .join("\n")
+            .contains("missing from the tree"),
+        "an absent path reports missing"
+    );
+    assert!(
+        compare(&file_entry("a\n", false), Some(&file_entry("b\n", false)))
+            .join("\n")
+            .contains("differs from the pinned render"),
+        "edited bytes report a diff"
+    );
+    assert!(
+        compare(
+            &file_entry("same\n", false),
+            Some(&file_entry("same\n", true))
+        )
+        .join("\n")
+        .contains("is executable in the tree"),
+        "a set execute bit reports mode drift"
+    );
+    assert!(
+        compare(&link_entry("AGENTS.md"), Some(&link_entry("AGENTS.md"))).is_empty(),
+        "an identical link compares clean"
+    );
+    assert!(
+        compare(&link_entry("AGENTS.md"), Some(&link_entry("other.md")))
+            .join("\n")
+            .contains("points at"),
+        "a retargeted link reports its target"
+    );
+    // The type-blindness regression: a regular file with identical bytes
+    // must not satisfy a link, and a link must not satisfy a file.
+    assert!(
+        compare(
+            &link_entry("AGENTS.md"),
+            Some(&file_entry("AGENTS.md", false))
+        )
+        .join("\n")
+        .contains("is a regular file in the tree but the pinned render has a symlink"),
+        "a file squatting a link reports mistyped"
+    );
+    assert!(
+        compare(
+            &file_entry("content\n", false),
+            Some(&link_entry("content"))
+        )
+        .join("\n")
+        .contains("is a symlink in the tree but the pinned render has a regular file"),
+        "a link squatting a file reports mistyped"
+    );
+    assert!(
+        compare(&file_entry("content\n", false), Some(&TreeEntry::Directory))
+            .join("\n")
+            .contains("is a directory in the tree"),
+        "a directory squatting a file reports mistyped"
+    );
+}
+
+#[test]
+fn exclude_hatch_covers_top_level_workflows_only() {
+    let excludes = BTreeSet::from(["hand.yml".to_owned()]);
+    assert!(
+        is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &excludes),
+        "a named top-level workflow is excluded"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/other.yml"), &excludes),
+        "an unnamed workflow is not excluded"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/nested/hand.yml"), &excludes),
+        "a nested path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/notes.txt"), &excludes),
+        "a non-workflow path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &BTreeSet::new()),
+        "no excludes means no hatch"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn actual_tree_collection_never_follows_symlinks() {
+    let root = temporary_directory("tree-collection");
+    let outside = temporary_directory("tree-collection-outside");
+    write(&outside.join("kept.txt"), "external bytes\n");
+    write(&root.join(".github/real.txt"), "real\n");
+    must(
+        std::os::unix::fs::symlink(outside.join("kept.txt"), root.join(".github/link.txt")),
+        "link outside the tree",
+    );
+    let mut entries = BTreeMap::new();
+    must(
+        collect_actual_tree_entries(&root, &root.join(".github"), &mut entries),
+        "collect the tree",
+    );
+    let target_path = outside.join("kept.txt");
+    let target = must(
+        target_path.to_str().ok_or("non-utf8 temp path"),
+        "render the link target",
+    );
+    assert_eq!(
+        entries.get(&PathBuf::from(".github/real.txt")),
+        Some(&file_entry("real\n", false)),
+        "a regular file collects by bytes"
+    );
+    assert_eq!(
+        entries.get(&PathBuf::from(".github/link.txt")),
+        Some(&link_entry(target)),
+        "a link collects by target, never by the bytes it points at"
+    );
+    assert!(
+        !entries.values().any(|entry| matches!(entry,
+            TreeEntry::File { bytes, .. } if bytes == b"external bytes\n")),
+        "external bytes must not leak into the collection"
+    );
+    assert_eq!(
+        must(
+            stat_tree_entry(&root.join(".github/link.txt")),
+            "stat the link"
+        ),
+        Some(link_entry(target)),
+        "a single stat classifies the link itself"
+    );
+    assert_eq!(
+        must(
+            stat_tree_entry(&root.join(".github/absent.txt")),
+            "stat an absent path"
+        ),
+        None,
+        "an absent path stats as missing"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
+
+#[cfg(unix)]
+fn link(target: &Path, link: &Path) {
+    must(
+        std::os::unix::fs::symlink(target, link),
+        "create test symlink",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn confined_render_symlink_compares_clean() {
+    let rendered = temporary_directory("render-symlink-confined");
+    let tree = temporary_directory("render-symlink-confined-tree");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    write(&tree.join(".github/AGENTS.md"), "agents\n");
+    link(Path::new("AGENTS.md"), &rendered.join(".github/CLAUDE.md"));
+    link(Path::new("AGENTS.md"), &tree.join(".github/CLAUDE.md"));
+    let excludes = std::collections::BTreeSet::new();
+    let differences = must(
+        compare_rendered_tree(&rendered, &tree, &excludes),
+        "a confined in-render symlink compares by target",
+    );
+    assert!(
+        differences.is_empty(),
+        "confined symlink must compare clean: {differences:?}"
+    );
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn render_symlink_escaping_its_root_is_an_error() {
+    let rendered = temporary_directory("render-symlink-escape");
+    let outside = temporary_directory("render-symlink-escape-outside");
+    let secret = outside.join("secret.txt");
+    write(&secret, "outside\n");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    link(&secret, &rendered.join(".github/CLAUDE.md"));
+    let tree = temporary_directory("render-symlink-escape-tree");
+    let excludes = std::collections::BTreeSet::new();
+    let error = must_fail(
+        compare_rendered_tree(&rendered, &tree, &excludes),
+        "a render symlink outside its root",
+    )
+    .to_string();
+    assert!(error.contains("escapes its root"), "{error}");
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(outside);
+    let _ = fs::remove_dir_all(tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_render_symlink_is_an_error() {
+    let rendered = temporary_directory("render-symlink-dangling");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    link(Path::new("MISSING.md"), &rendered.join(".github/CLAUDE.md"));
+    let tree = temporary_directory("render-symlink-dangling-tree");
+    let excludes = std::collections::BTreeSet::new();
+    let error = must_fail(
+        compare_rendered_tree(&rendered, &tree, &excludes),
+        "a dangling render symlink",
+    )
+    .to_string();
+    assert!(error.contains("dangles"), "{error}");
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(tree);
+}
+
+fn declared_tree(required_checks: &[&str]) -> DeclaredTree {
+    DeclaredTree {
+        pin: None,
+        repository: None,
+        default_branch: "main".to_owned(),
+        excludes: BTreeSet::new(),
+        velnor_policy: VelnorPolicyContract::default(),
+        required_checks: required_checks
+            .iter()
+            .map(|context| (*context).to_owned())
+            .collect(),
+        external_checks: Vec::new(),
+    }
+}
+
+const REQUIRED_CHECKS_PR_AGGREGATE: &str = "jobs:\n  ci-required:\n    name: ci-required\n";
+const REQUIRED_CHECKS_POLICY_ENTRYPOINT: &str = "jobs:\n  policy:\n    name: Policy\n";
+
+fn write_required_checks_fixture(root: &Path, entrypoint: bool) {
+    write(
+        &root.join(PULL_REQUEST_AGGREGATE),
+        REQUIRED_CHECKS_PR_AGGREGATE,
+    );
+    if entrypoint {
+        write(
+            &root.join(POLICY_ENTRYPOINT),
+            REQUIRED_CHECKS_POLICY_ENTRYPOINT,
+        );
+    }
+}
+
+#[test]
+fn required_checks_accepts_policy_from_the_entrypoint() {
+    let root = temporary_directory("required-checks-policy");
+    write_required_checks_fixture(&root, true);
+    let declared = declared_tree(&["ci-required", "Policy"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(
+        report.passed,
+        "{}: {}",
+        report.reason,
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_rejects_contexts_absent_from_both_workflows() {
+    let root = temporary_directory("required-checks-bogus");
+    write_required_checks_fixture(&root, true);
+    let declared = declared_tree(&["ci-required", "Policy", "bogus-context"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(!report.passed, "a bogus context must fail the rule");
+    assert!(
+        report
+            .details
+            .iter()
+            .any(|finding| finding.contains("bogus-context")),
+        "the rule names the absent context: {}",
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_has_no_hard_coded_policy_exemption() {
+    let root = temporary_directory("required-checks-no-entrypoint");
+    write_required_checks_fixture(&root, false);
+    let declared = declared_tree(&["Policy"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(
+        !report.passed,
+        "Policy without a rendered entrypoint must fail the rule"
+    );
+    assert!(
+        report
+            .details
+            .iter()
+            .any(|finding| finding.contains("Policy")),
+        "the rule names the absent context: {}",
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_passes_when_live_matches_declared_plus_entrypoint() {
+    let root = temporary_directory("required-checks-live");
+    write_required_checks_fixture(&root, true);
+    let mut declared = declared_tree(&["ci-required", "Policy"]);
+    declared.external_checks = vec!["DCO".to_owned()];
+    let live = vec![
+        "ci-required".to_owned(),
+        "DCO".to_owned(),
+        "Policy".to_owned(),
+    ];
+    let report = required_checks(&root, &declared, Some(&live));
+    assert!(
+        report.passed,
+        "{}: {}",
+        report.reason,
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
 }

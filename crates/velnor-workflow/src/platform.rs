@@ -537,6 +537,10 @@ fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
         prefixed.extend(commands_for_lane.iter().cloned());
         *commands_for_lane = prefixed;
     }
+    // Prepare commands carry no phase tags and shift every position: the unit
+    // keeps the product rebuild ahead of its checks and verifies through the
+    // single legacy step.
+    unit.clear_phases();
     unit.watch.sort();
     unit.watch.dedup();
 }
@@ -670,6 +674,8 @@ mod tests {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,

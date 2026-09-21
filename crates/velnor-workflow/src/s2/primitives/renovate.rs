@@ -1,17 +1,14 @@
-//! Self-hosted Renovate workflows: scheduled dependency updates and optional
+//! Control-plane Renovate workflows: scheduled dependency updates and optional
 //! configuration validation.
 
-use std::fmt::Write as _;
-
-use super::{trusted_cache_save_expression, Args, Primitive, RenderCtx, Rendered};
-use crate::s2::provider::ProviderId;
+use super::{Args, Primitive, RenderCtx, Rendered};
 use crate::s2::{
-    selector_runs_on_yaml, yaml_scalar, ActionPin, GeneratorError, ProjectConfig, RenovateSpec,
-    GENERATED_HEADER,
+    yaml_scalar, ActionPin, GeneratorError, ProjectConfig, RenovateSpec, GENERATED_HEADER,
 };
 
 /// The pinned Renovate OSS version rendered into `renovate-version`.
-pub(crate) const RENOVATE_OSS_VERSION: &str = "44.93.6";
+#[cfg(test)]
+pub(crate) use crate::renovate_renderer::RENOVATE_OSS_VERSION;
 
 /// Sidecar workflow families the generator may emit for Renovate.
 pub(crate) const RENOVATE_SIDE_FILES: &[(&str, &str)] = &[
@@ -46,17 +43,18 @@ pub(crate) fn renovate_content(config: &ProjectConfig) -> Result<Option<String>,
 }
 
 /// The `renovate-validate.yml` content, or `None` when validation is disabled.
-pub(crate) fn renovate_validate_content(config: &ProjectConfig) -> Option<String> {
+pub(crate) fn renovate_validate_content(
+    config: &ProjectConfig,
+) -> Result<Option<String>, GeneratorError> {
     config
         .renovate
         .as_ref()
         .filter(|spec| spec.validate)
         .map(|spec| {
-            format!(
-                "{GENERATED_HEADER}{}",
-                render_renovate_validate(config, spec)
-            )
+            render_renovate_validate(config, spec)
+                .map(|content| format!("{GENERATED_HEADER}{content}"))
         })
+        .transpose()
 }
 
 /// The declared `renovate.yml` writer workflow.
@@ -100,7 +98,7 @@ impl Primitive for RenovateValidate {
         }
         let content = format!(
             "{GENERATED_HEADER}{}",
-            render_renovate_validate(ctx.config, &spec)
+            render_renovate_validate(ctx.config, &spec)?
         );
         render_file(ctx, "renovate-validate.yml", content)
     }
@@ -141,284 +139,51 @@ fn render_file(
 }
 
 fn renovate_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
-    crate::s2::provider::runs_on_for(&config.selectors, ProviderId::Velnor)
-        .map(crate::s2::runs_on_labels_yaml)
-}
-
-fn trusted_renovate_gate(default_branch: &str) -> String {
-    format!(
-        "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}')"
-    )
-}
-
-fn renovate_repository_cache_path() -> &'static str {
-    "/tmp/renovate/cache/${{ github.repository }}/renovate/repository"
-}
-
-fn renovate_config_env(spec: &RenovateSpec) -> String {
-    if spec.config_path == "renovate.json" {
-        String::new()
-    } else {
-        format!(
-            "          RENOVATE_CONFIG_FILE: {}\n",
-            yaml_scalar(&spec.config_path)
-        )
-    }
-}
-
-/// The `on.schedule` cron list: the primary schedule plus every declared
-/// extra, each once.
-fn renovate_schedules(spec: &RenovateSpec) -> String {
-    let mut schedules = format!("    - cron: {}\n", yaml_scalar(&spec.schedule));
-    for extra in &spec.schedules {
-        if extra != &spec.schedule {
-            let _ = writeln!(schedules, "    - cron: {}", yaml_scalar(extra));
-        }
-    }
-    schedules
-}
-
-/// Repository targets: explicit targets disable autodiscovery, so the writer
-/// renovates exactly the declared slugs. Empty keeps autodiscovery.
-fn renovate_target_env(spec: &RenovateSpec) -> String {
-    if spec.repositories.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "          RENOVATE_AUTODISCOVER: \"false\"\n          RENOVATE_REPOSITORIES: {}\n",
-            yaml_scalar(&spec.repositories.join(","))
-        )
-    }
-}
-
-/// Private-registry credentials: the secret holds the JSON `hostRules`
-/// array, so credentials travel by reference and never as workflow text.
-fn renovate_host_rules_env(spec: &RenovateSpec) -> String {
-    spec.host_rules_secret
-        .as_deref()
-        .map_or_else(String::new, |secret| {
-            format!("          RENOVATE_HOST_RULES: ${{{{ secrets.{secret} }}}}\n")
-        })
-}
-
-/// The git author Renovate commits as.
-fn renovate_author_env(spec: &RenovateSpec) -> String {
-    spec.author.as_deref().map_or_else(String::new, |author| {
-        format!("          RENOVATE_GIT_AUTHOR: {}\n", yaml_scalar(author))
-    })
-}
-
-/// DCO sign-off: the commit body carries a `Signed-off-by` trailer for the
-/// declared author. The repository's DCO check stays the enforcement; this
-/// only makes the writer produce commits that pass it.
-fn renovate_signoff_env(spec: &RenovateSpec) -> String {
-    if !spec.signoff {
-        return String::new();
-    }
-    spec.author.as_deref().map_or_else(String::new, |author| {
-        format!(
-            "          RENOVATE_COMMIT_BODY: {}\n",
-            yaml_scalar(&format!("Signed-off-by: {author}"))
-        )
-    })
-}
-
-/// Execution allowances: the `allowedCommands` regex allowlist for
-/// post-upgrade commands, as the JSON array Renovate parses it from.
-fn renovate_allowed_commands_env(spec: &RenovateSpec) -> String {
-    if spec.allowed_commands.is_empty() {
-        return String::new();
-    }
-    let json = serde_json::to_string(&spec.allowed_commands).unwrap_or_else(|_| "[]".to_owned());
-    format!(
-        "          RENOVATE_ALLOWED_COMMANDS: {}\n",
-        yaml_scalar(&json)
-    )
-}
-
-fn cache_hash_files(spec: &RenovateSpec) -> String {
-    format!(
-        "${{{{ hashFiles('{}') }}}}",
-        spec.config_path.replace('\'', "''")
-    )
+    crate::s2::control_plane_runner(config)
 }
 
 fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> Result<String, GeneratorError> {
-    let checkout = ActionPin::Checkout.reference();
-    let cache_restore = ActionPin::CacheRestore.reference();
-    let cache_save = ActionPin::CacheSave.reference();
-    let renovate_action = ActionPin::Renovate.reference();
     let runner = renovate_runner(config)?;
-    let gate = trusted_renovate_gate(&config.default_branch);
-    let token_secret = format!("secrets.{}", spec.token);
-    let cache_save_gate = trusted_cache_save_expression(&config.default_branch);
-    let config_env = renovate_config_env(spec);
-    let schedules = renovate_schedules(spec);
-    let target_env = renovate_target_env(spec);
-    let host_rules_env = renovate_host_rules_env(spec);
-    let author_env = renovate_author_env(spec);
-    let signoff_env = renovate_signoff_env(spec);
-    let allowed_commands_env = renovate_allowed_commands_env(spec);
-    let hash_files = cache_hash_files(spec);
-    let cache_path = renovate_repository_cache_path();
-
-    let mut cache_steps = String::new();
-    if spec.cache {
-        let _ = write!(
-            cache_steps,
-            r"      - name: Restore Renovate repository cache
-        id: renovate-cache
-        uses: {cache_restore}
-        with:
-          path: {cache_path}
-          key: velnor-renovate-${{{{ github.repository }}}}-{hash_files}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
-          restore-keys: |
-            velnor-renovate-${{{{ github.repository }}}}-{hash_files}-
-            velnor-renovate-${{{{ github.repository }}}}- 
-      - name: Fix Renovate cache ownership
-        if: steps.renovate-cache.outputs.cache-matched-key != ''
-        run: sudo chown -R 12021:0 /tmp/renovate/
-"
-        );
-    }
-
-    let mut cache_save_step = String::new();
-    if spec.cache {
-        let _ = write!(
-            cache_save_step,
-            r"      - name: Save Renovate repository cache
-        if: always() && ({cache_save_gate}) && steps.renovate-cache.outputs.cache-hit != 'true'
-        uses: {cache_save}
-        with:
-          path: {cache_path}
-          key: velnor-renovate-${{{{ github.repository }}}}-{hash_files}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
-"
-        );
-    }
-
-    Ok(format!(
-        r#"name: Renovate
-run-name: Renovate · ${{{{ github.event_name }}}}
-
-on:
-  schedule:
-{schedules}  workflow_dispatch:
-
-permissions:
-  contents: read
-  actions: read
-
-concurrency:
-  group: renovate-${{{{ github.repository }}}}-${{{{ github.ref }}}}
-  cancel-in-progress: true
-
-jobs:
-  renovate:
-    name: Renovate dependencies
-    if: ${{{{ {gate} }}}}
-    runs-on: {runner}
-    timeout-minutes: 120
-    env:
-      RENOVATE_HAS_TOKEN: ${{{{ {token_secret} != '' }}}}
-    steps:
-      - name: Checkout repository
-        uses: {checkout}
-        with:
-          persist-credentials: false
-      - name: Prepare Renovate workspace
-        run: |
-          set -euo pipefail
-          install -d -m 0755 /tmp/renovate /tmp/renovate/cache /tmp/renovate/repos
-          install -d -m 0755 "/tmp/renovate/cache/${{{{ github.repository }}}}/renovate/repository"
-{cache_steps}      - name: Run Renovate
-        if: env.RENOVATE_HAS_TOKEN == 'true'
-        uses: {renovate_action}
-        with:
-          token: ${{{{ {token_secret} }}}}
-          renovate-version: {version}
-        env:
-          RENOVATE_REPOSITORY_CACHE: enabled
-          RENOVATE_BASE_DIR: /tmp/renovate
-          RENOVATE_ONBOARDING: "false"
-{config_env}{target_env}{host_rules_env}{author_env}{signoff_env}{allowed_commands_env}      - name: Skip Renovate without token
-        if: env.RENOVATE_HAS_TOKEN != 'true'
-        run: |
-          echo "::notice::Renovate skipped because '{token}' is not configured for this repository" >> "$GITHUB_STEP_SUMMARY"
-{cache_save_step}"#,
-        version = yaml_scalar(RENOVATE_OSS_VERSION),
-        token = spec.token,
+    Ok(crate::renovate_renderer::render_writer(
+        &crate::renovate_renderer::WriterInput {
+            checkout: ActionPin::Checkout.reference(),
+            cache_restore: ActionPin::CacheRestore.reference(),
+            cache_save: ActionPin::CacheSave.reference(),
+            renovate_action: ActionPin::Renovate.reference(),
+            runner: &runner,
+            dispatch_inputs: "",
+            default_branch: &config.default_branch,
+            token: &spec.token,
+            config_path: &spec.config_path,
+            schedule: &spec.schedule,
+            schedules: &spec.schedules,
+            repositories: &spec.repositories,
+            host_rules_secret: spec.host_rules_secret.as_deref(),
+            author: spec.author.as_deref(),
+            signoff: spec.signoff,
+            allowed_commands: &spec.allowed_commands,
+            cache: spec.cache,
+        },
     ))
 }
 
-fn render_renovate_validate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
-    let checkout = ActionPin::Checkout.reference();
-    let runner = config
-        .selectors
-        .get(&ProviderId::GithubHosted)
-        .map(selector_runs_on_yaml)
-        .unwrap_or_default();
-    let config_arg = shell_escape(&spec.config_path);
-
-    format!(
-        r#"name: Renovate validate
-run-name: Renovate validate · ${{{{ github.event_name }}}}
-
-on:
-  push:
-    branches: [{default_branch}]
-    paths:
-      - renovate.json
-      - renovate.json5
-      - .github/renovate.json
-      - .github/renovate.json5
-  pull_request:
-    paths:
-      - renovate.json
-      - renovate.json5
-      - .github/renovate.json
-      - .github/renovate.json5
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: renovate-validate-${{{{ github.repository }}}}-${{{{ github.ref }}}}
-  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}
-
-jobs:
-  validate:
-    name: Validate Renovate configuration
-    runs-on: {runner}
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: {checkout}
-        with:
-          persist-credentials: false
-      - name: Validate Renovate configuration
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/repo" \
-            -w /repo \
-            ghcr.io/renovatebot/renovate:{version} \
-            renovate-config-validator --strict --no-global {config_arg}
-"#,
-        default_branch = yaml_scalar(&config.default_branch),
-        version = RENOVATE_OSS_VERSION,
-    )
-}
-
-fn shell_escape(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
+fn render_renovate_validate(
+    config: &ProjectConfig,
+    spec: &RenovateSpec,
+) -> Result<String, GeneratorError> {
+    let runner = crate::s2::control_plane_runner(config)?;
+    let local = crate::s2::provider::control_plane_provider(&config.providers).is_local();
+    let gate = local.then(super::ir::WorkflowIr::trusted_event_expression);
+    let default_branch = yaml_scalar(&config.default_branch);
+    Ok(crate::renovate_renderer::render_validate(
+        &crate::renovate_renderer::ValidateInput {
+            checkout: ActionPin::Checkout.reference(),
+            runner: &runner,
+            gate: gate.as_deref(),
+            default_branch: &default_branch,
+            config_path: &spec.config_path,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -480,6 +245,7 @@ mod tests {
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),
@@ -489,11 +255,11 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            default_dispatch_providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             rust_needs: crate::s2::RustNeeds::Parallel,
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),
@@ -535,6 +301,25 @@ mod tests {
             workflow.contains("/tmp/renovate/cache/${{ github.repository }}/renovate/repository")
         );
         assert!(workflow.contains("velnor-renovate-${{ github.repository }}-"));
+    }
+
+    #[test]
+    fn renovate_writer_has_no_trailing_whitespace() {
+        let config = renovate_config();
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
+        let workflow = must(render_renovate(&config, spec), "render renovate workflow");
+        let offenders = workflow
+            .lines()
+            .enumerate()
+            .filter_map(|(line, content)| (content.trim_end() != content).then_some(line + 1))
+            .collect::<Vec<_>>();
+        assert!(
+            offenders.is_empty(),
+            "trailing whitespace at lines {offenders:?}"
+        );
     }
 
     #[test]
@@ -590,7 +375,10 @@ mod tests {
             config.renovate.as_ref(),
             "renovate_config must include a renovate spec",
         );
-        let workflow = render_renovate_validate(&config, spec);
+        let workflow = must(
+            render_renovate_validate(&config, spec),
+            "render renovate validator",
+        );
         assert!(workflow.contains("renovate-config-validator --strict --no-global renovate.json"));
         assert!(workflow.contains("ghcr.io/renovatebot/renovate:44.93.6"));
         assert!(!workflow.contains("GH_RENOVATE_TOKEN"));
@@ -682,7 +470,10 @@ mod tests {
             render_renovate(&config, &full_spec()),
             "render renovate workflow",
         );
-        let validator = render_renovate_validate(&config, &full_spec());
+        let validator = must(
+            render_renovate_validate(&config, &full_spec()),
+            "render renovate validator",
+        );
         assert!(
             writer.contains(&format!("renovate-version: \"{RENOVATE_OSS_VERSION}\"")),
             "{writer}"
@@ -703,7 +494,7 @@ mod tests {
     fn audited_tree(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-renovate-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         match std::fs::create_dir_all(root.join(".github/workflows")) {
             Ok(()) => {}
@@ -729,7 +520,10 @@ mod tests {
             render_renovate(&config, &full_spec()),
             "render renovate workflow",
         );
-        let validator = render_renovate_validate(&config, &full_spec());
+        let validator = must(
+            render_renovate_validate(&config, &full_spec()),
+            "render renovate validator",
+        );
         let root = audited_tree(
             "audit",
             &[

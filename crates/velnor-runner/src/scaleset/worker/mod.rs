@@ -39,7 +39,7 @@ pub mod supervise;
 
 pub use dind::{
     DindProvision, DindSpec, NetworkProvision, BUILDKIT_CACHE_DIR, DIND_READY_POLL_INTERVAL,
-    DIND_READY_TIMEOUT, DIND_SOCKET, STATE_MOUNT,
+    DIND_READY_TIMEOUT, DIND_SOCKET, STATE_MOUNT, WORK_DIR,
 };
 pub use ownership::{OwnershipId, WorkerIdentity};
 pub use runner::{
@@ -47,11 +47,9 @@ pub use runner::{
     RunnerProvision, RunnerSpec, ToolContentAttestation, ToolContentExpectation, ToolContentHook,
     DIND_DIGEST_AMD64, DIND_DIGEST_ARM64, DIND_INDEX_DIGEST, DIND_REPOSITORY, DIND_VERSION,
     RUNNER_DIGEST_AMD64, RUNNER_DIGEST_ARM64, RUNNER_INDEX_DIGEST, RUNNER_REPOSITORY,
-    RUNNER_VERSION,
+    RUNNER_VERSION, RUNNER_WORK_DIR, TOOL_CACHE_DIR,
 };
 pub use supervise::{CleanupReport, DiagnosticExport, Supervision, SupervisionOutcome};
-
-use std::path::Path;
 
 use velnor_model::ScaleSetWorkerState;
 
@@ -86,31 +84,6 @@ where
             stderr: output.stderr,
         })
     }
-}
-
-/// Write secret-adjacent bytes with owner-only permissions. The mode is
-/// set at creation (a `0600` open mode can only lose bits to the umask,
-/// never gain group/other) and enforced again after the write so a
-/// pre-existing wider file cannot survive.
-pub(crate) fn write_owner_only(dest: &Path, contents: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(dest)?;
-        file.write_all(contents)?;
-        file.flush()?;
-        drop(file);
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    std::fs::write(dest, contents)
 }
 
 /// A recorded lifecycle edge: `from → to` for one ownership id.
@@ -366,6 +339,7 @@ pub fn provision_worker(
     hook: &dyn ToolContentHook,
     plan: &ProvisionPlan,
     sleep: &dyn Fn(std::time::Duration),
+    before_runner_start: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<ProvisionOutcome> {
     use anyhow::Context;
     if plan.ready_attempts == 0 {
@@ -412,7 +386,7 @@ pub fn provision_worker(
         &plan.state_dir,
         &plan.jit_config,
     );
-    let provisioned = runner::ensure_runner(runner, &runner_spec)?;
+    let provisioned = runner::ensure_runner(runner, &runner_spec, before_runner_start)?;
     let connection = runner::runner_connection(runner, &plan.identity)?;
     Ok(ProvisionOutcome {
         network,
@@ -657,9 +631,15 @@ mod tests {
             ScriptRunner::ok("Connected to GitHub\n"),
         ]);
         let sleeps = std::cell::Cell::new(0u32);
-        let outcome = provision_worker(&mut script, &DockerToolContentHook, &plan, &|_| {
-            sleeps.set(sleeps.get() + 1);
-        })
+        let outcome = provision_worker(
+            &mut script,
+            &DockerToolContentHook,
+            &plan,
+            &|_| {
+                sleeps.set(sleeps.get() + 1);
+            },
+            &mut || Ok(()),
+        )
         .unwrap();
         assert_eq!(outcome.network, NetworkProvision::Created);
         assert_eq!(outcome.dind, DindProvision::Created);
@@ -711,8 +691,14 @@ mod tests {
             ScriptRunner::fail(1, "Cannot connect"),
             ScriptRunner::fail(1, "Cannot connect"),
         ]);
-        let error =
-            provision_worker(&mut script, &DockerToolContentHook, &plan, &|_| {}).unwrap_err();
+        let error = provision_worker(
+            &mut script,
+            &DockerToolContentHook,
+            &plan,
+            &|_| {},
+            &mut || Ok(()),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("never became ready"), "{error}");
         // The runner was never created: no runner argv ran.
         assert!(

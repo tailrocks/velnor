@@ -42,8 +42,9 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_yaml::{Mapping, Value};
 
@@ -214,6 +215,17 @@ impl PolicyReport {
 /// Usage errors, unreadable inputs, and a failed evaluation (the rendered
 /// report is printed first; the error names the failing rules).
 pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    run_cli_with_env(arguments, &|name| env::var_os(name))
+}
+
+/// `run_cli` with an injectable environment lookup. Production passes
+/// `env::var_os`; tests pass a fixed map so cases that must observe a
+/// missing variable stay hermetic under any ambient environment (mutating
+/// process env in-process is racy under parallel tests).
+fn run_cli_with_env(
+    arguments: &[OsString],
+    getenv: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<(), GeneratorError> {
     let mut options = BTreeMap::new();
     let mut build_pin = false;
     let mut index = 0;
@@ -262,14 +274,14 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let root = options
         .get("workflow-root")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("WORKFLOW_ROOT").map(PathBuf::from))
-        .or_else(|| env::var_os("GITHUB_WORKSPACE").map(PathBuf::from))
+        .or_else(|| getenv("WORKFLOW_ROOT").map(PathBuf::from))
+        .or_else(|| getenv("GITHUB_WORKSPACE").map(PathBuf::from))
         .or_else(|| env::current_dir().ok())
         .ok_or_else(|| GeneratorError::usage("resolve workflow root"))?;
     let base_revision = options
         .get("base-revision")
         .cloned()
-        .or_else(|| env::var(BASE_REVISION_ENV).ok())
+        .or_else(|| getenv(BASE_REVISION_ENV).and_then(|value| value.into_string().ok()))
         .ok_or_else(|| {
             GeneratorError::usage(format!(
                 "--base-revision or {BASE_REVISION_ENV} is required: the validator revision the base branch runs"
@@ -283,8 +295,10 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     });
-    let candidate_manifest =
-        candidate_manifest_source(options.get("candidate-manifest").map(String::as_str));
+    let candidate_manifest = candidate_manifest_source_with_env(
+        options.get("candidate-manifest").map(String::as_str),
+        getenv,
+    );
     let report = evaluate(&PolicyOptions {
         root,
         head_sha: options.get("head-sha").cloned(),
@@ -312,14 +326,17 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
 /// Resolve the candidate manifest the policy run binds env-slot candidates
 /// to: the `--candidate-manifest` flag wins (an empty value disables the
 /// binding), else [`VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV`], else none.
-fn candidate_manifest_source(cli: Option<&str>) -> Option<PathBuf> {
+fn candidate_manifest_source_with_env(
+    cli: Option<&str>,
+    getenv: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
     if let Some(flag) = cli {
         if flag.is_empty() {
             return None;
         }
         return Some(PathBuf::from(flag));
     }
-    env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
+    getenv(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
@@ -613,7 +630,8 @@ struct DeclaredTree {
     default_branch: String,
     excludes: BTreeSet<String>,
     velnor_policy: VelnorPolicyContract,
-    /// Ruleset contexts `ci-pr.yml` must emit as job display names.
+    /// Ruleset contexts `ci-pr.yml` or `ci-policy.yml` must emit as job
+    /// display names.
     required_checks: Vec<String>,
     /// Ruleset contexts reported by GitHub Apps rather than workflows.
     external_checks: Vec<String>,
@@ -1083,14 +1101,32 @@ impl PinnedBinaryLookup {
         build_pin: bool,
         candidate_manifest: Option<PathBuf>,
     ) -> Self {
+        Self::from_env_with(revision, build_pin, candidate_manifest, &|name| {
+            env::var_os(name)
+        })
+    }
+
+    /// `from_env` with an injectable environment lookup. Production passes
+    /// `env::var_os`; tests pass a fixed map so cases that must observe a
+    /// missing (or present) variable stay hermetic under any ambient
+    /// environment (mutating process env in-process is racy under parallel
+    /// tests).
+    pub(crate) fn from_env_with(
+        revision: &str,
+        build_pin: bool,
+        candidate_manifest: Option<PathBuf>,
+        getenv: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Self {
         Self {
-            pinned_binary: env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
-            search_path: env::var_os("PATH"),
+            pinned_binary: getenv(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            search_path: getenv("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
-                || env::var("CARGO_NET_OFFLINE").is_ok_and(|value| value == "true"),
+                || getenv("CARGO_NET_OFFLINE")
+                    .and_then(|value| value.into_string().ok())
+                    .is_some_and(|value| value == "true"),
             candidate_manifest: candidate_manifest.or_else(|| {
-                env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
+                getenv(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from)
             }),
@@ -1389,12 +1425,9 @@ fn scratch_directory(label: &str) -> Result<PathBuf, GeneratorError> {
     let base = env::var_os("RUNNER_TEMP")
         .or_else(|| env::var_os("TMPDIR"))
         .map_or_else(env::temp_dir, PathBuf::from);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
     let path = base.join(format!(
-        "velnor-workflow-{label}-{}-{nanos}",
-        std::process::id()
+        "velnor-workflow-{label}-{}",
+        crate::unique_suffix()
     ));
     fs::create_dir_all(&path)
         .map_err(|error| GeneratorError::io("create scratch directory", &path, &error))?;
@@ -1403,10 +1436,12 @@ fn scratch_directory(label: &str) -> Result<PathBuf, GeneratorError> {
 
 /// Scan `checkout` with the generator built at `pin`, render into a scratch
 /// directory, and return every path under `tree` that differs, in sorted
-/// order. Every rendered file must match the tree byte for byte, and every
-/// workflow in the tree must be generator-owned unless the tree's policy
-/// excludes it. `checkout` and `tree` are the same directory except under
-/// `--check --output`, where the rendered tree lives apart from its source.
+/// order. Every rendered entry must match the tree in kind and content —
+/// file bytes, the executable bit, and symlink targets — and every
+/// `.github` entry in the tree must be generator-owned unless the tree's
+/// policy excludes it. `checkout` and `tree` are the same directory except
+/// under `--check --output`, where the rendered tree lives apart from its
+/// source.
 ///
 /// # Errors
 /// When the pinned generator cannot be obtained or its render fails.
@@ -1483,6 +1518,19 @@ fn render_with_candidate(
     let Ok(wanted) = closure_identity::candidate_closure_of_tree(checkout, &head) else {
         return Ok(None);
     };
+    // Candidate code is untrusted PR output. Give it a clean git-object
+    // snapshot to scan and render, while `tree` remains the authoritative
+    // checkout used for comparison. A candidate can mutate its snapshot
+    // without changing the bytes the trusted comparison reads.
+    let candidate_source = scratch.with_file_name(format!(
+        "{}-candidate-source",
+        scratch
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("policy-render")
+    ));
+    let _ = fs::remove_dir_all(&candidate_source);
+    immutable_git_snapshot(checkout, &candidate_source)?;
     let current_exe = env::current_exe().ok();
     // The manifest gate fails closed loudly: a manifest path that cannot be
     // loaded, or names another tree, is a configuration error, not a skip.
@@ -1535,13 +1583,62 @@ fn render_with_candidate(
         if reported != wanted {
             continue;
         }
-        let differences =
-            render_and_compare(&binary, checkout, tree, scratch, default_branch, excludes)?;
+        let differences = render_and_compare(
+            &binary,
+            &candidate_source,
+            tree,
+            scratch,
+            default_branch,
+            excludes,
+        );
+        let differences = differences?;
         if differences.is_empty() {
+            let _ = fs::remove_dir_all(&candidate_source);
             return Ok(Some(reported));
         }
     }
+    let _ = fs::remove_dir_all(&candidate_source);
     Ok(None)
+}
+
+/// Materialize the audited `HEAD` from git objects into a disposable tree.
+/// The candidate process receives this tree only; the authoritative checkout
+/// stays outside its writable working directory and is never passed to it.
+fn immutable_git_snapshot(checkout: &Path, destination: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(destination).map_err(|error| {
+        GeneratorError::io("create candidate source snapshot", destination, &error)
+    })?;
+    let archive = Command::new("git")
+        .args(["archive", "--format=tar", "HEAD"])
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("archive candidate source: {error}")))?;
+    if !archive.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "archive candidate source failed: {}",
+            String::from_utf8_lossy(&archive.stderr).trim()
+        )));
+    }
+    let mut extract = Command::new("tar")
+        .args(["-xf", "-", "-C"])
+        .arg(destination)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if let Some(stdin) = extract.stdin.as_mut() {
+        stdin.write_all(&archive.stdout).map_err(|error| {
+            GeneratorError::usage(format!("write candidate source archive: {error}"))
+        })?;
+    }
+    let status = extract
+        .wait()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage(
+            "extract candidate source archive failed",
+        ));
+    }
+    Ok(())
 }
 
 fn render_and_compare(
@@ -1552,6 +1649,15 @@ fn render_and_compare(
     default_branch: &str,
     excludes: &BTreeSet<String>,
 ) -> Result<Vec<String>, GeneratorError> {
+    // Each render starts from an empty scratch, so the comparison is
+    // against exactly this renderer's tree — never a union with a
+    // previous render into the same directory.
+    if fs::symlink_metadata(scratch).is_ok() {
+        fs::remove_dir_all(scratch)
+            .map_err(|error| GeneratorError::io("clean scratch directory", scratch, &error))?;
+    }
+    fs::create_dir_all(scratch)
+        .map_err(|error| GeneratorError::io("create scratch directory", scratch, &error))?;
     let output = Command::new(binary)
         .arg(checkout)
         .arg("--output")
@@ -1578,61 +1684,226 @@ fn render_and_compare(
             detail.trim()
         )));
     }
+    compare_rendered_tree(scratch, root, excludes)
+}
+
+/// Compare an untrusted render directory with the untouched authoritative
+/// tree. The directory is never treated as source or provenance: its
+/// symlinks are admitted only when confined to the render root — a link
+/// that escapes the root, dangles, or names a non-file is an error — and
+/// every admitted entry must then match the tree in kind and content:
+/// file bytes, the executable bit, and symlink targets. Every `.github`
+/// entry in the tree must be generator-owned unless the tree's policy
+/// excludes it.
+fn compare_rendered_tree(
+    rendered_root: &Path,
+    tree: &Path,
+    excludes: &BTreeSet<String>,
+) -> Result<Vec<String>, GeneratorError> {
     let mut rendered = BTreeMap::new();
-    collect_files(scratch, scratch, &mut rendered)?;
+    collect_rendered_tree_entries(rendered_root, rendered_root, &mut rendered)?;
+    let mut actual = BTreeMap::new();
+    let github = tree.join(".github");
+    if fs::symlink_metadata(&github).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        collect_actual_tree_entries(tree, &github, &mut actual)?;
+    }
     let mut differences = Vec::new();
-    for (relative, content) in &rendered {
-        let actual = root.join(relative);
-        match fs::read(&actual) {
-            Ok(bytes) if &bytes == content => {}
-            Ok(_) => differences.push(format!(
-                "{}: differs from the pinned render",
-                relative.display()
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                differences.push(format!("{}: missing from the tree", relative.display()));
-            }
-            Err(error) => return Err(GeneratorError::io("read tree file", &actual, &error)),
+    for (relative, expected) in &rendered {
+        if relative.starts_with(".github") {
+            compare_tree_entry(relative, expected, actual.get(relative), &mut differences);
+        } else {
+            let found = stat_tree_entry(&tree.join(relative))?;
+            compare_tree_entry(relative, expected, found.as_ref(), &mut differences);
         }
     }
-    let workflows = root.join(".github/workflows");
-    if let Ok(entries) = fs::read_dir(&workflows) {
-        for entry in entries {
-            let path = entry
-                .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
-                .path();
-            if !path.is_file()
-                || !matches!(
-                    path.extension().and_then(|value| value.to_str()),
-                    Some("yml" | "yaml")
-                )
-            {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if excludes.contains(name) {
-                continue;
-            }
-            let relative = PathBuf::from(".github/workflows").join(name);
-            if !rendered.contains_key(&relative) {
-                differences.push(format!(
-                    "{}: not generator-owned (hand-written workflows are refused; list it under [policy] exclude_workflows only while migrating)",
-                    relative.display()
-                ));
-            }
+    for relative in actual.keys() {
+        if rendered.contains_key(relative) || is_excluded_workflow(relative, excludes) {
+            continue;
+        }
+        if relative.starts_with(".github/workflows")
+            && matches!(
+                relative.extension().and_then(|value| value.to_str()),
+                Some("yml" | "yaml")
+            )
+        {
+            differences.push(format!(
+                "{}: not generator-owned (hand-written workflows are refused; list it under [policy] exclude_workflows only while migrating)",
+                relative.display()
+            ));
+        } else {
+            differences.push(format!(
+                "{}: not generator-owned (absent from the pinned render)",
+                relative.display()
+            ));
         }
     }
     differences.sort();
     Ok(differences)
 }
 
-fn collect_files(
+/// The migration hatch, unchanged: an unrendered top-level
+/// `.github/workflows/<name>.yml|.yaml` the tree's `[policy]
+/// exclude_workflows` names. Nested paths never match, exactly like the
+/// previous directory scan.
+fn is_excluded_workflow(relative: &Path, excludes: &BTreeSet<String>) -> bool {
+    if excludes.is_empty() {
+        return false;
+    }
+    let Ok(name) = relative.strip_prefix(".github/workflows") else {
+        return false;
+    };
+    if name.components().count() != 1
+        || !matches!(
+            name.extension().and_then(|value| value.to_str()),
+            Some("yml" | "yaml")
+        )
+    {
+        return false;
+    }
+    name.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| excludes.contains(name))
+}
+
+/// One collected tree entry: regular files by bytes plus the executable
+/// bit, symlinks by target, anything else by kind. Directories stay
+/// implicit — the comparison names entries, and the writer's own
+/// `--check` is what reports unknown directories.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TreeEntry {
+    File { bytes: Vec<u8>, executable: bool },
+    Symlink { target: PathBuf },
+    Special,
+    Directory,
+}
+
+impl TreeEntry {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::File { .. } => "a regular file",
+            Self::Symlink { .. } => "a symlink",
+            Self::Special => "a special file",
+            Self::Directory => "a directory",
+        }
+    }
+}
+
+/// Compare one rendered entry against the actual tree, pushing a finding
+/// for a missing, mistyped, edited, retargeted, or mode-drifted path.
+fn compare_tree_entry(
+    relative: &Path,
+    expected: &TreeEntry,
+    found: Option<&TreeEntry>,
+    differences: &mut Vec<String>,
+) {
+    let Some(found) = found else {
+        differences.push(format!("{}: missing from the tree", relative.display()));
+        return;
+    };
+    match (expected, found) {
+        (
+            TreeEntry::File {
+                bytes: wanted,
+                executable: wanted_exec,
+            },
+            TreeEntry::File {
+                bytes: actual,
+                executable: actual_exec,
+            },
+        ) => {
+            if actual != wanted {
+                differences.push(format!(
+                    "{}: differs from the pinned render",
+                    relative.display()
+                ));
+            } else if actual_exec != wanted_exec {
+                differences.push(format!(
+                    "{}: {} in the tree but the pinned render {}",
+                    relative.display(),
+                    if *actual_exec {
+                        "is executable"
+                    } else {
+                        "is not executable"
+                    },
+                    if *wanted_exec {
+                        "is executable"
+                    } else {
+                        "is not"
+                    },
+                ));
+            }
+        }
+        (TreeEntry::Symlink { target: wanted }, TreeEntry::Symlink { target: actual }) => {
+            if actual != wanted {
+                differences.push(format!(
+                    "{}: points at {} in the tree but the pinned render points at {}",
+                    relative.display(),
+                    actual.display(),
+                    wanted.display()
+                ));
+            }
+        }
+        (TreeEntry::Special, TreeEntry::Special) | (TreeEntry::Directory, TreeEntry::Directory) => {
+        }
+        _ => {
+            differences.push(format!(
+                "{}: is {} in the tree but the pinned render has {}",
+                relative.display(),
+                found.kind(),
+                expected.kind()
+            ));
+        }
+    }
+}
+
+/// Classify one actual-tree path without following symlinks:
+/// `Ok(None)` when the path is absent.
+fn stat_tree_entry(path: &Path) -> Result<Option<TreeEntry>, GeneratorError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GeneratorError::io("read tree file", path, &error)),
+    };
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(path)
+            .map_err(|error| GeneratorError::io("read tree symlink", path, &error))?;
+        return Ok(Some(TreeEntry::Symlink { target }));
+    }
+    if metadata.file_type().is_dir() {
+        return Ok(Some(TreeEntry::Directory));
+    }
+    if !metadata.file_type().is_file() {
+        return Ok(Some(TreeEntry::Special));
+    }
+    let bytes =
+        fs::read(path).map_err(|error| GeneratorError::io("read tree file", path, &error))?;
+    Ok(Some(TreeEntry::File {
+        bytes,
+        executable: is_executable_metadata(&metadata),
+    }))
+}
+
+/// Collect the untrusted render side of a policy comparison: regular
+/// files by bytes plus the executable bit, symlinks by target after a
+/// confinement proof. A rendered link is admitted only when it resolves
+/// inside the render root to a regular file; escapes, dangling links,
+/// non-file targets, and non-file outputs are errors, never entries —
+/// the comparison must not follow untrusted bytes out of the render.
+fn collect_rendered_tree_entries(
     base: &Path,
     directory: &Path,
-    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+    entries: &mut BTreeMap<PathBuf, TreeEntry>,
+) -> Result<(), GeneratorError> {
+    let canonical_base = fs::canonicalize(base)
+        .map_err(|error| GeneratorError::io("canonicalize rendered root", base, &error))?;
+    collect_rendered_tree_entries_inner(base, &canonical_base, directory, entries)
+}
+
+fn collect_rendered_tree_entries_inner(
+    base: &Path,
+    canonical_base: &Path,
+    directory: &Path,
+    entries: &mut BTreeMap<PathBuf, TreeEntry>,
 ) -> Result<(), GeneratorError> {
     for entry in fs::read_dir(directory)
         .map_err(|error| GeneratorError::io("read rendered directory", directory, &error))?
@@ -1640,16 +1911,130 @@ fn collect_files(
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read rendered entry: {error}")))?
             .path();
-        if path.is_dir() {
-            collect_files(base, &path, files)?;
-        } else if path.is_file() {
-            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("read rendered metadata", &path, &error))?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path)
+                .map_err(|error| GeneratorError::io("read rendered symlink", &path, &error))?;
+            let joined = if target.is_absolute() {
+                target.clone()
+            } else {
+                path.parent()
+                    .map_or_else(|| PathBuf::from(&target), |parent| parent.join(&target))
+            };
+            let canonical = fs::canonicalize(&joined).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered symlink {} dangles or is unreadable",
+                    path.display()
+                ))
+            })?;
+            if !canonical.starts_with(canonical_base) {
+                return Err(GeneratorError::usage(format!(
+                    "rendered symlink escapes its root: {}",
+                    path.display()
+                )));
+            }
+            let target_metadata = fs::metadata(&canonical).map_err(|error| {
+                GeneratorError::io("read rendered link target", &canonical, &error)
+            })?;
+            if !target_metadata.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "rendered symlink {} does not name a file",
+                    path.display()
+                )));
+            }
+            let relative = path.strip_prefix(base).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered output escaped its root: {}",
+                    path.display()
+                ))
+            })?;
+            entries.insert(relative.to_path_buf(), TreeEntry::Symlink { target });
+        } else if metadata.is_dir() {
+            collect_rendered_tree_entries_inner(base, canonical_base, &path, entries)?;
+        } else if metadata.is_file() {
+            let relative = path.strip_prefix(base).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered output escaped its root: {}",
+                    path.display()
+                ))
+            })?;
             let content = fs::read(&path)
                 .map_err(|error| GeneratorError::io("read rendered file", &path, &error))?;
-            files.insert(relative, content);
+            entries.insert(
+                relative.to_path_buf(),
+                TreeEntry::File {
+                    bytes: content,
+                    executable: is_executable_metadata(&metadata),
+                },
+            );
+        } else {
+            return Err(GeneratorError::usage(format!(
+                "rendered output contains non-file {}",
+                path.display()
+            )));
         }
     }
     Ok(())
+}
+
+/// Collect the authoritative tree side of a policy comparison: regular
+/// files by bytes plus the executable bit, symlinks by target, anything
+/// else by kind. Lenient by design — every surprise here is drift the
+/// comparison names, never a collection error — and symlink-blind: links
+/// are recorded, never followed, so external bytes cannot leak in.
+fn collect_actual_tree_entries(
+    base: &Path,
+    directory: &Path,
+    entries: &mut BTreeMap<PathBuf, TreeEntry>,
+) -> Result<(), GeneratorError> {
+    for entry in fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read tree directory", directory, &error))?
+    {
+        let path = entry
+            .map_err(|error| GeneratorError::usage(format!("read tree entry: {error}")))?
+            .path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("read tree entry", &path, &error))?;
+        if metadata.file_type().is_dir() {
+            collect_actual_tree_entries(base, &path, entries)?;
+        } else if metadata.file_type().is_symlink() {
+            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            let target = fs::read_link(&path)
+                .map_err(|error| GeneratorError::io("read tree symlink", &path, &error))?;
+            entries.insert(relative, TreeEntry::Symlink { target });
+        } else if metadata.file_type().is_file() {
+            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            let content = fs::read(&path)
+                .map_err(|error| GeneratorError::io("read tree file", &path, &error))?;
+            entries.insert(
+                relative,
+                TreeEntry::File {
+                    bytes: content,
+                    executable: is_executable_metadata(&metadata),
+                },
+            );
+        } else {
+            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            entries.insert(relative, TreeEntry::Special);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `metadata` carries any execute bit. Only unix filesystems
+/// report one; elsewhere every file is definitionally non-executable.
+fn is_executable_metadata(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,8 +2044,8 @@ fn collect_files(
 fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>) -> RuleReport {
     let mut findings = Vec::new();
     let aggregate = root.join(PULL_REQUEST_AGGREGATE);
-    let emitted = match fs::read_to_string(&aggregate) {
-        Ok(yaml) => match super::workflow_job_display_names(&yaml) {
+    let mut emitted = match fs::read_to_string(&aggregate) {
+        Ok(yaml) => match super::workflow_job_display_names(PULL_REQUEST_AGGREGATE, &yaml) {
             Ok(names) => Some(names),
             Err(error) => {
                 findings.push(format!("{PULL_REQUEST_AGGREGATE}: {error}"));
@@ -1673,12 +2058,23 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
             None
         }
     };
+    // The policy entrypoint contributes its job names to the searched set:
+    // `Policy` is emitted there, not by the aggregate. An absent entrypoint
+    // contributes nothing; its absence is audited by the entrypoint rule.
+    if let Some(names) = emitted.as_mut()
+        && let Ok(yaml) = fs::read_to_string(root.join(POLICY_ENTRYPOINT))
+    {
+        match super::workflow_job_display_names(POLICY_ENTRYPOINT, &yaml) {
+            Ok(entrypoint) => names.extend(entrypoint),
+            Err(error) => findings.push(format!("{POLICY_ENTRYPOINT}: {error}")),
+        }
+    }
     match &emitted {
         Some(names) => {
             for context in &declared.required_checks {
                 if !names.contains(context) {
                     findings.push(format!(
-                        "{PULL_REQUEST_AGGREGATE} emits no job named `{context}` (required by the ruleset)"
+                        "{PULL_REQUEST_AGGREGATE} and {POLICY_ENTRYPOINT} emit no job named `{context}` (required by the ruleset)"
                     ));
                 }
             }
@@ -1692,7 +2088,7 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
         None => {}
     }
     let mut summary = format!(
-        "{PULL_REQUEST_AGGREGATE} emits [{}]",
+        "{PULL_REQUEST_AGGREGATE} and {POLICY_ENTRYPOINT} emit [{}]",
         declared.required_checks.join(", ")
     );
     if let Some(live) = live {
@@ -1701,7 +2097,7 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
         // ruleset that does not require it makes every rule here advisory.
         let entrypoint_contexts = fs::read_to_string(root.join(POLICY_ENTRYPOINT))
             .ok()
-            .and_then(|yaml| super::workflow_job_display_names(&yaml).ok())
+            .and_then(|yaml| super::workflow_job_display_names(POLICY_ENTRYPOINT, &yaml).ok())
             .unwrap_or_default();
         for context in &entrypoint_contexts {
             if !live.contains(context.as_str()) {
@@ -2127,9 +2523,16 @@ fn has_safe_runner_gate(
     if has_trusted_runner_gate(condition) {
         return true;
     }
-    // Generated provider jobs admit a provider-selecting dispatch on any ref
-    // (dispatch needs write access on a ref of this repository) plus the
-    // automatic events, with the trusted-event conjunct for local providers
+    // A top-level conjunction carrying the exact trusted-event predicate
+    // excludes fork and bot pull requests whatever the functional side
+    // narrows: conjunction preserves exclusion. The split is paren- and
+    // quote-aware, and any top-level `||` disqualifies, so the conjunct
+    // cannot hide inside a wider disjunction.
+    if has_exact_trusted_conjunct(condition) {
+        return true;
+    }
+    // Generated provider jobs admit every event (automatic) or dispatches
+    // alone (manual), with the trusted-event conjunct for local providers
     // and trusted-only units. That generated shape is trusted even when the
     // advisory checkout lacks `.github/ci/project.toml` and only carries
     // `.github-gen`.
@@ -2137,6 +2540,55 @@ fn has_safe_runner_gate(
         return false;
     };
     is_generated_provider_gate(condition, &provider)
+}
+
+/// Whether the condition is a pure top-level `&&` conjunction with the
+/// exact trusted-event predicate as one member, e.g. the `(functional) &&
+/// (trusted)` shape every generated local job renders. Parentheses and
+/// single-quoted literals (with `''` escapes) nest; anything else splits.
+fn has_exact_trusted_conjunct(condition: &str) -> bool {
+    let value = condition.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim);
+    let flat: String = value.split_whitespace().collect();
+    let trusted = format!("({})", trusted_event_conjunct());
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut start = 0usize;
+    let bytes = flat.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    index += 1;
+                } else {
+                    in_string = false;
+                }
+            }
+        } else if byte == b'\'' {
+            in_string = true;
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 {
+            if byte == b'&' && bytes.get(index + 1) == Some(&b'&') {
+                members.push(&flat[start..index]);
+                index += 1;
+                start = index + 1;
+            } else if byte == b'|' && bytes.get(index + 1) == Some(&b'|') {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    members.push(&flat[start..]);
+    members.iter().any(|member| *member == trusted)
 }
 
 fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorError> {
@@ -2356,26 +2808,18 @@ fn trusted_event_conjunct() -> &'static str {
     "!(github.event_name=='pull_request'&&(github.event.pull_request.head.repo.fork||github.event.pull_request.user.type=='Bot'))"
 }
 
-/// Whether `value` is the generated admission for `provider`: a
-/// provider-selecting dispatch (`inputs.providers` comma-boundary match) or
-/// the automatic events, with the trusted-event conjunct. The reusable
-/// provider/unit selector prefix is stripped first; the remaining
-/// expression must be exactly the admission the generator renders.
-fn is_generated_provider_gate(value: &str, provider: &str) -> bool {
+/// Whether `value` is the generated admission for a local provider:
+/// dispatches select the static universe, so an automatic provider renders
+/// the bare trusted-event conjunct and a manual one conjoins it with the
+/// dispatch predicate. No input match survives. The reusable provider/unit
+/// selector prefix is stripped first; the remaining expression must be
+/// exactly the admission the generator renders.
+fn is_generated_provider_gate(value: &str, _provider: &str) -> bool {
     let normalized = normalize_gate_expression(value);
     let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
-    let dispatch = format!(
-        "github.event_name=='workflow_dispatch'&&contains(format(',{{0}},',github.event.inputs.providers),',{provider},')"
-    );
     let trusted = trusted_event_conjunct();
-    // The generator renders `((dispatch) || (automatic)) && (trusted)` for
-    // local providers: the automatic side is the event predicate when the
-    // provider is in the automatic set, `false` otherwise.
-    let automatic_shapes = ["github.event_name!='workflow_dispatch'", "false"];
-    automatic_shapes.into_iter().any(|automatic| {
-        let event = format!("({dispatch})||({automatic})");
-        value == format!("({event})&&({trusted})") || value == format!("{event}&&({trusted})")
-    })
+    let dispatch = "github.event_name=='workflow_dispatch'";
+    value == format!("({trusted})") || value == format!("({dispatch})&&({trusted})")
 }
 
 fn inspect_jobs(
@@ -2621,9 +3065,14 @@ fn is_full_sha_reference(value: &str) -> bool {
 /// reference outside `.github/actions/` stays rejected below. The owner
 /// policy job's setup composite resolves out of its sibling checkout
 /// instead of the root (a root checkout would wipe `policy-checkout/`),
-/// so that exact reference is reviewed too — but no second sibling path.
+/// so that exact reference is reviewed too. The owner package publisher has
+/// a separate, exact `source/` checkout for repository verification tasks;
+/// arbitrary checkout-root action paths remain rejected.
 fn is_approved_local_action(value: &str) -> bool {
-    if value == super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION {
+    if matches!(
+        value,
+        super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION | super::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION
+    ) {
         return true;
     }
     let Some(path) = value.strip_prefix("./.github/actions/") else {

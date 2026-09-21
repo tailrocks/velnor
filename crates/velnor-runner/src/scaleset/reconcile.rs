@@ -19,6 +19,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::scaleset::capacity::{AcquireOutcome, CapacityLedger, LedgerLane, LedgerPermitState};
+use crate::scaleset::converge::WorkerLane;
 use crate::scaleset::demand::{DemandState, DemandStore};
 use crate::scaleset::intents::{permit_holder, reconcile_returned_ids, AcquireBatchStore};
 use crate::scaleset::metrics::Metrics;
@@ -35,23 +36,28 @@ pub const UNCERTAIN_REACQUIRE_AFTER: Duration = Duration::from_secs(60);
 /// row holding a permit, and unattested-but-granted rows adopt their
 /// about-to-reserve permit early — retention direction), while step-7
 /// convergence excludes `granted` (it is the acquire pass's input).
-pub(crate) const PERMIT_STATES: [DemandState; 5] = [
+pub(crate) const PERMIT_STATES: [DemandState; 7] = [
     DemandState::Granted,
     DemandState::AcquireIntent,
     DemandState::Acquired,
     DemandState::Uncertain,
+    DemandState::CanceledPending,
+    DemandState::CanceledAcquired,
     DemandState::ProvisionIntent,
 ];
 
 pub(crate) fn permit_state_for_demand(state: DemandState) -> LedgerPermitState {
     match state {
         DemandState::Granted => LedgerPermitState::Reserved,
-        DemandState::AcquireIntent | DemandState::Acquired => LedgerPermitState::Acquiring,
-        DemandState::Uncertain => LedgerPermitState::Uncertain,
+        DemandState::AcquireIntent | DemandState::Acquired | DemandState::CanceledAcquired => {
+            LedgerPermitState::Acquiring
+        }
+        DemandState::Uncertain | DemandState::CanceledPending => LedgerPermitState::Uncertain,
         DemandState::ProvisionIntent => LedgerPermitState::Provisioning,
         DemandState::Observed
         | DemandState::Eligible
         | DemandState::Declined
+        | DemandState::CanceledDone
         | DemandState::Terminal => LedgerPermitState::Uncertain,
     }
 }
@@ -61,6 +67,9 @@ pub(crate) fn permit_state_for_demand(state: DemandState) -> LedgerPermitState {
 pub struct StartupReport {
     pub generation: u64,
     pub stale_grants_reset: u64,
+    /// Acquire intents with no batch are pre-network crash orphans: the
+    /// request could not have been sent, so their reservation was released.
+    pub unbatched_acquire_intents_recovered: u64,
     pub adopted: Vec<String>,
     pub marked_uncertain: Vec<String>,
     pub confirmed: Vec<String>,
@@ -97,6 +106,48 @@ pub fn startup<L: CapacityLedger>(
     let generation = ledger
         .generation()
         .map_err(|error| anyhow::anyhow!("read ledger generation: {error}"))?;
+
+    // An unbatched acquire intent cannot have crossed the network boundary:
+    // both the previous row-first writer and the current batch-first writer
+    // persist the acquire batch before calling `acquirejobs`. Return these
+    // crash orphans to eligibility before ledger attestation.
+    let mut unbatched_acquire_intents_recovered = 0;
+    for (request_id, state) in demand.list_in_states(
+        scale_set_id,
+        &[DemandState::AcquireIntent, DemandState::CanceledPending],
+    )? {
+        if !batches.contains_request(scale_set_id, request_id)? {
+            let holder = permit_holder(scale_set_id, request_id);
+            if state == DemandState::CanceledPending {
+                demand.set_state(request_id, DemandState::CanceledDone, None, generation)?;
+                ledger.release_cancelled(&holder)?;
+            } else {
+                demand.set_state(request_id, DemandState::Eligible, None, generation)?;
+                ledger.release_to_eligible(&holder)?;
+            }
+            unbatched_acquire_intents_recovered += 1;
+        }
+    }
+
+    // Open batches are the durable network boundary. Mark members uncertain
+    // before stale-generation reset so a crash between batch and demand-row
+    // writes cannot be mistaken for an unsent grant.
+    let open_batches = batches.open_batches(scale_set_id, usize::MAX)?;
+    let mut batches_orphaned = 0u64;
+    for batch in &open_batches {
+        if batch.state == crate::scaleset::intents::BatchState::Intended {
+            batches.resolve(&batch.batch_id, true)?;
+            for request_id in &batch.request_ids {
+                if let Some(row) = demand.get(*request_id)?
+                    && matches!(row.state, DemandState::Granted | DemandState::AcquireIntent)
+                {
+                    demand.set_state(*request_id, DemandState::Uncertain, None, generation)?;
+                }
+            }
+            batches_orphaned += 1;
+        }
+    }
+
     let stale_grants_reset = demand.reset_stale_grants(scale_set_id, generation)?;
     metrics.add_stale_grants_reset(stale_grants_reset);
 
@@ -128,28 +179,11 @@ pub fn startup<L: CapacityLedger>(
         .reconcile(&alive_refs)
         .map_err(|error| anyhow::anyhow!("reconcile ledger: {error}"))?;
 
-    // Crash orphans: `intended` batches never saw their `acquirejobs`
-    // answer. They become `uncertain` (members keep their permits, still
-    // counted) for idle reconcile to resolve — never silently dropped.
-    let mut batches_orphaned = 0u64;
-    for batch in batches.open_batches(scale_set_id, 64)? {
-        if batch.state == crate::scaleset::intents::BatchState::Intended {
-            batches.resolve(&batch.batch_id, true)?;
-            for request_id in &batch.request_ids {
-                if let Some(row) = demand.get(*request_id)?
-                    && row.state == DemandState::AcquireIntent
-                {
-                    demand.set_state(*request_id, DemandState::Uncertain, None, generation)?;
-                }
-            }
-            batches_orphaned += 1;
-        }
-    }
-
     metrics.inc_reconcile_runs();
     Ok(StartupReport {
         generation,
         stale_grants_reset,
+        unbatched_acquire_intents_recovered,
         adopted: report.adopted,
         marked_uncertain: report.marked_uncertain,
         confirmed: report.confirmed,
@@ -177,11 +211,13 @@ fn batch_age(created_at: &str) -> Option<Duration> {
 /// Bounded idle-poll reconcile: resolve uncertain batches from observations
 /// first, then re-acquire at most one overdue batch. Never fails the poll:
 /// a failed re-acquire stays uncertain for the next idle round.
-pub async fn idle_poll<Q: QueueSession, L: CapacityLedger>(
+#[allow(clippy::too_many_arguments, reason = "single idle-reconcile call path")]
+pub async fn idle_poll<Q: QueueSession, L: CapacityLedger, W: WorkerLane>(
     queue: &Q,
     ledger: &mut L,
     demand: &mut DemandStore,
     batches: &mut AcquireBatchStore,
+    lane: &mut W,
     scale_set_id: i32,
     generation: u64,
     metrics: &Metrics,
@@ -190,7 +226,7 @@ pub async fn idle_poll<Q: QueueSession, L: CapacityLedger>(
     let mut report = IdleReport::default();
     let open = batches.open_batches(scale_set_id, 16)?;
     for batch in &open {
-        if resolve_from_observations(ledger, demand, batches, batch, generation).await? {
+        if resolve_from_observations(ledger, demand, batches, lane, batch, generation).await? {
             report.batches_resolved += 1;
         }
     }
@@ -214,14 +250,17 @@ pub async fn idle_poll<Q: QueueSession, L: CapacityLedger>(
 }
 
 /// Resolve one batch when no member remains uncertain: members observed
-/// `acquired` confirm the grant, members observed `terminal` ran elsewhere
-/// (permits released — nothing was ever provisioned for an uncertain
-/// member). Returns whether the batch resolved.
+/// `acquired` confirm the grant; members observed `terminal` stay owned by
+/// the terminal handler unless the lane disowns them (rowless orphans free
+/// their permits under the epoch fence — nothing was ever provisioned for
+/// them and no further messages will arrive). Returns whether the batch
+/// resolved.
 #[allow(clippy::too_many_arguments, reason = "single idle-resolve call site")]
-async fn resolve_from_observations<L: CapacityLedger>(
+async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
     ledger: &mut L,
     demand: &mut DemandStore,
     batches: &mut AcquireBatchStore,
+    lane: &mut W,
     batch: &crate::scaleset::intents::AcquireBatch,
     generation: u64,
 ) -> Result<bool> {
@@ -230,8 +269,12 @@ async fn resolve_from_observations<L: CapacityLedger>(
         states.push(demand.get(*request_id)?);
     }
     if states.iter().any(|row| {
-        row.as_ref()
-            .is_some_and(|row| row.state == DemandState::Uncertain)
+        row.as_ref().is_some_and(|row| {
+            matches!(
+                row.state,
+                DemandState::Uncertain | DemandState::CanceledPending
+            )
+        })
     }) {
         return Ok(false);
     }
@@ -242,16 +285,51 @@ async fn resolve_from_observations<L: CapacityLedger>(
             DemandState::Acquired => {
                 transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
             }
+            DemandState::CanceledAcquired => {
+                transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
+            }
+            // The terminal handler owns worker cleanup and permit release.
+            // A completion message alone is not cleanup confirmation. The
+            // one exception is a rowless orphan: no worker row exists, so
+            // nobody will ever visit this holder again (a completed job
+            // emits no further messages) and the held permit would leak
+            // occupancy forever. Free it under the epoch fence.
             DemandState::Terminal => {
-                ledger
-                    .release(&holder)
-                    .map_err(|error| anyhow::anyhow!("release orphaned holder: {error}"))?;
+                let owned = lane
+                    .owns_terminal_cleanup(*request_id)
+                    .map_err(|error| anyhow::anyhow!("check terminal ownership: {error}"))?;
+                if !owned {
+                    fenced_release_orphan(ledger, &holder, generation)?;
+                }
             }
             _ => {}
         }
     }
     batches.resolve(&batch.batch_id, false)?;
     Ok(true)
+}
+
+/// Release a rowless orphan's permit under the epoch fence. The demand
+/// rows were read under `generation`, so a moved epoch means the Terminal
+/// observation may be stale — bail and let the next poll retry rather
+/// than free another epoch's permit. Idempotent: an already-released
+/// holder is a no-op.
+fn fenced_release_orphan<L: CapacityLedger>(
+    ledger: &mut L,
+    holder: &str,
+    generation: u64,
+) -> Result<bool> {
+    let fresh = ledger
+        .generation()
+        .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
+    if fresh != generation {
+        anyhow::bail!(
+            "ledger generation moved during idle resolve (saw {generation}, now {fresh}); retry under the fresh epoch"
+        );
+    }
+    ledger
+        .release(holder)
+        .map_err(|error| anyhow::anyhow!("release orphaned holder: {error}"))
 }
 
 pub(crate) fn transition_or_adopt<L: CapacityLedger>(
@@ -315,14 +393,19 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
     generation: u64,
     metrics: &Metrics,
 ) -> Result<bool> {
+    let mut canceled_pending = std::collections::HashSet::new();
     let uncertain: Vec<i64> = {
         let mut members = Vec::new();
         for request_id in &batch.request_ids {
-            if demand
-                .get(*request_id)?
-                .is_some_and(|row| row.state == DemandState::Uncertain)
-            {
-                members.push(*request_id);
+            if let Some(row) = demand.get(*request_id)? {
+                match row.state {
+                    DemandState::Uncertain => members.push(*request_id),
+                    DemandState::CanceledPending => {
+                        members.push(*request_id);
+                        canceled_pending.insert(*request_id);
+                    }
+                    _ => {}
+                }
             }
         }
         members
@@ -344,7 +427,12 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
     };
     let (acquired, missing) = reconcile_returned_ids(&uncertain, &returned);
     for request_id in &acquired {
-        demand.set_state(*request_id, DemandState::Acquired, None, generation)?;
+        let state = if canceled_pending.contains(request_id) {
+            DemandState::CanceledAcquired
+        } else {
+            DemandState::Acquired
+        };
+        demand.set_state(*request_id, state, None, generation)?;
         transition_or_adopt(
             ledger,
             &permit_holder(batch.scale_set_id, *request_id),
@@ -353,10 +441,21 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
         )?;
     }
     for request_id in &missing {
-        ledger
-            .release(&permit_holder(batch.scale_set_id, *request_id))
-            .map_err(|error| anyhow::anyhow!("release missing holder: {error}"))?;
-        demand.set_state(*request_id, DemandState::Eligible, None, generation)?;
+        let holder = permit_holder(batch.scale_set_id, *request_id);
+        if canceled_pending.contains(request_id) {
+            // The cancellation message was already ACKed. Once the batch
+            // proves this request was not acquired, close this old attempt;
+            // upstream sends a new JobAvailable for the requeued job.
+            demand.set_state(*request_id, DemandState::CanceledDone, None, generation)?;
+            ledger
+                .release_cancelled(&holder)
+                .map_err(|error| anyhow::anyhow!("release canceled holder: {error}"))?;
+        } else {
+            ledger
+                .release_to_eligible(&holder)
+                .map_err(|error| anyhow::anyhow!("release missing holder: {error}"))?;
+            demand.set_state(*request_id, DemandState::Eligible, None, generation)?;
+        }
     }
     metrics.add_acquired_ids(acquired.len() as u64);
     metrics.add_missing_ids(missing.len() as u64);
@@ -424,6 +523,46 @@ mod tests {
         }
     }
 
+    struct OwnershipLane {
+        owned: bool,
+    }
+
+    impl WorkerLane for OwnershipLane {
+        type Error = std::convert::Infallible;
+
+        async fn provision(
+            &mut self,
+            _intent: &crate::scaleset::intents::ProvisionIntent,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn note_assigned(
+            &mut self,
+            _assigned: &velnor_model::ScaleSetJobAssigned,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn note_started(
+            &mut self,
+            _started: &velnor_model::ScaleSetJobStarted,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn note_terminal(
+            &mut self,
+            _completed: &velnor_model::ScaleSetJobCompleted,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn owns_terminal_cleanup(&self, _request_id: i64) -> Result<bool, Self::Error> {
+            Ok(self.owned)
+        }
+    }
+
     fn temp_path(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "velnor-scaleset-reconcile-{name}-{}",
@@ -479,6 +618,52 @@ mod tests {
         assert_eq!(report.adopted, vec!["scaleset/7/11".to_owned()]);
         assert_eq!(ledger.advertised_free().unwrap(), Some(3));
         assert_eq!(metrics.snapshot().reconcile_runs, 1);
+    }
+
+    #[test]
+    fn startup_requeues_unbatched_acquire_intent_without_claiming_network_success() {
+        let path = temp_path("unbatched-acquire-intent");
+        let mut demand = DemandStore::open(&path).unwrap();
+        let mut batches = AcquireBatchStore::open(&path).unwrap();
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        let metrics = Metrics::new();
+
+        demand.submit_offer(7, &push_offer(12), 0).unwrap();
+        demand
+            .set_state(12, DemandState::AcquireIntent, None, 0)
+            .unwrap();
+        let holder = permit_holder(7, 12);
+        assert_eq!(
+            ledger
+                .acquire(
+                    &holder,
+                    LedgerLane::ScaleSet,
+                    LedgerPermitState::Acquiring,
+                    0,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+
+        let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
+        assert_eq!(report.unbatched_acquire_intents_recovered, 1);
+        assert_eq!(report.batches_orphaned, 0);
+        assert_eq!(
+            demand.get(12).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+        assert_eq!(ledger.holder_state(&holder).unwrap(), None);
+        assert_eq!(ledger.occupied().unwrap(), 0);
+
+        // Restart replay is idempotent after the reservation was freed.
+        let replay = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
+        assert_eq!(replay.unbatched_acquire_intents_recovered, 0);
+        assert_eq!(
+            demand.get(12).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+        assert_eq!(ledger.occupied().unwrap(), 0);
     }
 
     #[test]
@@ -571,11 +756,13 @@ mod tests {
 
         let queue = ScriptedQueue::default();
         *queue.answer.lock().unwrap() = Some(Ok(vec![31]));
+        let mut lane = OwnershipLane { owned: true };
         let report = idle_poll(
             &queue,
             &mut ledger,
             &mut demand,
             &mut batches,
+            &mut lane,
             7,
             generation,
             &metrics,
@@ -594,6 +781,153 @@ mod tests {
         );
         assert_eq!(ledger.holder_state(&holders[1]).unwrap(), None);
         assert_eq!(queue.seen.lock().unwrap().as_slice(), &[vec![31, 32]]);
+    }
+
+    #[tokio::test]
+    async fn idle_poll_releases_rowless_terminal_orphans() {
+        let path = temp_path("terminal-orphan");
+        let mut demand = DemandStore::open(&path).unwrap();
+        let mut batches = AcquireBatchStore::open(&path).unwrap();
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        ledger.reconcile(&[]).unwrap();
+        let metrics = Metrics::new();
+        let generation = ledger.generation().unwrap();
+
+        // Crash orphan: the demand row went `terminal` but the permit
+        // release never landed (crash between the row write and the
+        // terminal path). No worker row exists and a completed job emits
+        // no further messages, so the lane disowns cleanup.
+        for id in [41, 42] {
+            demand.submit_offer(7, &push_offer(id), generation).unwrap();
+            demand
+                .set_state(id, DemandState::Terminal, None, generation)
+                .unwrap();
+            ledger
+                .acquire(
+                    &permit_holder(7, id),
+                    LedgerLane::ScaleSet,
+                    LedgerPermitState::Uncertain,
+                    generation,
+                )
+                .unwrap();
+        }
+        let holders = vec![permit_holder(7, 41), permit_holder(7, 42)];
+        batches
+            .record_intended("acq-orphan", 7, &[41, 42], &holders, generation)
+            .unwrap();
+        batches.resolve("acq-orphan", true).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 2);
+
+        let queue = ScriptedQueue::default();
+        let mut lane = OwnershipLane { owned: false };
+        let report = idle_poll(
+            &queue,
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            &mut lane,
+            7,
+            generation,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.batches_resolved, 1);
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(ledger.holder_state(&holders[0]).unwrap(), None);
+        assert_eq!(ledger.holder_state(&holders[1]).unwrap(), None);
+        // Observation-only resolve: no re-acquire traffic for members that
+        // already observed terminal.
+        assert!(queue.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn idle_poll_keeps_lane_owned_terminal_permits() {
+        let path = temp_path("terminal-owned");
+        let mut demand = DemandStore::open(&path).unwrap();
+        let mut batches = AcquireBatchStore::open(&path).unwrap();
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        ledger.reconcile(&[]).unwrap();
+        let metrics = Metrics::new();
+        let generation = ledger.generation().unwrap();
+
+        demand.submit_offer(7, &push_offer(43), generation).unwrap();
+        demand
+            .set_state(43, DemandState::Terminal, None, generation)
+            .unwrap();
+        let holder = permit_holder(7, 43);
+        ledger
+            .acquire(
+                &holder,
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Cleaning,
+                generation,
+            )
+            .unwrap();
+        batches
+            .record_intended(
+                "acq-owned",
+                7,
+                &[43],
+                std::slice::from_ref(&holder),
+                generation,
+            )
+            .unwrap();
+        batches.resolve("acq-owned", true).unwrap();
+
+        // The lane owns cleanup (a worker row exists): the terminal handler
+        // — not the idle path — releases this permit.
+        let queue = ScriptedQueue::default();
+        let mut lane = OwnershipLane { owned: true };
+        let report = idle_poll(
+            &queue,
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            &mut lane,
+            7,
+            generation,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.batches_resolved, 1);
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Cleaning)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+    }
+
+    #[test]
+    fn fenced_orphan_release_bails_on_moved_epoch() {
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        ledger.reconcile(&[]).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = permit_holder(7, 44);
+        ledger
+            .acquire(
+                &holder,
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Uncertain,
+                generation,
+            )
+            .unwrap();
+        ledger.begin_epoch();
+        let error = fenced_release_orphan(&mut ledger, &holder, generation).unwrap_err();
+        assert!(
+            error.to_string().contains("retry under the fresh epoch"),
+            "unexpected fence error: {error:#}"
+        );
+        // No release happened: the next poll retries under the fresh epoch.
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
     }
 
     #[test]
