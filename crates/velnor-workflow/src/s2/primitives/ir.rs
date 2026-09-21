@@ -28,11 +28,10 @@ use crate::s2::{
     kind_unit_workflow_file, nested_unit_workflow_file, prepare_cargo_caller_job_id,
     product_dependency_needs, provider_supports_unit, render_mr_boxington_store_budget_step,
     rendered_cache_values, rust_dependency_needs, stack_group_job_id, unit_group,
-    unit_group_job_id, unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
-    workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
-    yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RustNeeds, RustToolchain,
-    SelectionFieldSources, Unit, UnitKind, ValidationPhase, XcodeToolchain, GENERATED_HEADER,
-    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
+    unit_group_job_id, unit_job_display_name, unit_job_id, workflow_runtime_setup,
+    workflow_selection_file_materialize, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
+    ProjectConfig, RustNeeds, RustToolchain, SelectionFieldSources, Unit, UnitKind,
+    ValidationPhase, XcodeToolchain, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -6429,13 +6428,14 @@ impl WorkflowIr {
             needs.join(", "),
             self.runs_on_yaml(self.control_plane_provider()),
         );
-        // The aggregate scores first, the shell verdict re-confirms after:
-        // conjunction, so either side failing fails the check. A hosted
-        // control plane downloads the verified plan-artifact runtime the
-        // plan publishes for this download; a local control plane scores
-        // with the ambient fleet runtime, like every other local job.
-        let runtime_steps =
-            workflow_runtime_download(self.control_plane_provider(), &self.workflow_revision);
+        // Every hosted consumer resolves the declared immutable runtime product
+        // itself. A plan artifact fanout made availability depend on one
+        // Results-service list request per consumer.
+        let runtime_steps = workflow_runtime_setup(
+            self.control_plane_provider(),
+            &self.repository,
+            &self.workflow_revision,
+        );
         output.push_str(&render_aggregate_score_steps(
             &runtime_steps,
             self.pins.download_artifact,
@@ -7944,37 +7944,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ));
     }
 
-    pub(crate) fn render_workflow_runtime_download(
-        &self,
-        output: &mut String,
-        provider: ProviderId,
-    ) {
-        output.push_str(&workflow_runtime_download(
-            provider,
-            &self.workflow_revision,
-        ));
-    }
-
     fn render_unit_runtime(&self, output: &mut String, provider: ProviderId, unit: &Unit) {
         if provider != ProviderId::GithubHosted {
             return;
         }
-        // Manual dispatch jobs bootstrap the pinned runtime themselves. The
-        // setup acquisition serves every job the Linux-built plan artifact
-        // cannot: Apple jobs, whose executor never matches what the hosted
-        // plan publishes, and Swift jobs, which stay executor-uniform and
-        // set the runtime up wherever they land. A macOS Rust unit (a
-        // `BoltFFI` producer the join forced onto macOS) bootstraps
-        // through the setup action exactly like a Swift unit, while other
-        // Linux units keep the plan download. Collapsed partitions are
-        // executor-homogeneous, so the sampled member represents the job.
-        if unit.kind == UnitKind::Swift
-            || unit.platform == crate::s2::provider::Platform::MacosArm64
-        {
-            self.render_workflow_runtime_setup(output, provider);
-        } else {
-            self.render_workflow_runtime_download(output, provider);
-        }
+        // Active consumers use one verified immutable runtime product per
+        // platform. Candidate same-run artifacts never provision active jobs.
+        let _ = unit;
+        self.render_workflow_runtime_setup(output, provider);
     }
 
     /// The control-plane provider for this surface: hosted when the universe
@@ -8064,15 +8041,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             expected_work_dir = EXPECTED_WORK_DIR,
         );
         output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
-        // The runtime artifact feeds hosted consumers only: hosted unit
-        // jobs and the hosted aggregate download it for their verified
-        // runtime. A local control plane plans ambient — no setup step, so
-        // no `steps.runtime` closure for Prepare to check — and every
-        // local job runs the fleet binary, so the plan publishes only for
-        // a hosted control plane and never orphans an artifact.
-        if control_plane == ProviderId::GithubHosted {
-            output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
-        }
     }
 
     pub(crate) fn render_policy(&self, output: &mut String) {

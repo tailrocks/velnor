@@ -5985,33 +5985,6 @@ pub(crate) fn workflow_pinned_policy_runtime_local(revision: &str, checkout: &st
     )
 }
 
-/// Where a hosted unit job places the runtime pair it downloads from the
-/// Planning artifact (`bin/velnor-workflow` at the event revision,
-/// `bin/velnor-workflow-policy` at the pin). Job-scoped and never
-/// `~/.cargo/bin`: that directory is restored from the cargo-bin toolchain
-/// cache, so a runtime copied there would be saved into a cache keyed by
-/// `mise.lock` and resurface at a stale revision in later jobs.
-pub(crate) const HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME: &str =
-    "$RUNNER_TEMP/velnor-workflow-runtime-artifact";
-
-fn workflow_runtime_download(provider: provider::ProviderId, revision: &str) -> String {
-    if provider == provider::ProviderId::GithubHosted {
-        format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and (.policy_binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and (.closure | test(\"^[0-9a-f]{{64}}$\")) and (.policy_closure | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n          expected=\"$(jq -er '.policy_binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$home/bin/velnor-workflow\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy \"$home/bin/velnor-workflow-policy\"\n          expected_closure=\"$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)\"\n          reported=\"$(\"$home/bin/velnor-workflow-policy\" --closure)\"\n          [[ \"$reported\" == \"$expected_closure\" ]] || {{ echo \"::error::policy runtime reports closure $reported, expected $expected_closure\" >&2; exit 1; }}\n          echo \"$home/bin\" >> \"$GITHUB_PATH\"\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\"\n",
-            ActionPin::DownloadArtifact.reference()
-        )
-    } else {
-        String::new()
-    }
-}
-
-fn workflow_runtime_artifact_upload(revision: &str) -> String {
-    format!(
-        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          policy_src=\"${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}\"\n          install -m 0755 \"$policy_src\" \"$stage/velnor-workflow-policy\"\n          policy_revision=\"$(\"$stage/velnor-workflow-policy\" --revision)\"\n          policy_closure=\"$(\"$stage/velnor-workflow-policy\" --closure)\"\n          [[ \"$policy_closure\" == \"${{{{ steps.runtime.outputs.closure }}}}\" ]] || {{ echo \"::error::policy runtime reports closure $policy_closure, expected ${{{{ steps.runtime.outputs.closure }}}}\" >&2; exit 1; }}\n          policy_digest=\"$(sha256sum \"$stage/velnor-workflow-policy\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg closure \"${{{{ steps.runtime.outputs.closure }}}}\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" --arg policy_revision \"$policy_revision\" --arg policy_closure \"$policy_closure\" --arg policy_binary_sha256 \"$policy_digest\" '{{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
-        ActionPin::UploadArtifact.reference()
-    )
-}
-
 /// Selection-file field sources for one materialize step: already-rendered
 /// GitHub expressions such as `${{ inputs.base_sha }}` or
 /// `${{ needs.plan.outputs.unit_ids }}`. The `units` source must be the
@@ -10732,110 +10705,43 @@ mod tests {
     }
 
     #[test]
-    fn runtime_lane_consumes_platform_qualified_verified_products() {
+    fn hosted_runtime_lane_bootstraps_the_declared_immutable_product() {
         let mut output = String::new();
         WorkflowIr::from_config(&scanned_fixture(provider_set([ProviderId::GithubHosted])))
-            .render_workflow_runtime_download(&mut output, ProviderId::GithubHosted);
-        assert!(output.contains(
-            &format!("name: velnor-workflow-runtime-{FIXTURE_REVISION}-$EYES_OS-$EYES_ARCH")
-                .replace("$EYES_OS", "${{ runner.os }}")
-                .replace("$EYES_ARCH", "${{ runner.arch }}")
-        ));
-        assert!(output.contains("GITHUB_RUN_ID"));
-        assert!(output.contains(".run_id == $run_id"));
-        assert!(output.contains(".revision == $revision"));
-        assert!(output.contains(".platform == $platform"));
-        assert!(output.contains("runtime digest mismatch"));
-        assert!(!output.contains(".head_sha == $revision"));
-        assert!(!output.contains(".head_branch == $head_branch"));
-        assert!(!output.contains("conclusion == \"success\""));
-        assert!(!output.contains("path: ~/.cargo/bin/velnor-workflow\n          if-no-files-found"));
-
-        let publish = workflow_runtime_artifact_upload(FIXTURE_REVISION);
-        assert!(publish.contains("name: Prepare Velnor workflow runtime"));
-        assert!(publish.contains("manifest.json"));
-        assert!(publish.contains("binary_sha256"));
-        assert!(publish.contains("head_branch"));
-        assert!(publish.contains("${{ runner.os }}-${{ runner.arch }}"));
-        assert!(publish.contains("name: Publish Velnor workflow runtime"));
+            .render_workflow_runtime_setup(&mut output, ProviderId::GithubHosted);
+        assert!(
+            output.contains("name: Set up Velnor workflow runtime"),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!("rev: {FIXTURE_REVISION}")),
+            "{output}"
+        );
+        assert!(
+            !output.contains("Download Velnor workflow runtime"),
+            "{output}"
+        );
+        assert!(!output.contains("velnor-workflow-runtime-"), "{output}");
     }
 
     #[test]
-    fn hosted_runtime_artifact_carries_a_proven_policy_binary() {
-        let publish = workflow_runtime_artifact_upload(FIXTURE_REVISION);
-        assert!(publish.contains("velnor-workflow-policy"), "{publish}");
+    fn generated_hosted_ci_has_no_runtime_artifact_fanout() {
+        let workflow = generated_ci_pr(&WorkflowIr::from_config(&scanned_fixture(provider_set([
+            ProviderId::GithubHosted,
+        ]))));
         assert!(
-            publish.contains(&format!("${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}")),
-            "the policy binary is the staged pin, or the event runtime when both are the pin: {publish}"
-        );
-        assert!(publish.contains("--revision"), "{publish}");
-        assert!(
-            publish.contains("policy_revision: $policy_revision"),
-            "{publish}"
-        );
-        assert!(publish.contains("policy_binary_sha256"), "{publish}");
-
-        let mut download = String::new();
-        WorkflowIr::from_config(&scanned_fixture(provider_set([ProviderId::GithubHosted])))
-            .render_workflow_runtime_download(&mut download, ProviderId::GithubHosted);
-        assert!(
-            download.contains(".revision == $revision"),
-            "the artifact is manifest-bound to the event revision: {download}"
+            workflow.contains("name: Set up Velnor workflow runtime"),
+            "{workflow}"
         );
         assert!(
-            download.contains(".repository == $repository"),
-            "the artifact is manifest-bound to this repository: {download}"
+            !workflow.contains("name: Download Velnor workflow runtime"),
+            "{workflow}"
         );
         assert!(
-            download.contains(".run_id == $run_id"),
-            "the artifact is manifest-bound to this run: {download}"
+            !workflow.contains("name: Publish Velnor workflow runtime"),
+            "{workflow}"
         );
-        assert!(
-            download.contains(".policy_closure"),
-            "the manifest carries the policy closure: {download}"
-        );
-        assert!(
-            download.contains(".policy_binary_sha256"),
-            "the manifest carries the policy binary digest: {download}"
-        );
-        assert!(
-            download.contains("policy runtime digest mismatch"),
-            "{download}"
-        );
-        assert!(
-            download.contains(&format!("home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"")),
-            "{download}"
-        );
-        assert!(
-            download.contains("install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy"),
-            "the pair stages the policy binary beside the event binary: {download}"
-        );
-        assert!(
-            download.contains("\"$home/bin/velnor-workflow-policy\" --closure"),
-            "the staged policy binary self-reports its closure: {download}"
-        );
-        assert!(
-            download.contains("policy runtime reports closure"),
-            "the self-report is checked against the manifest closure: {download}"
-        );
-        assert!(
-            download.contains("echo \"$home/bin\" >> \"$GITHUB_PATH\""),
-            "{download}"
-        );
-        assert!(
-            download.contains(&format!(
-                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\""
-            )),
-            "unit jobs export the pinned binary for the D19 guard: {download}"
-        );
-        assert!(
-            !download.contains(".cargo/bin"),
-            "the runtime pair never enters the shared cargo bin: {download}"
-        );
-        assert!(
-            !download.contains("cargo install"),
-            "unit jobs never install from the network: {download}"
-        );
+        assert!(!workflow.contains("velnor-workflow-runtime-"), "{workflow}");
     }
 
     #[test]
