@@ -122,7 +122,8 @@ Split (small PRs, merged in order):
    with the old product (runtime writes expected-work only when the
    env is set; old YAML never sets it).
 2. Runtime product publishes from main; D19 pin advances (repo pin
-   flow, cf. #997/#999).
+   flow, cf. #997/#999). [done: product run `35570540310` success
+   for `9374a4d3`; pin bumped in the merge-4 commit below]
 3. PR-B: this branch rebased = S4 render + S5 docs + regen + pin bump
    (+ pad recalibration per #995 precedent). Proves the full
    plan/run/aggregate loop live. MUST message-rebase `e53b4eee`
