@@ -458,12 +458,10 @@ impl ScaleSetClient {
         let token = self.update_token_if_needed().await?;
         let url = actions_request_url(&token.url, path, query)?;
         let authorization = authorization_override.unwrap_or(token.authorization_header.clone());
-        let user_agent = self.user_agent().await;
         self.execute(method, url, move |request| {
             let request = request
                 .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, authorization.clone())
-                .header(USER_AGENT, user_agent.clone());
+                .header(AUTHORIZATION, authorization.clone());
             if let Some(body) = body.clone() {
                 request.body(body)
             } else {
