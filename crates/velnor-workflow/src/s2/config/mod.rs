@@ -117,12 +117,18 @@ pub(crate) struct RepoGenerationConfig {
     units: Vec<UnitSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     static_files: Vec<StaticFileSection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reviewers: Vec<ReviewerSection>,
     #[serde(default)]
     declare: Vec<DeclareRow>,
     /// Generator-only dual-lane cache budgets. Never serialized into
     /// `.github/ci/project.toml`.
     #[serde(default)]
     cache: CacheRootSection,
+    /// Generator-only native-pack policy. Skipped while empty so the
+    /// canonical form of a repository without native overrides is unchanged.
+    #[serde(default, skip_serializing_if = "NativeRootSection::is_empty")]
+    native: NativeRootSection,
 }
 
 /// GitHub Actions cache account retention (`[cache.github]`). Governs
@@ -152,6 +158,35 @@ struct CacheRootSection {
     github: CacheGithubSection,
     #[serde(default)]
     velnor: CacheVelnorSection,
+}
+
+/// The Apple native-pack policy (`[native.apple]`). The Cargo profile the
+/// `BoltFFI` pack passes through `--cargo-arg`; absent keeps `BoltFFI`'s own
+/// default. Generator-only: never serialized into `.github/ci/project.toml`.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeAppleSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cargo_profile: Option<String>,
+}
+
+impl NativeAppleSection {
+    fn is_empty(&self) -> bool {
+        self.cargo_profile.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeRootSection {
+    #[serde(default, skip_serializing_if = "NativeAppleSection::is_empty")]
+    apple: NativeAppleSection,
+}
+
+impl NativeRootSection {
+    fn is_empty(&self) -> bool {
+        self.apple.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -684,6 +719,17 @@ pub(crate) struct StaticFileSection {
     source: Option<String>,
 }
 
+/// One CODEOWNERS rule: a file pattern and the reviewers who own it.
+/// Declaration order is semantic — GitHub is last-match-wins — so rows
+/// render in the order they appear.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReviewerSection {
+    pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owners: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScanSection {
@@ -699,8 +745,8 @@ struct PolicySection {
     dco_required: Option<bool>,
     /// Require the generated policy workflow to conclude on a pull request.
     ci_required: Option<bool>,
-    /// Repository-ruleset status-check contexts that `ci-pr.yml` must expose as
-    /// top-level job `name:` values.
+    /// Repository-ruleset status-check contexts that `ci-pr.yml` or
+    /// `ci-policy.yml` must expose as top-level job `name:` values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ruleset_required_status_checks: Vec<String>,
     /// Repository-ruleset status-check contexts reported by GitHub Apps rather
@@ -1414,6 +1460,16 @@ impl StaticFileSection {
     }
 }
 
+impl ReviewerSection {
+    pub(crate) fn pattern(&self) -> Option<&str> {
+        self.pattern.as_deref()
+    }
+
+    pub(crate) fn owners(&self) -> &[String] {
+        &self.owners
+    }
+}
+
 /// One declared render primitive and the units it applies to.
 ///
 /// `args` is free-form on purpose: this phase stores it verbatim and digests
@@ -1612,9 +1668,19 @@ impl RepoGenerationConfig {
         &self.cache.velnor
     }
 
+    /// The Apple native-pack policy from `[native.apple]`.
+    pub(crate) fn native_apple(&self) -> &NativeAppleSection {
+        &self.native.apple
+    }
+
     /// The declared repository-local files the generated output owns.
     pub(crate) fn static_files(&self) -> &[StaticFileSection] {
         &self.static_files
+    }
+
+    /// The declared reviewer rules, in the order the config declares them.
+    pub(crate) fn reviewers(&self) -> &[ReviewerSection] {
+        &self.reviewers
     }
 
     /// The repository paths excluded from the scan.
@@ -1639,7 +1705,7 @@ impl RepoGenerationConfig {
     }
 
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
-    /// must expose as job display names.
+    /// or `ci-policy.yml` must expose as job display names.
     pub(crate) fn ruleset_required_status_checks(&self) -> &[String] {
         &self.policy.ruleset_required_status_checks
     }
@@ -1729,6 +1795,7 @@ impl RepoGenerationConfig {
             unit_ids,
         )?;
         validate_static_files(&self.static_files)?;
+        validate_reviewers(&self.reviewers)?;
         self.validate_release()?;
         self.validate_renovate()?;
         self.validate_docs()?;
@@ -2308,6 +2375,61 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
         if duplicate > 1 {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] declares `{file}` twice; one row per owned file"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reviewer rows render into the generator-owned CODEOWNERS file, whose
+/// syntax is GitHub-strict: patterns are single-line globs with no negation
+/// and no comments, owners are `@user`, `@org/team`, or email. Anything
+/// else fails closed with a link to the format reference.
+fn validate_reviewers(rows: &[ReviewerSection]) -> Result<(), GeneratorError> {
+    for row in rows {
+        let pattern = row.pattern.as_deref().unwrap_or_default();
+        if pattern.is_empty() {
+            return Err(GeneratorError::usage(
+                "[[reviewers]] row is missing `pattern`; one file pattern per row",
+            ));
+        }
+        if pattern.contains('\n') || pattern.contains('\r') {
+            return Err(GeneratorError::usage(format!(
+                "[[reviewers]] pattern must be a single line, found `{pattern}`"
+            )));
+        }
+        if pattern.starts_with('#') {
+            return Err(GeneratorError::usage(format!(
+                "[[reviewers]] pattern `{pattern}` starts with `#`, which GitHub reads as a comment; see {}",
+                crate::CODEOWNERS_DOCS_URL
+            )));
+        }
+        if pattern.starts_with('!') {
+            return Err(GeneratorError::usage(format!(
+                "[[reviewers]] pattern `{pattern}` starts with `!`, which GitHub CODEOWNERS does not support; see {}",
+                crate::CODEOWNERS_DOCS_URL
+            )));
+        }
+        if row.owners.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "[[reviewers]] pattern `{pattern}` needs at least one owner"
+            )));
+        }
+        for owner in &row.owners {
+            if !crate::is_valid_codeowner(owner) {
+                return Err(GeneratorError::usage(format!(
+                    "[[reviewers]] owner `{owner}` must be `@user`, `@org/team`, or an email address; see {}",
+                    crate::CODEOWNERS_DOCS_URL
+                )));
+            }
+        }
+        let duplicate = rows
+            .iter()
+            .filter(|other| other.pattern.as_deref() == Some(pattern))
+            .count();
+        if duplicate > 1 {
+            return Err(GeneratorError::usage(format!(
+                "[[reviewers]] declares `{pattern}` twice; GitHub is last-match-wins, so one row per pattern"
             )));
         }
     }
@@ -4096,7 +4218,13 @@ mod tests {
         let providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
         must(
-            crate::s2::scan::scan_shape(root, &providers, "main", &[]),
+            crate::s2::scan::scan_shape(
+                root,
+                &providers,
+                "main",
+                &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
+            ),
             "scan config test repository",
         )
     }
@@ -4314,6 +4442,103 @@ mod tests {
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n",
         );
         assert_eq!(config.providers(), Some(&["velnor".to_owned()][..]));
+    }
+
+    #[test]
+    fn reviewer_rows_accept_handles_teams_and_email() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[reviewers]]\npattern = \"*\"\nowners = [\"@tailrocks\"]\n\n\
+             [[reviewers]]\npattern = \"/docs/**\"\nowners = [\"@tailrocks/docs-team.x\", \"docs@example.com\"]\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate reviewer rows",
+        );
+        assert_eq!(config.reviewers().len(), 2);
+        assert_eq!(config.reviewers()[0].pattern(), Some("*"));
+        assert_eq!(
+            config.reviewers()[1].owners(),
+            &["@tailrocks/docs-team.x", "docs@example.com"]
+        );
+    }
+
+    #[test]
+    fn reviewer_rows_refuse_codeowners_hostile_input() {
+        for (name, rows, message) in [
+            (
+                "missing-pattern",
+                "[[reviewers]]\nowners = [\"@example\"]\n",
+                "missing `pattern`",
+            ),
+            (
+                "empty-pattern",
+                "[[reviewers]]\npattern = \"\"\nowners = [\"@example\"]\n",
+                "missing `pattern`",
+            ),
+            (
+                "multiline-pattern",
+                "[[reviewers]]\npattern = \"a\\nb\"\nowners = [\"@example\"]\n",
+                "must be a single line",
+            ),
+            (
+                "comment-pattern",
+                "[[reviewers]]\npattern = \"#trap\"\nowners = [\"@example\"]\n",
+                "reads as a comment",
+            ),
+            (
+                "negation-pattern",
+                "[[reviewers]]\npattern = \"!build/\"\nowners = [\"@example\"]\n",
+                "does not support",
+            ),
+            (
+                "missing-owners",
+                "[[reviewers]]\npattern = \"*\"\n",
+                "at least one owner",
+            ),
+            (
+                "bare-owner",
+                "[[reviewers]]\npattern = \"*\"\nowners = [\"not-an-owner\"]\n",
+                "must be `@user`",
+            ),
+            (
+                "punctuated-handle",
+                "[[reviewers]]\npattern = \"*\"\nowners = [\"@bad!user\"]\n",
+                "must be `@user`",
+            ),
+            (
+                "empty-team",
+                "[[reviewers]]\npattern = \"*\"\nowners = [\"@org/\"]\n",
+                "must be `@user`",
+            ),
+            (
+                "nested-team",
+                "[[reviewers]]\npattern = \"*\"\nowners = [\"@org/a/b\"]\n",
+                "must be `@user`",
+            ),
+            (
+                "empty-email-domain",
+                "[[reviewers]]\npattern = \"*\"\nowners = [\"docs@\"]\n",
+                "must be `@user`",
+            ),
+            (
+                "duplicate-pattern",
+                "[[reviewers]]\npattern = \"*\"\nowners = [\"@a\"]\n\n[[reviewers]]\npattern = \"*\"\nowners = [\"@b\"]\n",
+                "one row per pattern",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n{rows}"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                name,
+            );
+            assert!(
+                error.to_string().contains(message),
+                "{name} must be refused naming the rule: {error}"
+            );
+        }
     }
 
     #[test]
@@ -5200,6 +5425,43 @@ mod tests {
         let env = super::render_velnor_host_env(config.cache_velnor());
         assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
         assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
+    }
+
+    #[test]
+    fn native_apple_section_parses_optional_profile() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [native.apple]\ncargo_profile = \"ci-release\"\n",
+        );
+        assert_eq!(
+            config.native_apple().cargo_profile.as_deref(),
+            Some("ci-release")
+        );
+        let absent = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(absent.native_apple().cargo_profile, None);
+        let canonical = must(
+            absent.canonical_json(),
+            "canonicalize config without native",
+        );
+        assert!(
+            !canonical.contains("native"),
+            "an empty native section stays out of the canonical form: {canonical}"
+        );
+    }
+
+    #[test]
+    fn native_apple_section_rejects_unknown_fields() {
+        let error = match toml::from_str::<RepoGenerationConfig>(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [native.apple]\ncargo_profile_typo = \"ci-release\"\n",
+        ) {
+            Ok(_) => String::from("accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("unknown field"),
+            "typo'd fields must fail closed: {error}"
+        );
     }
 
     #[test]

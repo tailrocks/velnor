@@ -629,7 +629,8 @@ struct DeclaredTree {
     default_branch: String,
     excludes: BTreeSet<String>,
     velnor_policy: VelnorPolicyContract,
-    /// Ruleset contexts `ci-pr.yml` must emit as job display names.
+    /// Ruleset contexts `ci-pr.yml` or `ci-policy.yml` must emit as job
+    /// display names.
     required_checks: Vec<String>,
     /// Ruleset contexts reported by GitHub Apps rather than workflows.
     external_checks: Vec<String>,
@@ -1916,8 +1917,8 @@ fn is_executable_metadata(metadata: &fs::Metadata) -> bool {
 fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>) -> RuleReport {
     let mut findings = Vec::new();
     let aggregate = root.join(PULL_REQUEST_AGGREGATE);
-    let emitted = match fs::read_to_string(&aggregate) {
-        Ok(yaml) => match super::workflow_job_display_names(&yaml) {
+    let mut emitted = match fs::read_to_string(&aggregate) {
+        Ok(yaml) => match super::workflow_job_display_names(PULL_REQUEST_AGGREGATE, &yaml) {
             Ok(names) => Some(names),
             Err(error) => {
                 findings.push(format!("{PULL_REQUEST_AGGREGATE}: {error}"));
@@ -1930,12 +1931,23 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
             None
         }
     };
+    // The policy entrypoint contributes its job names to the searched set:
+    // `Policy` is emitted there, not by the aggregate. An absent entrypoint
+    // contributes nothing; its absence is audited by the entrypoint rule.
+    if let Some(names) = emitted.as_mut()
+        && let Ok(yaml) = fs::read_to_string(root.join(POLICY_ENTRYPOINT))
+    {
+        match super::workflow_job_display_names(POLICY_ENTRYPOINT, &yaml) {
+            Ok(entrypoint) => names.extend(entrypoint),
+            Err(error) => findings.push(format!("{POLICY_ENTRYPOINT}: {error}")),
+        }
+    }
     match &emitted {
         Some(names) => {
             for context in &declared.required_checks {
                 if !names.contains(context) {
                     findings.push(format!(
-                        "{PULL_REQUEST_AGGREGATE} emits no job named `{context}` (required by the ruleset)"
+                        "{PULL_REQUEST_AGGREGATE} and {POLICY_ENTRYPOINT} emit no job named `{context}` (required by the ruleset)"
                     ));
                 }
             }
@@ -1949,7 +1961,7 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
         None => {}
     }
     let mut summary = format!(
-        "{PULL_REQUEST_AGGREGATE} emits [{}]",
+        "{PULL_REQUEST_AGGREGATE} and {POLICY_ENTRYPOINT} emit [{}]",
         declared.required_checks.join(", ")
     );
     if let Some(live) = live {
@@ -1958,7 +1970,7 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
         // ruleset that does not require it makes every rule here advisory.
         let entrypoint_contexts = fs::read_to_string(root.join(POLICY_ENTRYPOINT))
             .ok()
-            .and_then(|yaml| super::workflow_job_display_names(&yaml).ok())
+            .and_then(|yaml| super::workflow_job_display_names(POLICY_ENTRYPOINT, &yaml).ok())
             .unwrap_or_default();
         for context in &entrypoint_contexts {
             if !live.contains(context.as_str()) {

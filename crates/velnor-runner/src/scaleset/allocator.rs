@@ -30,7 +30,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use velnor_control::permit_ledger::{
-    AcquireOutcome, LedgerError, PermitLane, PermitLedger, PermitState, ReconcileReport,
+    deferred_wait, AcquireOutcome, LedgerError, PermitLane, PermitLedger, PermitState,
+    ReconcileReport, DEFERRED_WAIT_BUDGET,
 };
 
 /// Scale-set lane allocator over the shared host-wide ledger.
@@ -65,16 +66,21 @@ impl ScaleSetAllocator {
     /// * `Ok(Some(guard))` — granted (or duplicate delivery onto an
     ///   existing hold, in which case the guard owns nothing and its drop
     ///   releases nothing).
-    /// * `Ok(None)` — ledger full; the offer stays queued with its age.
-    /// * `Err` — storage failure, unconfigured ledger, or a generation
-    ///   that moved twice under one acquire (retry the poll).
+    /// * `Ok(None)` — ledger full, or older demand never yielded within
+    ///   the wait budget; the offer stays queued with its age.
+    /// * `Err` — storage failure or unconfigured ledger.
     pub fn acquire(&self, holder: &str) -> Result<Option<ScaleSetPermitGuard>, AllocatorError> {
         let mut ledger = PermitLedger::open(&self.ledger_path).map_err(AllocatorError::Storage)?;
         let observed = velnor_control::permit_ledger::unix_now();
         ledger
             .observe_demand(holder, PermitLane::ScaleSet, "", observed, observed)
             .map_err(AllocatorError::Storage)?;
-        for _ in 0..32 {
+        // Younger waiters must outlive the older attempts ahead of them
+        // (see DEFERRED_WAIT_BUDGET); every departure below parks its
+        // demand so it cannot head-block younger work.
+        let deadline = std::time::Instant::now() + DEFERRED_WAIT_BUDGET;
+        let mut deferred_attempts = 0u32;
+        loop {
             let generation = ledger.generation().map_err(AllocatorError::Storage)?;
             match ledger
                 .acquire(
@@ -99,12 +105,27 @@ impl ScaleSetAllocator {
                         holder,
                     )));
                 }
-                AcquireOutcome::Full | AcquireOutcome::Closed => return Ok(None),
-                AcquireOutcome::Deferred | AcquireOutcome::StaleGeneration => continue,
+                AcquireOutcome::Full | AcquireOutcome::Closed => {
+                    park_departed(&mut ledger, holder);
+                    return Ok(None);
+                }
+                AcquireOutcome::Deferred => {
+                    if std::time::Instant::now() >= deadline {
+                        park_departed(&mut ledger, holder);
+                        return Ok(None);
+                    }
+                    std::thread::sleep(deferred_wait(deferred_attempts));
+                    deferred_attempts = deferred_attempts.saturating_add(1);
+                }
+                AcquireOutcome::StaleGeneration => {
+                    if std::time::Instant::now() >= deadline {
+                        park_departed(&mut ledger, holder);
+                        return Ok(None);
+                    }
+                }
                 AcquireOutcome::NotConfigured => return Err(AllocatorError::NotConfigured),
             }
         }
-        Ok(None)
     }
 
     /// Free capacity (`N − occupied`) across BOTH lanes — but only after
@@ -304,6 +325,16 @@ impl Drop for ScaleSetPermitGuard {
                 self.holder
             );
         }
+    }
+}
+
+/// Yield our queue place without losing our age: a departed waiter must
+/// not head-block younger demand. Best-effort: on storage failure the
+/// demand stays eligible (younger waiters defer to it) rather than
+/// failing the departure.
+fn park_departed(ledger: &mut PermitLedger, holder: &str) {
+    if let Err(error) = ledger.park_demand(holder) {
+        eprintln!("Warning: permit demand park failed for {holder}: {error}");
     }
 }
 
