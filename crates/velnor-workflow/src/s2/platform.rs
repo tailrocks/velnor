@@ -33,7 +33,9 @@ use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
 /// must stay disabled while any gap remains. `inputs_digest` is the
 /// generator-computed SHA-256 over the expanded closure bytes (the
 /// prepared-tool inputs digest with closure sources); `Some` only on a
-/// complete closure, `None` otherwise.
+/// complete closure, `None` otherwise. `output_files` lists the expected
+/// structural files under the claimed `outputs` roots; per-file digests
+/// are build-time facts the producer manifest records, not plan facts.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub(crate) struct NamedProduct {
     pub(crate) name: String,
@@ -43,6 +45,8 @@ pub(crate) struct NamedProduct {
     pub(crate) env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) output_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) inputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -218,9 +222,43 @@ pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> 
     Ok(())
 }
 
+/// Validate one product's expected output files: normal-form, duplicate-free,
+/// and strictly under a claimed output root. A file outside every root
+/// names bytes the product never claimed to produce.
+fn validate_output_files(unit: &Unit, product: &NamedProduct) -> Result<(), GeneratorError> {
+    let mut seen_files = BTreeSet::new();
+    for file in &product.output_files {
+        if !valid_product_output(file) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with output file `{file}`, which is not a repo-relative path in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+                unit.id, product.name,
+            )));
+        }
+        if !seen_files.insert(file.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` output file `{file}` twice; one entry per path",
+                unit.id, product.name,
+            )));
+        }
+        let under_root = product.outputs.iter().any(|root| {
+            file.len() > root.len()
+                && file.starts_with(root.as_str())
+                && file.as_bytes().get(root.len()) == Some(&b'/')
+        });
+        if !under_root {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with output file `{file}` outside its claimed outputs; every expected file must sit under a claimed output root",
+                unit.id, product.name,
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate the product graph before compilation: every declared output is a
 /// normal-form repo-relative path claimed by exactly one product, every
-/// declared input is a normal-form path or glob without duplicates, closure
+/// expected output file is a duplicate-free normal-form path under a claimed
+/// root, every declared input is a normal-form path or glob without duplicates, closure
 /// gaps stay printable diagnostics, a claimed inputs digest is a hex SHA-256
 /// on a gap-free closure, no unit requires its own product, and the
 /// consumer-to-producer edges are acyclic. Unknown producers and products
@@ -289,6 +327,7 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
                     )));
                 }
             }
+            validate_output_files(unit, product)?;
         }
         for prerequisite in &unit.prerequisites {
             if prerequisite.producer == unit.id {
@@ -641,6 +680,7 @@ mod tests {
             task: Some("build-xcframework".to_owned()),
             env: std::collections::BTreeMap::new(),
             outputs: Vec::new(),
+            output_files: Vec::new(),
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
             inputs_digest: None,
@@ -693,6 +733,7 @@ mod tests {
             task: Some(format!("build-{name}")),
             env: BTreeMap::new(),
             outputs: outputs.iter().map(ToString::to_string).collect(),
+            output_files: Vec::new(),
         }
     }
 
@@ -907,6 +948,56 @@ mod tests {
         must_ok(
             resolve(&mut project_config(vec![producer])),
             "digest on complete closure resolves",
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_output_file_outside_roots() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.output_files = vec!["elsewhere/Info.plist".to_owned()];
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "stray file fails closed",
+        );
+        assert!(
+            error.to_string().contains("outside its claimed outputs"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_duplicate_output_file() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.output_files = vec![
+            "native/out/lib.xcframework/Info.plist".to_owned(),
+            "native/out/lib.xcframework/Info.plist".to_owned(),
+        ];
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "duplicate file fails closed",
+        );
+        assert!(
+            error.to_string().contains("twice"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_accepts_output_files_under_roots() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.output_files = vec![
+            "native/out/lib.xcframework/Info.plist".to_owned(),
+            "native/out/lib.xcframework/macos-arm64/Headers/module.modulemap".to_owned(),
+        ];
+        producer.products = vec![ffi];
+        must_ok(
+            resolve(&mut project_config(vec![producer])),
+            "files under roots resolve",
         );
     }
 

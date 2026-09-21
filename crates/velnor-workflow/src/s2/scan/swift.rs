@@ -2135,6 +2135,34 @@ mod tests {
     }
 
     #[test]
+    fn native_join_carries_expected_output_files() {
+        let boltffi = "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+             [targets.apple]\ninclude_macos = true\nios_architectures = []\n\
+             simulator_architectures = []\nmacos_architectures = [\"arm64\"]\n\n\
+             [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n";
+        let root = digest_fixture(&[("libs/bridge-ffi/boltffi.toml", boltffi)]);
+        let shape = scan_native(&root);
+        let producer = must_some(
+            shape.units.iter().find(|unit| {
+                unit.id == "rust-libs-bridge-ffi" || unit.id.starts_with("rust-bridge")
+            }),
+            "rust producer unit",
+        );
+        let product = must_some(producer.products.first(), "producer product");
+        let out = "target/xcframework/BridgeCore.xcframework";
+        assert_eq!(product.outputs, vec![out.to_owned()]);
+        assert_eq!(
+            product.output_files,
+            vec![
+                format!("{out}/Info.plist"),
+                format!("{out}/macos-arm64/Headers/module.modulemap"),
+                format!("{out}/macos-arm64/libbridge_core_ffi.a"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn xcode_scheme_unit_caches_intermediates_with_toolchain_pins() {
         let root = native_fixture(&[(
             "apps/one/One.xcodeproj/xcshareddata/xcschemes/App.xcscheme",

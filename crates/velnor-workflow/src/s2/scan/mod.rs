@@ -198,6 +198,7 @@ fn wire_native_edge(
                 task: None,
                 env: std::collections::BTreeMap::new(),
                 outputs: vec![producer.output.clone()],
+                output_files: producer.output_files.clone(),
                 inputs: producer.inputs.clone(),
                 inputs_unknown: producer.inputs_unknown.clone(),
                 inputs_digest: producer.inputs_digest.clone(),

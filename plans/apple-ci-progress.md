@@ -71,8 +71,14 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   (`None` + diagnostic on gaps); `resolve` rejects malformed
   digests and digest-with-gaps; transitive edit invalidates,
   consumer-only edit preserves; 8 new tests, lib 1917 green.
-  4b-iii next: per-file output manifest + validation; 4c
-  staging + binding-drift check before install;
+  4b-iii done: `[targets.apple]` arch lists + `include_macos`
+  parsed (multi-line arrays); slice dirs derived per verified
+  BoltFFI 0.30.1 defaults; `output_files` (Info.plist, per-slice
+  lib + modulemap) on producer/product; `resolve` enforces
+  normal-form, dedupe, under-root containment; unknown arch
+  and zero-slice configs fail closed with diagnostics; 8 new
+  tests, lib 1925 green. 4c next: staging + binding-drift
+  check before install;
   4d verified cross-job artifact transport; 4e per-layer
   cache-state reporting (`snapshot.rs`). Follow-ups: `.build`
   intermediates need multi-layer cache support; scoped
@@ -85,8 +91,16 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: 4b-iii per-file output manifest —
-   `s2/platform.rs` (expected output set + digests),
-   `s2/primitives/prepared_tools.rs` (reuse `ToolManifest`
-   verification for composite native products).
+2. Next edit surface: 4c staging + binding-drift check —
+   `s2/primitives/prepared_tools.rs` (staging dir + manifest
+   write/verify reuse), `s2/scan/rust.rs` (parse
+   `[targets.apple.swift] output` + `deployment_target`, which
+   EXISTS, default `"16.0"` — report correction), adapter
+   recipe + verification-step rendering. Verified layout facts
+   (BoltFFI 0.30.1 @ `2e6320a`): slice dirs
+   `macos/ios-{archs_joined}[-simulator]`, structural files
+   `Info.plist` + per-slice `lib{crate}.a` (underscored) +
+   `Headers/module.modulemap` declaring `module {ffi} `,
+   exactly one lib, lipo arch match
+   (Jackin `desktop.rs:758-789`).
 3. Keep one branch per repo; merge main in, never rebase; `git commit -s`.

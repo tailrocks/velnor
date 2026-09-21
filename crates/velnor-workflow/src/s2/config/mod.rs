@@ -1166,6 +1166,9 @@ impl UnitSection {
                 task: product.task.clone(),
                 env: product.env.clone().unwrap_or_default(),
                 outputs: product.outputs.clone().unwrap_or_default(),
+                // Declared rows cannot list expected files: only the
+                // scanner derives them, from the adapter's layout facts.
+                output_files: Vec::new(),
                 inputs: product.inputs.clone().unwrap_or_default(),
                 inputs_unknown: Vec::new(),
                 // Declared rows cannot claim a digest: only the scanner

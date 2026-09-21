@@ -1226,6 +1226,9 @@ pub(crate) struct BoltffiProducer {
     pub(crate) output: String,
     /// The Rust unit owning the producing crate, resolved at detect time.
     pub(crate) unit: Option<String>,
+    /// The expected structural output files: the framework manifest plus,
+    /// per slice, the static library and header modulemap. Sorted.
+    pub(crate) output_files: Vec<String>,
     /// The transitive input closure: sorted patterns whose bytes feed the
     /// pack, plus the binding manifest itself.
     pub(crate) inputs: Vec<String>,
@@ -1237,9 +1240,9 @@ pub(crate) struct BoltffiProducer {
     pub(crate) inputs_digest: Option<String>,
 }
 
-/// The `boltffi.toml` fields the producer join reads. Everything else in the
-/// file (architectures, SPM layout, debug symbols) belongs to the execution
-/// adapter, not to static matching.
+/// The `boltffi.toml` fields the producer join reads. SPM layout and debug
+/// symbols belong to the execution adapter, but architectures are static
+/// matching facts: they fix the expected slice directories of the pack.
 #[derive(Default)]
 struct BoltffiManifest {
     enabled: bool,
@@ -1249,6 +1252,12 @@ struct BoltffiManifest {
     xcframework_name: Option<String>,
     xcframework_output: Option<String>,
     swift_module_name: Option<String>,
+    include_macos: bool,
+    /// `None` means the key is absent and `BoltFFI` defaults apply; `Some`
+    /// (possibly empty) is an explicit list, where empty disables the slice.
+    ios_architectures: Option<Vec<String>>,
+    simulator_architectures: Option<Vec<String>>,
+    macos_architectures: Option<Vec<String>>,
 }
 
 fn parse_boltffi_manifest(contents: &str) -> BoltffiManifest {
@@ -1257,25 +1266,33 @@ fn parse_boltffi_manifest(contents: &str) -> BoltffiManifest {
         ..BoltffiManifest::default()
     };
     let mut section = String::new();
-    for line in contents.lines() {
-        let trimmed = strip_toml_comment(line).trim().to_owned();
-        if trimmed.is_empty() {
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = strip_toml_comment(lines[index]).trim().to_owned();
+        index += 1;
+        if line.is_empty() {
             continue;
         }
-        if let Some(header) = trimmed.strip_prefix('[') {
+        if let Some(header) = line.strip_prefix('[') {
             if let Some(header) = header.strip_suffix(']') {
                 header.trim().clone_into(&mut section);
             }
             continue;
         }
-        let Some((key, value)) = trimmed.split_once('=') else {
+        let Some((key, first_value)) = line.split_once('=') else {
             continue;
         };
         let key = key.trim();
-        let value = value.trim();
+        let mut value = first_value.trim().to_owned();
+        while toml_array_is_open(&value) && index < lines.len() {
+            value.push(' ');
+            value.push_str(strip_toml_comment(lines[index]).trim());
+            index += 1;
+        }
         match (section.as_str(), key) {
-            ("package", "name") => manifest.package_name = toml_string_value(value),
-            ("package", "crate") => manifest.package_crate = toml_string_value(value),
+            ("package", "name") => manifest.package_name = toml_string_value(&value),
+            ("package", "crate") => manifest.package_crate = toml_string_value(&value),
             ("targets.apple", "enabled") => {
                 if value == "true" {
                     manifest.enabled = true;
@@ -1283,15 +1300,27 @@ fn parse_boltffi_manifest(contents: &str) -> BoltffiManifest {
                     manifest.enabled = false;
                 }
             }
-            ("targets.apple", "output") => manifest.apple_output = toml_string_value(value),
+            ("targets.apple", "output") => manifest.apple_output = toml_string_value(&value),
+            ("targets.apple", "include_macos") => {
+                manifest.include_macos = value == "true";
+            }
+            ("targets.apple", "ios_architectures") => {
+                manifest.ios_architectures = Some(toml_array_values(&value));
+            }
+            ("targets.apple", "simulator_architectures") => {
+                manifest.simulator_architectures = Some(toml_array_values(&value));
+            }
+            ("targets.apple", "macos_architectures") => {
+                manifest.macos_architectures = Some(toml_array_values(&value));
+            }
             ("targets.apple.xcframework", "name") => {
-                manifest.xcframework_name = toml_string_value(value);
+                manifest.xcframework_name = toml_string_value(&value);
             }
             ("targets.apple.xcframework", "output") => {
-                manifest.xcframework_output = toml_string_value(value);
+                manifest.xcframework_output = toml_string_value(&value);
             }
             ("targets.apple.swift", "module_name") => {
-                manifest.swift_module_name = toml_string_value(value);
+                manifest.swift_module_name = toml_string_value(&value);
             }
             _ => {}
         }
@@ -1322,6 +1351,100 @@ fn valid_framework_segment(segment: &str) -> bool {
         && !segment.chars().any(char::is_control)
         && segment != "."
         && segment != ".."
+}
+
+/// `BoltFFI` 0.30.1 default slice architectures when the corresponding
+/// `targets.apple.*_architectures` key is absent
+/// (`boltffi_cli/src/target.rs`: `Architecture::IOS` and
+/// `APPLE_MULTI_ARCH`; `boltffi_cli/src/config/mod.rs`
+/// `apple_*_architectures`). An explicit empty list disables the slice.
+const BOLTFFI_DEFAULT_IOS_ARCHITECTURES: [&str; 1] = ["arm64"];
+const BOLTFFI_DEFAULT_MULTI_ARCHITECTURES: [&str; 2] = ["arm64", "x86_64"];
+
+/// Whether `arch` is an architecture `BoltFFI` can place in an Apple slice
+/// (`boltffi_cli/src/target.rs` `Architecture`, Apple members only).
+fn valid_boltffi_apple_arch(arch: &str) -> bool {
+    matches!(arch, "arm64" | "x86_64" | "armv7" | "x86")
+}
+
+/// Resolve the expected `XCFramework` slice directories in `BoltFFI` target
+/// order (iOS device, simulator, macOS). Directory names follow the
+/// `xcodebuild -create-xcframework` convention
+/// (`{macos,ios}-{archs joined by _}[-simulator]`), with architectures
+/// sorted so multi-arch slices are deterministic. An unknown architecture
+/// or an empty slice set (which `BoltFFI` itself rejects at build time)
+/// is an `Err` naming the problem for a scan diagnostic.
+/// An explicit architecture list as declared, or the `BoltFFI` default when
+/// the key is absent. An explicit empty list stays empty: it disables the
+/// slice.
+fn boltffi_arch_list(explicit: Option<&Vec<String>>, default: &[&str]) -> Vec<String> {
+    explicit.map_or_else(
+        || default.iter().map(ToString::to_string).collect(),
+        Clone::clone,
+    )
+}
+
+fn boltffi_slice_dirs(manifest: &BoltffiManifest) -> Result<Vec<String>, String> {
+    let ios = boltffi_arch_list(
+        manifest.ios_architectures.as_ref(),
+        &BOLTFFI_DEFAULT_IOS_ARCHITECTURES,
+    );
+    let simulator = boltffi_arch_list(
+        manifest.simulator_architectures.as_ref(),
+        &BOLTFFI_DEFAULT_MULTI_ARCHITECTURES,
+    );
+    let macos = boltffi_arch_list(
+        manifest.macos_architectures.as_ref(),
+        &BOLTFFI_DEFAULT_MULTI_ARCHITECTURES,
+    );
+    for arch in ios.iter().chain(simulator.iter()).chain(macos.iter()) {
+        if !valid_boltffi_apple_arch(arch) {
+            return Err(format!(
+                "architecture `{arch}` is not a supported Apple slice architecture"
+            ));
+        }
+    }
+    let mut slices = Vec::new();
+    if !ios.is_empty() {
+        slices.push(format!("ios-{}", join_sorted_arches(&ios)));
+    }
+    if !simulator.is_empty() {
+        slices.push(format!("ios-{}-simulator", join_sorted_arches(&simulator)));
+    }
+    if manifest.include_macos && !macos.is_empty() {
+        slices.push(format!("macos-{}", join_sorted_arches(&macos)));
+    }
+    if slices.is_empty() {
+        return Err(
+            "no Apple slice is enabled; at least one architecture list must be nonempty".to_owned(),
+        );
+    }
+    Ok(slices)
+}
+
+/// Join slice architectures with `_` in sorted order for a deterministic
+/// directory name.
+fn join_sorted_arches(arches: &[String]) -> String {
+    let mut sorted: Vec<&str> = arches.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.join("_")
+}
+
+/// The expected structural files of the pack: the framework manifest plus,
+/// per slice, the static library and header modulemap. Cargo names a
+/// staticlib `lib{crate}.a` with `-` folded to `_`; these are the paths
+/// Jackin's `desktop xcframework` verification asserts. Generated headers
+/// beyond the modulemap and per-file digests are build-time facts the
+/// producer manifest records, not plan facts.
+fn boltffi_expected_files(output: &str, crate_name: &str, slices: &[String]) -> Vec<String> {
+    let mut files = vec![format!("{output}/Info.plist")];
+    let library = format!("lib{}.a", crate_name.replace('-', "_"));
+    for slice in slices {
+        files.push(format!("{output}/{slice}/{library}"));
+        files.push(format!("{output}/{slice}/Headers/module.modulemap"));
+    }
+    files.sort();
+    files
 }
 
 /// Discover every usable `BoltFFI` Apple producer plus one diagnostic per
@@ -1479,6 +1602,36 @@ fn closure_sources(
     Ok(sources)
 }
 
+/// Compute the exact inputs digest over the expanded closure, or `None`
+/// with a diagnostic when closure gaps make the contract incomplete.
+/// I/O errors propagate because they may hide a producer input.
+fn boltffi_inputs_digest(
+    context: &ScanContext<'_>,
+    manifest_path: &str,
+    inputs: &[String],
+    inputs_unknown: &[String],
+    diagnostics: &mut Vec<String>,
+) -> Result<Option<String>, GeneratorError> {
+    if !inputs_unknown.is_empty() {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} has an incomplete input closure ({}); no exact inputs digest was computed and the product cannot be reused exactly.",
+            inputs_unknown.join(", "),
+        ));
+        return Ok(None);
+    }
+    let sources = closure_sources(context.root, context.files, inputs, manifest_path)?;
+    Ok(Some(crate::s2::primitives::prepared_tools::inputs_digest(
+        &crate::s2::primitives::prepared_tools::InputsFacts {
+            // Lockfiles and toolchain pins ride `sources` as raw bytes,
+            // which subsumes the parsed lock/toolchain facts.
+            locks: Vec::new(),
+            sources,
+            recipe: vec![BOLTFFI_APPLE_RECIPE.to_owned()],
+            toolchain: Vec::new(),
+        },
+    )))
+}
+
 /// Parse one `boltffi.toml` into a producer, pushing a diagnostic and
 /// returning `Ok(None)` when the manifest cannot yield a joinable edge.
 /// I/O and closure errors propagate because they may hide a real producer.
@@ -1495,6 +1648,15 @@ fn boltffi_producer_from_manifest(
     if !parsed.enabled {
         return Ok(None);
     }
+    let slices = match boltffi_slice_dirs(&parsed) {
+        Ok(slices) => slices,
+        Err(problem) => {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} {problem}; no producer edge was constructed."
+            ));
+            return Ok(None);
+        }
+    };
     let Some(package) = parsed.package_name else {
         diagnostics.push(format!(
             "BoltFFI manifest {manifest_path} declares no [package] name; the framework name cannot be derived."
@@ -1541,6 +1703,8 @@ fn boltffi_producer_from_manifest(
         ));
         return Ok(None);
     }
+    let output = join_repo_path(&parent, &format!("{framework}.xcframework"));
+    let output_files = boltffi_expected_files(&output, &crate_name, &slices);
     let (inputs, inputs_unknown) = native_input_closure(
         context.root,
         context.files,
@@ -1548,32 +1712,21 @@ fn boltffi_producer_from_manifest(
         &root,
         std::slice::from_ref(manifest_path),
     )?;
-    let inputs_digest = if inputs_unknown.is_empty() {
-        let sources = closure_sources(context.root, context.files, &inputs, manifest_path)?;
-        Some(crate::s2::primitives::prepared_tools::inputs_digest(
-            &crate::s2::primitives::prepared_tools::InputsFacts {
-                // Lockfiles and toolchain pins ride `sources` as raw bytes,
-                // which subsumes the parsed lock/toolchain facts.
-                locks: Vec::new(),
-                sources,
-                recipe: vec![BOLTFFI_APPLE_RECIPE.to_owned()],
-                toolchain: Vec::new(),
-            },
-        ))
-    } else {
-        diagnostics.push(format!(
-            "BoltFFI manifest {manifest_path} has an incomplete input closure ({}); no exact inputs digest was computed and the product cannot be reused exactly.",
-            inputs_unknown.join(", "),
-        ));
-        None
-    };
+    let inputs_digest = boltffi_inputs_digest(
+        context,
+        manifest_path,
+        &inputs,
+        &inputs_unknown,
+        diagnostics,
+    )?;
     Ok(Some(BoltffiProducer {
         manifest: manifest_path.to_owned(),
         root,
         package,
         crate_name,
         ffi_module: format!("{framework}FFI"),
-        output: join_repo_path(&parent, &format!("{framework}.xcframework")),
+        output,
+        output_files,
         framework,
         unit: None,
         inputs,
@@ -1693,6 +1846,17 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_err<T: std::fmt::Debug, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(value) => panic!("{context}: unexpectedly succeeded with {value:?}"),
+            Err(error) => error,
         }
     }
 
@@ -1952,6 +2116,87 @@ mod tests {
         let disabled =
             parse_boltffi_manifest("[package]\nname = \"x\"\n\n[targets.apple]\nenabled = false\n");
         assert!(!disabled.enabled);
+    }
+
+    #[test]
+    fn boltffi_slice_dirs_applies_verified_defaults() {
+        use super::{boltffi_slice_dirs, parse_boltffi_manifest};
+        // No [targets.apple] keys: iOS [arm64], simulator [arm64, x86_64],
+        // macOS off. Matches BoltFFI 0.30.1 platform defaults.
+        let parsed = parse_boltffi_manifest("[package]\nname = \"x\"\n");
+        assert_eq!(
+            boltffi_slice_dirs(&parsed),
+            Ok(vec![
+                "ios-arm64".to_owned(),
+                "ios-arm64_x86_64-simulator".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn boltffi_slice_dirs_honors_explicit_lists() {
+        use super::{boltffi_slice_dirs, parse_boltffi_manifest};
+        // Jackin shape: macOS-only arm64, iOS and simulator disabled.
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n\
+             [targets.apple]\ninclude_macos = true\nios_architectures = []\n\
+             simulator_architectures = []\nmacos_architectures = [\"arm64\"]\n",
+        );
+        assert_eq!(
+            boltffi_slice_dirs(&parsed),
+            Ok(vec!["macos-arm64".to_owned()])
+        );
+        // Multi-arch lists join sorted for deterministic directory names.
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n\
+             [targets.apple]\ninclude_macos = true\n\
+             macos_architectures = [\"x86_64\", \"arm64\"]\n\
+             ios_architectures = []\nsimulator_architectures = []\n",
+        );
+        assert_eq!(
+            boltffi_slice_dirs(&parsed),
+            Ok(vec!["macos-arm64_x86_64".to_owned()])
+        );
+    }
+
+    #[test]
+    fn boltffi_slice_dirs_fails_closed_on_bad_config() {
+        use super::{boltffi_slice_dirs, parse_boltffi_manifest};
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple]\nmacos_architectures = [\"riscv64\"]\n",
+        );
+        let error = must_err(boltffi_slice_dirs(&parsed), "unknown arch must fail");
+        assert!(error.contains("riscv64"), "unexpected error: {error}");
+        // Everything disabled: BoltFFI itself rejects the empty slice set.
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n\
+             [targets.apple]\nios_architectures = []\nsimulator_architectures = []\n",
+        );
+        let error = must_err(boltffi_slice_dirs(&parsed), "zero slices must fail");
+        assert!(
+            error.contains("no Apple slice"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn boltffi_expected_files_lists_plist_lib_modulemap() {
+        use super::boltffi_expected_files;
+        let files = boltffi_expected_files(
+            "target/xcframework/BridgeCore.xcframework",
+            "bridge-core-ffi",
+            &["macos-arm64".to_owned()],
+        );
+        assert_eq!(
+            files,
+            vec![
+                "target/xcframework/BridgeCore.xcframework/Info.plist".to_owned(),
+                "target/xcframework/BridgeCore.xcframework/macos-arm64/Headers/module.modulemap"
+                    .to_owned(),
+                "target/xcframework/BridgeCore.xcframework/macos-arm64/libbridge_core_ffi.a"
+                    .to_owned(),
+            ]
+        );
     }
 
     #[test]
