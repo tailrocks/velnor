@@ -15,6 +15,7 @@ generator	70
 .github/workflows/ci-main.yml	7173ecc41e5f7e40
 .github/workflows/ci-policy.yml	c0267d3f9e9869ec
 .github/workflows/ci-pr.yml	883d52bac9105228
+.github/workflows/candidate-qualification.yml	1408488e32d3a135
 .github/workflows/ci-release-package-signer.yml	29e2df02b006cd2e
 .github/workflows/ci-runtime-products.yml	4fc8534e1e557a06
 .github/workflows/ci-unit-bun.yml	0e2c2ea6b57a4a83
