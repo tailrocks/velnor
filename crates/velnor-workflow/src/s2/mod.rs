@@ -609,6 +609,10 @@ impl UnitKind {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidationPhase {
+    /// Commands that must run before the ordinary validation phases. Unit
+    /// contract primitives use this for regeneration and product material-
+    /// isation commands added after scanning.
+    Precondition,
     Fmt,
     Clippy,
     Test,
@@ -617,14 +621,21 @@ pub enum ValidationPhase {
 }
 
 impl ValidationPhase {
-    /// The runnable phases in step order: formatting first, then lints, then
-    /// tests, then doctests. `Check` is prerequisite-only and never renders
-    /// a validation step.
-    pub(crate) const RUNNABLE: [Self; 4] = [Self::Fmt, Self::Clippy, Self::Test, Self::Doctest];
+    /// The runnable phases in step order: preconditions first, then
+    /// formatting, lints, tests, and doctests. `Check` is prerequisite-only
+    /// and never renders a validation step.
+    pub(crate) const RUNNABLE: [Self; 5] = [
+        Self::Precondition,
+        Self::Fmt,
+        Self::Clippy,
+        Self::Test,
+        Self::Doctest,
+    ];
 
     /// The phase a `--phase` selector or `phases` TOML entry names.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "precondition" => Self::Precondition,
             "fmt" => Self::Fmt,
             "clippy" => Self::Clippy,
             "test" => Self::Test,
@@ -638,6 +649,7 @@ impl ValidationPhase {
     /// `validation_phases` workflow-input record.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Precondition => "precondition",
             Self::Fmt => "fmt",
             Self::Clippy => "clippy",
             Self::Test => "test",
@@ -649,6 +661,7 @@ impl ValidationPhase {
     /// The GitHub Actions step name of one runnable phase.
     pub(crate) fn step_name(self) -> &'static str {
         match self {
+            Self::Precondition => "Preconditions",
             Self::Fmt => "Formatting check",
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
@@ -812,9 +825,100 @@ impl Unit {
             .collect()
     }
 
+    /// Prefix commands that are required before validation on every command
+    /// lane. Phased units get one `precondition` tag per inserted command, so
+    /// their existing phase identity and order remain intact. A phased unit
+    /// must be in one of two complete states across all lanes — every lane
+    /// already has the whole prefix, or no lane has any of it. Refusing a
+    /// partial state prevents one PR/full lane from acquiring a different
+    /// positional phase map.
+    pub(crate) fn prepend_precondition_commands(
+        &mut self,
+        commands: &[String],
+    ) -> Result<(), GeneratorError> {
+        let mut requested = Vec::new();
+        for command in commands {
+            if !requested.contains(command) {
+                requested.push(command.clone());
+            }
+        }
+        if requested.is_empty() {
+            return Ok(());
+        }
+
+        let phased = self.has_phases();
+        let phase_count = self.phases.len();
+        let mut lanes = vec![
+            ("PR", &mut self.pr_commands),
+            ("full", &mut self.full_commands),
+        ];
+
+        if phased {
+            for (lane, commands) in &lanes {
+                if commands.len() != phase_count {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` has {phase_count} validation phases but {lane} carries {} commands; refusing a precondition insertion that would misalign phases",
+                        self.id,
+                        commands.len()
+                    )));
+                }
+            }
+
+            // 0 = no requested command anywhere, 1 = the complete requested
+            // prefix with no later duplicate, 2 = a partial or misplaced
+            // prefix. Only states 0 and 1 compose positionally.
+            let prefix_state = |lane: &[String]| {
+                if lane.starts_with(&requested)
+                    && !lane[requested.len()..]
+                        .iter()
+                        .any(|command| requested.contains(command))
+                {
+                    1_u8
+                } else if requested.iter().all(|command| !lane.contains(command)) {
+                    0_u8
+                } else {
+                    2_u8
+                }
+            };
+            let state = prefix_state(lanes[0].1);
+            if state == 2 || lanes.iter().any(|(_, lane)| prefix_state(lane) != state) {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` has a partial or misplaced precondition across command lanes; both lanes must omit the gate or carry the same prefix",
+                    self.id
+                )));
+            }
+            if state == 1 {
+                return Ok(());
+            }
+
+            for (_, lane) in &mut lanes {
+                for command in requested.iter().rev() {
+                    lane.insert(0, command.clone());
+                }
+            }
+            let mut phases = vec![ValidationPhase::Precondition; requested.len()];
+            phases.extend(self.phases.iter().copied());
+            self.phases = phases;
+            return Ok(());
+        }
+
+        // Unphased units have no positional tags to preserve. Normalize each
+        // lane to one copy of the requested prefix so a gate cannot be
+        // silently skipped on the full lane.
+        for (_, lane) in &mut lanes {
+            for command in requested.iter().rev() {
+                lane.retain(|candidate| candidate != command);
+                lane.insert(0, command.clone());
+            }
+        }
+        Ok(())
+    }
+
     /// Drop the phase model after a command mutation that cannot preserve
     /// the positional alignment: the unit keeps every command in order and
-    /// verifies through the single legacy step.
+    /// verifies through the single legacy step. This remains for mutations
+    /// that add untyped user tasks; precondition mutations use the method
+    /// above instead.
     pub(crate) fn clear_phases(&mut self) {
         self.phases.clear();
         self.check_commands.clear();
@@ -14668,6 +14772,52 @@ channel = "stable"
             error.to_string().contains("without validation phases"),
             "a stored check without phases fails closed: {error}"
         );
+    }
+
+    #[test]
+    fn phased_precondition_rejects_pr_full_presence_skew() {
+        let mut unit = Unit {
+            xcode: None,
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            pr_commands: vec!["cargo run -- --check".to_owned(), "cargo test".to_owned()],
+            full_commands: vec!["cargo fmt --check".to_owned(), "cargo test".to_owned()],
+            phases: vec![ValidationPhase::Fmt, ValidationPhase::Test],
+            check_commands: vec!["cargo check".to_owned()],
+            depends_on: Vec::new(),
+            pinned_lockfile: true,
+            cache: None,
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            trust: provider::TrustReq::UntrustedOk,
+            capabilities: provider::Capabilities::default(),
+            workspace_check: false,
+            reads_closed: false,
+            full_history: false,
+            platform: provider::Platform::LinuxX64,
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            docker_contexts: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
+        };
+        let before_pr = unit.pr_commands.clone();
+        let before_full = unit.full_commands.clone();
+        let error = unit
+            .prepend_precondition_commands(&["cargo run -- --check".to_owned()])
+            .expect_err("a gate present in only one scope must fail closed");
+        assert!(
+            error.to_string().contains("partial or misplaced"),
+            "{error}"
+        );
+        assert_eq!(unit.pr_commands, before_pr);
+        assert_eq!(unit.full_commands, before_full);
     }
 
     #[test]
