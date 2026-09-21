@@ -1381,10 +1381,37 @@ async fn restart_adopts_live_worker_without_reprovision() {
         "completion must not re-provision either"
     );
     assert_eq!(jit_calls(&server).await, 1);
+    // Three session DELETEs: phase-1 shutdown closes its session, phase-2
+    // startup best-effort reaps the stored prior session id before creating
+    // the new session (avoids a 409 session conflict on restart), and
+    // phase-2 shutdown closes its own session.
     assert_eq!(
         session_close_calls(&server).await,
-        2,
-        "one clean session close per phase"
+        3,
+        "shutdown close per phase plus phase-2 startup reap of the prior session"
+    );
+    // The reap DELETE must land before phase 2 creates its replacement
+    // session: it is startup cleanup, not a shutdown double close.
+    let requests = server.received_requests().await.unwrap();
+    let mut creates_seen = 0;
+    let mut deletes_seen = 0;
+    let mut reap_before_recreate = false;
+    for request in &requests {
+        let path = request.url.path().to_string();
+        if request.method == wiremock::http::Method::POST && path.ends_with("/sessions") {
+            creates_seen += 1;
+        }
+        if request.method == wiremock::http::Method::DELETE && path.contains("/sessions/") {
+            deletes_seen += 1;
+            if creates_seen == 1 && deletes_seen == 2 {
+                reap_before_recreate = true;
+            }
+        }
+    }
+    assert_eq!(creates_seen, 2, "one session create per phase");
+    assert!(
+        reap_before_recreate,
+        "phase-2 startup must reap the prior session before creating its own"
     );
     assert_eq!(set_delete_calls(&server).await, 0);
 

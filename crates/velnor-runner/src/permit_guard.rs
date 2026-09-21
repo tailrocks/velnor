@@ -325,6 +325,38 @@ impl NativePermitGuard {
         }
     }
 
+    /// Job execution completed or failed and container/service/volume
+    /// cleanup is beginning: transition the permit to cleaning.
+    /// Best-effort: occupancy never depended on the state spelling.
+    pub fn transition_cleaning(&mut self) {
+        if !self.owns_permit {
+            return;
+        }
+        self.retain_on_drop = true;
+        match PermitLedger::open(&self.ledger_path) {
+            Ok(mut ledger) => match ledger.generation() {
+                Ok(generation) => {
+                    if let Err(error) =
+                        ledger.transition(&self.holder, PermitState::Cleaning, generation)
+                    {
+                        eprintln!(
+                            "Warning: permit ledger transition to cleaning failed for {}: {error}",
+                            self.holder
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "Warning: permit ledger generation read failed for {}: {error}",
+                    self.holder
+                ),
+            },
+            Err(error) => eprintln!(
+                "Warning: permit ledger open failed for {}: {error}",
+                self.holder
+            ),
+        }
+    }
+
     /// Terminal success: owned cleanup is confirmed, atomically close the
     /// demand and free the permit. Best-effort with a loud warning.
     pub fn release(mut self) {
@@ -595,6 +627,42 @@ mod tests {
             Some(PermitState::Uncertain)
         );
         assert_eq!(ledger.occupied().unwrap(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn guard_transition_cleaning() {
+        let path = temp_ledger_path("cleaning-state");
+        configure(&path, 2);
+
+        let mut guard =
+            NativePermitGuard::acquire(&path, native_permit_holder("req-1"), "test-scope")
+                .unwrap()
+                .unwrap();
+        guard.transition_running();
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(
+            ledger.holder_state(&native_permit_holder("req-1")).unwrap(),
+            Some(PermitState::Running)
+        );
+        drop(ledger);
+
+        guard.transition_cleaning();
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(
+            ledger.holder_state(&native_permit_holder("req-1")).unwrap(),
+            Some(PermitState::Cleaning)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        drop(ledger);
+
+        guard.release();
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(
+            ledger.holder_state(&native_permit_holder("req-1")).unwrap(),
+            None
+        );
+        assert_eq!(ledger.occupied().unwrap(), 0);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

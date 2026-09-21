@@ -44,6 +44,9 @@ sha2 = { workspace = true }
 [dev-dependencies]
 velnor-runner = { path = "../velnor-runner" }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
 

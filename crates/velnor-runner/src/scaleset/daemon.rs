@@ -419,10 +419,47 @@ impl ScaleSetDaemon {
             "scale-set workers adopted"
         );
 
-        let session =
-            crate::scaleset::MessageSessionClient::create(&self.client, set_id, &self.owner)
+        let cursors = SessionStore::open(&self.state_db).context("open scale-set session store")?;
+        if let Ok(Some(existing_session)) = cursors.get(set_id) {
+            tracing::info!(
+                set_id,
+                session_id = %existing_session.session_id,
+                "cleaning up previous scale-set session before acquiring new session"
+            );
+            let _ = self
+                .client
+                .actions_service_request(
+                    reqwest::Method::DELETE,
+                    &format!(
+                        "/_apis/runtime/runnerscalesets/{set_id}/sessions/{}",
+                        existing_session.session_id
+                    ),
+                    &[],
+                    None,
+                )
+                .await;
+        }
+
+        let mut session_attempt = 0;
+        let session = loop {
+            match crate::scaleset::MessageSessionClient::create(&self.client, set_id, &self.owner)
                 .await
-                .map_err(|error| anyhow::anyhow!("create scale-set message session: {error}"))?;
+            {
+                Ok(s) => break s,
+                Err(error) if session_attempt < 3 && error.to_string().contains("409 Conflict") => {
+                    session_attempt += 1;
+                    tracing::warn!(
+                        set_id,
+                        attempt = session_attempt,
+                        "session conflict encountered, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!("create scale-set message session: {error}"))
+                }
+            }
+        };
         let queue = ClientSession::new(session.clone());
         let ledger = SharedLedger::open(&self.ledger_path).context("open shared permit ledger")?;
         let processor = Processor::new(
@@ -442,7 +479,6 @@ impl ScaleSetDaemon {
                 max_acquire_batch: MAX_ACQUIRE_BATCH,
             },
         );
-        let cursors = SessionStore::open(&self.state_db).context("open scale-set session store")?;
         let listener = Listener::new(
             queue,
             processor,

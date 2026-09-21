@@ -494,26 +494,20 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         assigned: &ScaleSetJobAssigned,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = assigned.base.runner_request_id;
-        let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
-            return Ok(false);
-        };
-        if row.state == DemandState::Terminal || row.state == DemandState::Declined {
+        let generation = self.generation()?;
+        let (request_id, state) = self
+            .demand
+            .submit_assigned(self.config.scale_set_id, assigned, generation)
+            .map_err(ScaleError::Store)?;
+        if state == DemandState::Terminal || state == DemandState::Declined {
             return Ok(true);
         }
-        // JobAssigned is not proof that acquirejobs succeeded. Pinned
-        // actions/scaleset `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`
-        // README.md:97–100 documents JobAssigned → canceled as assignment
-        // timeout before runner acquisition; each retry emits new messages.
-        // Only an acquirejobs result, JobStarted, or provision state proves
-        // ownership.
         if !matches!(
-            row.state,
+            state,
             DemandState::Acquired | DemandState::ProvisionIntent | DemandState::CanceledAcquired
         ) {
             return Ok(true);
         }
-        let generation = self.generation()?;
         transition_or_adopt(
             &mut self.ledger,
             &permit_holder(self.config.scale_set_id, request_id),
@@ -535,7 +529,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         started: &ScaleSetJobStarted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = started.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
         let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
             return Ok(false);
         };
@@ -593,7 +587,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         completed: &ScaleSetJobCompleted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = completed.base.runner_request_id;
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
         let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
             return Ok(false);
         };

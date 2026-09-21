@@ -5825,6 +5825,7 @@ cp "$record" "$out"
 
     fn unit(id: &str) -> crate::s2::Unit {
         crate::s2::Unit {
+            xcode: None,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: crate::s2::UnitKind::Rust,

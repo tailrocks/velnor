@@ -8,7 +8,9 @@ use super::file_walk::{
     files_named, has_extension, join_repo_path, path_prefix, resolve_repo_path,
 };
 use super::{RepositoryShape, ScanContext};
-use crate::rust_include::{parse_include_paths, resolve_include_path, IncludePathError};
+use crate::rust_include::{
+    parse_include_paths, resolve_include_path, IncludeDiscovery, IncludePathError,
+};
 use crate::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
     GeneratorError, RustToolchain, Unit, UnitKind, ValidationPhase,
@@ -607,7 +609,10 @@ fn analyze_rust_manifests(
                 ));
             }
         }
-        watch.extend(include_str_paths(root, files, file_set, &manifest.root)?);
+        let (include_targets, include_limitations) =
+            include_str_paths(root, files, file_set, &manifest.root)?;
+        watch.extend(include_targets);
+        result.limitations.extend(include_limitations);
         let local_lock = join_repo_path(&manifest.root, "Cargo.lock");
         if file_set.contains(&local_lock) {
             watch.push(local_lock.clone());
@@ -801,9 +806,10 @@ fn include_str_paths(
     files: &[String],
     file_set: &BTreeSet<String>,
     package_root: &str,
-) -> Result<Vec<String>, GeneratorError> {
+) -> Result<(Vec<String>, Vec<String>), GeneratorError> {
     let prefix = path_prefix(package_root);
     let mut targets = BTreeSet::new();
+    let mut opaque: BTreeMap<&str, BTreeSet<(usize, &'static str)>> = BTreeMap::new();
     for source in files.iter().filter(|file| {
         has_extension(file, "rs") && (package_root == "." || file.starts_with(&prefix))
     }) {
@@ -812,7 +818,17 @@ fn include_str_paths(
         let included_paths = parse_include_paths(&source_contents).map_err(|error| {
             GeneratorError::usage(format!("{error} in {}", root.join(source).display()))
         })?;
-        for included in included_paths {
+        for discovery in included_paths {
+            let included = match discovery {
+                IncludeDiscovery::Resolved(included) => included,
+                IncludeDiscovery::Opaque { macro_name, line } => {
+                    opaque
+                        .entry(source.as_str())
+                        .or_default()
+                        .insert((line, macro_name));
+                    continue;
+                }
+            };
             let target = resolve_include_path(
                 root,
                 &parent_path(source),
@@ -840,7 +856,24 @@ fn include_str_paths(
             targets.insert(target);
         }
     }
-    Ok(targets.into_iter().collect())
+    let mut limitations = Vec::new();
+    if !opaque.is_empty() {
+        // An opaque target is not proven-bad, so generation continues; the
+        // package subtree is watched conservatively so no rebuild is missed.
+        let conservative = format!("{prefix}**");
+        targets.insert(conservative.clone());
+        for (file, sites) in &opaque {
+            let sites = sites
+                .iter()
+                .map(|(line, macro_name)| format!("{macro_name} line {line}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            limitations.push(format!(
+                "Opaque Rust include targets in {file} ({sites}) cannot be resolved statically; watching {conservative} conservatively."
+            ));
+        }
+    }
+    Ok((targets.into_iter().collect(), limitations))
 }
 
 pub(crate) fn cargo_dependency_name(key: &str) -> &str {
@@ -1286,12 +1319,13 @@ mod tests {
 
         let files = vec!["assets/manifest.yml".to_owned(), "src/lib.rs".to_owned()];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let targets = must(
+        let (targets, limitations) = must(
             include_str_paths(&root, &files, &file_set, "."),
             "resolve symlinked include target",
         );
 
         assert_eq!(targets, vec!["assets/manifest.yml"]);
+        assert!(limitations.is_empty(), "{limitations:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1335,7 +1369,7 @@ mod tests {
             "docs/templates/example.rs".to_owned(),
         ];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let targets = must(
+        let (targets, limitations) = must(
             include_str_paths(&root, &files, &file_set, "crates/app"),
             "resolve manifest-dir include",
         );
@@ -1344,6 +1378,7 @@ mod tests {
             targets,
             vec!["crates/app/assets/font.ttf", "crates/app/src/lib.rs"]
         );
+        assert!(limitations.is_empty(), "{limitations:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1375,12 +1410,13 @@ mod tests {
             "crates/appsrc/lib.rs".to_owned(),
         ];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let targets = must(
+        let (targets, limitations) = must(
             include_str_paths(&root, &files, &file_set, "crates/app"),
             "resolve exact concat include",
         );
 
         assert_eq!(targets, vec!["crates/appsrc/lib.rs"]);
+        assert!(limitations.is_empty(), "{limitations:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1405,7 +1441,9 @@ mod tests {
                 error.to_string().contains("escapes the repository"),
                 "{error}"
             ),
-            Ok(targets) => assert!(!targets.is_empty(), "manifest-dir traversal was ignored"),
+            Ok((targets, _)) => {
+                assert!(!targets.is_empty(), "manifest-dir traversal was ignored");
+            }
         }
         let _ = fs::remove_dir_all(root);
     }
@@ -1431,8 +1469,197 @@ mod tests {
                 error.to_string().contains("static string expression"),
                 "{error}"
             ),
-            Ok(targets) => assert!(!targets.is_empty(), "dynamic include was ignored"),
+            Ok((targets, _)) => assert!(!targets.is_empty(), "dynamic include was ignored"),
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_manifest_dir_self_read_fixture_discovers_every_site() {
+        // Termrock-shaped fixture: policy tests read the crate's own sources
+        // through `concat!(env!("CARGO_MANIFEST_DIR"), ...)` in single-line
+        // and multi-line forms. Every site must resolve; nothing degrades.
+        let root = scratch("manifest-dir-self-read");
+        for directory in [
+            "crates/termrock/src/interaction",
+            "crates/termrock/src/style",
+            "crates/termrock/src/widgets",
+        ] {
+            must(
+                fs::create_dir_all(root.join(directory)),
+                "create package source directory",
+            );
+        }
+        must(
+            fs::write(
+                root.join("crates/termrock/src/lib.rs"),
+                concat!(
+                    "let lib = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/lib.rs\"));\n",
+                    "let interaction = include_str!(concat!(\n",
+                    "    env!(\"CARGO_MANIFEST_DIR\"),\n",
+                    "    \"/src/interaction/mod.rs\"\n",
+                    "));\n",
+                    "let style_mod = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/style/mod.rs\"));\n",
+                    "let tokens = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/style/tokens.rs\"));\n",
+                    "let panel = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/widgets/panel.rs\"));\n",
+                    "let interaction_again = include_str!(concat!(\n",
+                    "    env!(\"CARGO_MANIFEST_DIR\"),\n",
+                    "    \"/src/interaction/mod.rs\"\n",
+                    "));\n",
+                ),
+            ),
+            "write self-reading source",
+        );
+        for target in [
+            "crates/termrock/src/interaction/mod.rs",
+            "crates/termrock/src/style/mod.rs",
+            "crates/termrock/src/style/tokens.rs",
+            "crates/termrock/src/widgets/panel.rs",
+        ] {
+            must(
+                fs::write(root.join(target), "pub fn check() {}\n"),
+                "write include target",
+            );
+        }
+
+        let files = vec![
+            "crates/termrock/src/interaction/mod.rs".to_owned(),
+            "crates/termrock/src/lib.rs".to_owned(),
+            "crates/termrock/src/style/mod.rs".to_owned(),
+            "crates/termrock/src/style/tokens.rs".to_owned(),
+            "crates/termrock/src/widgets/panel.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let (targets, limitations) = must(
+            include_str_paths(&root, &files, &file_set, "crates/termrock"),
+            "resolve self-reading includes",
+        );
+
+        assert_eq!(
+            targets,
+            vec![
+                "crates/termrock/src/interaction/mod.rs",
+                "crates/termrock/src/lib.rs",
+                "crates/termrock/src/style/mod.rs",
+                "crates/termrock/src/style/tokens.rs",
+                "crates/termrock/src/widgets/panel.rs",
+            ]
+        );
+        assert!(limitations.is_empty(), "{limitations:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_opaque_shapes_watch_package_and_note_file_and_lines() {
+        let root = scratch("opaque-include");
+        must(
+            fs::create_dir_all(root.join("crates/app/src")),
+            "create package source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/app/data")),
+            "create package data directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/app/src/data")),
+            "create source data directory",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/src/lib.rs"),
+                concat!(
+                    "const OUT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
+                    "const PATH: &str = \"data/words.txt\";\n",
+                    "const WORDS: &str = include_str!(PATH);\n",
+                    "const PLAIN: &str = include_str!(\"data/plain.txt\");\n",
+                ),
+            ),
+            "write package source",
+        );
+        must(
+            fs::write(root.join("crates/app/src/data/plain.txt"), "plain\n"),
+            "write determinate include target",
+        );
+        must(
+            fs::write(root.join("crates/app/data/words.txt"), "words\n"),
+            "write opaque include target",
+        );
+
+        let files = vec![
+            "crates/app/data/words.txt".to_owned(),
+            "crates/app/src/data/plain.txt".to_owned(),
+            "crates/app/src/lib.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let (targets, limitations) = must(
+            include_str_paths(&root, &files, &file_set, "crates/app"),
+            "opaque includes must degrade, never fail",
+        );
+
+        // The determinate target in the same file still resolves exactly; the
+        // opaque sites add the conservative package watch, which the glob
+        // engine must match against both nested and top-level package paths.
+        assert_eq!(
+            targets,
+            vec!["crates/app/**", "crates/app/src/data/plain.txt"]
+        );
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(must(
+            globset::Glob::new("crates/app/**"),
+            "opaque watch must be a valid glob",
+        ));
+        let matcher = must(builder.build(), "opaque watch must build");
+        assert!(matcher.is_match("crates/app/data/words.txt"));
+        assert!(matcher.is_match("crates/app/src/lib.rs"));
+        assert!(!matcher.is_match("crates/other/src/lib.rs"));
+        assert_eq!(
+            limitations,
+            vec![
+                "Opaque Rust include targets in crates/app/src/lib.rs (include_str! line 1, include_str! line 3) cannot be resolved statically; watching crates/app/** conservatively."
+                    .to_owned()
+            ]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_opaque_shape_in_root_package_watches_whole_tree() {
+        let root = scratch("opaque-include-root");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "const WORDS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/words.bin\"));\n",
+            ),
+            "write package source",
+        );
+
+        let files = vec!["src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let (targets, limitations) = must(
+            include_str_paths(&root, &files, &file_set, "."),
+            "root opaque include must degrade, never fail",
+        );
+
+        assert_eq!(targets, vec!["**"]);
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(must(
+            globset::Glob::new("**"),
+            "root watch must be a valid glob",
+        ));
+        let matcher = must(builder.build(), "root watch must build");
+        assert!(matcher.is_match("src/lib.rs"));
+        assert!(matcher.is_match("Cargo.toml"));
+        assert_eq!(
+            limitations,
+            vec![
+                "Opaque Rust include targets in src/lib.rs (include_bytes! line 1) cannot be resolved statically; watching ** conservatively."
+                    .to_owned()
+            ]
+        );
         let _ = fs::remove_dir_all(root);
     }
 

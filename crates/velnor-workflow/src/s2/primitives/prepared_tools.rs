@@ -278,7 +278,7 @@ impl std::fmt::Display for HandoffFailure {
 impl std::error::Error for HandoffFailure {}
 
 /// Whether `value` is a full lowercase hex SHA-256 digest.
-fn is_digest(value: &str) -> bool {
+pub(crate) fn is_digest(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -960,15 +960,21 @@ pub(crate) fn governing_locks(files: &[String], unit_root: &str) -> BTreeMap<Loc
 }
 
 /// The generation-known facts an inputs digest binds: the compilation inputs
-/// (governing lockfile bytes by repository-relative path), the tool's build
-/// recipe as the repository declared it, and the toolchain pin. Platform ABI
-/// and trust boundary are runtime facts: the ABI renders into the key as a
-/// runner expression and the manifest check proves it, while saves stay
-/// trusted-event gated so untrusted bytes never enter the namespace.
+/// (governing lockfile bytes by repository-relative path), the transitive
+/// local source/build-script/configuration closure by repository-relative
+/// path, the build recipe as the repository declared it (or the adapter
+/// operation identity for scanned native products), and the toolchain pin.
+/// Platform ABI and trust boundary are runtime facts: the ABI renders into
+/// the key as a runner expression and the manifest check proves it, while
+/// saves stay trusted-event gated so untrusted bytes never enter the
+/// namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InputsFacts {
     /// Governing lockfiles: repository-relative path and committed bytes.
     pub(crate) locks: Vec<(String, Vec<u8>)>,
+    /// Closure sources: repository-relative path and bytes, empty for tools
+    /// whose local source is not part of identity.
+    pub(crate) sources: Vec<(String, Vec<u8>)>,
     /// The tool's build recipe: the declared commands that produce it.
     pub(crate) recipe: Vec<String>,
     /// The toolchain pin facts, `key=value` shaped.
@@ -1002,10 +1008,12 @@ pub(crate) fn toolchain_facts(
 }
 
 /// The inputs digest: lowercase hex SHA-256 over the canonical inputs
-/// bytes. Locks sort by path (walk order is not an identity fact) and carry
-/// content digests; recipe and toolchain lines keep declared order. Any
-/// compilation-input, recipe, or toolchain change mints a new digest, so a
-/// bundle built from other inputs can never share the key.
+/// bytes. Locks and sources sort by path (walk order is not an identity
+/// fact) and carry content digests; recipe and toolchain lines keep declared
+/// order. Any compilation-input, recipe, or toolchain change mints a new
+/// digest, so a bundle built from other inputs can never share the key. An
+/// empty source list emits no lines, so tools without a source closure keep
+/// their historical digests byte for byte.
 pub(crate) fn inputs_digest(facts: &InputsFacts) -> String {
     let mut locks: Vec<(&str, String)> = facts
         .locks
@@ -1013,9 +1021,22 @@ pub(crate) fn inputs_digest(facts: &InputsFacts) -> String {
         .map(|(path, bytes)| (path.as_str(), hex_digest(bytes)))
         .collect();
     locks.sort();
+    let mut sources: Vec<(&str, String)> = facts
+        .sources
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), hex_digest(bytes)))
+        .collect();
+    sources.sort();
     let mut canonical = String::from("prepared-tool-inputs-v1\n");
     for (path, digest) in &locks {
         canonical.push_str("lock ");
+        canonical.push_str(&serde_json::to_string(path).unwrap_or_default());
+        canonical.push(' ');
+        canonical.push_str(digest);
+        canonical.push('\n');
+    }
+    for (path, digest) in &sources {
+        canonical.push_str("source ");
         canonical.push_str(&serde_json::to_string(path).unwrap_or_default());
         canonical.push(' ');
         canonical.push_str(digest);
@@ -1451,6 +1472,7 @@ fn inputs_facts_for(
     }
     Ok(InputsFacts {
         locks: lock_inputs,
+        sources: Vec::new(),
         recipe: recipe.to_vec(),
         toolchain: toolchain_facts(unit.toolchain.as_ref(), unit.tool_version.as_deref()),
     })
@@ -2132,6 +2154,7 @@ mod tests {
     fn facts() -> InputsFacts {
         InputsFacts {
             locks: vec![("Cargo.lock".to_owned(), b"lock-bytes".to_vec())],
+            sources: Vec::new(),
             recipe: vec!["cargo build --locked".to_owned()],
             toolchain: vec!["channel=1.91.1".to_owned()],
         }
@@ -2163,6 +2186,35 @@ mod tests {
         let mut toolchain = facts();
         toolchain.toolchain[0] = "channel=1.90.0".to_owned();
         assert_ne!(inputs_digest(&toolchain), digest);
+        // Closure sources participate: path, bytes (even same-size edits),
+        // and membership. Source order is not an identity fact.
+        let mut sourced = facts();
+        sourced.sources = vec![
+            ("libs/b/src/lib.rs".to_owned(), b"fn b() {}".to_vec()),
+            ("libs/a/src/lib.rs".to_owned(), b"fn a() {}".to_vec()),
+        ];
+        let sourced_digest = inputs_digest(&sourced);
+        assert_ne!(sourced_digest, digest);
+        let mut flipped_sources = sourced.clone();
+        flipped_sources.sources.reverse();
+        assert_eq!(inputs_digest(&flipped_sources), sourced_digest);
+        let mut same_size = sourced.clone();
+        same_size.sources[0].1 = b"fn c() {}".to_vec();
+        assert_eq!(same_size.sources[0].1.len(), sourced.sources[0].1.len());
+        assert_ne!(inputs_digest(&same_size), sourced_digest);
+        let mut dropped = sourced.clone();
+        dropped.sources.pop();
+        assert_ne!(inputs_digest(&dropped), sourced_digest);
+    }
+
+    #[test]
+    fn inputs_digest_without_sources_keeps_historical_bytes() {
+        // Golden pin: an empty source list must emit no canonical lines, so
+        // every pre-closure digest keeps its historical value byte for byte.
+        assert_eq!(
+            inputs_digest(&facts()),
+            "7936e704637eee9ae49ef0dbd920c4a9122751301c0b56f3208d2fb237ea4067"
+        );
     }
 
     #[test]

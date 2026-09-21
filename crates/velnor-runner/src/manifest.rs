@@ -278,6 +278,32 @@ const BAKE_REFS: &[AllowedRef] = &[
     allowed("d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b", "v7"),
     allowed("v7", "fixture transition until plan 041"),
 ];
+const TAILROCKS_VELNOR_REFS: &[AllowedRef] = &[
+    allowed(
+        "8b8f1cbe03427227e9d04301de530b3e744110f4",
+        "v0.1.277 generator pin",
+    ),
+    allowed(
+        "1048337062ea625fada1b4f7c07f2feed75f60c7",
+        "v0.1.276 generator pin",
+    ),
+    allowed(
+        "9374a4d367a80956dd385d54a912587a99f5c8b6",
+        "workflow generator pin",
+    ),
+    allowed(
+        "0e67d03d9e4b5fdaf5f76d4c9580a80614e2ac9f",
+        "apple-ci-s2 candidate pin",
+    ),
+    allowed(
+        "6cd827726f4b44343d0919a8d2321178ef263842",
+        "apple-ci-s2 intermediate pin",
+    ),
+    allowed(
+        "496c2397396435cd9a6af068e2839b6093887301",
+        "apple-ci-s2 HEAD pin",
+    ),
+];
 
 const CACHE_INPUTS: &[InputRule] = &[
     InputRule::Any("path"),
@@ -393,6 +419,45 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
     InputRule::Literal("provenance", &["true", "false"]),
     InputRule::Literal("sbom", &["true", "false"]),
 ];
+const TAILROCKS_VELNOR_INPUTS: &[InputRule] = &[
+    // .github/actions/report-velnor-ci-outcomes inputs
+    InputRule::Any("job_label"),
+    InputRule::Any("ci_lane"),
+    InputRule::Any("host_warm_layers"),
+    InputRule::Any("cache_declared_layers"),
+    InputRule::Any("cache_rustup_outcome"),
+    InputRule::Any("cache_rustup_primary"),
+    InputRule::Any("cache_rustup_matched"),
+    InputRule::Any("cache_mold_outcome"),
+    InputRule::Any("cache_mold_primary"),
+    InputRule::Any("cache_mold_matched"),
+    InputRule::Any("cache_cargo_outcome"),
+    InputRule::Any("cache_cargo_primary"),
+    InputRule::Any("cache_cargo_matched"),
+    InputRule::Any("cache_mbx_outcome"),
+    InputRule::Any("cache_mbx_hit"),
+    InputRule::Any("cache_mbx_primary"),
+    InputRule::Any("cache_mbx_matched"),
+    InputRule::Any("cache_docker_seed_outcome"),
+    InputRule::Any("cache_docker_seed_primary"),
+    InputRule::Any("cache_docker_seed_matched"),
+    InputRule::Any("cache_rustup_verified"),
+    InputRule::Any("cache_rustup_saved"),
+    InputRule::Any("cache_mold_verified"),
+    InputRule::Any("cache_mold_saved"),
+    InputRule::Any("cache_cargo_verified"),
+    InputRule::Any("cache_cargo_saved"),
+    InputRule::Any("cache_mbx_verified"),
+    InputRule::Any("cache_mbx_saved"),
+    InputRule::Any("cache_docker_seed_verified"),
+    InputRule::Any("cache_docker_seed_saved"),
+    // .github/actions/setup-velnor-workflow inputs
+    InputRule::Any("rev"),
+    InputRule::Any("checkout-path"),
+    InputRule::Literal("cache", &["true", "false"]),
+    InputRule::Any("cache-key-prefix"),
+    InputRule::Any("github-token"),
+];
 
 macro_rules! capability {
     ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr) => {
@@ -411,6 +476,17 @@ macro_rules! capability {
 }
 
 pub static ACTIONS: &[ActionCapability] = &[
+    ActionCapability {
+        repository: "tailrocks/velnor",
+        adapter: ActionAdapter::Composite,
+        allowed_refs: TAILROCKS_VELNOR_REFS,
+        allowed_subpaths: &[
+            ".github/actions/report-velnor-ci-outcomes",
+            ".github/actions/setup-velnor-workflow",
+        ],
+        inputs: TAILROCKS_VELNOR_INPUTS,
+        notes: "pinned repository composite actions for CI reporting and workflow runtime acquisition across owner and consumer repositories",
+    },
     ActionCapability {
         repository: "jackin-project/jackin-role-action",
         adapter: ActionAdapter::Composite,
@@ -706,10 +782,10 @@ pub static ACTIONS: &[ActionCapability] = &[
             InputRule::Any("install-dir")
         ]
     ),
-    // `setup-velnor-workflow` is deliberately absent: the owner's generated
-    // workflows run it as a local `./.github/actions/setup-velnor-workflow`
-    // step (admitted below without a capability), so no self-referential pin
-    // has to be re-listed here on every D19 bump.
+    // Note: the owner's generated workflows run `setup-velnor-workflow` and
+    // `report-velnor-ci-outcomes` as local `./.github/actions/...` steps (admitted
+    // below without a capability), while consumer workflows execute them via
+    // remote references admitted in `tailrocks/velnor` above.
     ActionCapability {
         repository: "oven-sh/setup-bun",
         adapter: ActionAdapter::JavaScript,
@@ -1965,6 +2041,7 @@ mod tests {
     #[test]
     fn admitted_remote_actions_declare_their_actual_runtime_kind() {
         let expected = [
+            ("tailrocks/velnor", ActionAdapter::Composite),
             (
                 "jackin-project/jackin-role-action",
                 ActionAdapter::Composite,
@@ -2803,6 +2880,127 @@ mod tests {
                 field
             );
         }
+    }
+
+    #[test]
+    fn tailrocks_velnor_composite_actions_are_admitted() {
+        const GENERATOR_PIN_277: &str = "8b8f1cbe03427227e9d04301de530b3e744110f4";
+        const GENERATOR_PIN_276: &str = "1048337062ea625fada1b4f7c07f2feed75f60c7";
+        const WORKFLOW_GEN_PIN: &str = "9374a4d367a80956dd385d54a912587a99f5c8b6";
+        const APPLE_CI_S2_PIN: &str = "496c2397396435cd9a6af068e2839b6093887301";
+
+        let report_inputs = BTreeMap::from([
+            ("job_label".to_string(), "rust-essential-mac".to_string()),
+            ("ci_lane".to_string(), "velnor".to_string()),
+            ("host_warm_layers".to_string(), "cargo".to_string()),
+            ("cache_declared_layers".to_string(), "cargo".to_string()),
+            ("cache_cargo_outcome".to_string(), "success".to_string()),
+        ]);
+
+        // report-velnor-ci-outcomes subpath is admitted with valid inputs across admitted pins
+        for pin in [
+            GENERATOR_PIN_277,
+            GENERATOR_PIN_276,
+            WORKFLOW_GEN_PIN,
+            APPLE_CI_S2_PIN,
+        ] {
+            validate_resolved_action(
+                "report",
+                "tailrocks/velnor",
+                pin,
+                Some(".github/actions/report-velnor-ci-outcomes"),
+                &report_inputs,
+            )
+            .unwrap();
+        }
+
+        let setup_inputs = BTreeMap::from([
+            ("rev".to_string(), GENERATOR_PIN_276.to_string()),
+            ("cache".to_string(), "true".to_string()),
+        ]);
+
+        // setup-velnor-workflow subpath is admitted with valid inputs
+        validate_resolved_action(
+            "setup",
+            "tailrocks/velnor",
+            GENERATOR_PIN_276,
+            Some(".github/actions/setup-velnor-workflow"),
+            &setup_inputs,
+        )
+        .unwrap();
+
+        // Job-level validation also admits the composite action with subpath
+        let job_req: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "manifest test",
+            "jobName": "test",
+            "requestId": 1,
+            "steps": [{
+                "type": "Action",
+                "displayName": "Report phase timings and cache outcomes",
+                "reference": {
+                    "type": "Repository",
+                    "name": "tailrocks/velnor",
+                    "path": ".github/actions/report-velnor-ci-outcomes",
+                    "ref": GENERATOR_PIN_277
+                },
+                "inputs": {
+                    "job_label": "rust-essential-mac",
+                    "ci_lane": "velnor"
+                }
+            }]
+        }))
+        .unwrap();
+        assert!(violations(&job_req).is_empty());
+
+        // Unknown ref is rejected
+        let error = validate_resolved_action(
+            "report",
+            "tailrocks/velnor",
+            "1111111111111111111111111111111111111111",
+            Some(".github/actions/report-velnor-ci-outcomes"),
+            &report_inputs,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "ref"
+        );
+
+        // Unknown subpath is rejected
+        let error = validate_resolved_action(
+            "report",
+            "tailrocks/velnor",
+            GENERATOR_PIN_277,
+            Some(".github/actions/unknown-action"),
+            &report_inputs,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "path"
+        );
+
+        // Unknown input is rejected
+        let invalid_inputs = BTreeMap::from([
+            ("job_label".to_string(), "test".to_string()),
+            ("unsupported_field".to_string(), "val".to_string()),
+        ]);
+        let error = validate_resolved_action(
+            "report",
+            "tailrocks/velnor",
+            GENERATOR_PIN_277,
+            Some(".github/actions/report-velnor-ci-outcomes"),
+            &invalid_inputs,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "with.unsupported_field"
+        );
     }
 
     #[test]
