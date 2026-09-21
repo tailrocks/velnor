@@ -194,3 +194,119 @@ Reviewer `/root/handoff_review` (read-only, after #1064 publication) verified du
 Corrections accepted from review: W1 now denotes the handoff branch checkout, while B1 preserves local source `d97645d9`; exact known renderer worktrees are `/private/tmp/velnor-active-render-new.4dhvov` at `eed474c4` and `/private/tmp/velnor-active-render.KWIEiB` at `6737cdb3`, both retained. P4 was overbroad: #1051/#1053 were merged; current related open PR details require the promised per-PR refresh. #1064 itself is the pause artifact, not an original-goal implementation PR.
 
 The original engineering goal remains paused. This administrative block does not authorize implementation or cleanup; it names the exact preservation-record work a later handoff/resumption coordinator must complete before claiming exhaustive inventory coverage.
+
+# Audit repair record — 2026-09-22T00:00:00Z
+
+## A. Source register and instruction hierarchy
+
+| Source ID | Type / accessibility | Authority and recovered content |
+|---|---|---|
+| U1 | Original user engineering prompt in this session; FULL | Original goal. It specifies incidents, target lifecycle, identity/trust/event/graph/performance/test/integration requirements. Its operative requirements are atomized in G-001..G-026 below because the conversation itself is not a durable artifact for a future agent. |
+| U2 | User amendment, session; FULL | Continue autonomously; never ask or wait; resolve uncertainty through agents/evidence; commit/push frequently on one branch. Remains binding after resume. |
+| U3 | User amendment, session; FULL | Commit small verified increments and push regularly; minimize branches. Remains binding after resume. |
+| U4 | User pause/handoff request, session; FULL | Supersedes execution only: pause original goal, preserve/publish handoff, no merge/cleanup. Remains binding until explicit resume. |
+| U5 | User handoff-repair audit request, session; FULL | Authorizes only bounded audit/document repair/preservation publication. It does not resume G. |
+| R1 | Repository `AGENTS.md`; FULL | Tooling/commit/generated-output/runner-protocol rules. Applies to resumed engineering and this documentation commit. |
+| E1 | [Architecture decision record](../../plans/2026-09-22-generator-activation-architecture.md); SECONDARY_ONLY | Agent evidence/decisions, not user authorization. |
+| E2 | PR #1044, runs and Git state; FULL at audit time | Evidence of checkpoint implementation, not proof of completion. |
+
+Instruction order: U4/U5 pause restrictions supersede U1-U3 execution requirements now. U1-U3 resume only after explicit later user `/goal Read and resume ...`; R1 remains applicable. E1/E2 are evidence, never authorization. No secret-bearing content is recorded.
+
+## B. Original-goal requirement matrix
+
+`Coverage` measures this document, not implementation success. States point to D/H/T evidence.
+
+| Requirement ID | Source | Operative requirement | Handoff section | State/evidence | Remaining task / acceptance | Coverage |
+|---|---|---|---|---|---|---|
+| G-001 | U1 | Treat both incidents as architecture defects; root-cause before fix. | F, T-002 | Root causes recorded. | T-002 proves old states rejected. | COVERED |
+| G-002 | U1 | Preserve trusted bootstrap authority separate from candidate and active product. | D:R4, F, T-003 | BLOCKED by unbound check authority. | External independently controlled authority enforced. | COVERED |
+| G-003 | U1 | One active-tree invariant for PR, prospective integration, main, Preview, release. | D:R1, T-004 | source implemented, unactivated. | Active renderer hosted proof all contexts. | COVERED |
+| G-004 | U1 | Qualify candidate in isolated disposable staging; candidate output cannot activate itself. | D:R3, T-005 | hosted partial. | isolation + behavioral qualification proof. | COVERED |
+| G-005 | U1 | Publish immutable authenticated all-platform product before atomic activation; failed publication preserves old active state. | D:R5/R6, T-006 | implementation unverified. | lifecycle tests and hosted publication. | COVERED |
+| G-006 | U1 | Extend existing promote transaction with readiness, revocation/expiry/rollback/concurrency/manifest visibility. | D:R5, T-006 | local readiness only. | controlled lifecycle regressions plus hosted evidence. | COVERED |
+| G-007 | U1 | Distinguish source, build inputs, binary digest, tree, policy authority, audited tree, run/attempt. | D:R5/R7, T-007 | partial typed identity. | manifest/graph completion and mutations. | COVERED |
+| G-008 | U1 | Model explicit producers, requirements, event contexts, platform/trust/deadline; reject cycles/impossible/unsatisfied edges. | D:R7, T-007 | partial. | graph validator in both paths. | COVERED |
+| G-009 | U1 | No guessed producer/latest/branch lookup; terminal no-producer fails immediately; remove 900-second polling. | D:R2, T-004/T-007 | source staged; generated active workflow still polls. | activation then negative resolver tests. | COVERED |
+| G-010 | U1 | Candidate code never runs privileged; trusted verdict rejects missing/failed/cancelled/unexpected skips and spoofing. | D:R3/R4/R8, T-003/T-005/T-008 | blocked/partial. | authority and verdict tests. | COVERED |
+| G-011 | U1 | Prospective integration parity: PR head/merge/squash/merge-group identity not interchangeable. | D:R8, T-008 | not complete. | event matrix and base-fresh proof. | COVERED |
+| G-012 | U1 | Use merge_group if available, otherwise enforce fresh integration proof. | T-008 | NOT RUN. | capability check + enforcement test. | COVERED |
+| G-013 | U1 | Measure all path components; any applicable step/job/critical path >120s is defect, including queue/dependency wait. | D:R9, F, T-009 | verified violations. | matched cold/warm optimization evidence. | COVERED |
+| G-014 | U1 | Do not hide time by staging/optional skips; preserve obligations/security/platforms. | F, T-009 | design constraint. | aggregate all phase obligations. | COVERED |
+| G-015 | U1 | Candidate/active products reused only under exact compatible identity; no arbitrary PR executable trusted. | D:R5/R6, T-006/T-007 | partial. | exact provenance/identity tests. | COVERED |
+| G-016 | U1 | Required regressions: incidents, publication failure, successful lifecycle, identity/event contexts, artifact attacks, publisher races/revocation/rollback. | D:R8, T-008 | partial. | executable suite, fake clock/state service. | COVERED |
+| G-017 | U1 | Mutation tests remove invariant/event/provenance/needs and must fail. | D:R8, T-008 | not complete. | mutation suite. | COVERED |
+| G-018 | U1 | Migrate every active consumer, delete permissive/polling/conflicting docs; no permanent legacy path. | D:R2/R10, T-004/T-010 | staged only. | activation and regeneration prove absence. | COVERED |
+| G-019 | U1 | Format, strict Clippy, relevant tests, shell/actionlint/security, deterministic double regeneration, supported consumers. | G, T-010 | mixed/stale/NOT RUN. | exact listed gates at target revision. | COVERED |
+| G-020 | U1 | Small protected increments, inspect all PR review feedback, integrate promptly through allowed method. | U2/U3, E.5, T-011 | paused. | live review/head reconciliation before merges. | COVERED |
+| G-021 | U1 | Final report architecture before/after, merged evidence/timings and demonstrated violations; do not claim incomplete verification complete. | T-012 | not started. | final combined evidence. | COVERED |
+| G-022 | U2/U3 | Autonomous agents; frequent signed scoped commits/pushes; minimal branches. | Source register, T-001 onward | continuing constraint. | apply on resume. | COVERED |
+| G-023 | R1 | Generated files only by active pinned renderer; actions/runner protocol source; no legacy shims. | I, T-004/T-010 | constraint. | apply/verify. | COVERED |
+| G-024 | U1 | Preserve correct existing local atomic promotion work; do not duplicate mechanism. | F, T-006 | recorded. | extend existing command only. | COVERED |
+| G-025 | U1 | Maintain one concise authoritative decision/execution record. | E1, this handoff, T-012 | partial. | consolidate at final. | COVERED |
+| G-026 | U1 | Completion requires architectural removal, independent review, protected integration, hosted evidence, honest performance proof. | D:R10/R11, T-010..T-012 | NOT COMPLETE. | all final gates. | COVERED |
+
+## C. Handoff requirements matrix
+
+| Requirement ID | Source | Requirement | Section | State | Coverage |
+|---|---|---|---|---|---|
+| H-001 | U4 | Keep original goal `PAUSED_BY_USER`; stop implementation/workers. | metadata, C, audit record | goal tool reported paused; watcher stopped. | COVERED |
+| H-002 | U4 | Preserve code/artifacts and publish draft PR without merge/cleanup. | E, publication receipt | PR #1064 draft, branch remote. | COVERED |
+| H-003 | U4 | Inventory worktrees/clones/branches/PRs/stashes and future cleanup gates. | E, audit expansion | known coverage large but not exhaustive per-resource. | VAGUE / BLOCKED |
+| H-004 | U4 | Self-contained original goal, decisions, evidence, resume instructions. | source register, matrices, T, J | repaired; original long prompt is atomized not fully quoted. | PARTIAL |
+| H-005 | U5 | Audit source fidelity, state, inventory, fresh-reader; repair canonical doc/PR. | audit record | four auditors requested; results incorporated as available. | PARTIAL |
+| H-006 | U5 | Exact executable task plan mapped to requirements. | T-001..T-012 | added below. | COVERED |
+| H-007 | U5 | Verify remote publication/head/draft/no-auto-merge. | publication receipt/audit receipt | must refresh after final commit. | IN_PROGRESS |
+
+## D. Executable resumed task plan
+
+| Task | Links | Starting evidence / concrete next action | Dependencies / validation / completion |
+|---|---|---|---|
+| T-001 | H-003,H-007,G-020 | In exclusive worktree, fetch server heads without force/prune; compare local `d97645d9`, server #1044 `60bb9326`, handoff branch, main, all worktree inventories and PR reviews. | First after explicit resume. Use `git worktree list --porcelain -z`, `git for-each-ref`, `git stash list`, `gh pr view`; update resource ledger. Complete when every goal-related resource has owner/recovery/disposition. |
+| T-002 | G-001,G-003,G-009 | Reproduce historical fixtures against active and candidate trees; inspect source and generated outputs after T-001. | Depends T-001. Existing policy test modules/contract tests; complete when original stale-pin and no-producer states fail immediately in real logic. |
+| T-003 | G-002,G-010,G-012 | Select/install independently controlled required acceptance authority based on live GitHub capability; do not rely on candidate workflow/job names. | External capability is blocker. Complete only with live enforcement proof on workflow mutation/spoof attempt. |
+| T-004 | G-003,G-009,G-018,G-023 | Activate only after T-003/T-006; regenerate static workflows twice using activated pinned renderer; remove remaining active generated poll loops. | Validate `--plain --check`, generated shell checks and policy/Preview. Complete when active consumers contain no guessed polling/candidate exception. |
+| T-005 | G-004,G-010,G-015 | Harden candidate lane isolation/authority and qualification output semantics; inspect workflow/action boundaries. | T-003 before trusting result. Complete when candidate cannot alter validator/verdict or publish trusted binary and qualification tests pass. |
+| T-006 | G-005,G-006,G-007,G-015,G-024 | Repair existing runtime publisher checksum/tag-contract/source-digest/build-identity/readiness lifecycle. | Requires T-001; retain promote mechanism. Complete with failure/no-mutation, duplicate/interrupted/revoked/expired/rollback tests and authenticated all-platform product. |
+| T-007 | G-007,G-008,G-009,G-015 | Extend existing graph, not second scheduler: typed EventContext and ArtifactRequirement/Producer/identity/state/deadline; mirror root/s2 or remove superseded path. | Can parallel design with T-006. Complete with cycle/producerless/event/platform/trust/terminal-state mutations. |
+| T-008 | G-011,G-012,G-016,G-017 | Build event/prospective-main/fork/bot/rerun and adversarial artifact/manifest/verdict mutation matrix using controlled state/fake clock. | T-003/T-007 foundations. Complete when all required cases execute, not textual assertions. |
+| T-009 | G-013,G-014 | Measure cold/warm complete affected paths including queue; design phase result graph before splitting jobs, then prove required aggregate. | Can investigate parallel; implementation depends T-007. Complete only if every observed >120s breach remedied or retained with measured cause and feasible remedies attempted; never call requirement met otherwise. |
+| T-010 | G-018,G-019,G-026 | Run target-revision formatting/Clippy/unit/integration/contract/generated-shell/actionlint/security/double regeneration/supported consumers; hosted main/Preview/activation evidence. | After T-003..T-009 integration. Complete with durable command/run evidence. |
+| T-011 | G-020,G-026,H-003 | Read every live review/comment/thread on P1 and related required PRs, resolve source overlap, merge only allowed protected increments. | Depends T-001/T-010 per increment. Complete target combined state verified; no stale check reuse. |
+| T-012 | G-021,G-025,G-026,H-003 | Publish final decision/evidence record; then execute individually approved cleanup gates for each retained goal-exclusive resource. | Only after T-011; re-observe every candidate. Complete with final architecture/timing report and cleanup receipt. |
+
+
+## E. Atomic original-goal fidelity addendum
+
+The following supplements G-001..G-026. `MISSING` means engineering/documentation work remains; it does not waive U1.
+
+| ID | Atomic requirement from U1 | State / linked task | Coverage |
+|---|---|---|---|
+| G-027 | Before every bug fix, name enabling architecture/failure class; retain regression for a deferred root cause. | T-002/T-006/T-007/T-008 | COVERED |
+| G-028 | Execute six independent workstreams: incident/producer forensic; lifecycle/trust alternative; typed graph/artifact; regressions/prospective-main; cold/warm performance; integration/security review. | Resume must assign bounded agents across T-002..T-011. | COVERED |
+| G-029 | Refresh main/branches/PRs/reviews/runs/jobs/logs/rulesets; inspect actual protection, not one field. | T-001 | COVERED |
+| G-030 | Keep bootstrap authority, active renderer, candidate renderer, audited tree and execution context distinct. | T-003..T-006 | COVERED |
+| G-031 | Active output equals deterministic declared authenticated active renderer over audited complete config/scan/static inputs in every consumer context. | T-002/T-004 | COVERED |
+| G-032 | Candidate source integration does not activate incompatible output; syntax is staged until its renderer product activates. | T-004/T-005/T-006 | COVERED |
+| G-033 | New product readiness covers every supported platform, retrieval, integrity, compatibility, interrupted/concurrent/duplicate publication, manifest visibility, retention/revocation and rollback. | T-006 | COVERED |
+| G-034 | Same-run bootstrap is only an alternative after trust/self-reference/availability/cold-path proof; single-PR activation needs independent producer and exact integration proof. | T-003/T-006 | COVERED |
+| G-035 | Build identity covers all byte-affecting inputs: transitive source/build scripts/embedded files/lock/toolchain/target/host/features/profile/flags/environment/revision stamps. | T-006/T-007 | COVERED |
+| G-036 | Never equate PR head/synthetic merge/squash/merge-group/dispatch/rerun/fork/bot identities without proven input equivalence and origin. | T-008 | COVERED |
+| G-037 | Graph rejects cycles, producerless requirements, impossible producer event, incompatible platform/build/trust, and prohibited trust transition before execution. | T-007 | COVERED |
+| G-038 | Resolver states ready/pending/producer-failed/unavailable/invalid/expired; no producer fails immediately; bounded retries honor inherited remaining time/cancellation. | T-007/T-008 | COVERED |
+| G-039 | Scheduler dependency waits are explicit `needs`/artifact relationships and counted in timing; no runner-resident polling. | T-004/T-007/T-009 | COVERED |
+| G-040 | Candidate executes only restricted ephemeral worker; trusted acceptance/publication separately controlled; no privileged candidate execution or self-selected verifier. | T-003/T-005 | COVERED |
+| G-041 | Verify builder/workflow/repository/revision/parameters/digest/run-attempt/platform/profile/features provenance; signature proves origin only. | T-006/T-008 | COVERED |
+| G-042 | Same acceptance predicates on prospective integration and main/Preview; only legitimate publication authorization differs; no environment spoofed push. | T-008 | COVERED |
+| G-043 | Trusted final verdict rejects missing/failed/cancelled/unexpectedly skipped work and spoofed names; explicit no-work proof passes. | T-003/T-008 | COVERED |
+| G-044 | Measure event creation, queue/dependency, bootstrap, checkout/tool/cache/build/test/artifact/post/verdict/delivery and generator-change-to-activation. | T-009 | COVERED |
+| G-045 | Matched cold/warm records retain first attempts/failures/retries/cancellations; cache misses never alter correctness; external limits reported, not excused. | T-009 | COVERED |
+| G-046 | Real emitted acquisition/verdict tests use controlled producer states/fake clocks; cover listed hostile identities/products/manifests/cache/self-report and lifecycle races. | T-008 | COVERED |
+| G-047 | Mutation tests fail if event compatibility, provenance, active invariant or required edge is removed. | T-008 | COVERED |
+| G-048 | Remove superseded permissive paths/polling/conflicting docs after all active consumers migrate; no recovery shim. | T-004/T-010 | COVERED |
+| G-049 | Required target validation: actual-pinned formatting, strict Clippy, relevant unit/integration/contract/generated-shell/actionlint/security, two clean renders, supported consumers. | T-010 | COVERED |
+| G-050 | Reread every review/comment/thread at final SHA; integrate through actual protected method, verify post-merge main/Preview and follow failures. | T-011 | COVERED |
+| G-051 | Final decision/execution record distinguishes documented/implemented/pushed/CI-verified/merged/post-merge verified and reports before/after/timings/remaining violation. | T-012 | COVERED |
+
+## F. Audit-only requirement status
+
+G remains paused. Handoff repair is `PARTIAL`, not `VERIFIED`: source fidelity and task mapping are now materially expanded, but exact exhaustive resource enumeration and per-resource cleanup mapping remain unavailable in the canonical document. This is an administrative quality limitation, not an engineering-completion claim.
