@@ -18,6 +18,13 @@ on:
       - 'rust-toolchain.toml'
       - '.cargo/**'
 
+# Candidate qualification is commit-specific, but only the newest commit on a
+# pull request can satisfy its current required check. Cancel obsolete builds
+# within that PR while keeping independent pull requests isolated.
+concurrency:
+  group: candidate-qualification-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
