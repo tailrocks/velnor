@@ -8839,6 +8839,22 @@ fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, Generator
                 file.sync_all().map_err(|error| {
                     GeneratorError::io("sync staged generated file", &staged, &error)
                 })?;
+                // Deterministic non-executable permissions, exactly like the
+                // staged-tree installer: the live tree inherits this mode on
+                // install, so a umask-derived mode here would make repeat
+                // generation churn under a restrictive umask.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    file.set_permissions(std::fs::Permissions::from_mode(0o644))
+                        .map_err(|error| {
+                            GeneratorError::io(
+                                "set staged generated file permissions",
+                                &staged,
+                                &error,
+                            )
+                        })?;
+                }
                 return Ok(staged);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -21281,6 +21297,64 @@ lockfile = true
             root.join(".github/first.txt").exists(),
             "a refused publish must remove nothing"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn render_into_previous_era_tree_converges_clean() {
+        // Policy-candidate shape: the tree and its state predate the
+        // generator-owned link (as a pin-era scratch render does), and a
+        // fresh render carries it. The link is created, never flagged:
+        // unrecorded plus rendered means Create, not stale, not unknown.
+        let root = temporary_repository("previous-era-tree");
+        let mut previous = std::collections::BTreeMap::new();
+        previous.insert(
+            PathBuf::from(".github/actionlint.yaml"),
+            "lint\n".to_owned(),
+        );
+        must(
+            write_generated(&root, &previous, false, false, false),
+            "write previous-era tree",
+        );
+        let mut current = previous.clone();
+        current.insert(PathBuf::from(".github/AGENTS.md"), "agents\n".to_owned());
+        let mut symlinks = std::collections::BTreeMap::new();
+        symlinks.insert(
+            PathBuf::from(crate::GITHUB_CLAUDE_MD),
+            PathBuf::from("AGENTS.md"),
+        );
+        must(
+            write_generated_with_options(
+                &root,
+                &current,
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
+            "a fresh render must converge over a previous-era tree",
+        );
+        assert_eq!(
+            must(
+                fs::read_link(root.join(crate::GITHUB_CLAUDE_MD)),
+                "read created link"
+            ),
+            PathBuf::from("AGENTS.md")
+        );
+        assert!(matches!(
+            write_generated_with_options(
+                &root,
+                &current,
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+                false,
+                true,
+                false,
+                false,
+            ),
+            Ok(WriteOutcome::Unchanged)
+        ));
         let _ = fs::remove_dir_all(root);
     }
     #[cfg(unix)]

@@ -135,6 +135,44 @@ pub fn generate_ok(root: &Path, output: &Path, force: bool) {
     );
 }
 
+/// Run generation under an explicit umask, hermetically: the mask applies
+/// to the generator child only, never to the test process, so parallel
+/// tests cannot observe it. Generated output must be umask-independent —
+/// every installed file carries deterministic permissions.
+#[cfg(unix)]
+pub fn run_generate_with_umask(root: &Path, output: &Path, force: bool, mask: &str) -> Output {
+    let mut args = vec![
+        "--plain".to_owned(),
+        "--default-branch".to_owned(),
+        "main".to_owned(),
+        "--output".to_owned(),
+        output.to_str().unwrap().to_owned(),
+    ];
+    if force {
+        args.push("--force".to_owned());
+    }
+    args.push(root.to_str().unwrap().to_owned());
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("umask {mask}; exec \"$@\""))
+        .arg("sh")
+        .arg(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args(&args)
+        .output()
+        .expect("run velnor-workflow under umask")
+}
+
+/// Generate under an explicit umask and panic on failure.
+#[cfg(unix)]
+pub fn generate_ok_with_umask(root: &Path, output: &Path, force: bool, mask: &str) {
+    let outcome = run_generate_with_umask(root, output, force, mask);
+    assert!(
+        outcome.status.success(),
+        "generation under umask {mask} failed:\n{}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+}
+
 /// Run `--check` of `root` against `output`, returning the raw outcome.
 pub fn run_check(root: &Path, output: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))

@@ -15,6 +15,8 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use common::generate_ok_with_umask;
 use common::{
     assert_no_staging_leftovers, check_fails, check_ok, generate_ok, is_executable,
     make_executable, minimal_root, run_check, run_generate, snapshot_tree, unique_dir,
@@ -181,6 +183,35 @@ fn v1_repeat_regen_is_identical_noop() {
 #[test]
 fn s2_repeat_regen_is_identical_noop() {
     repeat_regen_is_identical_noop(Pipeline::S2);
+}
+
+/// The ownership-refresh install path must not inherit the caller umask:
+/// a forced repeat under `umask 077` installs the same modes as the
+/// staged-tree publish, so the tree stays byte- and mode-identical.
+#[cfg(unix)]
+fn forced_repeat_is_noop_under_restrictive_umask(pipeline: Pipeline) {
+    let (root, output) = fixture(pipeline, "repeat-noop-umask");
+    let before = snapshot_tree(&output);
+    generate_ok_with_umask(&root, &output, true, "077");
+    assert_eq!(
+        snapshot_tree(&output),
+        before,
+        "forced repeat under umask 077 must leave every byte, mode, and link untouched"
+    );
+    assert_no_staging_leftovers(&output);
+    check_ok(&root, &output);
+}
+
+#[cfg(unix)]
+#[test]
+fn v1_forced_repeat_is_noop_under_restrictive_umask() {
+    forced_repeat_is_noop_under_restrictive_umask(Pipeline::V1);
+}
+
+#[cfg(unix)]
+#[test]
+fn s2_forced_repeat_is_noop_under_restrictive_umask() {
+    forced_repeat_is_noop_under_restrictive_umask(Pipeline::S2);
 }
 
 /// One drift mutation plus whether `--force` repairs it. A hand edit to
@@ -691,4 +722,45 @@ fn force_normalizes_executable_modes() {
         );
         check_ok(&root, &output);
     }
+}
+
+/// Incident regression: a policy-checkout-shaped tree — a full render
+/// whose committed state records the generator-owned `.github/CLAUDE.md`
+/// symlink with the link on disk — must plan, check, and publish clean
+/// under every mode. The owned link is expected output: never stale,
+/// never unknown, never refused.
+fn owned_symlink_renders_clean_in_policy_checkout_shape(pipeline: Pipeline) {
+    let (root, output) = fixture(pipeline, "owned-link-clean");
+    let link = output.join(".github/CLAUDE.md");
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        PathBuf::from("AGENTS.md"),
+        "the render must carry the owned link"
+    );
+    let state =
+        fs::read_to_string(output.join(".github/ci/.github-actions-generator-state")).unwrap();
+    assert!(
+        state.contains(".github/CLAUDE.md"),
+        "the committed state must record the owned link"
+    );
+    generate_ok(&root, &output, false);
+    check_ok(&root, &output);
+    generate_ok(&root, &output, true);
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        PathBuf::from("AGENTS.md"),
+        "every mode must leave the owned link alone"
+    );
+    check_ok(&root, &output);
+    assert_no_staging_leftovers(&output);
+}
+
+#[test]
+fn v1_owned_symlink_renders_clean_in_policy_checkout_shape() {
+    owned_symlink_renders_clean_in_policy_checkout_shape(Pipeline::V1);
+}
+
+#[test]
+fn s2_owned_symlink_renders_clean_in_policy_checkout_shape() {
+    owned_symlink_renders_clean_in_policy_checkout_shape(Pipeline::S2);
 }
