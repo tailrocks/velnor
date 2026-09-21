@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -209,6 +210,7 @@ struct GeneratedCallerSample {
 
 struct RemoteCheckout {
     path: PathBuf,
+    _git_context: IsolatedGitContext,
 }
 
 impl Drop for RemoteCheckout {
@@ -595,9 +597,263 @@ fn validate_estate_scope(
     Ok(())
 }
 
+fn git_command() -> Command {
+    git_command_with_environment(std::env::vars_os())
+}
+
+fn isolated_git_command() -> Result<(Command, IsolatedGitContext)> {
+    isolated_git_command_with_environment(std::env::vars_os())
+}
+
+fn isolated_git_command_with_environment<I>(inherited: I) -> Result<(Command, IsolatedGitContext)>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let context = IsolatedGitContext::new()?;
+    let cwd = git_isolation_cwd()?;
+    let mut command = git_command_with_environment(inherited);
+    command
+        .current_dir(&cwd)
+        .env("GIT_CEILING_DIRECTORIES", &cwd);
+    command
+        .env("HOME", context.path())
+        .env("XDG_CONFIG_HOME", context.path())
+        .env("TMPDIR", context.path())
+        .env("TEMP", context.path())
+        .env("TMP", context.path())
+        .env("GIT_CONFIG_GLOBAL", context.config_path())
+        .env("GIT_CONFIG_SYSTEM", context.config_path());
+    #[cfg(windows)]
+    command
+        .env("USERPROFILE", context.path())
+        .env("SystemRoot", &cwd);
+    Ok((command, context))
+}
+
+fn git_command_with_environment<I>(inherited: I) -> Command
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let mut command = Command::new("git");
+    command.env_clear();
+    command.envs(sanitized_git_environment(inherited));
+    command
+}
+
+fn sanitized_git_environment<I>(inherited: I) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let mut environment = inherited
+        .into_iter()
+        .filter(|(name, _)| !is_git_environment_variable(name))
+        .collect::<Vec<_>>();
+    environment.extend([
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_CONFIG_SYSTEM".into(), null_config_path().into()),
+        ("GIT_CONFIG_GLOBAL".into(), null_config_path().into()),
+        ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+    ]);
+    environment
+}
+
+fn is_git_environment_variable(name: &OsStr) -> bool {
+    name.to_string_lossy()
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_"))
+}
+
+fn null_config_path() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
+}
+
+// Isolated Git contexts are implemented for unix and windows only; fail with
+// an explicit error on other targets instead of an unbound `path` below.
+#[cfg(not(any(unix, windows)))]
+compile_error!("isolated Git support requires a unix or windows target");
+
+fn trusted_temp_root() -> Result<PathBuf> {
+    #[cfg(unix)]
+    let path = Path::new("/tmp")
+        .canonicalize()
+        .context("resolve trusted temporary directory /tmp")?;
+    #[cfg(windows)]
+    let path = windows_directory()?.join("Temp");
+
+    if !path.is_dir() {
+        bail!(
+            "trusted temporary directory {} is not a directory",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn git_isolation_cwd() -> Result<PathBuf> {
+    #[cfg(unix)]
+    let path = PathBuf::from("/").canonicalize().context("resolve /")?;
+    #[cfg(windows)]
+    let path = windows_directory()?;
+
+    if !path.is_dir() {
+        bail!(
+            "isolated Git working directory {} is not a directory",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn windows_directory() -> Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+
+    let mut buffer = vec![0u16; 32_768];
+    // SAFETY: `buffer` is writable for `buffer.len()` UTF-16 code units, and
+    // the API writes at most that many units.
+    let length = unsafe { GetSystemWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return Err(std::io::Error::last_os_error()).context("resolve Windows directory");
+    }
+    let length = length as usize;
+    if length >= buffer.len() {
+        bail!("Windows directory path exceeds the supported limit");
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length],
+    )))
+}
+
+struct IsolatedGitContext {
+    path: PathBuf,
+}
+
+impl IsolatedGitContext {
+    fn new() -> Result<Self> {
+        let parent = trusted_temp_root()?;
+        for attempt in 0..128 {
+            let path = parent.join(format!(
+                "velnor-git-context-{}-{}-{attempt}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            match create_private_directory(&path) {
+                Ok(()) => {
+                    if let Err(error) = fs::write(path.join("gitconfig"), b"") {
+                        let _ = fs::remove_dir_all(&path);
+                        return Err(error).context("create isolated empty Git config");
+                    }
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("create isolated Git context at {}", path.display())
+                    });
+                }
+            }
+        }
+        bail!("create isolated Git context after 128 attempts")
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.path.join("gitconfig")
+    }
+}
+
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700).create(path)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+            SECURITY_ATTRIBUTES,
+        };
+        use windows_sys::Win32::{Foundation::LocalFree, Storage::FileSystem::CreateDirectoryW};
+
+        // Protect this private context from broad ACEs inherited from the
+        // shared Windows temporary directory.
+        let descriptor_text = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+        let descriptor_text = descriptor_text
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: both pointers are valid and NUL-terminated; the API allocates
+        // a descriptor that is released with `LocalFree` below.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                descriptor_text.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // SAFETY: path and security attributes remain valid for the call;
+        // the security descriptor grants access only to its owner, SYSTEM,
+        // and administrators, and propagates those entries to children.
+        let created = unsafe { CreateDirectoryW(path.as_ptr(), &attributes) };
+        let result = if created == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        };
+        // SAFETY: `descriptor` was allocated by the successful conversion above.
+        unsafe { LocalFree(descriptor) };
+        result
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "private Git context is unsupported on this platform",
+        ))
+    }
+}
+
+impl Drop for IsolatedGitContext {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 fn remote_default_identity(repository: &str) -> Result<(String, String)> {
     let url = format!("https://github.com/{repository}.git");
-    let output = Command::new("git")
+    let (mut command, _context) = isolated_git_command()?;
+    let output = command
         .args(["ls-remote", "--symref", &url, "HEAD"])
         .output()
         .with_context(|| format!("resolve remote default for {repository}"))?;
@@ -630,13 +886,10 @@ fn checkout_remote_default(
     default_branch: &str,
     head_sha: &str,
 ) -> Result<RemoteCheckout> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("system clock predates Unix epoch")?
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("velnor-estate-{}-{nonce}", std::process::id()));
+    let (mut command, context) = isolated_git_command()?;
+    let path = context.path().join("checkout");
     let url = format!("https://github.com/{repository}.git");
-    let output = Command::new("git")
+    let output = command
         .args([
             "clone",
             "--quiet",
@@ -662,7 +915,7 @@ fn checkout_remote_default(
     // verified index blob below, so sparse omission cannot become a false
     // negative or a hard failure.
     let sparse_input = b"/*\n!/*/\n/.github/\n/docs/\n/scripts/\n/operational/\n/config/fleet/\n";
-    let sparse = Command::new("git")
+    let sparse = git_command()
         .current_dir(&path)
         .args(["sparse-checkout", "set", "--no-cone", "--stdin"])
         .stdin(std::process::Stdio::piped())
@@ -672,7 +925,7 @@ fn checkout_remote_default(
         let _ = fs::remove_dir_all(&path);
         return Err(error);
     }
-    let checkout = Command::new("git")
+    let checkout = git_command()
         .current_dir(&path)
         .args(["checkout", "--quiet", "--detach", head_sha])
         .status()
@@ -682,7 +935,10 @@ fn checkout_remote_default(
         bail!("checkout delivered default for {repository}");
     }
     verify_checkout_identity(&path, repository, default_branch, head_sha, false)?;
-    Ok(RemoteCheckout { path })
+    Ok(RemoteCheckout {
+        path,
+        _git_context: context,
+    })
 }
 
 fn configure_sparse_checkout(
@@ -739,7 +995,7 @@ fn verify_checkout_identity(
     require_branch: bool,
 ) -> Result<()> {
     let git = |args: &[&str]| -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .arg("-C")
             .arg(path)
             .args(args)
@@ -768,7 +1024,15 @@ fn verify_checkout_identity(
             );
         }
     }
-    if !git(&["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty() {
+    if !git(&[
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ])?
+    .is_empty()
+    {
         bail!("estate checkout {repository} is dirty");
     }
     Ok(())
@@ -1244,7 +1508,7 @@ fn audit_test_runner_text(file: &str, relative: &Path, text: &str, findings: &mu
 }
 
 fn collect_repository_surface_entries(root: &Path) -> Result<TrackedSurfaceCollection> {
-    let output = Command::new("git")
+    let output = git_command()
         .current_dir(root)
         .args(["ls-files", "--stage", "-z"])
         .output()
@@ -1566,7 +1830,7 @@ fn read_index_blob(root: &Path, entry: &TrackedSurfaceEntry) -> Result<Vec<u8>> 
         .object
         .as_deref()
         .context("sparse tracked surface has no verified index blob")?;
-    let output = Command::new("git")
+    let output = git_command()
         .current_dir(root)
         .args(["cat-file", "blob", object])
         .output()
@@ -3275,6 +3539,349 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
+    #[test]
+    fn git_environment_drops_inherited_git_state() {
+        let environment = sanitized_git_environment([
+            ("PATH".into(), "/trusted/bin".into()),
+            ("GIT_DIR".into(), "/attacker/repository/.git".into()),
+            ("git_work_tree".into(), "/attacker/worktree".into()),
+            ("GIT_INDEX_FILE".into(), "/attacker/index".into()),
+            ("GIT_OBJECT_DIRECTORY".into(), "/attacker/objects".into()),
+            (
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
+                "/attacker/alternate-objects".into(),
+            ),
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            (
+                "GIT_CONFIG_KEY_0".into(),
+                "url.file:///attacker.insteadOf".into(),
+            ),
+            ("GIT_CONFIG_VALUE_0".into(), "https://github.com/".into()),
+            ("GIT_CONFIG_PARAMETERS".into(), "injected=true".into()),
+            ("GIT_NO_REPLACE_OBJECTS".into(), "0".into()),
+            ("GIT_TRACE".into(), "/attacker/trace".into()),
+        ]);
+
+        let git_environment = environment
+            .iter()
+            .filter(|(name, _)| is_git_environment_variable(name))
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            git_environment,
+            BTreeSet::from([
+                "GIT_CONFIG_GLOBAL".to_string(),
+                "GIT_CONFIG_NOSYSTEM".to_string(),
+                "GIT_CONFIG_SYSTEM".to_string(),
+                "GIT_NO_REPLACE_OBJECTS".to_string(),
+            ])
+        );
+        assert!(environment.iter().any(|(name, value)| {
+            name == OsStr::new("PATH") && value == OsStr::new("/trusted/bin")
+        }));
+        assert!(environment.iter().any(|(name, value)| {
+            name == OsStr::new("GIT_NO_REPLACE_OBJECTS") && value == OsStr::new("1")
+        }));
+    }
+
+    #[test]
+    fn git_identity_commands_ignore_inherited_repository_environment() {
+        let root = TestRepo::new();
+        let trusted = root.path.join("trusted");
+        let attacker = root.path.join("attacker");
+        initialize_git_repository(&trusted, "trusted tree\n");
+        initialize_git_repository(&attacker, "attacker tree\n");
+
+        let inherited = environment_with_git_overrides([
+            ("GIT_DIR".into(), attacker.join(".git").into_os_string()),
+            ("GIT_WORK_TREE".into(), attacker.clone().into_os_string()),
+            (
+                "GIT_COMMON_DIR".into(),
+                attacker.join(".git").into_os_string(),
+            ),
+            (
+                "GIT_INDEX_FILE".into(),
+                attacker.join(".git/index").into_os_string(),
+            ),
+            (
+                "GIT_OBJECT_DIRECTORY".into(),
+                attacker.join(".git/objects").into_os_string(),
+            ),
+            (
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
+                attacker.join(".git/objects").into_os_string(),
+            ),
+        ]);
+        let output = git_command_with_environment(inherited)
+            .current_dir(&trusted)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            trusted
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn checkout_cleanliness_check_does_not_run_repository_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TestRepo::new();
+        let checkout = root.path.join("checkout");
+        let head = initialize_git_repository(&checkout, "trusted tree\n");
+        let fsmonitor = root.path.join("fsmonitor");
+        let marker = root.path.join("fsmonitor.ran");
+        let fsmonitor_command = format!("'{}'", fsmonitor.to_string_lossy().replace('\'', "'\\''"));
+        fs::write(
+            &fsmonitor,
+            "#!/bin/sh\n: > \"${0}.ran\"\nprintf 'token\\n\\0'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fsmonitor).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fsmonitor, permissions).unwrap();
+
+        let config = run_git(
+            &checkout,
+            &[
+                "config",
+                "--local",
+                "core.fsmonitor",
+                fsmonitor_command.as_str(),
+            ],
+        );
+        assert!(
+            config.status.success(),
+            "{}",
+            String::from_utf8_lossy(&config.stderr)
+        );
+
+        let control = run_git(
+            &checkout,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        );
+        assert!(
+            marker.exists(),
+            "repository-local core.fsmonitor did not run in the control status: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        fs::remove_file(&marker).unwrap();
+
+        let result = verify_checkout_identity(&checkout, "fixture/repo", "main", &head, true);
+        assert!(
+            !marker.exists(),
+            "repository-local core.fsmonitor ran during the cleanliness check"
+        );
+        result.unwrap();
+    }
+
+    #[test]
+    fn git_object_reads_ignore_replacement_refs_and_inherited_override() {
+        let root = TestRepo::new();
+        let trusted = root.path.join("trusted");
+        let replacement = root.path.join("replacement");
+        let trusted_commit = initialize_git_repository(&trusted, "trusted tree\n");
+        let replacement_commit = initialize_git_repository(&replacement, "replacement tree\n");
+        let replacement_path = replacement.to_string_lossy();
+        let fetch = run_git(
+            &trusted,
+            &[
+                "fetch",
+                "--quiet",
+                replacement_path.as_ref(),
+                "refs/heads/main:refs/remotes/fixture/main",
+            ],
+        );
+        assert!(
+            fetch.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fetch.stderr)
+        );
+        let replace = run_git(
+            &trusted,
+            &[
+                "replace",
+                trusted_commit.as_str(),
+                replacement_commit.as_str(),
+            ],
+        );
+        assert!(
+            replace.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replace.stderr)
+        );
+        let replace_refs = run_git(
+            &trusted,
+            &["for-each-ref", "--format=%(refname)", "refs/replace"],
+        );
+        assert!(
+            String::from_utf8_lossy(&replace_refs.stdout)
+                .contains(&format!("refs/replace/{trusted_commit}")),
+            "{}
+{}",
+            String::from_utf8_lossy(&replace_refs.stdout),
+            String::from_utf8_lossy(&replace_refs.stderr)
+        );
+
+        let inherited =
+            environment_with_git_overrides([("GIT_NO_REPLACE_OBJECTS".into(), "0".into())]);
+        let output = git_command_with_environment(inherited)
+            .current_dir(&trusted)
+            .args(["show", "HEAD:identity.txt"])
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "trusted tree\n");
+    }
+
+    #[test]
+    fn git_clone_ignores_inherited_url_rewrites() {
+        let root = TestRepo::new();
+        let source = root.path.join("source # % ü");
+        let attacker = root.path.join("attacker # % ü");
+        let workspace = root.path.join("workspace");
+        let source_commit = initialize_git_repository(&source, "trusted source\n");
+        let attacker_commit = initialize_git_repository(&attacker, "rewritten source\n");
+        initialize_git_repository(&workspace, "workspace\n");
+
+        let source_url = file_url(&source).unwrap();
+        let attacker_url = file_url(&attacker).unwrap();
+        let rewrite_key = format!("url.{attacker_url}.insteadOf");
+        let local_rewrite = run_git(
+            &workspace,
+            &[
+                "config",
+                "--local",
+                rewrite_key.as_str(),
+                source_url.as_str(),
+            ],
+        );
+        assert!(
+            local_rewrite.status.success(),
+            "{}",
+            String::from_utf8_lossy(&local_rewrite.stderr)
+        );
+
+        let control = git_command()
+            .current_dir(&workspace)
+            .args(["ls-remote", source_url.as_str(), "HEAD"])
+            .output()
+            .unwrap();
+        assert!(
+            control.status.success(),
+            "{}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&control.stdout).contains(&attacker_commit),
+            "local URL rewrite was not active: {}",
+            String::from_utf8_lossy(&control.stdout)
+        );
+
+        let global_config = root.path.join("attacker.gitconfig");
+        fs::write(
+            &global_config,
+            format!("[url \"{attacker_url}\"]\n\tinsteadOf = {source_url}\n"),
+        )
+        .unwrap();
+        let inherited = environment_with_git_overrides([
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), rewrite_key.into()),
+            ("GIT_CONFIG_VALUE_0".into(), source_url.clone().into()),
+            ("GIT_CONFIG_GLOBAL".into(), global_config.into_os_string()),
+            ("TMPDIR".into(), workspace.clone().into_os_string()),
+            ("TEMP".into(), workspace.clone().into_os_string()),
+            ("TMP".into(), workspace.clone().into_os_string()),
+            ("HOME".into(), workspace.clone().into_os_string()),
+            ("XDG_CONFIG_HOME".into(), workspace.clone().into_os_string()),
+            ("SystemRoot".into(), workspace.clone().into_os_string()),
+        ]);
+
+        let (mut command, context) =
+            isolated_git_command_with_environment(inherited.clone()).unwrap();
+        let trusted_temp = trusted_temp_root().unwrap();
+        assert_eq!(context.path().parent(), Some(trusted_temp.as_path()));
+        assert!(!context.path().starts_with(&workspace));
+        let output = command
+            .args(["ls-remote", source_url.as_str(), "HEAD"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&source_commit),
+            "isolated Git command followed local URL rewrite: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let (mut command, context) = isolated_git_command_with_environment(inherited).unwrap();
+        assert_eq!(context.path().parent(), Some(trusted_temp.as_path()));
+        assert!(!context.path().starts_with(&workspace));
+        let clone = context.path().join("clone");
+        let output = command
+            .args(["clone", "--quiet", source_url.as_str()])
+            .arg(&clone)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(clone.join("identity.txt")).unwrap(),
+            "trusted source\n"
+        );
+    }
+
+    #[test]
+    fn isolated_git_context_ignores_inherited_temp_and_home() {
+        let root = TestRepo::new();
+        let global_config = root.path.join("attacker.gitconfig");
+        fs::write(&global_config, "[user]\n\tname = attacker\n").unwrap();
+        let inherited = environment_with_git_overrides([
+            ("TMPDIR".into(), root.path.clone().into_os_string()),
+            ("TEMP".into(), root.path.clone().into_os_string()),
+            ("TMP".into(), root.path.clone().into_os_string()),
+            ("HOME".into(), root.path.clone().into_os_string()),
+            ("XDG_CONFIG_HOME".into(), root.path.clone().into_os_string()),
+            ("GIT_CONFIG_GLOBAL".into(), global_config.into_os_string()),
+        ]);
+
+        let (mut command, context) = isolated_git_command_with_environment(inherited).unwrap();
+        let trusted_temp = trusted_temp_root().unwrap();
+        assert_eq!(context.path().parent(), Some(trusted_temp.as_path()));
+        assert!(!context.path().starts_with(&root.path));
+
+        let output = command
+            .args(["config", "--global", "--get", "user.name"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+    }
+
     const BASE: &str = r#"
 on:
   push:
@@ -4184,6 +4791,57 @@ jobs:
             }
             Self { path }
         }
+    }
+
+    fn environment_with_git_overrides<I>(overrides: I) -> Vec<(OsString, OsString)>
+    where
+        I: IntoIterator<Item = (OsString, OsString)>,
+    {
+        let mut environment = std::env::vars_os().collect::<Vec<_>>();
+        environment.extend(overrides);
+        environment
+    }
+
+    fn run_git(path: &Path, args: &[&str]) -> std::process::Output {
+        git_command().current_dir(path).args(args).output().unwrap()
+    }
+
+    fn initialize_git_repository(path: &Path, identity: &str) -> String {
+        fs::create_dir_all(path).unwrap();
+        let init = run_git(path, &["init", "--quiet", "--initial-branch=main"]);
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        fs::write(path.join("identity.txt"), identity).unwrap();
+
+        let commands: &[&[&str]] = &[
+            &["config", "user.name", "Velnor Git Test"],
+            &["config", "user.email", "velnor-git-test@example.invalid"],
+            &["add", "identity.txt"],
+            &["commit", "--quiet", "-m", "fixture"],
+        ];
+        for args in commands {
+            let output = run_git(path, args);
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let output = run_git(path, &["rev-parse", "HEAD"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn file_url(path: &Path) -> std::result::Result<String, ()> {
+        url::Url::from_file_path(path).map(|url| url.to_string())
     }
 
     impl Drop for TestRepo {
