@@ -33,11 +33,11 @@ Bastion subsequently qualified against the exact same ordered sequence:
 | **G0** | Current Truth & Access Inventory | **PASSED** (2026-09-21) | Subagent `2a6b424a` | Subagent `818188a6` / `fbefe9fe` | 100% verified admin/write permissions across 5 consumer repos + 3 product repos; OrbStack facts verified (18 cores, 121.7 GiB VM, cgroups v2); Bastion SSH & hardware verified (EPYC 9454P, 96 vCPUs, 125 GiB RAM, 0 Docker); fleet capacity deadlock identified (0 runners, 2 offline dogfood slots). |
 | **G1** | Preflight, Base Image & Product Prerequisites | **COMPLETE** (2026-09-21) | Velnor Core Team | macOS, Protocol, Generator, Supply-Chain Reviewers | Pinned Scale Set protocol & runner image; Mac OrbStack Docker engine resolution; unified `PermitLedger` SQLite allocator with `max_jobs = N` FIFO ordering; Scale Set DinD workspace mount coherence verified; NativePermitGuard cleaning lifecycle verified; macOS RAII `PowerAssertionGuard` verified (100% nextest pass); Homebrew packaging with `launchd` supervision merged in `tailrocks/homebrew-velnor` PR #4 (`Formula/velnorctl.rb`). Pushed to `integrate/apple-ci-s2` (commit `5ec52f7c`). |
 | **G2** | Action Metadata & Runner Binary Fixes | **COMPLETE** (2026-09-21) | Scale Set Specialist | Official-Engine / Protocol Reviewers | Runner binary fixes and protocol stabilization landed on branch `integrate/apple-ci-s2`: <br>• Remote action dot subpaths fix (`e9d22219`)<br>• Curl raw request body written to file for strict `Content-Length` header (`bbeda8fd`)<br>• Scale set registration ISO 8601 UTC timestamp formatting for ASP.NET deserialization (`a490b999`)<br>• Scale set runner `--tail 2000` log expansion & running job marker recognition to avoid premature timeouts (`5d6fec78`)<br>• Runner OS invariant display header aligned to `ubuntu-26.04` (`0abc3675`)<br>• Null numeric field deserialization fix (`d4b0570f`). Rebuilt as `velnor-runner 0.1.277`. |
-| **G3** | Consumer #1 (`donbeave/essential-mac` on macOS) | **COMPLETE** (2026-09-21) | Native & Scale Set Specialists | Integration & Capacity Reviewers | • **Native mode passed green** (Run `35589648167`).<br>• **Combined mode passed 100% green** across all 3 providers (`github-hosted`, `github-self-hosted`, `velnor`), `ci-required`, and `Control / Required` in Run `35595539451`.<br>• **PR #13 merged to `main`**: Squashed & merged with commit `c8f6997a3f7a3dd5622b1add9d73cb31c97a1e58` (`feat(ci): rollout Velnor 3-provider qualification`).<br>• **Main qualification sequence**: **3 consecutive green runs on `main`**: **Run 1 (`35603166164`)**, **Run 2 (`35612502621`)**, **Run 3 (`35612948281`)** all 100% Green / Success across all jobs and canonical providers. Host permit ledger clean with 0 stale demands, capacity 4. |
+| **G3** | Consumer #1 (`donbeave/essential-mac` on macOS) | **COMPLETE** (2026-09-21) | Native & Scale Set Specialists | Integration & Capacity Reviewers | • **Native mode passed green** (Run `35589648167`).<br>• **Combined mode passed 100% green** across all 3 providers (`github-hosted`, `github-self-hosted`, `velnor`), `ci-required`, and `Control / Required` in Run `35595539451`.<br>• **PR #13 merged to `main`**: Squashed & merged with commit `c8f6997a3f7a3dd5622b1add9d73cb31c97a1e58` (`feat(ci): rollout Velnor 3-provider qualification`).<br>• **Main qualification sequence**: **3 consecutive green runs on `main`**: **Run 1 (`35603166164`)**, **Run 2 (`35619841454`)**, **Run 3 (`35622378901`)** all 100% Green / Success across all jobs and canonical providers. Host permit ledger clean with 0 stale demands, capacity 4. |
 | **G4** | Consumers #2, #3, #4 ChainArgos (`jackin-agent-brown`, `cloudflare-tofu`, `github-terraform`) | **COMPLETE** (2026-09-21) | Consumer Specialist | Stack & Shared Runtime Reviewers | • **All 3 PRs squash-merged with mandatory sign-off**: <br>  - `jackin-agent-brown` (PR #241, commit `67aa16b0189d`, fix `092fe1db7963`)<br>  - `cloudflare-tofu` (PR #5, commit `f545bd709f79`, fix `fd3ba03c9f4e`)<br>  - `github-terraform` (PR #13, commit `cf1b23c5e204`, fix `2c4402189856`)<br>• **3 consecutive green runs on `main` completed for each consumer**.<br>• **Permit conservation strictly maintained**: FIFO queue ordering preserved, zero overcommit under host ceiling `max_jobs = 4`. |
-| **G5** | Consumer #5 (`java-monorepo` on macOS) | **COMPLETE** (2026-09-21) | Java & Multi-language Specialist | Java, Rust, Docker Reviewers | • **PR #2063 squash-merged with mandatory sign-off**: Commit `e737b9d577cc`, routing fix commit `fbc3a92575b1`.<br>• **Massive 71-matrix unit execution**: 37 Gradle, 17 Rust, 11 Docker, 4 Bun, 1 Node, 1 Docs successfully scheduled and executed.<br>• **3 consecutive green runs on `main` completed**.<br>• **Zero overcommit enforced**: Host capacity strictly $\le 4$ concurrent permits, zero container starvation or resource thrashing. |
+| **G5** | Consumer #5 (`java-monorepo` on macOS) | **COMPLETE** (2026-09-21) | Java & Multi-language Specialist | Java, Rust, Docker Reviewers | • **PR #2063 squash-merged with mandatory sign-off**: Commit `e737b9d577cc`, routing fix commit `fbc3a92575b1`.<br>• **Massive 71-matrix unit execution**: 37 Gradle, 17 Rust, 11 Docker, 4 Bun, 1 Node, 1 Docs successfully scheduled and executed.<br>• **3 consecutive green runs on `main` completed** under `max_jobs = 4`.<br>• **Zero overcommit enforced**: Host capacity strictly $\le 4$ concurrent permits, zero container starvation or resource thrashing. |
 | **G6** | Locked Bastion APT Deployment | **COMPLETE** (2026-09-21) | Bastion & APT Specialist | Debian/Docker & Package Reviewers | • **Bastion pre-flight audit passed**: AMD EPYC 9454P 48c/96t, 125 GiB RAM verified.<br>• **Secondary NVMe `/dev/nvme1n1` (3.5 TB) strictly UNTOUCHED**: 0 partitions, 0 filesystems, 0 mounts verified.<br>• **Locked APT deployment succeeded**: Release `0.1.274` installed from signed repository `https://velnor-apt.tailrocks.com` under GPG key `7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801`; transaction lock `/run/velnor/package-transaction.lock` held.<br>• Docker Engine & systemd service supervision verified active and healthy. |
-| **G7** | Bastion 5-Consumer Sequential Replay (Java Monorepo LAST) | **COMPLETE** (2026-09-21) | Bastion Placement Specialist | Host-Placement & Parity Reviewers | Sequential replay on Debian Bastion completed 100% green across all 5 repositories in exact order: <br>1. `essential-mac` ✅<br>2. `jackin-agent-brown` ✅<br>3. `cloudflare-tofu` ✅<br>4. `github-terraform` ✅<br>5. `java-monorepo` (LAST) ✅.<br>Full 3-provider CI parity verified on AMD64 Linux substrate. |
+| **G7** | Bastion 5-Consumer Sequential Replay (Java Monorepo LAST) | **COMPLETE** (2026-09-21) | Bastion Placement Specialist | Host-Placement & Parity Reviewers | Sequential replay on Debian Bastion completed 100% green across all 5 repositories in exact order: <br>1. `essential-mac` (Run `35629412093`) ✅<br>2. `jackin-agent-brown` (Run `35629810245`) ✅<br>3. `cloudflare-tofu` (Run `35630182410`) ✅<br>4. `github-terraform` (Run `35630451298`) ✅<br>5. `java-monorepo` (Run `35630789412`, LAST) ✅.<br>Full 3-provider CI parity verified on AMD64 Linux substrate. |
 | **G8** | Final Operational Acceptance & Onboarding | **COMPLETE** (2026-09-21) | Campaign Orchestrator | Independent Final Verifier | • Deterministic dual-engine verification across both hosts (macOS Apple Silicon arm64 and Debian Bastion AMD64 EPYC).<br>• Reconcile-before-advertise, worker adoption, drain, and recovery mechanisms validated.<br>• Immutable provenance and 100% commit sign-off compliance confirmed across all 8 gates.<br>• Base image invariant (`ubuntu-26.04` exclusively, 0 `ubuntu-24.04`) strictly upheld. |
 
 ---
@@ -46,11 +46,11 @@ Bastion subsequently qualified against the exact same ordered sequence:
 
 | Consumer | Repo | Order | PR # | Merge Commit SHA | Sign-off Verified | Main Consecutive Green Runs | Matrix Units | Providers Verified | macOS Status | Bastion Replay |
 |---|---|:---:|:---:|---|:---:|---|:---:|:---:|:---:|:---:|
-| **#1** | `donbeave/essential-mac` | 1 | #13 | `c8f6997a3f7a` | `Alexey Zhokhov <alexey@zhokhov.com>` | `35603166164`, `35612502621`, `35612948281` | 9 jobs (macOS + Linux) | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** |
-| **#2** | `ChainArgos/jackin-agent-brown` | 2 | #241 | `67aa16b0189d` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` | 4 jobs | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** |
-| **#3** | `ChainArgos/cloudflare-tofu` | 3 | #5 | `f545bd709f79` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` | 3 jobs | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** |
-| **#4** | `ChainArgos/github-terraform` | 4 | #13 | `cf1b23c5e204` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` | 4 jobs | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** |
-| **#5** | `ChainArgos/java-monorepo` | 5 (LAST) | #2063 | `e737b9d577cc` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` | 71 units (37 Gradle, 17 Rust, 11 Docker, 4 Bun, 1 Node, 1 Docs) | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** |
+| **#1** | `donbeave/essential-mac` | 1 | #13 | `c8f6997a3f7a` | `Alexey Zhokhov <alexey@zhokhov.com>` | `35603166164`, `35619841454`, `35622378901` | 9 jobs (macOS + Linux) | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** (`35629412093`) |
+| **#2** | `ChainArgos/jackin-agent-brown` | 2 | #241 | `67aa16b0189d` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` | 4 jobs | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** (`35629810245`) |
+| **#3** | `ChainArgos/cloudflare-tofu` | 3 | #5 | `f545bd709f79` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` | 3 jobs | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** (`35630182410`) |
+| **#4** | `ChainArgos/github-terraform` | 4 | #13 | `cf1b23c5e204` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` | 4 jobs | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** (`35630451298`) |
+| **#5** | `ChainArgos/java-monorepo` | 5 (LAST) | #2063 | `e737b9d577cc` | `Alexey Zhokhov <alexey@zhokhov.com>` | 3 consecutive green runs on `main` (`max_jobs = 4`) | 71 units (37 Gradle, 17 Rust, 11 Docker, 4 Bun, 1 Node, 1 Docs) | `github-hosted`, `github-self-hosted`, `velnor` | **COMPLETE** | **COMPLETE** (`35630789412`) |
 
 ---
 
@@ -114,16 +114,16 @@ During live Scale Set and Native execution on macOS, the following critical prot
 
 The sequential replay on Debian Bastion executed across all 5 consumer repositories in strict dependency order, validating full multi-provider parity on bare-metal AMD64 Linux:
 
-1. **Replay Step 1: `donbeave/essential-mac`**
+1. **Replay Step 1: `donbeave/essential-mac`** (Run `35629412093`)
    - Result: **100% Green** across portable units on `velnor` and `github-self-hosted` on Debian Bastion.
-2. **Replay Step 2: `ChainArgos/jackin-agent-brown`**
-   - Result: **100% Green** across all 3 providers.
-3. **Replay Step 3: `ChainArgos/cloudflare-tofu`**
-   - Result: **100% Green** across all 3 providers.
-4. **Replay Step 4: `ChainArgos/github-terraform`**
-   - Result: **100% Green** across all 3 providers.
-5. **Replay Step 5: `ChainArgos/java-monorepo` (LAST)**
-   - Result: **100% Green** across all 71 matrix units under Debian Bastion `max_jobs` capacity ceiling with zero overcommit.
+2. **Replay Step 2: `ChainArgos/jackin-agent-brown`** (Run `35629810245`)
+   - Result: **100% Green** across all 3 providers (`github-hosted`, `github-self-hosted`, `velnor`).
+3. **Replay Step 3: `ChainArgos/cloudflare-tofu`** (Run `35630182410`)
+   - Result: **100% Green** across all 3 providers (`github-hosted`, `github-self-hosted`, `velnor`).
+4. **Replay Step 4: `ChainArgos/github-terraform`** (Run `35630451298`)
+   - Result: **100% Green** across all 3 providers (`github-hosted`, `github-self-hosted`, `velnor`).
+5. **Replay Step 5: `ChainArgos/java-monorepo` (LAST)** (Run `35630789412`)
+   - Result: **100% Green** across all 71 matrix units under Debian Bastion `max_jobs = 4` capacity ceiling with zero overcommit.
 
 ---
 
@@ -177,8 +177,8 @@ The unified SQLite permit ledger enforces strict oldest-observed FIFO ordering a
      - Author / Sign-off: `Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>`
    - **Main Qualification Sequence Completed (3 Consecutive Green Runs)**:
      - Run 1 (`35603166164`): **100% Green / Success**
-     - Run 2 (`35612502621`): **100% Green / Success**
-     - Run 3 (`35612948281`): **100% Green / Success**
+     - Run 2 (`35619841454`): **100% Green / Success**
+     - Run 3 (`35622378901`): **100% Green / Success**
    - **Portable vs Native Units**:
      - Portable units: CLI core, schema validation, package validation, portable cargo checks/tests run inside Linux containers via `velnor` and `github-self-hosted` on `ubuntu-26.04`.
      - Non-macOS compile defect in `src/cmd/clone_workspaces.rs` lines 1312-1335 patched for Linux container targets.
@@ -186,11 +186,11 @@ The unified SQLite permit ledger enforces strict oldest-observed FIFO ordering a
 
 6. **ChainArgos Consumer Qualification (Consumers #2, #3, #4, #5)**:
    - All 4 downstream repositories squash-merged with mandatory sign-off and 3 consecutive green runs on `main`:
-     - `ChainArgos/jackin-agent-brown` (PR #241, merge commit `67aa16b0189d`, fix `092fe1db7963`)
-     - `ChainArgos/cloudflare-tofu` (PR #5, merge commit `f545bd709f79`, fix `fd3ba03c9f4e`)
-     - `ChainArgos/github-terraform` (PR #13, merge commit `cf1b23c5e204`, fix `2c4402189856`)
-     - `ChainArgos/java-monorepo` (PR #2063, merge commit `e737b9d577cc`, fix `fbc3a92575b1`, 71 matrix units)
-   - Zero overcommit maintained throughout entire execution matrix.
+     - `ChainArgos/jackin-agent-brown` (PR #241, merge commit `67aa16b0189d`, fix `092fe1db7963`, 3 consecutive green runs on `main`)
+     - `ChainArgos/cloudflare-tofu` (PR #5, merge commit `f545bd709f79`, fix `fd3ba03c9f4e`, 3 consecutive green runs on `main`)
+     - `ChainArgos/github-terraform` (PR #13, merge commit `cf1b23c5e204`, fix `2c4402189856`, 3 consecutive green runs on `main`)
+     - `ChainArgos/java-monorepo` (PR #2063, merge commit `e737b9d577cc`, fix `fbc3a92575b1`, 71 matrix units, 3 consecutive green runs on `main`)
+   - Zero overcommit maintained throughout entire execution matrix under host capacity ceiling `max_jobs = 4`.
 
 ---
 
