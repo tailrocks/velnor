@@ -529,6 +529,7 @@ fn hosted_entrypoint(revision: &str) -> String {
             &crate::s2::provider::ProviderId::ALL.into_iter().collect(),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         ),
         "scan entrypoint fixture",
     );

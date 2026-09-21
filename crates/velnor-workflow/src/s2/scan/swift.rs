@@ -1653,6 +1653,7 @@ mod tests {
                 &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
                 "main",
                 &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
             ),
             "scan fixture",
         )
@@ -2451,6 +2452,7 @@ mod tests {
                 &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
                 "main",
                 &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
             ),
             "a malformed pin fails the scan",
         );

@@ -1725,7 +1725,12 @@ fn scan_target(
         .as_ref()
         .and_then(config::RepoGenerationConfig::default_branch)
         .unwrap_or(default_branch);
-    let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude)?;
+    let apple = scan::rust::AppleNativePolicy::from_cargo_profile(
+        generation
+            .as_ref()
+            .and_then(|generation| generation.native_apple().cargo_profile.as_deref()),
+    )?;
+    let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude, &apple)?;
     let mut config = ProjectConfig::from(shape.clone());
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
@@ -12343,6 +12348,72 @@ mod tests {
             !scanned.config.toml().contains("runs_on"),
             "selectors are generation-time routing, never runtime fields: {}",
             scanned.config.toml()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_native_apple_profile_reaches_boltffi_recipe() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [native.apple]\ncargo_profile = \"ci-release\"\n";
+        let root = configured_repository("native-apple-profile", Some(config));
+        must(
+            fs::create_dir_all(root.join("libs/bridge-ffi")),
+            "create ffi directory",
+        );
+        must(
+            fs::write(
+                root.join("libs/bridge-ffi/boltffi.toml"),
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            "write BoltFFI manifest",
+        );
+        must(
+            fs::write(
+                root.join("libs/bridge-ffi/Cargo.toml"),
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n",
+            ),
+            "write ffi manifest",
+        );
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        assert_eq!(scanned.shape.boltffi_producers.len(), 1);
+        assert_eq!(
+            scanned.shape.boltffi_producers[0]
+                .recipe
+                .profile
+                .as_ref()
+                .map(scan::rust::CargoProfile::as_str),
+            Some("ci-release")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_native_apple_profile_refuses_bad_charset() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [native.apple]\ncargo_profile = \"has space\"\n";
+        let root = configured_repository("native-apple-profile-bad", Some(config));
+        let error = match scan_target(
+            &root,
+            Some(provider_set([ProviderId::GithubHosted])),
+            "main",
+        ) {
+            Ok(_) => String::from("accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("[native.apple] cargo_profile"),
+            "a bad profile must name the section: {error}"
         );
         let _ = fs::remove_dir_all(root);
     }
