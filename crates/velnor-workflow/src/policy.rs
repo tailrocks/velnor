@@ -1917,7 +1917,7 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
     let mut findings = Vec::new();
     let aggregate = root.join(PULL_REQUEST_AGGREGATE);
     let emitted = match fs::read_to_string(&aggregate) {
-        Ok(yaml) => match super::workflow_job_display_names(&yaml) {
+        Ok(yaml) => match super::workflow_job_display_names(PULL_REQUEST_AGGREGATE, &yaml) {
             Ok(names) => Some(names),
             Err(error) => {
                 findings.push(format!("{PULL_REQUEST_AGGREGATE}: {error}"));
@@ -1958,7 +1958,7 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
         // ruleset that does not require it makes every rule here advisory.
         let entrypoint_contexts = fs::read_to_string(root.join(POLICY_ENTRYPOINT))
             .ok()
-            .and_then(|yaml| super::workflow_job_display_names(&yaml).ok())
+            .and_then(|yaml| super::workflow_job_display_names(POLICY_ENTRYPOINT, &yaml).ok())
             .unwrap_or_default();
         for context in &entrypoint_contexts {
             if !live.contains(context.as_str()) {
