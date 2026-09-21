@@ -115,6 +115,17 @@ pub(crate) fn run_promote(options: &PromoteOptions) -> Result<PromoteReport, Gen
     let closure = verify_render_stamp_binding(&generator_repo, &options.rev)?;
     require_promotion_clean(&repo)?;
     let pin_path = repo.join(GENERATION_CONFIG);
+    // The pin stamp writes through to the config bytes, but the snapshot
+    // records a link as a link: restoring through a symlinked config
+    // would relink without reverting the stamped target. Refuse instead
+    // of promoting a tree rollback cannot restore.
+    if std::fs::symlink_metadata(&pin_path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(GeneratorError::usage(format!(
+            "refusing to promote through symlinked generation config {}; restore it to a regular file so rollback can restore the pre-promotion bytes",
+            pin_path.display()
+        )));
+    }
     let pin_content = std::fs::read_to_string(&pin_path)
         .map_err(|error| GeneratorError::io("read generation config", &pin_path, &error))?;
     let (stamped, old_pin) = stamp_pin(&pin_content, &options.rev)?;
