@@ -4,7 +4,8 @@ Status: active and incomplete. This is the authoritative execution record for
 the generator activation, policy validation, and CI artifact dependency work.
 Evidence was refreshed on 2026-09-22 against `origin/main` at
 `4dec6b9ec28b0d51cb370fd8f5d5401c6186adf0`; the local integration checkout is
-`b3b3c3cf38f9c71cf5dae75a2694bd2eb1bd31a0` plus uncommitted source changes.
+`b3b3c3cf38f9c71cf5dae75a2694bd2eb1bd31a0`; integration commits are listed
+below.
 
 ## Structural causes
 
@@ -75,13 +76,15 @@ runner polling loop.
 | Main incident | [run 35623133871, job 106410848097](https://github.com/tailrocks/velnor/actions/runs/35623133871/job/106410848097) | Policy failed after about 920s; about 906s was absent-producer acquisition. |
 | Recovery | Preview job `106420138590` and main Policy job `106420140784` | Passed in about 23s and 35s; these prove recovery, not complete lifecycle correctness. |
 | Current main baseline | CI Main run `35629948234` | About 18m30s wall; Docker job about 788s and runtime publication about 597s. This remains a performance violation against the 120s requirement. |
+| Foundation PR Policy | [run 35641013363](https://github.com/tailrocks/velnor/actions/runs/35641013363) | Passed in 29s at `cf2e236`; the active renderer validated the active tree without candidate acquisition. |
+| Foundation final-SHA CI | [run 35641107449](https://github.com/tailrocks/velnor/actions/runs/35641107449) | Cancelled after two jobs were stuck far beyond 120s: `Set up Mr. Boxington` and `Clippy check`. This is retained as a hosted performance failure, not a green verification. |
 
 The detailed timing observations remain in
 [`plans/ci-performance/README.md`](ci-performance/README.md) and its retained
 raw observations. No staged promotion or green recovery run is counted as a
 speedup.
 
-## Implemented in the current integration slice
+## Implemented integration commits
 
 - Both top-level and schema-2 policy validators reject candidate-rendered
   output as the active tree; the old semantic exception is removed.
@@ -89,9 +92,13 @@ speedup.
   head-SHA PR-run search or waits 900 seconds for a guessed producer.
 - The existing promotion command now requires a publication-readiness
   manifest and validates it before local render/stamp mutation.
-- Focused policy, policy-rendering, promotion, and readiness tests have been
-  updated and exercised locally. This source slice is not yet committed,
-  regenerated into `.github`, protected, or hosted-verified.
+- `4ad4b28`, `a111a04`, `11342007`, `cf2e236`, and `30a7995` are pushed on
+  PR #1044. The active renderer regenerated the ownership state at `11342007`.
+- Transportable same-run prerequisites now require producer `success`; a
+  skipped, failed, or cancelled producer cannot unlock a consumer-side rebuild.
+- Focused policy, policy-rendering, promotion, readiness, and transport
+  regressions have been exercised locally. The implementation is not yet
+  activated into `.github`, protected-integrated, or fully hosted-verified.
 
 ## Remaining required work and demonstrated blocks
 
