@@ -1169,6 +1169,11 @@ impl UnitSection {
                 // Declared rows cannot list expected files: only the
                 // scanner derives them, from the adapter's layout facts.
                 output_files: Vec::new(),
+                // Binding facts likewise arrive from the scanner; a
+                // declared row carries no binding contract.
+                bindings_dir: String::new(),
+                bindings_file: String::new(),
+                deployment_target: String::new(),
                 inputs: product.inputs.clone().unwrap_or_default(),
                 inputs_unknown: Vec::new(),
                 // Declared rows cannot claim a digest: only the scanner

@@ -77,8 +77,17 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   lib + modulemap) on producer/product; `resolve` enforces
   normal-form, dedupe, under-root containment; unknown arch
   and zero-slice configs fail closed with diagnostics; 8 new
-  tests, lib 1925 green. 4c next: staging + binding-drift
-  check before install;
+  tests, lib 1925 green. 4c-i done: binding facts —
+  `[targets.apple.swift] output`/`ffi_module_name`,
+  `[targets.apple.spm] layout`, `[targets.apple]
+  deployment_target` parsed; `bindings_dir`/`bindings_file`
+  resolved per verified `generate swift` rules (split appends
+  `BoltFFI`, stem `{PascalCase(crate)}BoltFFI.swift`);
+  unknown layout / escaping output fail closed; FFI module
+  honors `ffi_module_name`; facts flow to `NamedProduct`
+  with together-or-empty validation; 8 new tests, lib 1933
+  green. 4c-ii next: staging + binding-drift check before
+  install;
   4d verified cross-job artifact transport; 4e per-layer
   cache-state reporting (`snapshot.rs`). Follow-ups: `.build`
   intermediates need multi-layer cache support; scoped
@@ -91,12 +100,11 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: 4c staging + binding-drift check —
+2. Next edit surface: 4c-ii staging + binding-drift check —
    `s2/primitives/prepared_tools.rs` (staging dir + manifest
-   write/verify reuse), `s2/scan/rust.rs` (parse
-   `[targets.apple.swift] output` + `deployment_target`, which
-   EXISTS, default `"16.0"` — report correction), adapter
-   recipe + verification-step rendering. Verified layout facts
+   write/verify reuse), adapter recipe + verification-step
+   rendering from product `bindings_dir`/`bindings_file`
+   (4c-i done). Verified layout facts
    (BoltFFI 0.30.1 @ `2e6320a`): slice dirs
    `macos/ios-{archs_joined}[-simulator]`, structural files
    `Info.plist` + per-slice `lib{crate}.a` (underscored) +

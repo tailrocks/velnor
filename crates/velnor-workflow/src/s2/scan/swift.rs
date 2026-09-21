@@ -2159,6 +2159,12 @@ mod tests {
                 format!("{out}/macos-arm64/libbridge_core_ffi.a"),
             ]
         );
+        assert_eq!(product.bindings_dir, "libs/bridge-ffi/dist/apple/Sources");
+        assert_eq!(
+            product.bindings_file,
+            "libs/bridge-ffi/dist/apple/Sources/BridgeCoreFfiBoltFFI.swift"
+        );
+        assert_eq!(product.deployment_target, "16.0");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -47,6 +47,18 @@ pub(crate) struct NamedProduct {
     pub(crate) outputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) output_files: Vec<String>,
+    /// Scanner-derived Swift bindings directory for a native product, empty
+    /// when the product has no binding contract.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) bindings_dir: String,
+    /// Scanner-derived expected binding file under `bindings_dir`, empty
+    /// when the product has no binding contract.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) bindings_file: String,
+    /// Scanner-derived Apple deployment target, empty when the product has
+    /// no Apple contract.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) deployment_target: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) inputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -255,10 +267,60 @@ fn validate_output_files(unit: &Unit, product: &NamedProduct) -> Result<(), Gene
     Ok(())
 }
 
+/// Validate one product's binding contract: the directory and file are
+/// normal-form repo-relative paths, the file sits strictly under the
+/// directory, and the deployment target is printable text. All three are
+/// empty together when the product has no binding contract; a lone file or
+/// target without a directory names a contract the scanner never derived.
+fn validate_bindings(unit: &Unit, product: &NamedProduct) -> Result<(), GeneratorError> {
+    let dir = product.bindings_dir.as_str();
+    let file = product.bindings_file.as_str();
+    let target = product.deployment_target.as_str();
+    if dir.is_empty() {
+        if file.is_empty() && target.is_empty() {
+            return Ok(());
+        }
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares product `{}` with a binding file or deployment target but no bindings directory; binding facts arrive together from the scanner",
+            unit.id, product.name,
+        )));
+    }
+    if !valid_product_output(dir) {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares product `{}` with bindings directory `{dir}`, which is not a repo-relative path in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+            unit.id, product.name,
+        )));
+    }
+    if !valid_product_output(file) {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares product `{}` with binding file `{file}`, which is not a repo-relative path in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+            unit.id, product.name,
+        )));
+    }
+    let under_dir = file.len() > dir.len()
+        && file.starts_with(dir)
+        && file.as_bytes().get(dir.len()) == Some(&b'/');
+    if !under_dir {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares product `{}` with binding file `{file}` outside its bindings directory `{dir}`; the expected file must sit under the directory the adapter writes",
+            unit.id, product.name,
+        )));
+    }
+    if !valid_env_value(target) || target.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares product `{}` with bindings directory `{dir}` but no printable deployment target; binding facts arrive together from the scanner",
+            unit.id, product.name,
+        )));
+    }
+    Ok(())
+}
+
 /// Validate the product graph before compilation: every declared output is a
 /// normal-form repo-relative path claimed by exactly one product, every
 /// expected output file is a duplicate-free normal-form path under a claimed
-/// root, every declared input is a normal-form path or glob without duplicates, closure
+/// root, every binding contract carries a normal-form directory with its
+/// expected file beneath it plus a printable deployment target, every
+/// declared input is a normal-form path or glob without duplicates, closure
 /// gaps stay printable diagnostics, a claimed inputs digest is a hex SHA-256
 /// on a gap-free closure, no unit requires its own product, and the
 /// consumer-to-producer edges are acyclic. Unknown producers and products
@@ -328,6 +390,7 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
                 }
             }
             validate_output_files(unit, product)?;
+            validate_bindings(unit, product)?;
         }
         for prerequisite in &unit.prerequisites {
             if prerequisite.producer == unit.id {
@@ -681,6 +744,9 @@ mod tests {
             env: std::collections::BTreeMap::new(),
             outputs: Vec::new(),
             output_files: Vec::new(),
+            bindings_dir: String::new(),
+            bindings_file: String::new(),
+            deployment_target: String::new(),
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
             inputs_digest: None,
@@ -734,6 +800,9 @@ mod tests {
             env: BTreeMap::new(),
             outputs: outputs.iter().map(ToString::to_string).collect(),
             output_files: Vec::new(),
+            bindings_dir: String::new(),
+            bindings_file: String::new(),
+            deployment_target: String::new(),
         }
     }
 
@@ -998,6 +1067,54 @@ mod tests {
         must_ok(
             resolve(&mut project_config(vec![producer])),
             "files under roots resolve",
+        );
+    }
+
+    #[test]
+    fn resolve_accepts_binding_contract_together() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.bindings_dir = "app/Sources/Bindings/BoltFFI".to_owned();
+        ffi.bindings_file = "app/Sources/Bindings/BoltFFI/BridgeCoreFfiBoltFFI.swift".to_owned();
+        ffi.deployment_target = "15.0".to_owned();
+        producer.products = vec![ffi];
+        must_ok(
+            resolve(&mut project_config(vec![producer])),
+            "binding facts together resolve",
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_binding_file_outside_dir() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.bindings_dir = "app/Sources/Bindings".to_owned();
+        ffi.bindings_file = "elsewhere/Bindings.swift".to_owned();
+        ffi.deployment_target = "15.0".to_owned();
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "stray binding file fails closed",
+        );
+        assert!(
+            error.to_string().contains("outside its bindings directory"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_lone_binding_file() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.bindings_file = "app/Sources/Bindings.swift".to_owned();
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "lone binding file fails closed",
+        );
+        assert!(
+            error.to_string().contains("no bindings directory"),
+            "unexpected error: {error}"
         );
     }
 
