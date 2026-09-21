@@ -300,7 +300,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -455,7 +495,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -623,7 +703,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -791,7 +911,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -959,7 +1119,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1127,7 +1327,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1295,7 +1535,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1463,7 +1743,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1631,7 +1951,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1787,7 +2147,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1928,7 +2328,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -2084,7 +2524,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -2252,7 +2732,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -2552,7 +3072,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -2820,7 +3380,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -2939,7 +3539,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -3175,7 +3815,47 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Verify Rust toolchain cache
+        id: rustup-toolchain-verify
+        if: steps.rustup-toolchain.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          valid=true
+          if ! command -v rustup >/dev/null 2>&1; then
+            valid=false
+          else
+            expected_channel='1.98.1'
+            installed="$(rustup toolchain list 2>/dev/null | awk -v expected="$expected_channel" '$1 == expected || index($1, expected "-") == 1 { print $1; exit }')" || installed=""
+            if [[ -z "$installed" ]]; then
+              valid=false
+            else
+              :
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='rustfmt' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup component list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='clippy' '$1 == wanted || index($1, wanted "-") == 1 { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='aarch64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-apple-darwin' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-gnu' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+              if ! rustup target list --installed --toolchain "$installed" 2>/dev/null | awk -v wanted='x86_64-unknown-linux-musl' '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+                valid=false
+              fi
+            fi
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Provision Rust toolchain
+        if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'
         shell: bash
         run: |
           set -euo pipefail

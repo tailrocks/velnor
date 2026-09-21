@@ -6626,11 +6626,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "63e4abe43158fc16153efef67d4d81ed0ef3cd7306d0c69930c0201f36563bc6",
+                "ccb41bed96febf991764dcf752169bc5e56d2f8a83593199b96e16d24df9ea9f",
             ),
             (
                 "preview.yml",
-                "9c01438ada4a500c8f221aa890c20b58d492a2ae1b35ab54392f1d161393097f",
+                "9a860863d29563a89c267e04b9eb0b2f95e6f17ffbf02042feedfbef55a09a94",
             ),
             (
                 "maintenance.yml",
@@ -6755,11 +6755,11 @@ cp "$record" "$out"
             // input are gone; the build gate declares tag scope statically.
             (
                 "release.yml",
-                "7f31f4ac2d87afc62f85ec2f75e4805ee5575c2a6cfe796ed4acf2ee0081ac15",
+                "f832ec949b717f40dfcf0195b935f4841e3d27ffa2799de27f5ca8bf693b123b",
             ),
             (
                 "preview.yml",
-                "6dbb4d7a71bd8313fd06daecb2407986a26c52ed1b3033bfec89a109ff2c93bc",
+                "9b633cebb645cb24088f317bb80d078498dff3a3712c13fd9cf416d6cd838080",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -11874,7 +11874,7 @@ cp "$record" "$out"
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "de8b89dc8e7f38d2a8cad3cd603bd5fba0cfdb2fa79b63dc4a3388acd1f019cb",
+            "13a3aec949a1974a42eca5006faade1ee1f0afdf2b506647f1dc3fab51e458e5",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));
