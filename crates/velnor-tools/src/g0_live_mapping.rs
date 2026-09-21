@@ -996,24 +996,28 @@ fn map_workflow(
         .source_jobs
         .iter()
         .map(|job| {
-            let expected = manifest
-                .expected_jobs
-                .iter()
-                .find(|expected| expected.job_id == job.job_id);
-            // Only the reviewed workflow path enforces the expected-job
-            // contract here; auxiliary workflows emit their observed job IDs
-            // without manifest enforcement. Typed identity stays enforced by
-            // the checker gate check_g0_source_jobs (evidence_check.rs),
-            // which only runs for the reviewed workflow path and revision.
-            let expected = match expected {
-                Some(expected) => Some(expected),
-                None if reviewed_workflow => {
-                    return Err(anyhow!(
-                        "workflow source job {} is absent from reviewed manifest",
-                        job.job_id
-                    ));
-                }
-                None => None,
+            // Only the reviewed workflow path consults the expected-job
+            // manifest here; auxiliary workflows emit their observed job IDs
+            // with empty typed identity so a coincidental job-id match can
+            // never inherit reviewed workload/provider/target metadata.
+            // Typed identity stays enforced by the checker gate
+            // check_g0_source_jobs (evidence_check.rs), which only runs for
+            // the reviewed workflow path and revision.
+            let expected = if reviewed_workflow {
+                Some(
+                    manifest
+                        .expected_jobs
+                        .iter()
+                        .find(|expected| expected.job_id == job.job_id)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "workflow source job {} is absent from reviewed manifest",
+                                job.job_id
+                            )
+                        })?,
+                )
+            } else {
+                None
             };
             validate_raw_references(
                 &job.raw_object_refs,
@@ -1983,10 +1987,35 @@ mod tests {
         assert_eq!(mapped.source_jobs.len(), 1);
         assert_eq!(mapped.source_jobs[0].job_id, "release");
         assert_eq!(mapped.source_jobs[0].raw_object_refs, vec!["raw-src"]);
+        assert!(mapped.source_jobs[0].workload_id.is_empty());
+        assert!(mapped.source_jobs[0].provider.is_empty());
+        assert!(mapped.source_jobs[0].platform.is_empty());
+        assert!(mapped.source_jobs[0].architecture.is_empty());
+        assert!(!mapped.source_jobs[0].required);
+
+        // A coincidental job-id match on an auxiliary path must not inherit
+        // reviewed typed identity.
+        let mut coincidental = workflow.clone();
+        coincidental.source_jobs = vec![LiveSourceJob {
+            job_id: "unit".to_owned(),
+            raw_object_refs: vec!["raw-src".to_owned()],
+        }];
+        let mapped = map_workflow(
+            &coincidental,
+            &repository,
+            &manifest,
+            &raw_by_id,
+            &request_by_id,
+            "2026-09-20T00:00:00Z",
+        )
+        .expect("auxiliary workflow keeps coincidental job IDs");
+        assert_eq!(mapped.source_jobs[0].job_id, "unit");
+        assert!(mapped.source_jobs[0].workload_id.is_empty());
+        assert!(!mapped.source_jobs[0].required);
 
         let mut reviewed_mismatch = workflow.clone();
         reviewed_mismatch.path = ".github/workflows/ci.yml".to_owned();
-        assert!(map_workflow(
+        let err = map_workflow(
             &reviewed_mismatch,
             &repository,
             &manifest,
@@ -1994,7 +2023,11 @@ mod tests {
             &request_by_id,
             "2026-09-20T00:00:00Z",
         )
-        .is_err());
+        .expect_err("reviewed-path mismatch still bails");
+        assert_eq!(
+            err.to_string(),
+            "workflow source job release is absent from reviewed manifest"
+        );
 
         let mut reviewed_match = reviewed_mismatch;
         reviewed_match.source_jobs = vec![LiveSourceJob {

@@ -3788,13 +3788,17 @@ jobs:
         assert_eq!(observed[0].job_id, "release");
         assert_eq!(observed[0].raw_object_refs, vec!["raw-release"]);
 
-        assert!(parse_source_jobs(
+        let err = parse_source_jobs(
             release_source,
             &manifest,
             ".github/workflows/ci.yml",
             &["raw-ci".to_owned()],
         )
-        .is_err());
+        .expect_err("reviewed-path mismatch still bails");
+        assert_eq!(
+            err.to_string(),
+            "workflow source job IDs do not match reviewed expected jobs for tailrocks/example"
+        );
     }
 
     #[test]
