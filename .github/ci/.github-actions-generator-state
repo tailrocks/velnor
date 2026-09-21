@@ -2,7 +2,7 @@
 schema = 2
 [inputs]
 config	689e5447c7cd9a57
-scan	f6f352b94c8d1064
+scan	9166f76db8b95dd0
 generator	69
 [outputs]
 .github/AGENTS.md	02ebb7198c435e9b
