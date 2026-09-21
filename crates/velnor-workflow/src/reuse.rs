@@ -2051,9 +2051,12 @@ pub(crate) fn render_report(verdict: &AggregateVerdict) -> String {
 }
 
 /// The planner's expected-work file: the units the run must account for, the
-/// explicit no-work marker, and the prerequisite map the aggregate checks.
+/// explicit no-work marker, the prerequisite map the aggregate checks, and
+/// the plan-transport identity binding this file to the plan that wrote it.
 /// `required` defaults to true: a unit is required unless the planner says
-/// otherwise.
+/// otherwise. The identity has no default: a file without it is unbound and
+/// the aggregate rejects it — a stale upload from an earlier run must never
+/// score against this run's results.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExpectedWorkFile {
@@ -2063,6 +2066,12 @@ pub(crate) struct ExpectedWorkFile {
     pub(crate) units: Vec<ExpectedUnitFile>,
     #[serde(default)]
     pub(crate) prerequisites: BTreeMap<String, Vec<String>>,
+    /// The base SHA the plan diffed against, exactly as the planner saw it.
+    #[serde(default)]
+    pub(crate) base_sha: Option<String>,
+    /// The head SHA the plan selected for, exactly as the planner saw it.
+    #[serde(default)]
+    pub(crate) head_sha: Option<String>,
 }
 
 /// One expected unit in the planner's file.
@@ -2113,14 +2122,36 @@ pub(crate) struct ReportedResultFile {
 /// Parse an expected-work file and a results file, then [`aggregate`] them.
 /// Malformed files are usage errors naming the offending value; contradictory
 /// verdicts stay inside the returned [`AggregateVerdict`].
+///
+/// `base_sha`/`head_sha` are the aggregate job's own checkout SHAs (its
+/// `BASE_SHA`/`HEAD_SHA`): the file's recorded plan SHAs must match them —
+/// HEAD always, BASE unless the job runs without one (`workflow_dispatch`
+/// leaves `BASE_SHA` empty) — mirroring the selection artifact's SHA
+/// binding. A file from any other plan fails here, before any verdict: a
+/// stale upload, a mis-threaded artifact, or a forged identity never
+/// scores. In particular a stale `planned_no_work` marker with zero units
+/// passes only when its SHAs prove it is this plan's file.
 pub(crate) fn aggregate_files(
     expected_json: &str,
     results_json: &str,
+    base_sha: &str,
+    head_sha: &str,
 ) -> Result<AggregateVerdict, String> {
     let expected_file: ExpectedWorkFile = serde_json::from_str(expected_json)
         .map_err(|error| format!("the expected-work file is not valid JSON: {error}"))?;
     let results_file: ResultsFile = serde_json::from_str(results_json)
         .map_err(|error| format!("the results file is not valid JSON: {error}"))?;
+    let file_base = expected_file.base_sha.as_deref().ok_or_else(|| {
+        "the expected-work file is missing base_sha: refusing an unbound plan".to_owned()
+    })?;
+    let file_head = expected_file.head_sha.as_deref().ok_or_else(|| {
+        "the expected-work file is missing head_sha: refusing an unbound plan".to_owned()
+    })?;
+    if file_head != head_sha || (!base_sha.is_empty() && file_base != base_sha) {
+        return Err(format!(
+            "the expected-work file does not match this aggregate checkout: plan base SHA `{file_base}` vs aggregate base SHA `{base_sha}`; plan head SHA `{file_head}` vs aggregate head SHA `{head_sha}`"
+        ));
+    }
     let mut units = BTreeMap::new();
     for unit in expected_file.units {
         if unit.id.is_empty() {
@@ -3843,6 +3874,8 @@ mod tests {
     #[test]
     fn aggregate_files_parses_and_scores() -> Result<(), String> {
         let expected = r#"{
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
             "units": [
                 {"id": "rust-alpha", "lanes": ["github"]},
                 {"id": "node-beta", "lanes": ["github"], "planned_skip": "lane cannot run kind"}
@@ -3855,20 +3888,74 @@ mod tests {
                 {"unit": "node-beta", "lane": "github", "outcome": "skipped", "reason": "lane gate closed"}
             ]
         }"#;
-        let verdict = aggregate_files(expected, results)?;
+        let verdict = aggregate_files(expected, results, "base-sha", "head-sha")?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
-        assert!(aggregate_files("bogus", results).is_err());
-        assert!(aggregate_files(expected, "bogus").is_err());
+        assert!(aggregate_files("bogus", results, "base-sha", "head-sha").is_err());
+        assert!(aggregate_files(expected, "bogus", "base-sha", "head-sha").is_err());
         let missing_reason = r#"{
             "results": [
                 {"unit": "rust-alpha", "lane": "github", "outcome": "skipped"}
             ]
         }"#;
-        assert!(aggregate_files(expected, missing_reason).is_err());
+        assert!(aggregate_files(expected, missing_reason, "base-sha", "head-sha").is_err());
         let unknown_field = r#"{
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
             "units": [{"id": "rust-alpha", "lanes": ["github"], "bogus": true}]
         }"#;
-        assert!(aggregate_files(unknown_field, results).is_err());
+        assert!(aggregate_files(unknown_field, results, "base-sha", "head-sha").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_files_binds_the_plan_identity() -> Result<(), String> {
+        let results = r#"{"results": []}"#;
+        // A file without identity is unbound and fails — including the stale
+        // no-work shape: marker plus zero units plus zero results.
+        let unbound = r#"{"planned_no_work": true, "units": []}"#;
+        let Err(error) = aggregate_files(unbound, results, "base-sha", "head-sha") else {
+            return Err("an unbound expected-work file must fail".to_owned());
+        };
+        assert!(
+            error.contains("missing base_sha"),
+            "unexpected error: {error}"
+        );
+        // A file bound to another plan fails: a stale upload, a mis-threaded
+        // artifact, or a forged identity never scores against this run.
+        let stale = r#"{
+            "planned_no_work": true,
+            "units": [],
+            "prerequisites": {},
+            "base_sha": "earlier-base",
+            "head_sha": "earlier-head"
+        }"#;
+        let Err(error) = aggregate_files(stale, results, "base-sha", "head-sha") else {
+            return Err("a stale expected-work file must fail".to_owned());
+        };
+        assert!(
+            error.contains("does not match this aggregate checkout"),
+            "unexpected error: {error}"
+        );
+        // The same file bound to this plan scores: proven no-work plus zero
+        // results passes.
+        let current = r#"{
+            "planned_no_work": true,
+            "units": [],
+            "prerequisites": {},
+            "base_sha": "base-sha",
+            "head_sha": "head-sha"
+        }"#;
+        let verdict = aggregate_files(current, results, "base-sha", "head-sha")?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        // An aggregate job without a base (workflow_dispatch leaves BASE_SHA
+        // empty) still binds the head: the base check is skipped, the head
+        // check is not.
+        let verdict = aggregate_files(current, results, "", "head-sha")?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            aggregate_files(current, results, "", "other-head").is_err(),
+            "the head binding holds without a job base"
+        );
         Ok(())
     }
 

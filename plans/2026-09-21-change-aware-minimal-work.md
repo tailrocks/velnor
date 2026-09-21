@@ -80,9 +80,12 @@ diff (fetch-depth 0, no truncation).
   DEMOTED (deliberately omitted per `lib.rs:16143`). [done: NUL
   plan-path collection, rename-both-sides, trusted-event guard helper;
   independent review INTEGRATE, select-path -z accepted as follow-up]
-- S4 live no-work proof only (caller skip + ci-required tolerance
-  already work; `ExpectedWork` aggregate is CLI-only/unwired — cut
-  as new scope). [pending]
+- S4 live no-work proof: runtime aggregate binds expected work to the
+  plan (expected-work file + no-work marker + fail-closed verdicts);
+  render must then thread the artifact, invoke `aggregate` in
+  ci-required, map plan outputs, and emit per-unit result records.
+  [runtime done + adversarial review INTEGRATE + M1 identity binding
+  and M2 empty-without-reason error; render pending]
 - S5 `crates/velnor-workflow/AGENTS.md` lean rule + `content/docs`
   contract docs. [pending]
 - S6 regenerate velnor + jackin consumers; real-CI before/after proof;

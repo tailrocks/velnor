@@ -11,6 +11,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
+/// The plan identity every fixture binds: the harness stamps it into the
+/// expected-work file and the aggregate child verifies it against the same
+/// checkout SHAs, independent of the outer environment.
+const FIXTURE_BASE: &str = "closure-reuse-base";
+const FIXTURE_HEAD: &str = "closure-reuse-head";
+
 struct Fixture {
     root: PathBuf,
 }
@@ -23,7 +29,13 @@ impl Fixture {
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root)?;
-        fs::write(root.join("expected.json"), expected)?;
+        let mut document: serde_json::Value = serde_json::from_str(expected)?;
+        document["base_sha"] = serde_json::Value::String(FIXTURE_BASE.to_owned());
+        document["head_sha"] = serde_json::Value::String(FIXTURE_HEAD.to_owned());
+        fs::write(
+            root.join("expected.json"),
+            serde_json::to_string(&document)?,
+        )?;
         fs::write(root.join("results.json"), results)?;
         Ok(Self { root })
     }
@@ -31,6 +43,8 @@ impl Fixture {
     fn aggregate(&self) -> Result<Output, Box<dyn Error>> {
         Ok(Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
             .current_dir(&self.root)
+            .env("BASE_SHA", FIXTURE_BASE)
+            .env("HEAD_SHA", FIXTURE_HEAD)
             .args([
                 "aggregate",
                 "--expected",
