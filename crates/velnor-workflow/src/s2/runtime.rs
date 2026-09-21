@@ -1646,12 +1646,35 @@ struct PlannedExclusion {
     reason: ExclusionReason,
 }
 
-/// The event identity admitted to the planner. Event kind and trust travel
-/// together so no caller can reclassify an untrusted source by substituting a
-/// loose boolean at a later routing boundary.
+/// A revision used to identify a source or audited tree. This remains
+/// textual because local plans intentionally accept symbolic revisions such
+/// as `HEAD` and `refs/heads/main`; the type prevents the two identities from
+/// collapsing into one unlabelled `String` in the planner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Revision(String);
+
+impl Revision {
+    fn new(name: &str, value: impl Into<String>) -> Result<Self, GeneratorError> {
+        let value = value.into();
+        if value.is_empty() || value.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(format!(
+                "{name} must be a non-empty single-line revision"
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Event kinds admitted by the planner. Parsing happens at the environment
+/// boundary; routing and scope selection consume this enum instead of
+/// branching on a caller-provided string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PlanEvent {
-    PullRequest { trusted: bool },
+enum EventKind {
+    PullRequest,
     Push,
     Schedule,
     MergeGroup,
@@ -1659,13 +1682,10 @@ enum PlanEvent {
     Local,
 }
 
-impl PlanEvent {
-    fn from_env() -> Result<Self, GeneratorError> {
-        let value = env::var("EVENT_NAME").unwrap_or_default();
-        let trusted =
-            env::var("VELNOR_EVENT_TRUSTED").map_or(true, |value| value.trim() != "false");
-        match value.as_str() {
-            "pull_request" => Ok(Self::PullRequest { trusted }),
+impl EventKind {
+    fn parse(value: &str) -> Result<Self, GeneratorError> {
+        match value {
+            "pull_request" => Ok(Self::PullRequest),
             "push" => Ok(Self::Push),
             "schedule" => Ok(Self::Schedule),
             "merge_group" => Ok(Self::MergeGroup),
@@ -1677,26 +1697,159 @@ impl PlanEvent {
         }
     }
 
-    const fn trusted(self) -> bool {
-        match self {
-            Self::PullRequest { trusted } => trusted,
-            Self::Push
-            | Self::Schedule
-            | Self::MergeGroup
-            | Self::WorkflowDispatch
-            | Self::Local => true,
-        }
+    fn from_env() -> Result<Self, GeneratorError> {
+        Self::parse(&env::var("EVENT_NAME").unwrap_or_default())
     }
 
-    const fn scope_name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
-            Self::PullRequest { .. } => "pull_request",
+            Self::PullRequest => "pull_request",
             Self::Push => "push",
             Self::Schedule => "schedule",
             Self::MergeGroup => "merge_group",
             Self::WorkflowDispatch => "workflow_dispatch",
             Self::Local => "",
         }
+    }
+
+    const fn requires_full_scope(self) -> bool {
+        matches!(self, Self::Push | Self::Schedule | Self::MergeGroup)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventTrust {
+    Trusted,
+    Untrusted,
+}
+
+impl EventTrust {
+    const fn is_trusted(self) -> bool {
+        matches!(self, Self::Trusted)
+    }
+}
+
+/// The complete event identity admitted to planning. `source` is the source
+/// commit supplied by the event (for a PR, the PR head); `audited` is the
+/// exact checkout being planned (for a PR, GitHub's synthetic merge commit).
+/// They are deliberately separate even when push-like events carry the same
+/// revision in both fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EventContext {
+    kind: EventKind,
+    source: Revision,
+    audited: Revision,
+    base: Option<Revision>,
+    trust: EventTrust,
+}
+
+impl EventContext {
+    fn from_env() -> Result<Self, GeneratorError> {
+        let kind = EventKind::from_env()?;
+        let audited = revision_from_env("HEAD_SHA", kind == EventKind::Local, "HEAD")?;
+        let source = revision_from_env("SOURCE_SHA", kind == EventKind::Local, audited.as_str())?;
+        let base = env::var("BASE_SHA")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| Revision::new("BASE_SHA", value))
+            .transpose()?;
+        let trust = event_trust_from_env(kind)?;
+        if kind == EventKind::PullRequest && base.is_none() {
+            return Err(GeneratorError::usage(
+                "pull_request planning requires explicit BASE_SHA",
+            ));
+        }
+        Ok(Self {
+            kind,
+            source,
+            audited,
+            base,
+            trust,
+        })
+    }
+
+    const fn kind(&self) -> EventKind {
+        self.kind
+    }
+
+    const fn trusted(&self) -> bool {
+        self.trust.is_trusted()
+    }
+
+    #[cfg(test)]
+    fn source_sha(&self) -> &str {
+        self.source.as_str()
+    }
+
+    fn audited_sha(&self) -> &str {
+        self.audited.as_str()
+    }
+
+    fn base_sha(&self) -> &str {
+        self.base.as_ref().map_or("", Revision::as_str)
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        kind: EventKind,
+        source: &str,
+        audited: &str,
+        base: Option<&str>,
+        trusted: bool,
+    ) -> Self {
+        Self {
+            kind,
+            source: Revision(source.to_owned()),
+            audited: Revision(audited.to_owned()),
+            base: base.map(|value| Revision(value.to_owned())),
+            trust: if trusted {
+                EventTrust::Trusted
+            } else {
+                EventTrust::Untrusted
+            },
+        }
+    }
+}
+
+fn revision_from_env(
+    name: &str,
+    allow_default: bool,
+    default: &str,
+) -> Result<Revision, GeneratorError> {
+    match env::var(name).ok().filter(|value| !value.is_empty()) {
+        Some(value) => Revision::new(name, value),
+        None if allow_default => Revision::new(name, default),
+        None => Err(GeneratorError::usage(format!(
+            "{name} is required for hosted event planning"
+        ))),
+    }
+}
+
+fn event_trust_from_env(kind: EventKind) -> Result<EventTrust, GeneratorError> {
+    let value = env::var("VELNOR_EVENT_TRUSTED").ok();
+    match kind {
+        EventKind::PullRequest | EventKind::WorkflowDispatch => match value.as_deref() {
+            Some("true") => Ok(EventTrust::Trusted),
+            Some("false") => Ok(EventTrust::Untrusted),
+            Some(other) => Err(GeneratorError::usage(format!(
+                "VELNOR_EVENT_TRUSTED must be true or false, got `{other}`"
+            ))),
+            None => Err(GeneratorError::usage(format!(
+                "{} planning requires explicit VELNOR_EVENT_TRUSTED",
+                kind.name()
+            ))),
+        },
+        EventKind::Push | EventKind::Schedule | EventKind::MergeGroup => match value.as_deref() {
+            None | Some("true") => Ok(EventTrust::Trusted),
+            Some("false") => Err(GeneratorError::usage(format!(
+                "{} is controller-trusted and cannot carry VELNOR_EVENT_TRUSTED=false",
+                kind.name()
+            ))),
+            Some(other) => Err(GeneratorError::usage(format!(
+                "VELNOR_EVENT_TRUSTED must be true or false, got `{other}`"
+            ))),
+        },
+        EventKind::Local => Ok(EventTrust::Trusted),
     }
 }
 
@@ -1706,10 +1859,8 @@ impl PlanEvent {
 /// which parallel tests also read.
 struct PlanInputs {
     root: PathBuf,
-    event: PlanEvent,
+    context: EventContext,
     scope_override: Option<String>,
-    base: String,
-    head: String,
     providers: String,
     selection_file: Option<PathBuf>,
     expected_file: Option<PathBuf>,
@@ -1719,14 +1870,12 @@ struct PlanInputs {
 impl PlanInputs {
     fn from_env() -> Result<Self, GeneratorError> {
         Ok(Self {
-            event: PlanEvent::from_env()?,
+            context: EventContext::from_env()?,
             scope_override: env::var("CI_SCOPE_OVERRIDE")
                 .ok()
                 .filter(|value| !value.is_empty()),
             root: env::current_dir()
                 .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
-            base: env::var("BASE_SHA").unwrap_or_default(),
-            head: env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
             providers: env::var("VELNOR_PROVIDERS").unwrap_or_default(),
             selection_file: env::var_os("VELNOR_SELECTION_FILE").map(PathBuf::from),
             expected_file: env::var_os("VELNOR_EXPECTED_WORK_FILE").map(PathBuf::from),
@@ -1749,7 +1898,7 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
 fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
     let scope = match scope_for_event_values(
-        inputs.event.scope_name(),
+        inputs.context.kind().name(),
         inputs.scope_override.as_deref(),
     )? {
         Some(value) => Scope::parse(&value)?,
@@ -1757,8 +1906,14 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     };
     let universe = parse_provider_set(&config.providers, "providers")?;
     let effective = plan_providers_for_value(&inputs.providers, &universe)?;
-    let event_trusted = inputs.event.trusted();
-    let selection = selection_for_diff(&inputs.root, &config, scope, &inputs.base, &inputs.head)?;
+    let event_trusted = inputs.context.trusted();
+    let selection = selection_for_diff(
+        &inputs.root,
+        &config,
+        scope,
+        inputs.context.base_sha(),
+        inputs.context.audited_sha(),
+    )?;
     let selected: BTreeSet<&str> = selection
         .units
         .iter()
@@ -1884,8 +2039,8 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     if let Some(path) = &inputs.selection_file {
         write_selection_file(
             path,
-            &inputs.base,
-            &inputs.head,
+            inputs.context.base_sha(),
+            inputs.context.audited_sha(),
             scope,
             &unit_ids,
             &full_units,
@@ -1893,7 +2048,13 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
         )?;
     }
     if let Some(path) = &inputs.expected_file {
-        write_expected_work_file(path, &planned, &config, &inputs.base, &inputs.head)?;
+        write_expected_work_file(
+            path,
+            &planned,
+            &config,
+            inputs.context.base_sha(),
+            inputs.context.audited_sha(),
+        )?;
     }
     if let Some(output_path) = &inputs.github_output {
         let mut file = fs::OpenOptions::new()
@@ -1907,8 +2068,8 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
         // The two channels carry one format each — never JSON into `units=`.
         for (name, value) in [
             ("scope", scope_name(scope).to_owned()),
-            ("base_sha", inputs.base.clone()),
-            ("head_sha", inputs.head.clone()),
+            ("base_sha", inputs.context.base_sha().to_owned()),
+            ("head_sha", inputs.context.audited_sha().to_owned()),
             ("units", units_json.clone()),
             ("unit_ids", unit_ids.clone()),
             ("full_units", full_units.clone()),
@@ -2062,7 +2223,7 @@ fn plan_providers_for_value(
 
 #[cfg(test)]
 mod scope_event_tests {
-    use super::{scope_for_event_values, PlanEvent};
+    use super::{scope_for_event_values, EventContext, EventKind};
     use crate::s2::GeneratorError;
 
     #[expect(
@@ -2089,11 +2250,41 @@ mod scope_event_tests {
 
     #[test]
     fn event_identity_keeps_pr_trust_attached_to_its_kind() {
-        let untrusted = PlanEvent::PullRequest { trusted: false };
+        let untrusted = EventContext::for_test(
+            EventKind::PullRequest,
+            "pr-head",
+            "synthetic-merge",
+            Some("base"),
+            false,
+        );
         assert!(!untrusted.trusted());
-        assert_eq!(untrusted.scope_name(), "pull_request");
-        assert!(PlanEvent::MergeGroup.trusted());
-        assert_eq!(PlanEvent::MergeGroup.scope_name(), "merge_group");
+        assert_eq!(untrusted.kind().name(), "pull_request");
+        assert_eq!(untrusted.source_sha(), "pr-head");
+        assert_eq!(untrusted.audited_sha(), "synthetic-merge");
+        let merge_group = EventContext::for_test(
+            EventKind::MergeGroup,
+            "merge-group",
+            "merge-group",
+            None,
+            true,
+        );
+        assert!(merge_group.trusted());
+        assert_eq!(merge_group.kind().name(), "merge_group");
+        assert_eq!(merge_group.base_sha(), "");
+    }
+
+    #[test]
+    fn event_kind_parse_table_rejects_unmodeled_events() {
+        for (name, expected) in [
+            ("pull_request", EventKind::PullRequest),
+            ("push", EventKind::Push),
+            ("merge_group", EventKind::MergeGroup),
+            ("workflow_dispatch", EventKind::WorkflowDispatch),
+            ("", EventKind::Local),
+        ] {
+            assert_eq!(EventKind::parse(name).ok(), Some(expected), "{name:?}");
+        }
+        assert!(EventKind::parse("pull_request_target").is_err());
     }
 
     #[test]
@@ -2403,8 +2594,9 @@ pub(crate) fn run_units(
 /// always run full scope, mirroring [`scope_for_event_values`]. Unit jobs
 /// re-check the plan-time verdict so a narrowed job scope can never execute
 /// under a trusted event.
+#[cfg(test)]
 fn event_requires_full_scope(event: &str) -> bool {
-    matches!(event, "push" | "schedule" | "merge_group")
+    EventKind::parse(event).is_ok_and(EventKind::requires_full_scope)
 }
 
 pub(crate) fn run_units_with_selection_file(
@@ -2416,9 +2608,8 @@ pub(crate) fn run_units_with_selection_file(
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    if event_requires_full_scope(&env::var("EVENT_NAME").unwrap_or_default())
-        && scope != Scope::Full
-    {
+    let event = EventKind::from_env()?;
+    if event.requires_full_scope() && scope != Scope::Full {
         return Err(GeneratorError::usage(
             "trusted events require full CI scope",
         ));
@@ -9480,10 +9671,14 @@ workspace_check = true
                 &config_path,
                 &PlanInputs {
                     root: root.clone(),
-                    event: PlanEvent::PullRequest { trusted: true },
+                    context: EventContext::for_test(
+                        EventKind::PullRequest,
+                        &head,
+                        &head,
+                        Some(&base),
+                        true,
+                    ),
                     scope_override: None,
-                    base,
-                    head,
                     providers: providers.to_owned(),
                     selection_file: None,
                     expected_file: Some(expected_path.clone()),
@@ -10452,10 +10647,14 @@ trust = "untrusted-ok"
                 &config_path,
                 &PlanInputs {
                     root: root.clone(),
-                    event: PlanEvent::PullRequest { trusted: true },
+                    context: EventContext::for_test(
+                        EventKind::PullRequest,
+                        &head,
+                        &head,
+                        Some(&base),
+                        true,
+                    ),
                     scope_override: None,
-                    base: base.clone(),
-                    head: head.clone(),
                     providers: String::new(),
                     selection_file: None,
                     expected_file: Some(expected_path.clone()),
