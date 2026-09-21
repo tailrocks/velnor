@@ -1401,10 +1401,12 @@ fn scratch_directory(label: &str) -> Result<PathBuf, GeneratorError> {
 
 /// Scan `checkout` with the generator built at `pin`, render into a scratch
 /// directory, and return every path under `tree` that differs, in sorted
-/// order. Every rendered file must match the tree byte for byte, and every
-/// workflow in the tree must be generator-owned unless the tree's policy
-/// excludes it. `checkout` and `tree` are the same directory except under
-/// `--check --output`, where the rendered tree lives apart from its source.
+/// order. Every rendered entry must match the tree in kind and content —
+/// file bytes, the executable bit, and symlink targets — and every
+/// `.github` entry in the tree must be generator-owned unless the tree's
+/// policy excludes it. `checkout` and `tree` are the same directory except
+/// under `--check --output`, where the rendered tree lives apart from its
+/// source.
 ///
 /// # Errors
 /// When the pinned generator cannot be obtained or its render fails.
@@ -1612,6 +1614,15 @@ fn render_and_compare(
     default_branch: &str,
     excludes: &BTreeSet<String>,
 ) -> Result<Vec<String>, GeneratorError> {
+    // Each render starts from an empty scratch, so the comparison is
+    // against exactly this renderer's tree — never a union with a
+    // previous render into the same directory.
+    if fs::symlink_metadata(scratch).is_ok() {
+        fs::remove_dir_all(scratch)
+            .map_err(|error| GeneratorError::io("clean scratch directory", scratch, &error))?;
+    }
+    fs::create_dir_all(scratch)
+        .map_err(|error| GeneratorError::io("create scratch directory", scratch, &error))?;
     let output = Command::new(binary)
         .arg(checkout)
         .arg("--output")
@@ -1642,81 +1653,222 @@ fn render_and_compare(
 }
 
 /// Compare an untrusted render directory with the untouched authoritative
-/// tree. The directory is never treated as source or provenance: only its
-/// regular-file bytes can match generated files in the clean tree. Symlinks
-/// in the render are resolved only when confined to the render root; a
-/// symlink that escapes the root, dangles, or names a non-file is an error.
+/// tree. The directory is never treated as source or provenance: its
+/// symlinks are admitted only when confined to the render root — a link
+/// that escapes the root, dangles, or names a non-file is an error — and
+/// every admitted entry must then match the tree in kind and content:
+/// file bytes, the executable bit, and symlink targets. Every `.github`
+/// entry in the tree must be generator-owned unless the tree's policy
+/// excludes it.
 fn compare_rendered_tree(
     rendered_root: &Path,
     tree: &Path,
     excludes: &BTreeSet<String>,
 ) -> Result<Vec<String>, GeneratorError> {
     let mut rendered = BTreeMap::new();
-    collect_files(rendered_root, rendered_root, &mut rendered)?;
+    collect_rendered_tree_entries(rendered_root, rendered_root, &mut rendered)?;
+    let mut actual = BTreeMap::new();
+    let github = tree.join(".github");
+    if fs::symlink_metadata(&github).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        collect_actual_tree_entries(tree, &github, &mut actual)?;
+    }
     let mut differences = Vec::new();
-    for (relative, content) in &rendered {
-        let actual = tree.join(relative);
-        match fs::read(&actual) {
-            Ok(bytes) if &bytes == content => {}
-            Ok(_) => differences.push(format!(
-                "{}: differs from the pinned render",
-                relative.display()
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                differences.push(format!("{}: missing from the tree", relative.display()));
-            }
-            Err(error) => return Err(GeneratorError::io("read tree file", &actual, &error)),
+    for (relative, expected) in &rendered {
+        if relative.starts_with(".github") {
+            compare_tree_entry(relative, expected, actual.get(relative), &mut differences);
+        } else {
+            let found = stat_tree_entry(&tree.join(relative))?;
+            compare_tree_entry(relative, expected, found.as_ref(), &mut differences);
         }
     }
-    let workflows = tree.join(".github/workflows");
-    if let Ok(entries) = fs::read_dir(&workflows) {
-        for entry in entries {
-            let path = entry
-                .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
-                .path();
-            if !path.is_file()
-                || !matches!(
-                    path.extension().and_then(|value| value.to_str()),
-                    Some("yml" | "yaml")
-                )
-            {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if excludes.contains(name) {
-                continue;
-            }
-            let relative = PathBuf::from(".github/workflows").join(name);
-            if !rendered.contains_key(&relative) {
-                differences.push(format!(
-                    "{}: not generator-owned (hand-written workflows are refused; list it under [policy] exclude_workflows only while migrating)",
-                    relative.display()
-                ));
-            }
+    for relative in actual.keys() {
+        if rendered.contains_key(relative) || is_excluded_workflow(relative, excludes) {
+            continue;
+        }
+        if relative.starts_with(".github/workflows")
+            && matches!(
+                relative.extension().and_then(|value| value.to_str()),
+                Some("yml" | "yaml")
+            )
+        {
+            differences.push(format!(
+                "{}: not generator-owned (hand-written workflows are refused; list it under [policy] exclude_workflows only while migrating)",
+                relative.display()
+            ));
+        } else {
+            differences.push(format!(
+                "{}: not generator-owned (absent from the pinned render)",
+                relative.display()
+            ));
         }
     }
     differences.sort();
     Ok(differences)
 }
 
-fn collect_files(
+/// The migration hatch, unchanged: an unrendered top-level
+/// `.github/workflows/<name>.yml|.yaml` the tree's `[policy]
+/// exclude_workflows` names. Nested paths never match, exactly like the
+/// previous directory scan.
+fn is_excluded_workflow(relative: &Path, excludes: &BTreeSet<String>) -> bool {
+    if excludes.is_empty() {
+        return false;
+    }
+    let Ok(name) = relative.strip_prefix(".github/workflows") else {
+        return false;
+    };
+    if name.components().count() != 1
+        || !matches!(
+            name.extension().and_then(|value| value.to_str()),
+            Some("yml" | "yaml")
+        )
+    {
+        return false;
+    }
+    name.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| excludes.contains(name))
+}
+
+/// One collected tree entry: regular files by bytes plus the executable
+/// bit, symlinks by target, anything else by kind. Directories stay
+/// implicit — the comparison names entries, and the writer's own
+/// `--check` is what reports unknown directories.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TreeEntry {
+    File { bytes: Vec<u8>, executable: bool },
+    Symlink { target: PathBuf },
+    Special,
+    Directory,
+}
+
+impl TreeEntry {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::File { .. } => "a regular file",
+            Self::Symlink { .. } => "a symlink",
+            Self::Special => "a special file",
+            Self::Directory => "a directory",
+        }
+    }
+}
+
+/// Compare one rendered entry against the actual tree, pushing a finding
+/// for a missing, mistyped, edited, retargeted, or mode-drifted path.
+fn compare_tree_entry(
+    relative: &Path,
+    expected: &TreeEntry,
+    found: Option<&TreeEntry>,
+    differences: &mut Vec<String>,
+) {
+    let Some(found) = found else {
+        differences.push(format!("{}: missing from the tree", relative.display()));
+        return;
+    };
+    match (expected, found) {
+        (
+            TreeEntry::File {
+                bytes: wanted,
+                executable: wanted_exec,
+            },
+            TreeEntry::File {
+                bytes: actual,
+                executable: actual_exec,
+            },
+        ) => {
+            if actual != wanted {
+                differences.push(format!(
+                    "{}: differs from the pinned render",
+                    relative.display()
+                ));
+            } else if actual_exec != wanted_exec {
+                differences.push(format!(
+                    "{}: {} in the tree but the pinned render {}",
+                    relative.display(),
+                    if *actual_exec {
+                        "is executable"
+                    } else {
+                        "is not executable"
+                    },
+                    if *wanted_exec {
+                        "is executable"
+                    } else {
+                        "is not"
+                    },
+                ));
+            }
+        }
+        (TreeEntry::Symlink { target: wanted }, TreeEntry::Symlink { target: actual }) => {
+            if actual != wanted {
+                differences.push(format!(
+                    "{}: points at {} in the tree but the pinned render points at {}",
+                    relative.display(),
+                    actual.display(),
+                    wanted.display()
+                ));
+            }
+        }
+        (TreeEntry::Special, TreeEntry::Special) | (TreeEntry::Directory, TreeEntry::Directory) => {
+        }
+        _ => {
+            differences.push(format!(
+                "{}: is {} in the tree but the pinned render has {}",
+                relative.display(),
+                found.kind(),
+                expected.kind()
+            ));
+        }
+    }
+}
+
+/// Classify one actual-tree path without following symlinks:
+/// `Ok(None)` when the path is absent.
+fn stat_tree_entry(path: &Path) -> Result<Option<TreeEntry>, GeneratorError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GeneratorError::io("read tree file", path, &error)),
+    };
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(path)
+            .map_err(|error| GeneratorError::io("read tree symlink", path, &error))?;
+        return Ok(Some(TreeEntry::Symlink { target }));
+    }
+    if metadata.file_type().is_dir() {
+        return Ok(Some(TreeEntry::Directory));
+    }
+    if !metadata.file_type().is_file() {
+        return Ok(Some(TreeEntry::Special));
+    }
+    let bytes =
+        fs::read(path).map_err(|error| GeneratorError::io("read tree file", path, &error))?;
+    Ok(Some(TreeEntry::File {
+        bytes,
+        executable: is_executable_metadata(&metadata),
+    }))
+}
+
+/// Collect the untrusted render side of a policy comparison: regular
+/// files by bytes plus the executable bit, symlinks by target after a
+/// confinement proof. A rendered link is admitted only when it resolves
+/// inside the render root to a regular file; escapes, dangling links,
+/// non-file targets, and non-file outputs are errors, never entries —
+/// the comparison must not follow untrusted bytes out of the render.
+fn collect_rendered_tree_entries(
     base: &Path,
     directory: &Path,
-    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+    entries: &mut BTreeMap<PathBuf, TreeEntry>,
 ) -> Result<(), GeneratorError> {
     let canonical_base = fs::canonicalize(base)
         .map_err(|error| GeneratorError::io("canonicalize rendered root", base, &error))?;
-    collect_files_inner(base, &canonical_base, directory, files)
+    collect_rendered_tree_entries_inner(base, &canonical_base, directory, entries)
 }
 
-fn collect_files_inner(
+fn collect_rendered_tree_entries_inner(
     base: &Path,
     canonical_base: &Path,
     directory: &Path,
-    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+    entries: &mut BTreeMap<PathBuf, TreeEntry>,
 ) -> Result<(), GeneratorError> {
     for entry in fs::read_dir(directory)
         .map_err(|error| GeneratorError::io("read rendered directory", directory, &error))?
@@ -1730,7 +1882,7 @@ fn collect_files_inner(
             let target = fs::read_link(&path)
                 .map_err(|error| GeneratorError::io("read rendered symlink", &path, &error))?;
             let joined = if target.is_absolute() {
-                target
+                target.clone()
             } else {
                 path.parent()
                     .map_or_else(|| PathBuf::from(&target), |parent| parent.join(&target))
@@ -1762,11 +1914,9 @@ fn collect_files_inner(
                     path.display()
                 ))
             })?;
-            let content = fs::read(&canonical)
-                .map_err(|error| GeneratorError::io("read rendered file", &canonical, &error))?;
-            files.insert(relative.to_path_buf(), content);
+            entries.insert(relative.to_path_buf(), TreeEntry::Symlink { target });
         } else if metadata.is_dir() {
-            collect_files_inner(base, canonical_base, &path, files)?;
+            collect_rendered_tree_entries_inner(base, canonical_base, &path, entries)?;
         } else if metadata.is_file() {
             let relative = path.strip_prefix(base).map_err(|_| {
                 GeneratorError::usage(format!(
@@ -1776,7 +1926,13 @@ fn collect_files_inner(
             })?;
             let content = fs::read(&path)
                 .map_err(|error| GeneratorError::io("read rendered file", &path, &error))?;
-            files.insert(relative.to_path_buf(), content);
+            entries.insert(
+                relative.to_path_buf(),
+                TreeEntry::File {
+                    bytes: content,
+                    executable: is_executable_metadata(&metadata),
+                },
+            );
         } else {
             return Err(GeneratorError::usage(format!(
                 "rendered output contains non-file {}",
@@ -1785,6 +1941,65 @@ fn collect_files_inner(
         }
     }
     Ok(())
+}
+
+/// Collect the authoritative tree side of a policy comparison: regular
+/// files by bytes plus the executable bit, symlinks by target, anything
+/// else by kind. Lenient by design — every surprise here is drift the
+/// comparison names, never a collection error — and symlink-blind: links
+/// are recorded, never followed, so external bytes cannot leak in.
+fn collect_actual_tree_entries(
+    base: &Path,
+    directory: &Path,
+    entries: &mut BTreeMap<PathBuf, TreeEntry>,
+) -> Result<(), GeneratorError> {
+    for entry in fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read tree directory", directory, &error))?
+    {
+        let path = entry
+            .map_err(|error| GeneratorError::usage(format!("read tree entry: {error}")))?
+            .path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("read tree entry", &path, &error))?;
+        if metadata.file_type().is_dir() {
+            collect_actual_tree_entries(base, &path, entries)?;
+        } else if metadata.file_type().is_symlink() {
+            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            let target = fs::read_link(&path)
+                .map_err(|error| GeneratorError::io("read tree symlink", &path, &error))?;
+            entries.insert(relative, TreeEntry::Symlink { target });
+        } else if metadata.file_type().is_file() {
+            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            let content = fs::read(&path)
+                .map_err(|error| GeneratorError::io("read tree file", &path, &error))?;
+            entries.insert(
+                relative,
+                TreeEntry::File {
+                    bytes: content,
+                    executable: is_executable_metadata(&metadata),
+                },
+            );
+        } else {
+            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            entries.insert(relative, TreeEntry::Special);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `metadata` carries any execute bit. Only unix filesystems
+/// report one; elsewhere every file is definitionally non-executable.
+fn is_executable_metadata(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

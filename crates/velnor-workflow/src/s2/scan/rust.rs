@@ -11,7 +11,7 @@ use super::file_walk::{
 use super::{RepositoryShape, ScanContext};
 use crate::s2::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
-    GeneratorError, RustToolchain, Unit, UnitKind,
+    GeneratorError, RustToolchain, Unit, UnitKind, ValidationPhase,
 };
 
 /// The scanner's Rust dependency-policy unit. Its commands resolve the
@@ -235,6 +235,8 @@ pub(crate) struct CargoManifestFacts {
     pub(crate) test_targets: Vec<String>,
     pub(crate) features: Vec<String>,
     pub(crate) crate_types: Vec<String>,
+    pub(crate) has_lib_section: bool,
+    pub(crate) autolib: Option<bool>,
 }
 
 #[derive(Default)]
@@ -270,6 +272,40 @@ fn workspace_pattern_matches(pattern: &str, workspace_root: &str, package_root: 
     let mut absolute = segments(workspace_root);
     absolute.extend(segments(pattern));
     matches(&absolute, &segments(package_root))
+}
+
+/// Crate types rustdoc can extract doctests from. `cargo test --doc` exits
+/// 101 with "no library targets found" for any other lib shape (measured:
+/// bin-only packages and `crate-type = ["cdylib"]`), while `test = false`
+/// and proc-macro libs still run their doctests.
+const DOCTEST_CRATE_TYPES: [&str; 4] = ["lib", "rlib", "dylib", "proc-macro"];
+
+/// Whether the package earns a doctest phase: it owns a doctest-capable lib
+/// target and the test phase cannot cover doctests itself. An explicit
+/// `[lib]` section always counts; otherwise the implicit `src/lib.rs` counts
+/// unless `[package] autolib = false` disables it. A declared `crate-type`
+/// without a rustdoc-readable kind (cdylib/staticlib-only) opts out, as does
+/// a repository without nextest, whose `cargo test` phase already runs the
+/// doctests inline.
+fn package_runs_doctests(
+    manifest: &CargoManifestFacts,
+    file_set: &BTreeSet<String>,
+    has_nextest: bool,
+) -> bool {
+    if !has_nextest {
+        return false;
+    }
+    let lib_path = join_repo_path(&manifest.root, "src/lib.rs");
+    let has_lib = manifest.has_lib_section
+        || (manifest.autolib != Some(false) && file_set.contains(&lib_path));
+    if !has_lib {
+        return false;
+    }
+    manifest.crate_types.is_empty()
+        || manifest
+            .crate_types
+            .iter()
+            .any(|crate_type| DOCTEST_CRATE_TYPES.contains(&crate_type.as_str()))
 }
 
 #[expect(
@@ -467,10 +503,19 @@ fn analyze_rust_manifests(
         let clippy_command = format!(
             "{command_prefix}cargo clippy {cargo_lock_flag} --profile test --no-deps --all-targets --all-features {package_selector} -- -D warnings"
         );
+        // The prerequisite tier compiles the unit without linting it: the
+        // check form of the clippy command, built from the same parts. The
+        // runtime selects it by phase; command text is never rewritten.
+        let check_command = format!(
+            "{command_prefix}cargo check {cargo_lock_flag} --profile test --no-deps --all-targets --all-features {package_selector}"
+        );
         // Clippy before tests: report lint failures before compiling and
         // running the test targets. Keep every command and its exact flags;
         // the test command still covers test-less crates through `--no-tests`.
-        let commands = vec![
+        // nextest cannot run doctests, so nextest repositories verify them
+        // through an explicit `cargo test --doc` phase; without nextest the
+        // test phase already runs them inline.
+        let mut commands = vec![
             format!(
                 "{command_prefix}cargo fmt --manifest-path {} -- --check",
                 shell_quote("Cargo.toml")
@@ -478,6 +523,17 @@ fn analyze_rust_manifests(
             clippy_command,
             test_command,
         ];
+        let mut phases = vec![
+            ValidationPhase::Fmt,
+            ValidationPhase::Clippy,
+            ValidationPhase::Test,
+        ];
+        if package_runs_doctests(manifest, file_set, has_nextest) {
+            commands.push(format!(
+                "{command_prefix}cargo test {cargo_lock_flag} --doc --all-features {package_selector}"
+            ));
+            phases.push(ValidationPhase::Doctest);
+        }
         let mut watch = vec![
             manifest_path.clone(),
             "Cargo.lock".to_owned(),
@@ -589,8 +645,8 @@ fn analyze_rust_manifests(
             watch,
             pr_commands: commands.clone(),
             full_commands: commands,
-            phases: Vec::new(),
-            check_commands: Vec::new(),
+            phases,
+            check_commands: vec![check_command],
             depends_on: Vec::new(),
             pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
@@ -652,6 +708,7 @@ fn analyze_rust_manifests(
             ],
             pr_commands: commands.clone(),
             full_commands: commands,
+            // Advisory checks are one untyped gate, not validation phases.
             phases: Vec::new(),
             check_commands: Vec::new(),
             depends_on: Vec::new(),
@@ -1006,6 +1063,8 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         test_targets: Vec::new(),
         features: Vec::new(),
         crate_types: Vec::new(),
+        has_lib_section: false,
+        autolib: None,
     };
     let mut section = String::new();
     let lines = contents.lines().collect::<Vec<_>>();
@@ -1029,6 +1088,9 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
             if section == "workspace" {
                 facts.has_workspace = true;
             }
+            if section == "lib" {
+                facts.has_lib_section = true;
+            }
             continue;
         }
         let Some((key, first_value)) = line.split_once('=') else {
@@ -1044,6 +1106,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         match section.as_str() {
             "package" if key == "name" => facts.package_name = toml_string_value(&value),
             "package" if key == "build" => facts.build_script = toml_string_value(&value),
+            "package" if key == "autolib" => facts.autolib = toml_bool_value(&value),
             "workspace" if key == "members" => {
                 facts.workspace_members = toml_array_values(&value);
             }
@@ -1167,6 +1230,14 @@ fn toml_string_value(value: &str) -> Option<String> {
     None
 }
 
+fn toml_bool_value(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 fn toml_array_values(value: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut quote = None;
@@ -1227,7 +1298,7 @@ pub(crate) fn detect(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{include_str_paths, parse_cargo_manifest};
+    use super::{include_str_paths, package_runs_doctests, parse_cargo_manifest};
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -1253,6 +1324,116 @@ mod tests {
         );
         assert!(plain.crate_types.is_empty());
         assert!(!crate::s2::platform::is_ffi_crate_type(&plain.crate_types));
+    }
+
+    #[test]
+    fn manifest_records_lib_section_and_autolib() {
+        let explicit = parse_cargo_manifest(
+            "crates/explicit",
+            "[package]\nname = \"explicit\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"other.rs\"\n",
+        );
+        assert!(explicit.has_lib_section);
+        assert_eq!(explicit.autolib, None);
+        let disabled = parse_cargo_manifest(
+            "crates/disabled",
+            "[package]\nname = \"disabled\"\nversion = \"0.1.0\"\nautolib = false\n",
+        );
+        assert!(!disabled.has_lib_section);
+        assert_eq!(disabled.autolib, Some(false));
+        let plain = parse_cargo_manifest(
+            "crates/plain",
+            "[package]\nname = \"plain\"\nversion = \"0.1.0\"\n",
+        );
+        assert!(!plain.has_lib_section);
+        assert_eq!(plain.autolib, None);
+    }
+
+    #[test]
+    fn doctest_phase_needs_doctest_capable_lib_and_nextest() {
+        fn files(paths: &[&str]) -> BTreeSet<String> {
+            paths.iter().map(|path| (*path).to_owned()).collect()
+        }
+        // A conventional lib crate under nextest earns the phase: nextest
+        // cannot run doctests, so the explicit `cargo test --doc` step is
+        // the only doctest coverage.
+        let lib = parse_cargo_manifest(
+            "crates/lib",
+            "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+        );
+        let lib_files = files(&["crates/lib/Cargo.toml", "crates/lib/src/lib.rs"]);
+        assert!(package_runs_doctests(&lib, &lib_files, true));
+        // Without nextest the `cargo test` phase already runs doctests
+        // inline; a second doctest run would only re-verify the subset.
+        assert!(!package_runs_doctests(&lib, &lib_files, false));
+        // `cargo test --doc` exits 101 with "no library targets found" on
+        // bin-only packages and cdylib-only libs: no phase there.
+        let bin = parse_cargo_manifest(
+            "crates/bin",
+            "[package]\nname = \"bin\"\nversion = \"0.1.0\"\n",
+        );
+        assert!(!package_runs_doctests(
+            &bin,
+            &files(&["crates/bin/Cargo.toml", "crates/bin/src/main.rs"]),
+            true,
+        ));
+        let cdylib = parse_cargo_manifest(
+            "crates/cdylib",
+            "[package]\nname = \"cdylib\"\nversion = \"0.1.0\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n",
+        );
+        assert!(!package_runs_doctests(
+            &cdylib,
+            &files(&["crates/cdylib/Cargo.toml", "crates/cdylib/src/lib.rs"]),
+            true,
+        ));
+        // A rustdoc-readable kind alongside the native one keeps the phase,
+        // as do explicit `[lib]` sections, `[lib] test = false` (which
+        // still runs doctests), and proc-macro libs.
+        let mixed = parse_cargo_manifest(
+            "crates/mixed",
+            "[package]\nname = \"mixed\"\nversion = \"0.1.0\"\n\n[lib]\ncrate-type = [\"lib\", \"staticlib\", \"cdylib\"]\n",
+        );
+        assert!(package_runs_doctests(
+            &mixed,
+            &files(&["crates/mixed/Cargo.toml", "crates/mixed/src/lib.rs"]),
+            true,
+        ));
+        let relocated = parse_cargo_manifest(
+            "crates/relocated",
+            "[package]\nname = \"relocated\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"other.rs\"\n",
+        );
+        assert!(package_runs_doctests(
+            &relocated,
+            &files(&["crates/relocated/Cargo.toml", "crates/relocated/other.rs"]),
+            true,
+        ));
+        let untested = parse_cargo_manifest(
+            "crates/untested",
+            "[package]\nname = \"untested\"\nversion = \"0.1.0\"\n\n[lib]\ntest = false\n",
+        );
+        assert!(package_runs_doctests(
+            &untested,
+            &files(&["crates/untested/Cargo.toml", "crates/untested/src/lib.rs"]),
+            true,
+        ));
+        let proc_macro = parse_cargo_manifest(
+            "crates/macros",
+            "[package]\nname = \"macros\"\nversion = \"0.1.0\"\n\n[lib]\nproc-macro = true\n",
+        );
+        assert!(package_runs_doctests(
+            &proc_macro,
+            &files(&["crates/macros/Cargo.toml", "crates/macros/src/lib.rs"]),
+            true,
+        ));
+        // `[package] autolib = false` disables the implicit lib target.
+        let no_auto = parse_cargo_manifest(
+            "crates/no-auto",
+            "[package]\nname = \"no-auto\"\nversion = \"0.1.0\"\nautolib = false\n",
+        );
+        assert!(!package_runs_doctests(
+            &no_auto,
+            &files(&["crates/no-auto/Cargo.toml", "crates/no-auto/src/lib.rs"]),
+            true,
+        ));
     }
 
     #[expect(
