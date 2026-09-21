@@ -18,6 +18,7 @@ use super::{
     CacheBackend, GraphNode, Pins, ProviderJob, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
     MUTABLE_MOUNT_HOST_DIR,
 };
+use crate::s2::config::MiseInstallDeps;
 use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap};
 use crate::s2::reuse::REQUIRED_CHECK;
 use crate::s2::scan::swift::XCODEGEN_TOOL;
@@ -167,7 +168,7 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::process::Command;
 
     use super::{
@@ -175,6 +176,7 @@ mod tests {
         ProviderAdmission, ProviderId, ProviderSet, RequiredCaller, RustNeeds, RustToolchain, Unit,
         UnitKind, WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
     };
+    use crate::s2::config::MiseInstallDeps;
     use crate::s2::platform::{NamedProduct, Prerequisite};
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -342,11 +344,12 @@ mod tests {
         across_separator.pr_commands = vec!["echo boltffi && make pack".to_owned()];
         assert!(!super::needs_boltffi(&across_separator));
         let lock = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        let deps = MiseInstallDeps::default();
         assert_eq!(
-            super::mise_tool_ids(&unit, &lock),
+            super::mise_tool_ids(&unit, &lock, &deps),
             vec![super::BOLTFFI_TOOL.to_owned()]
         );
-        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock).is_empty());
+        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock, &deps).is_empty());
     }
 
     #[test]
@@ -396,17 +399,18 @@ mod tests {
         qualified.pr_commands = vec!["/opt/mise/shims/xcodegen generate".to_owned()];
         assert!(super::needs_xcodegen(&qualified));
         let lock = BTreeSet::from([super::XCODEGEN_TOOL.to_owned()]);
+        let deps = MiseInstallDeps::default();
         assert_eq!(
-            super::mise_tool_ids(&unit, &lock),
+            super::mise_tool_ids(&unit, &lock, &deps),
             vec![super::XCODEGEN_TOOL.to_owned()]
         );
-        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock).is_empty());
+        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock, &deps).is_empty());
         // A generation-config override that replaces the stamped tools
         // cannot drop the install: detection re-adds the id.
         let mut overridden = unit;
         overridden.mise_tools = vec!["cargo-binstall".to_owned()];
         assert_eq!(
-            super::mise_tool_ids(&overridden, &lock),
+            super::mise_tool_ids(&overridden, &lock, &deps),
             vec![super::XCODEGEN_TOOL.to_owned(), "cargo-binstall".to_owned()]
         );
     }
@@ -433,6 +437,156 @@ mod tests {
         assert!(message.contains("swift-xcodegen-app"), "{message}");
         assert!(message.contains(super::XCODEGEN_TOOL), "{message}");
         assert!(message.contains("rust"), "{message}");
+    }
+
+    fn binstall_deps() -> MiseInstallDeps {
+        MiseInstallDeps {
+            cargo_binstall: true,
+            depends: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn cargo_subset_closes_over_the_binstall_provider() {
+        let unit = boltffi_unit("rust-producer");
+        let lock = BTreeSet::from([
+            super::BOLTFFI_TOOL.to_owned(),
+            super::BARE_BINSTALL_TOOL.to_owned(),
+        ]);
+        assert_eq!(
+            super::mise_tool_ids(&unit, &lock, &binstall_deps()),
+            vec![
+                super::BOLTFFI_TOOL.to_owned(),
+                super::BARE_BINSTALL_TOOL.to_owned()
+            ]
+        );
+        // Without the settings flag the subset keeps its historical shape:
+        // the provider installs only when the configuration requires it.
+        let plain = BTreeSet::from([
+            super::BOLTFFI_TOOL.to_owned(),
+            super::BARE_BINSTALL_TOOL.to_owned(),
+        ]);
+        assert_eq!(
+            super::mise_tool_ids(&unit, &plain, &MiseInstallDeps::default()),
+            vec![super::BOLTFFI_TOOL.to_owned()]
+        );
+    }
+
+    #[test]
+    fn closure_prefers_the_bare_binstall_spelling() {
+        let mut tools = vec![super::BOLTFFI_TOOL.to_owned()];
+        let lock = BTreeSet::from([
+            super::BOLTFFI_TOOL.to_owned(),
+            super::BARE_BINSTALL_TOOL.to_owned(),
+            super::QUALIFIED_BINSTALL_TOOL.to_owned(),
+        ]);
+        super::close_mise_tool_subset(&mut tools, &lock, &binstall_deps());
+        assert_eq!(
+            tools,
+            vec![
+                super::BOLTFFI_TOOL.to_owned(),
+                super::BARE_BINSTALL_TOOL.to_owned()
+            ]
+        );
+        let mut tools = vec![super::BOLTFFI_TOOL.to_owned()];
+        let lock = BTreeSet::from([
+            super::BOLTFFI_TOOL.to_owned(),
+            super::QUALIFIED_BINSTALL_TOOL.to_owned(),
+        ]);
+        super::close_mise_tool_subset(&mut tools, &lock, &binstall_deps());
+        assert_eq!(
+            tools,
+            vec![
+                super::BOLTFFI_TOOL.to_owned(),
+                super::QUALIFIED_BINSTALL_TOOL.to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn closure_follows_depends_edges_to_a_fixpoint() {
+        let deps = MiseInstallDeps {
+            cargo_binstall: false,
+            depends: BTreeMap::from([
+                (
+                    "pipx:example-lint".to_owned(),
+                    vec!["python".to_owned(), "uv".to_owned()],
+                ),
+                ("uv".to_owned(), vec!["python".to_owned()]),
+            ]),
+        };
+        let lock = BTreeSet::from([
+            "pipx:example-lint".to_owned(),
+            "python".to_owned(),
+            "uv".to_owned(),
+        ]);
+        let mut tools = vec!["pipx:example-lint".to_owned()];
+        super::close_mise_tool_subset(&mut tools, &lock, &deps);
+        assert_eq!(
+            tools,
+            vec![
+                "pipx:example-lint".to_owned(),
+                "python".to_owned(),
+                "uv".to_owned()
+            ]
+        );
+        // Idempotent: a second pass adds nothing.
+        super::close_mise_tool_subset(&mut tools, &lock, &deps);
+        assert_eq!(tools.len(), 3, "{tools:?}");
+    }
+
+    #[test]
+    fn install_deps_validation_names_the_missing_edge() {
+        let unit = boltffi_unit("rust-producer");
+        let unpinned = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        let error = must_err(
+            super::validate_mise_install_deps_are_closed(
+                std::slice::from_ref(&unit),
+                &unpinned,
+                &binstall_deps(),
+            ),
+            "a cargo subset without a binstall provider must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("rust-producer"), "{message}");
+        assert!(message.contains(super::BOLTFFI_TOOL), "{message}");
+        assert!(message.contains(super::BARE_BINSTALL_TOOL), "{message}");
+        let pinned = BTreeSet::from([
+            super::BOLTFFI_TOOL.to_owned(),
+            super::BARE_BINSTALL_TOOL.to_owned(),
+        ]);
+        assert!(super::validate_mise_install_deps_are_closed(
+            std::slice::from_ref(&unit),
+            &pinned,
+            &binstall_deps()
+        )
+        .is_ok());
+        // A dangling `depends` name fails with the exact missing edge.
+        let mut dangling = rust_unit("rust-plain", ".");
+        dangling.mise_tools = vec!["pipx:example-lint".to_owned()];
+        let deps = MiseInstallDeps {
+            cargo_binstall: false,
+            depends: BTreeMap::from([("pipx:example-lint".to_owned(), vec!["python".to_owned()])]),
+        };
+        let lock = BTreeSet::from(["pipx:example-lint".to_owned()]);
+        let error = must_err(
+            super::validate_mise_install_deps_are_closed(
+                std::slice::from_ref(&dangling),
+                &lock,
+                &deps,
+            ),
+            "a dangling depends name must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("pipx:example-lint"), "{message}");
+        assert!(message.contains("python"), "{message}");
+        // Units that install nothing pass even when edges dangle elsewhere.
+        assert!(super::validate_mise_install_deps_are_closed(
+            std::slice::from_ref(&rust_unit("rust-plain", ".")),
+            &lock,
+            &deps
+        )
+        .is_ok());
     }
 
     /// The rendered `Set up Mise tools` step block: the step header through
@@ -562,6 +716,7 @@ mod tests {
             units,
             pins: Pins::resolved(),
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: MiseInstallDeps::default(),
             declared_ruleset_contexts: String::new(),
             rust_pin: None,
         }
@@ -4488,8 +4643,15 @@ pub(crate) fn dependency_bundle_cache_save_if_for_step(
 /// provisions it from the repository's pin — and so is every tool a policy
 /// step installs through its own action. Each additional id widens the supply
 /// chain of every job that runs it. Detected ids resolve against the root lock
-/// keys; declared ids were already matched to the lock by validation.
-pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<String> {
+/// keys; declared ids were already matched to the lock by validation. The
+/// subset closes over the root `mise.toml` install dependencies before it
+/// returns, so `mise --locked` installs it without a missing-dependency
+/// refusal.
+pub(crate) fn mise_tool_ids(
+    unit: &Unit,
+    lock_keys: &BTreeSet<String>,
+    install_deps: &MiseInstallDeps,
+) -> Vec<String> {
     let mut tools = Vec::new();
     if needs_nextest(unit) {
         push_mise_tool(&mut tools, nextest_tool_id(lock_keys).to_owned());
@@ -4503,7 +4665,69 @@ pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<St
     for declared in &unit.mise_tools {
         push_mise_tool(&mut tools, declared.clone());
     }
+    close_mise_tool_subset(&mut tools, lock_keys, install_deps);
     tools
+}
+
+/// Lock spellings for the `cargo-binstall` tool. Repositories pin either the
+/// bare id or the aqua prebuilt; install args must match the lock.
+pub(crate) const BARE_BINSTALL_TOOL: &str = "cargo-binstall";
+pub(crate) const QUALIFIED_BINSTALL_TOOL: &str = "aqua:cargo-bins/cargo-binstall";
+
+/// The `cargo-binstall` lock key that serves `cargo:`-backend installs, or
+/// `None` when the lock pins neither spelling. The bare id wins: mise names
+/// its configured install dependency `cargo-binstall`, so a lock carrying
+/// that key resolves it directly.
+pub(crate) fn cargo_binstall_tool_id(lock_keys: &BTreeSet<String>) -> Option<&'static str> {
+    if lock_keys.contains(BARE_BINSTALL_TOOL) {
+        Some(BARE_BINSTALL_TOOL)
+    } else if lock_keys.contains(QUALIFIED_BINSTALL_TOOL) {
+        Some(QUALIFIED_BINSTALL_TOOL)
+    } else {
+        None
+    }
+}
+
+/// The lock key an install-dependency name resolves to, or `None` when no
+/// lock key spells it. Resolution is exact: `install_args` must equal the
+/// lock keys byte for byte, so a name the lock does not pin has no
+/// installable spelling.
+fn resolve_install_dep(name: &str, lock_keys: &BTreeSet<String>) -> Option<String> {
+    lock_keys.contains(name).then(|| name.to_owned())
+}
+
+/// Close a derived `install_args` subset over the root `mise.toml` install
+/// dependencies so `mise --locked` installs it: mise refuses an explicit
+/// install whose configured dependency is not installed instead of
+/// installing the dependency implicitly. The closure is idempotent and
+/// deterministic — members keep their order, dependencies append in member
+/// order — and a no-op when the repository declares no install edges.
+/// Dependencies that resolve to no lock key are skipped here; generation
+/// refuses that state loudly before rendering (see
+/// `validate_mise_install_deps_are_closed`).
+pub(crate) fn close_mise_tool_subset(
+    tools: &mut Vec<String>,
+    lock_keys: &BTreeSet<String>,
+    install_deps: &MiseInstallDeps,
+) {
+    if install_deps.cargo_binstall
+        && tools.iter().any(|tool| tool.starts_with("cargo:"))
+        && let Some(provider) = cargo_binstall_tool_id(lock_keys)
+    {
+        push_mise_tool(tools, provider.to_owned());
+    }
+    let mut index = 0;
+    while index < tools.len() {
+        let tool = tools[index].clone();
+        if let Some(names) = install_deps.depends.get(&tool) {
+            for name in names.clone() {
+                if let Some(key) = resolve_install_dep(&name, lock_keys) {
+                    push_mise_tool(tools, key);
+                }
+            }
+        }
+        index += 1;
+    }
 }
 
 /// Whether any of the unit's commands drive `XcodeGen` project generation.
@@ -4580,13 +4804,19 @@ pub(crate) fn cargo_deny_tool_id(lock_keys: &BTreeSet<String>) -> Option<String>
 pub(crate) fn velnor_mise_install_tool_ids(
     unit: &Unit,
     lock_keys: &BTreeSet<String>,
+    install_deps: &MiseInstallDeps,
 ) -> Vec<String> {
-    let mut tools = mise_tool_ids(unit, lock_keys);
+    let mut tools = mise_tool_ids(unit, lock_keys, install_deps);
     if needs_cargo_deny(unit)
         && let Some(deny) = cargo_deny_tool_id(lock_keys)
     {
         push_mise_tool(&mut tools, deny);
     }
+    // The policy tool joins after the first closure; close again so its own
+    // install edges (a `cargo:`-spelled deny needs `cargo-binstall`) ride
+    // along. The closure is idempotent, so the second pass only adds what
+    // the deny id newly requires.
+    close_mise_tool_subset(&mut tools, lock_keys, install_deps);
     tools
 }
 
@@ -4596,8 +4826,13 @@ fn push_mise_tool(tools: &mut Vec<String>, tool: String) {
     }
 }
 
-fn render_velnor_mise_install(output: &mut String, unit: &Unit, lock_keys: &BTreeSet<String>) {
-    let tools = velnor_mise_install_tool_ids(unit, lock_keys);
+fn render_velnor_mise_install(
+    output: &mut String,
+    unit: &Unit,
+    lock_keys: &BTreeSet<String>,
+    install_deps: &MiseInstallDeps,
+) {
+    let tools = velnor_mise_install_tool_ids(unit, lock_keys, install_deps);
     if tools.is_empty() {
         return;
     }
@@ -4697,6 +4932,67 @@ pub(crate) fn validate_xcodegen_tools_are_locked(
                 "unit {} runs xcodegen generate but mise.lock does not pin {XCODEGEN_TOOL}; pin it and re-lock so install_args match the lock, known keys: {known}",
                 unit.id
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a unit whose closed `install_args` subset still misses a configured
+/// install dependency: mise refuses the explicit install on the runner
+/// instead of installing the dependency implicitly, so the subset would fail
+/// at install time. The closure already added every dependency that resolves
+/// to a lock key; what remains is a repository gap — a `cargo:`-backend tool
+/// with `[settings] cargo.binstall` but no pinned provider, or a `depends`
+/// name the lock does not pin — named here with the exact missing edge.
+/// Units that install nothing, and repositories that declare no install
+/// edges, pass untouched.
+///
+/// # Errors
+/// Returns a usage error naming the first unit whose subset is not closed,
+/// with every key the lock does pin.
+pub(crate) fn validate_mise_install_deps_are_closed(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+    install_deps: &MiseInstallDeps,
+) -> Result<(), GeneratorError> {
+    for unit in units {
+        // The Velnor spelling is the union: it carries everything the hosted
+        // subset installs plus the policy tool, so a closed union proves
+        // every rendered subset of this unit installable.
+        let tools = velnor_mise_install_tool_ids(unit, lock_keys, install_deps);
+        if tools.is_empty() {
+            continue;
+        }
+        let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+        if install_deps.cargo_binstall
+            && tools.iter().any(|tool| tool.starts_with("cargo:"))
+            && cargo_binstall_tool_id(lock_keys).is_none()
+        {
+            let cargo = tools
+                .iter()
+                .filter(|tool| tool.starts_with("cargo:"))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(GeneratorError::usage(format!(
+                "unit {} installs {cargo} while mise.toml sets [settings] cargo.binstall, but mise.lock pins neither {BARE_BINSTALL_TOOL} nor {QUALIFIED_BINSTALL_TOOL}; pin one and re-lock so every install_args subset is installable, known keys: {}",
+                unit.id,
+                known()
+            )));
+        }
+        for tool in &tools {
+            let Some(names) = install_deps.depends.get(tool) else {
+                continue;
+            };
+            for name in names {
+                if resolve_install_dep(name, lock_keys).is_none() {
+                    return Err(GeneratorError::usage(format!(
+                        "unit {} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
+                        unit.id,
+                        known()
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -5158,6 +5454,10 @@ pub(crate) struct WorkflowIr {
     /// Tool keys the root `mise.lock` pins. Detected `install_args` resolve
     /// their spelling from these; empty when the scan root has no lock.
     pub(crate) mise_lock_keys: BTreeSet<String>,
+    /// Install dependencies the root `mise.toml` declares. Derived
+    /// `install_args` subsets close over these; empty when the scan root
+    /// has no mise configuration.
+    pub(crate) mise_install_deps: MiseInstallDeps,
     /// The repository's own parsed Rust pin: the file-driven provision leg.
     /// A unit leg whose channel differs provisions explicitly instead.
     pub(crate) rust_pin: Option<RustToolchain>,
@@ -6194,6 +6494,7 @@ impl WorkflowIr {
             units: config.units.clone(),
             pins: Pins::resolved(),
             mise_lock_keys: config.mise_lock_keys.clone(),
+            mise_install_deps: config.mise_install_deps.clone(),
             rust_pin: config.rust_pin.clone(),
         }
     }
@@ -7182,8 +7483,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     ) -> ProviderStepFacts {
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mise_tools =
-            Self::mise_tool_ids_for_provider(hosted, &tools, unit, &self.mise_lock_keys);
+        let mise_tools = self.mise_tool_ids_for_provider(hosted, &tools, unit);
         let mise_runner = hosted
             && tools.contains(&ToolRequirement::Mise)
             && mise_tools.is_empty()
@@ -7295,19 +7595,19 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// The mise tool ids one unit installs on `hosted`: the hosted spell
     /// for GitHub runners, the Velnor install spell for local lanes.
     fn mise_tool_ids_for_provider(
+        &self,
         hosted: bool,
         tools: &BTreeSet<ToolRequirement>,
         unit: &Unit,
-        lock_keys: &BTreeSet<String>,
     ) -> Vec<String> {
         if hosted {
             if tools.contains(&ToolRequirement::Mise) {
-                mise_tool_ids(unit, lock_keys)
+                mise_tool_ids(unit, &self.mise_lock_keys, &self.mise_install_deps)
             } else {
                 Vec::new()
             }
         } else if tools.contains(&ToolRequirement::Mise) {
-            velnor_mise_install_tool_ids(unit, lock_keys)
+            velnor_mise_install_tool_ids(unit, &self.mise_lock_keys, &self.mise_install_deps)
         } else {
             Vec::new()
         }
@@ -8733,7 +9033,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             // off on the checks step, so declared lockfile tools must be
             // installed explicitly or shims fail closed. Install only what
             // this unit's commands need — never the whole root manifest.
-            render_velnor_mise_install(output, unit, &self.mise_lock_keys);
+            render_velnor_mise_install(output, unit, &self.mise_lock_keys, &self.mise_install_deps);
         }
         if !local_skips_pinned_rust_toolchain(provider)
             && let Some(toolchain) = &unit.toolchain
@@ -8745,7 +9045,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
             // the unit's own commands name or the repository declares.
-            let mise_tools = mise_tool_ids(unit, &self.mise_lock_keys);
+            let mise_tools = mise_tool_ids(unit, &self.mise_lock_keys, &self.mise_install_deps);
             let invokes_mise = commands_invoke_mise(unit);
             if !mise_tools.is_empty() {
                 let trusted = trusted_cache_save_expression(&self.default_branch);
