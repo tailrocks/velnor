@@ -1230,7 +1230,7 @@ where
             bail!("workflow source metadata and raw media bytes differ for {path}");
         }
         let events = parse_workflow_events(&source_text)?;
-        let source_jobs = parse_source_jobs(&source_text, manifest, &source_raw_ids)?;
+        let source_jobs = parse_source_jobs(&source_text, manifest, &path, &source_raw_ids)?;
         let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
             &source_text,
             &manifest.repository,
@@ -1338,7 +1338,7 @@ where
     if source_text != metadata_source_text {
         bail!("workflow source metadata and raw media bytes differ for {path}");
     }
-    let source_jobs = parse_source_jobs(&source_text, manifest, &source_raw_ids)?;
+    let source_jobs = parse_source_jobs(source_text.as_str(), manifest, path, &source_raw_ids)?;
     let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
         &source_text,
         &manifest.repository,
@@ -2642,6 +2642,7 @@ fn parse_workflow_events(source: &str) -> Result<Vec<String>> {
 fn parse_source_jobs(
     source: &str,
     manifest: &ManifestRepository,
+    workflow_path: &str,
     raw_object_refs: &[String],
 ) -> Result<Vec<LiveSourceJob>> {
     let yaml: serde_yaml::Value =
@@ -2673,7 +2674,7 @@ fn parse_source_jobs(
         .collect::<Vec<_>>();
     expected.sort();
     expected.dedup();
-    if job_ids != expected {
+    if workflow_path == manifest.workflow_path && job_ids != expected {
         bail!(
             "workflow source job IDs do not match reviewed expected jobs for {}",
             manifest.repository
@@ -3756,6 +3757,42 @@ jobs:
             "tailrocks/example",
             "0123456789012345678901234567890123456789",
             &["raw".to_owned()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn source_jobs_bind_expected_ids_only_for_reviewed_workflow_path() {
+        let manifest = ManifestRepository {
+            repository: "tailrocks/example".to_owned(),
+            workflow_path: ".github/workflows/ci.yml".to_owned(),
+            expected_jobs: vec![crate::evidence_check::ExpectedJobSpec {
+                job_id: "unit".to_owned(),
+                workload_id: "tailrocks/example:unit".to_owned(),
+                provider: "github".to_owned(),
+                platform: "linux".to_owned(),
+                architecture: "x64".to_owned(),
+                required: true,
+                child_workflow: None,
+            }],
+            ..ManifestRepository::default()
+        };
+        let release_source = "jobs:\n  release:\n    steps: []\n";
+        let observed = parse_source_jobs(
+            release_source,
+            &manifest,
+            ".github/workflows/release.yml",
+            &["raw-release".to_owned()],
+        )
+        .expect("non-reviewed workflow keeps observed job IDs");
+        assert_eq!(observed[0].job_id, "release");
+        assert_eq!(observed[0].raw_object_refs, vec!["raw-release"]);
+
+        assert!(parse_source_jobs(
+            release_source,
+            &manifest,
+            ".github/workflows/ci.yml",
+            &["raw-ci".to_owned()],
         )
         .is_err());
     }
