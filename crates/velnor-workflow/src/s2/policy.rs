@@ -1643,7 +1643,9 @@ fn render_and_compare(
 
 /// Compare an untrusted render directory with the untouched authoritative
 /// tree. The directory is never treated as source or provenance: only its
-/// regular-file bytes can match generated files in the clean tree.
+/// regular-file bytes can match generated files in the clean tree. Symlinks
+/// in the render are resolved only when confined to the render root; a
+/// symlink that escapes the root, dangles, or names a non-file is an error.
 fn compare_rendered_tree(
     rendered_root: &Path,
     tree: &Path,
@@ -1705,6 +1707,17 @@ fn collect_files(
     directory: &Path,
     files: &mut BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<(), GeneratorError> {
+    let canonical_base = fs::canonicalize(base)
+        .map_err(|error| GeneratorError::io("canonicalize rendered root", base, &error))?;
+    collect_files_inner(base, &canonical_base, directory, files)
+}
+
+fn collect_files_inner(
+    base: &Path,
+    canonical_base: &Path,
+    directory: &Path,
+    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<(), GeneratorError> {
     for entry in fs::read_dir(directory)
         .map_err(|error| GeneratorError::io("read rendered directory", directory, &error))?
     {
@@ -1714,13 +1727,46 @@ fn collect_files(
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| GeneratorError::io("read rendered metadata", &path, &error))?;
         if metadata.file_type().is_symlink() {
-            return Err(GeneratorError::usage(format!(
-                "rendered output contains symlink {}",
-                path.display()
-            )));
-        }
-        if metadata.is_dir() {
-            collect_files(base, &path, files)?;
+            let target = fs::read_link(&path)
+                .map_err(|error| GeneratorError::io("read rendered symlink", &path, &error))?;
+            let joined = if target.is_absolute() {
+                target
+            } else {
+                path.parent()
+                    .map_or_else(|| PathBuf::from(&target), |parent| parent.join(&target))
+            };
+            let canonical = fs::canonicalize(&joined).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered symlink {} dangles or is unreadable",
+                    path.display()
+                ))
+            })?;
+            if !canonical.starts_with(canonical_base) {
+                return Err(GeneratorError::usage(format!(
+                    "rendered symlink escapes its root: {}",
+                    path.display()
+                )));
+            }
+            let target_metadata = fs::metadata(&canonical).map_err(|error| {
+                GeneratorError::io("read rendered link target", &canonical, &error)
+            })?;
+            if !target_metadata.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "rendered symlink {} does not name a file",
+                    path.display()
+                )));
+            }
+            let relative = path.strip_prefix(base).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered output escaped its root: {}",
+                    path.display()
+                ))
+            })?;
+            let content = fs::read(&canonical)
+                .map_err(|error| GeneratorError::io("read rendered file", &canonical, &error))?;
+            files.insert(relative.to_path_buf(), content);
+        } else if metadata.is_dir() {
+            collect_files_inner(base, canonical_base, &path, files)?;
         } else if metadata.is_file() {
             let relative = path.strip_prefix(base).map_err(|_| {
                 GeneratorError::usage(format!(

@@ -1452,3 +1452,73 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
         "other checkout paths are not implicitly trusted"
     );
 }
+
+#[cfg(unix)]
+fn link(target: &Path, link: &Path) {
+    must(
+        std::os::unix::fs::symlink(target, link),
+        "create test symlink",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn confined_render_symlink_compares_clean() {
+    let rendered = temporary_directory("render-symlink-confined");
+    let tree = temporary_directory("render-symlink-confined-tree");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    write(&tree.join(".github/AGENTS.md"), "agents\n");
+    link(Path::new("AGENTS.md"), &rendered.join(".github/CLAUDE.md"));
+    link(Path::new("AGENTS.md"), &tree.join(".github/CLAUDE.md"));
+    let excludes = std::collections::BTreeSet::new();
+    let differences = must(
+        compare_rendered_tree(&rendered, &tree, &excludes),
+        "a relative in-render symlink resolves to its target bytes",
+    );
+    assert!(
+        differences.is_empty(),
+        "confined symlink must compare clean: {differences:?}"
+    );
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn render_symlink_escaping_its_root_is_an_error() {
+    let rendered = temporary_directory("render-symlink-escape");
+    let outside = temporary_directory("render-symlink-escape-outside");
+    let secret = outside.join("secret.txt");
+    write(&secret, "outside\n");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    link(&secret, &rendered.join(".github/CLAUDE.md"));
+    let tree = temporary_directory("render-symlink-escape-tree");
+    let excludes = std::collections::BTreeSet::new();
+    let error = must_fail(
+        compare_rendered_tree(&rendered, &tree, &excludes),
+        "a render symlink outside its root",
+    )
+    .to_string();
+    assert!(error.contains("escapes its root"), "{error}");
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(outside);
+    let _ = fs::remove_dir_all(tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_render_symlink_is_an_error() {
+    let rendered = temporary_directory("render-symlink-dangling");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    link(Path::new("MISSING.md"), &rendered.join(".github/CLAUDE.md"));
+    let tree = temporary_directory("render-symlink-dangling-tree");
+    let excludes = std::collections::BTreeSet::new();
+    let error = must_fail(
+        compare_rendered_tree(&rendered, &tree, &excludes),
+        "a dangling render symlink",
+    )
+    .to_string();
+    assert!(error.contains("dangles"), "{error}");
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(tree);
+}
