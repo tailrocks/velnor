@@ -195,7 +195,7 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
    (BoltFFI 0.30.1 @ `2e6320a`): slice dirs
    `macos/ios-{archs_joined}[-simulator]`, structural files
    `Info.plist` + per-slice `lib{crate}.a` (underscored) +
-   `Headers/module.modulemap` declaring `module {ffi} `,
+   `Headers/module.modulemap` declaring `module {ffi}`,
    exactly one lib, lipo arch match
    (Jackin `desktop.rs:758-789`).
 3. Keep one branch per repo; merge main in, never rebase; `git commit -s`.
