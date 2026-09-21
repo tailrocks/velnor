@@ -124,6 +124,10 @@ impl Primitive for Release {
             "archive_checksum",
             "archive_members",
             "archive_retention_days",
+            "apt_arches",
+            "apt_feed_url",
+            "apt_identity_dir",
+            "apt_origin",
             "artifact_path",
             "assert_tasks",
             "binary",
@@ -133,12 +137,14 @@ impl Primitive for Release {
             "dockerfile",
             "image",
             "image_package",
+            "keyring_path",
             "kind",
             "manifest_schema",
             "modes",
             "name",
             "package",
             "packages",
+            "passphrase_secret",
             "platforms",
             "producer_conclusion",
             "producer_workflow",
@@ -150,6 +156,9 @@ impl Primitive for Release {
             "registry",
             "registry_password_secret",
             "registry_username_secret",
+            "retention",
+            "signer_fingerprint",
+            "signing_key_secret",
             "source_repository",
             "tag_pattern",
             "targets",
@@ -316,7 +325,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         args.integer("producer_workflow_id")?,
         args.string("producer_workflow_path")?.as_deref(),
     )?;
-    Ok(ReleaseSpec {
+    let spec = ReleaseSpec {
         kind,
         verification_providers: None,
         package: args.string("package")?.unwrap_or_default(),
@@ -330,6 +339,22 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         artifact_path: args.string("artifact_path")?.unwrap_or_default(),
         description: String::new(),
         manifest_schema: args.string("manifest_schema")?.unwrap_or_default(),
+        apt_arches: args.strings("apt_arches")?.unwrap_or_default(),
+        signer_fingerprint: args.string("signer_fingerprint")?.unwrap_or_default(),
+        passphrase_secret: args.string("passphrase_secret")?.unwrap_or_default(),
+        signing_key_secret: args.string("signing_key_secret")?.unwrap_or_default(),
+        keyring_path: args.string("keyring_path")?.unwrap_or_default(),
+        apt_origin: args.string("apt_origin")?.unwrap_or_default(),
+        apt_identity_dir: args.string("apt_identity_dir")?.unwrap_or_default(),
+        apt_feed_url: args.string("apt_feed_url")?.unwrap_or_default(),
+        retention: match args.integer("retention")? {
+            None => 0,
+            Some(value) => u32::try_from(value).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "`{family}` `retention` must be a non-negative count, found `{value}`"
+                ))
+            })?,
+        },
         dockerfile: args.string("dockerfile")?.unwrap_or_default(),
         context: args.string("context")?.unwrap_or_default(),
         platforms: args.strings("platforms")?.unwrap_or_default(),
@@ -360,7 +385,64 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         registry_username_secret,
         registry_password_secret,
         jobs: Vec::new(),
-    })
+    };
+    // A declared apt contract is validated now: malformed values fail the
+    // declaration loudly instead of rendering a broken feed.
+    if spec.kind == "apt" && release_contract_complete(&spec) {
+        let validation = apt_release_spec(&spec);
+        crate::apt::AptContract::resolve(&validation).map_err(|error| {
+            GeneratorError::usage(format!(
+                "`{family}` declares an invalid apt contract: {error}"
+            ))
+        })?;
+    }
+    Ok(spec)
+}
+
+/// Bridge the schema-2 release contract into the shared APT contract's
+/// schema-1 record: `AptContract::resolve` is pipeline-independent except
+/// for the record type it reads, so the s2 surface copies the scalar
+/// contract across instead of changing the shared resolver. Credential and
+/// job tables never travel: the APT contract reads neither.
+pub(crate) fn apt_release_spec(release: &ReleaseSpec) -> crate::ReleaseSpec {
+    crate::ReleaseSpec {
+        kind: release.kind.clone(),
+        package: release.package.clone(),
+        packages: release.packages.clone(),
+        binary: release.binary.clone(),
+        targets: release.targets.clone(),
+        image: release.image.clone(),
+        image_package: release.image_package.clone(),
+        source_repository: release.source_repository.clone(),
+        consumer_repository: release.consumer_repository.clone(),
+        artifact_path: release.artifact_path.clone(),
+        description: release.description.clone(),
+        manifest_schema: release.manifest_schema.clone(),
+        apt_arches: release.apt_arches.clone(),
+        signer_fingerprint: release.signer_fingerprint.clone(),
+        passphrase_secret: release.passphrase_secret.clone(),
+        signing_key_secret: release.signing_key_secret.clone(),
+        keyring_path: release.keyring_path.clone(),
+        apt_origin: release.apt_origin.clone(),
+        apt_identity_dir: release.apt_identity_dir.clone(),
+        apt_feed_url: release.apt_feed_url.clone(),
+        retention: release.retention,
+        dockerfile: release.dockerfile.clone(),
+        context: release.context.clone(),
+        platforms: release.platforms.clone(),
+        producer_workflow: release.producer_workflow.clone(),
+        producer_conclusion: release.producer_conclusion.clone(),
+        modes: release.modes.clone(),
+        archive_members: release.archive_members.clone(),
+        archive_checksum: release.archive_checksum.clone(),
+        archive_retention_days: release.archive_retention_days,
+        credentials: Vec::new(),
+        tag_pattern: release.tag_pattern.clone(),
+        registry: release.registry.clone(),
+        registry_username_secret: release.registry_username_secret.clone(),
+        registry_password_secret: release.registry_password_secret.clone(),
+        jobs: Vec::new(),
+    }
 }
 
 /// Parse a declared rolling-preview contract: the preview lane publishes a
@@ -388,6 +470,15 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         artifact_path: String::new(),
         description: String::new(),
         manifest_schema: String::new(),
+        apt_arches: Vec::new(),
+        signer_fingerprint: String::new(),
+        passphrase_secret: String::new(),
+        signing_key_secret: String::new(),
+        keyring_path: String::new(),
+        apt_origin: String::new(),
+        apt_identity_dir: String::new(),
+        apt_feed_url: String::new(),
+        retention: 0,
         dockerfile: String::new(),
         context: String::new(),
         platforms: Vec::new(),
@@ -890,6 +981,7 @@ fn incomplete_contract(family: &str, spec: &ReleaseSpec) -> GeneratorError {
         "crates" => "`packages`",
         "rust-binary" => "`package`, `binary`, and `targets`",
         "pages" => "`artifact_path`",
+        "apt" => "`package`, `binary`, `source_repository`, `consumer_repository`, `manifest_schema`, `signer_fingerprint`, `passphrase_secret`, `signing_key_secret`, and `apt_feed_url`",
         "docker" => "`image`",
         _ => "the contract",
     };
@@ -943,7 +1035,17 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
         }
         "pages" => !release.artifact_path.is_empty(),
         "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
-        "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
+        "apt" => {
+            !release.package.is_empty()
+                && !release.binary.is_empty()
+                && !release.source_repository.is_empty()
+                && !release.consumer_repository.is_empty()
+                && !release.manifest_schema.is_empty()
+                && !release.signer_fingerprint.is_empty()
+                && !release.passphrase_secret.is_empty()
+                && !release.signing_key_secret.is_empty()
+                && !release.apt_feed_url.is_empty()
+        }
         "docker" => {
             !release.image.is_empty()
                 && crate::s2::config::valid_docker_platforms(&release.platforms)
@@ -4651,12 +4753,207 @@ fn render_homebrew_release(config: &ProjectConfig, release: &ReleaseSpec) -> Str
     )
 }
 
+/// The shared APT-feed render bindings: the resolved contract's quoted
+/// scalars plus the runner, runtime setup, and mutation gates every
+/// per-job renderer reads. Secret names travel by reference; values never
+/// render.
+struct AptFeedCtx {
+    runner: String,
+    setup: String,
+    policy: String,
+    branch: String,
+    publish_gate: String,
+    deploy_gate: String,
+    source: String,
+    package: String,
+    package_raw: String,
+    source_raw: String,
+    binary: String,
+    schema: String,
+    signer: String,
+    secret: String,
+    key_secret: String,
+    keyring: String,
+    identity: String,
+    origin: String,
+    description: String,
+    feed: String,
+    consumer: String,
+    letter: String,
+}
+
+impl AptFeedCtx {
+    fn new(config: &ProjectConfig, contract: &crate::apt::AptContract) -> Self {
+        // The feed mutates from the release-side provider only: no dispatch
+        // input selects runners — the visibility singleton fixed the
+        // universe at generation time, so the mutation gate only pins the
+        // default branch and the writer events.
+        let mutation = release_gated_condition(
+            config,
+            &format!(
+                "github.ref == 'refs/heads/{}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+                config.default_branch
+            ),
+        );
+        Self {
+            runner: selected_runner(config),
+            setup: workflow_runtime_setup_for_config(config),
+            policy: policy_enforcement_step().to_owned(),
+            branch: config.default_branch.clone(),
+            publish_gate: mutation.clone(),
+            deploy_gate: mutation,
+            source: shell_quote(&contract.source_repo),
+            package: shell_quote(&contract.package),
+            // Names interpolated inside double-quoted shell strings stay
+            // raw: the typed validators forbid every metacharacter, so
+            // quoting them would corrupt the interpolation instead of
+            // protecting it.
+            package_raw: contract.package.clone(),
+            // The repository slug (owner/name, no metacharacters) for the
+            // attestation signer identity.
+            source_raw: contract.source_repo.clone(),
+            binary: shell_quote(&contract.binary),
+            schema: shell_quote(&contract.manifest_schema),
+            signer: shell_quote(&contract.signer),
+            secret: contract.passphrase_secret.clone(),
+            key_secret: contract.signing_key_secret.clone(),
+            keyring: shell_quote(&contract.keyring),
+            identity: shell_quote(&contract.identity_dir),
+            origin: shell_quote(&contract.origin),
+            description: shell_quote(&contract.description),
+            feed: shell_quote(&contract.feed_url),
+            consumer: shell_quote(&contract.consumer_repo),
+            letter: crate::apt::pool_letter(&contract.package).to_owned(),
+        }
+    }
+}
+
+/// The standalone APT feed publisher: verify (channel/version/commit
+/// dispatch, `apt-resolve-commit`, `apt-fetch`, attestation verify,
+/// live-fingerprint read, `apt-verify`, verified-inputs upload incl. the
+/// hidden sentinel) → publish (default-branch + writer-event gate,
+/// prior-pair recovery + `apt-previous-pointer`, secret export,
+/// `apt-publish`, `apt-channel-update`, staged-tree upload) → deploy
+/// (rollback guard, Pages) → feed-result (fail-closed aggregate). The
+/// fail-closed semantics mirror the schema-1 publisher exactly; only the
+/// runner idiom is schema-2 (the release-side provider, never a dispatch
+/// input).
 fn render_apt_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
-    render_package_feed(
-        config,
-        "apt",
-        &release.package,
-        &release.consumer_repository,
+    // Declared and config-driven contracts are validated before rendering,
+    // so resolution here only fails when a caller bypassed validation — and
+    // then no feed renders at all rather than a broken one.
+    let validation = apt_release_spec(release);
+    let Ok(contract) = crate::apt::AptContract::resolve(&validation) else {
+        return format!(
+            "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
+        );
+    };
+    let ctx = AptFeedCtx::new(config, &contract);
+    format!(
+        "{header}{verify}{publish}{deploy}{result}",
+        header = render_apt_header(),
+        verify = render_apt_verify_job(&ctx),
+        publish = render_apt_publish_job(&ctx),
+        deploy = render_apt_deploy_job(&ctx),
+        result = render_apt_feed_result_job(&ctx),
+    )
+}
+
+fn render_apt_header() -> String {
+    format!(
+        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · apt · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n      version:\n        description: Target version (empty discovers the channel head)\n        required: false\n        default: ''\n        type: string\n      commit:\n        description: Target source commit (empty resolves it)\n        required: false\n        default: ''\n        type: string\n\nconcurrency:\n  group: package-feed-apt-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n"
+    )
+}
+
+/// The verify job: resolve the channel head, fetch coherence inputs,
+/// attest every fetched deb, and verify the suite — then upload the
+/// verified inputs (hidden sentinel included) for publish.
+fn render_apt_verify_job(ctx: &AptFeedCtx) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    // The apt-incoming upload below carries verify's hidden sentinel, so
+    // its `with:` opts into `include-hidden-files`: upload-artifact drops
+    // dotfiles by default, and publish refuses without the sentinel.
+    let upload = ActionPin::UploadArtifact.reference();
+    let AptFeedCtx {
+        runner,
+        setup,
+        policy,
+        branch,
+        source,
+        package,
+        source_raw,
+        binary,
+        schema,
+        signer,
+        keyring,
+        identity,
+        ..
+    } = ctx;
+    format!(
+        "  verify:\n    name: Verify apt feed\n    runs-on: {runner}\n    timeout-minutes: 30\n    outputs:\n      version: ${{{{ steps.feed.outputs.version }}}}\n      commit: ${{{{ steps.feed.outputs.commit }}}}\n      channel: ${{{{ steps.feed.outputs.channel }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Fetch and verify feed inputs\n        id: feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n          INPUT_VERSION: ${{{{ github.event.inputs.version || '' }}}}\n          INPUT_COMMIT: ${{{{ github.event.inputs.commit || '' }}}}\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          channel=\"$CHANNEL\"\n          case \"$channel\" in stable|preview) ;; *) echo \"::error::unknown channel $channel\" >&2; exit 1 ;; esac\n          version=\"$INPUT_VERSION\"\n          commit=\"$INPUT_COMMIT\"\n          if [ \"$channel\" = stable ]; then\n            if [ -z \"$version\" ]; then\n              version=\"$(gh release list --repo {source} --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')\"\n            fi\n            if [ -z \"$commit\" ]; then\n              commit=\"$(velnor-workflow release apt-resolve-commit --source-repo {source} --version \"$version\")\"\n            fi\n          else\n            rm -rf discover\n            gh release download preview --repo {source} --pattern 'release-manifest.json' --dir discover\n            manifest_version=\"$(jq -er .version discover/release-manifest.json)\"\n            if [ -z \"$version\" ]; then\n              version=\"$manifest_version\"\n            elif [ \"$version\" != \"$manifest_version\" ]; then\n              echo \"::error::requested $version disagrees with the rolling manifest $manifest_version\" >&2\n              exit 1\n            fi\n            if [ -z \"$commit\" ]; then\n              commit=\"$(gh release view preview --repo {source} --json targetCommitish --jq .targetCommitish)\"\n            fi\n          fi\n          rm -rf incoming\n          velnor-workflow release apt-fetch --suite \"$channel\" --source-repo {source} --package {package} --version \"$version\" --dir incoming\n          if [ \"$channel\" = stable ]; then\n            source_ref=\"refs/tags/$version\"\n          else\n            source_ref=\"refs/heads/{branch}\"\n          fi\n          shopt -s nullglob\n          attest_subjects=(incoming/*.deb)\n          [ \"${{#attest_subjects[@]}}\" -gt 0 ] || {{ echo \"::error::no fetched debs to attest\" >&2; exit 1; }}\n          for subject in \"${{attest_subjects[@]}}\"; do\n            gh attestation verify \"$subject\" --repo {source} --signer-workflow \"{source_raw}/.github/workflows/ci-release-package-signer.yml\" --source-ref \"$source_ref\" --source-digest \"$commit\"\n          done\n          live_fpr=\"$(gpg --show-keys --with-colons {keyring} | awk -F: '/^fpr:/{{print $10; exit}}')\"\n          if [ \"$channel\" = stable ]; then\n            velnor-workflow release apt-verify --suite \"$channel\" --source-repo {source} --package {package} --binary {binary} --identity-dir {identity} --manifest-schema {schema} --version \"$version\" --incoming incoming --commit \"$commit\" --signer \"$live_fpr\" --expect-signer {signer} --verify-oci true\n          else\n            velnor-workflow release apt-verify --suite \"$channel\" --source-repo {source} --package {package} --binary {binary} --identity-dir {identity} --manifest-schema {schema} --version \"$version\" --incoming incoming --commit \"$commit\" --signer \"$live_fpr\" --expect-signer {signer}\n          fi\n          {{\n            echo \"version=$version\"\n            echo \"commit=$commit\"\n            echo \"channel=$channel\"\n          }} >> \"$GITHUB_OUTPUT\"\n      - name: Upload verified feed inputs\n        uses: {upload}\n        with:\n          name: apt-incoming\n          path: incoming\n          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n"
+    )
+}
+
+/// The publish job: recover the prior pair, derive the previous pointer
+/// (or bootstrap the preview suite), publish the staged suite with both
+/// secrets by reference, update the channel state, and upload the staged
+/// tree. Default branch + writer events only.
+fn render_apt_publish_job(ctx: &AptFeedCtx) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let download = ActionPin::DownloadArtifact.reference();
+    let AptFeedCtx {
+        runner,
+        setup,
+        source,
+        package,
+        package_raw,
+        binary,
+        consumer,
+        schema,
+        identity,
+        keyring,
+        origin,
+        description,
+        feed,
+        signer,
+        secret,
+        key_secret,
+        letter,
+        ..
+    } = ctx;
+    format!(
+        "  publish:\n    name: Publish apt feed\n    needs: [verify]\n    if: ${{{{ {publish_gate} }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    outputs:\n      version: ${{{{ needs.verify.outputs.version }}}}\n      commit: ${{{{ needs.verify.outputs.commit }}}}\n      channel: ${{{{ needs.verify.outputs.channel }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download verified feed inputs\n        uses: {download}\n        with:\n          name: apt-incoming\n          path: incoming\n      - name: Recover the prior pair and derive the previous pointer\n        id: prior\n        env:\n          CHANNEL: ${{{{ needs.verify.outputs.channel }}}}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n        run: |\n          set -euo pipefail\n          rm -rf prev\n          mkdir -p prev\n          feed={feed}\n          echo \"bootstrap=false\" >> \"$GITHUB_OUTPUT\"\n          case \"$CHANNEL\" in\n            stable)\n              prev_tag=\"$(curl --fail --show-error --silent --location \"$feed/last-publish\")\"\n              prev_version=\"${{prev_tag#v}}\"\n              case \"$prev_version\" in ''|*[!0-9.]*) echo \"::error::live last-publish is not a version: $prev_tag\" >&2; exit 1 ;; esac\n              for arch in amd64 arm64; do\n                curl --fail --show-error --silent --location --retry 3 \\\n                  -o \"prev/{package_raw}-$prev_version-$arch.deb\" \\\n                  \"$feed/pool/main/{letter}/{package_raw}/{package_raw}_${{prev_version}}_${{arch}}.deb\"\n              done\n              candidate_sha=\"$(awk '{{print $1}}' incoming/release-record.json.sha256)\"\n              curl --fail --show-error --silent --location -o published.json \"$feed/publication-record.json\"\n              velnor-workflow release apt-previous-pointer --suite stable --published published.json --prior \"$prev_tag\" --candidate \"$VERSION\" --candidate-sha \"$candidate_sha\" > previous-pointer.json\n              ;;\n            preview)\n              if curl --fail --show-error --silent --location --output /dev/null \"$feed/dists/preview/InRelease\"; then\n                curl --fail --show-error --silent --location -o live-packages \"$feed/dists/preview/main/binary-amd64/Packages\"\n                rollback=\"$(awk '$1==\"Package:\"{{p=$2}} p==\"{package_raw}\" && $1==\"Version:\"{{print $2}}' live-packages | sort -u | grep -Fxv \"$VERSION\")\"\n                [ -n \"$rollback\" ] || {{ echo \"::error::no retained rollback in the live preview index\" >&2; exit 1; }}\n                [ \"$(printf '%s\\n' \"$rollback\" | wc -l | tr -d ' ')\" = 1 ] || {{ echo \"::error::live preview index retains more than one rollback\" >&2; exit 1; }}\n                case \"$rollback\" in ''|*[!0-9A-Za-z.+:~-]*) echo \"::error::live preview rollback is not a pool version: $rollback\" >&2; exit 1 ;; esac\n                for arch in amd64 arm64; do\n                  curl --fail --show-error --silent --location --retry 3 \\\n                    -o \"prev/{package_raw}_${{rollback}}_${{arch}}.deb\" \\\n                    \"$feed/pool/preview/main/{letter}/{package_raw}/{package_raw}_${{rollback}}_${{arch}}.deb\"\n                done\n                velnor-workflow release apt-previous-pointer --suite preview > previous-pointer.json\n              else\n                velnor-workflow release apt-previous-pointer --suite preview --bootstrap true > previous-pointer.json\n                echo \"bootstrap=true\" >> \"$GITHUB_OUTPUT\"\n              fi\n              ;;\n          esac\n      - name: Publish the staged suite\n        env:\n          CHANNEL: ${{{{ needs.verify.outputs.channel }}}}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          COMMIT: ${{{{ needs.verify.outputs.commit }}}}\n          {secret}: ${{{{ secrets.{secret} }}}}\n          {key_secret}: ${{{{ secrets.{key_secret} }}}}\n        run: |\n          set -euo pipefail\n          args=(--suite \"$CHANNEL\" --source-repo {source} --package {package} --binary {binary} --consumer-repo {consumer} --manifest-schema {schema} --identity-dir {identity} --keyring {keyring} --origin {origin} --description {description} --feed-url {feed} --signer {signer} --passphrase-env {secret} --key-env {key_secret} --version \"$VERSION\" --incoming incoming --previous-pointer previous-pointer.json --staging public)\n          if [ \"${{{{ steps.prior.outputs.bootstrap }}}}\" = true ]; then\n            args+=(--bootstrap true)\n          else\n            args+=(--prev-dir prev)\n          fi\n          velnor-workflow release apt-publish \"${{args[@]}}\"\n          if [ \"$CHANNEL\" = stable ]; then\n            ref=\"refs/tags/$VERSION\"\n            manifest=\"incoming/manifest.json\"\n          else\n            ref=\"refs/heads/main\"\n            manifest=\"incoming/release-manifest.json\"\n          fi\n          velnor-workflow release apt-channel-update --suite \"$CHANNEL\" --source-repo {source} --source-ref \"$ref\" --commit \"$COMMIT\" --version \"$VERSION\" --package {package} --manifest \"$manifest\" --staging public\n      - name: Upload staged feed tree\n        uses: {upload}\n        with:\n          name: apt-staging\n          path: public\n          if-no-files-found: error\n          retention-days: 2\n",
+        publish_gate = ctx.publish_gate,
+    )
+}
+
+/// The deploy job: download the staged tree, guard against a rollback
+/// deploy, and publish through Pages. Same writer gate as publish.
+fn render_apt_deploy_job(ctx: &AptFeedCtx) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    let download = ActionPin::DownloadArtifact.reference();
+    let AptFeedCtx {
+        runner,
+        setup,
+        feed,
+        ..
+    } = ctx;
+    format!(
+        "  deploy:\n    name: Deploy apt feed\n    needs: [publish]\n    if: ${{{{ {deploy_gate} }}}}\n    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-pages\n    permissions:\n      contents: read\n      pages: write\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download staged feed tree\n        uses: {download}\n        with:\n          name: apt-staging\n          path: public\n      - name: Guard against a rollback deploy\n        env:\n          CHANNEL: ${{{{ needs.publish.outputs.channel }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then last=\"last-publish\"; else last=\"last-publish-preview\"; fi\n          live=\"unknown\"\n          if curl --fail --show-error --silent --location -o live-last-publish {feed}/$last; then\n            live=\"$(cat live-last-publish)\"\n          fi\n          velnor-workflow release apt-deploy-guard --suite \"$CHANNEL\" --staged public --live-version \"$live\"\n      - name: Configure Pages\n        uses: {configure_pages}\n      - name: Upload Pages artifact\n        uses: {upload_pages}\n        with:\n          path: public\n      - name: Deploy Pages\n        uses: {deploy_pages}\n",
+        deploy_gate = ctx.deploy_gate,
+        configure_pages = ActionPin::ConfigurePages.reference(),
+        upload_pages = ActionPin::UploadPages.reference(),
+        deploy_pages = ActionPin::DeployPages.reference(),
+    )
+}
+
+/// The feed-result job: fail closed unless verification succeeded — and,
+/// on the default branch, publication and deployment too.
+fn render_apt_feed_result_job(ctx: &AptFeedCtx) -> String {
+    let AptFeedCtx { runner, branch, .. } = ctx;
+    format!(
+        "  feed-result:\n    name: Feed result\n    needs: [verify, publish, deploy]\n    if: ${{{{ always() }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Fail closed unless the feed verified and published\n        env:\n          REF: ${{{{ github.ref }}}}\n          VERIFY: ${{{{ needs.verify.result }}}}\n          PUBLISH: ${{{{ needs.publish.result }}}}\n          DEPLOY: ${{{{ needs.deploy.result }}}}\n        run: |\n          set -euo pipefail\n          [ \"$VERIFY\" = success ] || {{ echo \"::error::feed verification did not succeed: $VERIFY\" >&2; exit 1; }}\n          if [ \"$REF\" = \"refs/heads/{branch}\" ]; then\n            [ \"$PUBLISH\" = success ] || {{ echo \"::error::feed publication did not succeed: $PUBLISH\" >&2; exit 1; }}\n            [ \"$DEPLOY\" = success ] || {{ echo \"::error::feed deployment did not succeed: $DEPLOY\" >&2; exit 1; }}\n          else\n            [ \"$PUBLISH\" = skipped ] || {{ echo \"::error::unexpected publication state off the default branch: $PUBLISH\" >&2; exit 1; }}\n            [ \"$DEPLOY\" = skipped ] || {{ echo \"::error::unexpected deployment state off the default branch: $DEPLOY\" >&2; exit 1; }}\n          fi\n"
     )
 }
 
@@ -5884,6 +6181,15 @@ cp "$record" "$out"
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: String::new(),
+            apt_arches: Vec::new(),
+            signer_fingerprint: String::new(),
+            passphrase_secret: String::new(),
+            signing_key_secret: String::new(),
+            keyring_path: String::new(),
+            apt_origin: String::new(),
+            apt_identity_dir: String::new(),
+            apt_feed_url: String::new(),
+            retention: 0,
             dockerfile: String::new(),
             context: String::new(),
             platforms: Vec::new(),
@@ -5925,6 +6231,15 @@ cp "$record" "$out"
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
+            apt_arches: Vec::new(),
+            signer_fingerprint: String::new(),
+            passphrase_secret: String::new(),
+            signing_key_secret: String::new(),
+            keyring_path: String::new(),
+            apt_origin: String::new(),
+            apt_identity_dir: String::new(),
+            apt_feed_url: String::new(),
+            retention: 0,
             dockerfile: String::new(),
             context: String::new(),
             platforms: Vec::new(),
@@ -5962,6 +6277,15 @@ cp "$record" "$out"
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: String::new(),
+            apt_arches: Vec::new(),
+            signer_fingerprint: String::new(),
+            passphrase_secret: String::new(),
+            signing_key_secret: String::new(),
+            keyring_path: String::new(),
+            apt_origin: String::new(),
+            apt_identity_dir: String::new(),
+            apt_feed_url: String::new(),
+            retention: 0,
             dockerfile: "Dockerfile".to_owned(),
             context: ".".to_owned(),
             platforms: vec!["linux/amd64".to_owned(), "linux/arm64".to_owned()],
@@ -6189,7 +6513,13 @@ cp "$record" "$out"
         pages.artifact_path = "site".to_owned();
         let mut apt = binary_spec();
         apt.kind = "apt".to_owned();
+        apt.source_repository = "example/app".to_owned();
         apt.consumer_repository = "example/apt".to_owned();
+        apt.manifest_schema = "example.test/apt-manifest-v1".to_owned();
+        apt.signer_fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567".to_owned();
+        apt.passphrase_secret = "APT_PASSPHRASE".to_owned();
+        apt.signing_key_secret = "APT_SIGNING_KEY".to_owned();
+        apt.apt_feed_url = "https://feed.example.test".to_owned();
         let mut homebrew = binary_spec();
         homebrew.kind = "homebrew".to_owned();
         homebrew.source_repository = "example/app".to_owned();
@@ -8832,6 +9162,15 @@ cp "$record" "$out"
                 artifact_path: String::new(),
                 description: String::new(),
                 manifest_schema: String::new(),
+                apt_arches: Vec::new(),
+                signer_fingerprint: String::new(),
+                passphrase_secret: String::new(),
+                signing_key_secret: String::new(),
+                keyring_path: String::new(),
+                apt_origin: String::new(),
+                apt_identity_dir: String::new(),
+                apt_feed_url: String::new(),
+                retention: 0,
                 dockerfile: String::new(),
                 context: String::new(),
                 platforms: Vec::new(),
@@ -9013,6 +9352,15 @@ cp "$record" "$out"
                 artifact_path: String::new(),
                 description: String::new(),
                 manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
+                apt_arches: Vec::new(),
+                signer_fingerprint: String::new(),
+                passphrase_secret: String::new(),
+                signing_key_secret: String::new(),
+                keyring_path: String::new(),
+                apt_origin: String::new(),
+                apt_identity_dir: String::new(),
+                apt_feed_url: String::new(),
+                retention: 0,
                 dockerfile: String::new(),
                 context: String::new(),
                 platforms: Vec::new(),
@@ -9124,52 +9472,468 @@ cp "$record" "$out"
         }
     }
 
+    fn apt_args(package: &str, source: &str, consumer: &str, origin: &str) -> String {
+        format!(
+            "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+             [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
+             binary = \"{package}\"\nsource_repository = \"{source}\"\n\
+             consumer_repository = \"{consumer}\"\n\
+             manifest_schema = \"example.test/apt-manifest-v1\"\n\
+             signer_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"\n\
+             passphrase_secret = \"APT_PASSPHRASE\"\n\
+             signing_key_secret = \"APT_SIGNING_KEY\"\n\
+             apt_origin = \"{origin}\"\n\
+             apt_feed_url = \"https://feed.example.test\"\n"
+        )
+    }
+
+    fn apt_release_yml(declaration: &str, root_name: &str) -> (String, PathBuf) {
+        let root = scanned_root(root_name);
+        let surface = generate(&root, &config(&[], None), Some(declaration));
+        let release = surface
+            .files
+            .get(&PathBuf::from(".github/workflows/release.yml"))
+            .unwrap_or_else(|| panic!("an apt feed must render release.yml"))
+            .clone();
+        (release, root)
+    }
+
+    /// A complete fixture apt spec for renderer-level tests.
+    fn apt_spec_for_render() -> ReleaseSpec {
+        let mut spec = binary_spec();
+        spec.kind = "apt".to_owned();
+        spec.source_repository = "example/app".to_owned();
+        spec.consumer_repository = "example/apt".to_owned();
+        spec.manifest_schema = "example.test/apt-manifest-v1".to_owned();
+        spec.signer_fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567".to_owned();
+        spec.passphrase_secret = "APT_PASSPHRASE".to_owned();
+        spec.signing_key_secret = "APT_SIGNING_KEY".to_owned();
+        spec.apt_origin = "Example".to_owned();
+        spec.apt_feed_url = "https://feed.example.test".to_owned();
+        spec
+    }
+
     #[test]
     fn a_declared_apt_feed_mutates_from_github_only() {
-        for (name, package, consumer) in [
-            ("apt-feed", "example", "example/apt"),
-            ("apt-feed-acme", "widget", "acme/apt"),
+        for (name, package, source, consumer) in [
+            ("apt-feed", "example", "example/app", "example/apt"),
+            ("apt-feed-acme", "widget", "acme/widget", "acme/apt"),
         ] {
-            let root = scanned_root(name);
-            let surface = generate(
-                &root,
-                &config(&[], None),
-                Some(&format!(
-                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
-                     [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
-                     consumer_repository = \"{consumer}\"\n"
-                )),
-            );
-            let release = surface
-                .files
-                .get(&PathBuf::from(".github/workflows/release.yml"))
-                .unwrap_or_else(|| panic!("an apt feed must render release.yml"));
+            let (release, root) =
+                apt_release_yml(&apt_args(package, source, consumer, "Example"), name);
             assert!(release.contains("Package feed"), "{release}");
-            assert!(release.contains("--kind apt"), "{release}");
+            assert!(release.contains("release apt-fetch"), "{release}");
+            assert!(release.contains("release apt-verify"), "{release}");
+            assert!(release.contains("release apt-publish"), "{release}");
+            assert!(release.contains("release apt-deploy-guard"), "{release}");
             assert!(
-                release.contains(&format!("--package {package}")),
+                release.contains(&format!("--package '{package}'")),
                 "{release}"
             );
             assert!(release.contains(consumer), "{release}");
+            // No dispatch input selects runners: the visibility singleton
+            // fixed the universe at generation time. (Spelled via concat!:
+            // the legacy-vocabulary guard bans the literal in s2 source.)
             assert!(
-                !release.contains("admit-provider"),
-                "no dispatch-scoped admission job survives: {release}"
+                !release.contains(concat!("inputs", ".runner")),
+                "no dispatch input selects runners: {release}"
+            );
+            assert!(
+                !release.contains("admit-runner"),
+                "no runner admission job survives: {release}"
             );
             assert!(
                 !release.contains("inputs.providers"),
                 "no dispatch input selects providers: {release}"
             );
+            // The feed is real: fetch, verify, publish, deploy, and a
+            // fail-closed result — never an omission notice.
+            for job in ["verify:", "publish:", "deploy:", "feed-result:"] {
+                assert!(release.contains(&format!("\n  {job}")), "{release}");
+            }
+            assert!(!release.contains("omitted"), "{release}");
+            assert!(release.contains("group: package-feed-apt-"), "{release}");
+            assert!(release.contains("environment: package-feed"), "{release}");
+            assert!(release.contains("environment: github-pages"), "{release}");
+            assert!(release.contains("pages: write"), "{release}");
+            assert!(release.contains("id-token: write"), "{release}");
+            let publish = yaml_job(&release, "publish");
             assert!(
-                release.contains("default: stable"),
-                "the channel input survives: {release}"
-            );
-            let mutate = yaml_job(release, "mutate");
-            assert!(
-                mutate.contains("runs-on: ubuntu-24.04"),
-                "feed mutation publishes from GitHub: {mutate}"
+                publish.contains("runs-on: ubuntu-24.04"),
+                "feed mutation publishes from GitHub: {publish}"
             );
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    fn apt_step_block<'a>(rendered: &'a str, step: &str) -> &'a str {
+        let start = must_some(rendered.find(step), "the step renders");
+        let rest = &rendered[start..];
+        let end = rest
+            .find("\n      - name: ")
+            .map_or(rendered.len(), |offset| start + offset);
+        &rendered[start..end]
+    }
+
+    #[test]
+    fn apt_artifact_handoffs_agree_on_directories() {
+        // Every cross-job artifact handoff must download into the directory
+        // the downstream steps address: `path: .` scatters the payload at
+        // the workspace root while the scripts read `incoming/…` / `public/…`.
+        let (release, root) = apt_release_yml(
+            &apt_args("example", "example/app", "example/apt", "Example"),
+            "apt-handoff-agreement",
+        );
+        for (upload_step, download_step, dir, reference) in [
+            (
+                "Upload verified feed inputs",
+                "Download verified feed inputs",
+                "incoming",
+                "incoming/release-record.json.sha256",
+            ),
+            (
+                "Upload staged feed tree",
+                "Download staged feed tree",
+                "public",
+                "--staged public",
+            ),
+        ] {
+            let upload = apt_step_block(&release, upload_step);
+            let download = apt_step_block(&release, download_step);
+            assert!(
+                upload.contains(&format!("path: {dir}")),
+                "the {upload_step} step must stage {dir}: {release}"
+            );
+            assert!(
+                download.contains(&format!("path: {dir}")),
+                "the {download_step} step must restore {dir}: {release}"
+            );
+            assert!(
+                release.contains(reference),
+                "downstream steps must address the handoff through {dir}: {release}"
+            );
+        }
+        assert!(
+            !release.contains("path: ."),
+            "no apt handoff may scatter its payload at the workspace root: {release}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_verify_upload_preserves_the_hidden_sentinel() {
+        // Verify arms a hidden sentinel and publish refuses without it, but
+        // upload-artifact drops dotfiles by default — the live feed failed
+        // exactly this way (verify green, publish refusing). The rendered
+        // apt-incoming upload must opt into hidden files so the sentinel
+        // survives the verify→publish handoff.
+        assert!(
+            crate::apt::SENTINEL_FILE.starts_with('.'),
+            "the handoff guard below only matters while the sentinel is hidden",
+        );
+        let (release, root) = apt_release_yml(
+            &apt_args("example", "example/app", "example/apt", "Example"),
+            "apt-sentinel-handoff",
+        );
+        let upload = apt_step_block(&release, "Upload verified feed inputs");
+        assert!(
+            upload.contains("name: apt-incoming"),
+            "the step under test must be the apt-incoming handoff: {release}"
+        );
+        assert!(
+            upload.contains("include-hidden-files: true"),
+            "the apt-incoming upload must carry the dotfile sentinel: {release}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_publish_wires_the_signing_key_secret() {
+        // The publish step must hand `apt-publish` both secrets by
+        // reference: the passphrase and the key material it imports into
+        // the isolated keyring. A passphrase alone cannot sign.
+        let (release, root) = apt_release_yml(
+            &apt_args("example", "example/app", "example/apt", "Example"),
+            "apt-key-secret",
+        );
+        let publish = apt_step_block(&release, "Publish the staged suite");
+        assert!(
+            publish.contains("APT_PASSPHRASE: ${{ secrets.APT_PASSPHRASE }}"),
+            "the passphrase must stay wired: {release}"
+        );
+        assert!(
+            publish.contains("APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}"),
+            "the key material must be wired by reference: {release}"
+        );
+        assert!(
+            publish.contains("--passphrase-env APT_PASSPHRASE --key-env APT_SIGNING_KEY"),
+            "apt-publish must receive both secret names: {release}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_rollback_version_is_charset_validated_before_use() {
+        let (release, root) = apt_release_yml(
+            &apt_args("example", "example/app", "example/apt", "Example"),
+            "apt-rollback-gate",
+        );
+        // The preview `prior` step validates the live-feed rollback
+        // against the `valid_pool_version` charset (rejecting `/` with
+        // everything else outside it) before embedding it in a path/URL,
+        // mirroring the stable `last-publish` gate.
+        let gate = "case \"$rollback\" in ''|*[!0-9A-Za-z.+:~-]*)";
+        assert!(release.contains(gate), "{release}");
+        let gate_at = must_some(release.find(gate), "rollback gate renders");
+        let use_at = must_some(
+            release.find("-o \"prev/example_${rollback}_${arch}.deb\""),
+            "rollback use renders",
+        );
+        assert!(
+            gate_at < use_at,
+            "the rollback gate must precede its first use: {release}"
+        );
+        assert!(
+            release.contains("case \"$prev_version\" in ''|*[!0-9.]*"),
+            "the stable gate is the mirror: {release}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn feed_verify_attests_every_fetched_deb_before_apt_verify() {
+        let (release, root) = apt_release_yml(
+            &apt_args("example", "example/app", "example/apt", "Example"),
+            "apt-attestation",
+        );
+        // Every fetched deb is attested against the source repo, the
+        // pinned package-signer workflow, and the resolved source
+        // ref/digest — before `apt-verify` sees any byte. A forged
+        // self-consistent record+manifest+debs set fails here, never at
+        // the signing key.
+        let attestation = "gh attestation verify \"$subject\" --repo 'example/app' \
+             --signer-workflow \"example/app/.github/workflows/ci-release-package-signer.yml\" \
+             --source-ref \"$source_ref\" --source-digest \"$commit\"";
+        assert!(release.contains(attestation), "{release}");
+        assert!(
+            release.contains("source_ref=\"refs/tags/$version\""),
+            "{release}"
+        );
+        assert!(
+            release.contains("source_ref=\"refs/heads/main\""),
+            "{release}"
+        );
+        // Fail closed on an empty fetch: no subjects, no silent pass.
+        assert!(release.contains("no fetched debs to attest"), "{release}");
+        let fetch_at = must_some(release.find("release apt-fetch"), "fetch renders");
+        let attest_at = must_some(release.find("gh attestation verify"), "attestation renders");
+        let verify_at = must_some(release.find("release apt-verify"), "verify renders");
+        assert!(
+            fetch_at < attest_at && attest_at < verify_at,
+            "attestation must run after fetch and before apt-verify: {release}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_declared_apt_feed_is_generic_over_names() {
+        // Renamed-fixture proof at the generator layer: two declarations
+        // that differ only in package/source/consumer/origin render the
+        // same workflow shape with the names substituted — no name-keyed
+        // branches anywhere in the renderer.
+        let (first, first_root) = apt_release_yml(
+            &apt_args("example", "example/app", "example/apt", "Example"),
+            "apt-generic-a",
+        );
+        let (second, second_root) = apt_release_yml(
+            &apt_args("widget", "acme/widget", "acme/feed", "Widget Works"),
+            "apt-generic-b",
+        );
+        assert!(second.contains("--package 'widget'"), "{second}");
+        assert!(second.contains("--binary 'widget'"), "{second}");
+        assert!(second.contains("acme/widget"), "{second}");
+        assert!(second.contains("--origin 'Widget Works'"), "{second}");
+        assert!(second.contains("pool/main/w/widget"), "{second}");
+        assert!(second.contains("pool/preview/main/w/widget"), "{second}");
+        // The shape is identical modulo names: the same job set and the
+        // same fixed command lines on both surfaces.
+        for job in ["verify:", "publish:", "deploy:", "feed-result:"] {
+            assert!(first.contains(&format!("\n  {job}")), "{first}");
+            assert!(second.contains(&format!("\n  {job}")), "{second}");
+        }
+        for command in [
+            "release apt-resolve-commit",
+            "release apt-fetch",
+            "release apt-verify",
+            "release apt-publish",
+            "release apt-previous-pointer",
+            "release apt-channel-update",
+            "release apt-deploy-guard",
+        ] {
+            assert!(first.contains(command), "{first}");
+            assert!(second.contains(command), "{second}");
+        }
+        assert_eq!(
+            first.matches("velnor-workflow release apt-").count(),
+            second.matches("velnor-workflow release apt-").count(),
+        );
+        let _ = fs::remove_dir_all(first_root);
+        let _ = fs::remove_dir_all(second_root);
+    }
+
+    #[test]
+    fn malformed_apt_declarations_fail_closed() {
+        let base = apt_args("example", "example/app", "example/apt", "Example");
+        // Each case breaks one typed field; the declaration must fail with
+        // a diagnostic, never render a feed around the bad value.
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "bad source",
+                "source_repository = \"example/app\"",
+                "source_repository = \"not-a-slug\"",
+            ),
+            (
+                "bad consumer",
+                "consumer_repository = \"example/apt\"",
+                "consumer_repository = \"\"",
+            ),
+            (
+                "bad package",
+                "package = \"example\"",
+                "package = \"has space\"",
+            ),
+            (
+                "bad schema",
+                "manifest_schema = \"example.test/apt-manifest-v1\"",
+                "manifest_schema = \"has space\"",
+            ),
+            (
+                "bad signer",
+                "signer_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"",
+                "signer_fingerprint = \"short\"",
+            ),
+            (
+                "bad secret",
+                "passphrase_secret = \"APT_PASSPHRASE\"",
+                "passphrase_secret = \"lowercase\"",
+            ),
+            (
+                "bad origin",
+                "apt_origin = \"Example\"",
+                "apt_origin = \"a;id\"",
+            ),
+            (
+                "bad feed",
+                "apt_feed_url = \"https://feed.example.test\"",
+                "apt_feed_url = \"http://plain\"",
+            ),
+            (
+                "bad retention",
+                "apt_feed_url = \"https://feed.example.test\"",
+                "apt_feed_url = \"https://feed.example.test\"\nretention = 2",
+            ),
+            (
+                "bad arches",
+                "apt_feed_url = \"https://feed.example.test\"",
+                "apt_feed_url = \"https://feed.example.test\"\napt_arches = [\"amd64\", \"i386\"]",
+            ),
+        ];
+        for (name, from, to) in cases {
+            let root = scanned_root(&format!("apt-malformed-{name}"));
+            let declaration = base.replace(from, to);
+            let error = match try_generate(&root, &config(&[], None), Some(&declaration)) {
+                Ok(_) => panic!("{name} must fail closed"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("apt") || error.contains("retention") || error.contains("arches"),
+                "{name}: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn incomplete_apt_declarations_name_the_missing_contract() {
+        let root = scanned_root("apt-incomplete");
+        let error = match try_generate(
+            &root,
+            &config(&[], None),
+            Some(
+                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                 [declare.args]\nkind = \"apt\"\npackage = \"example\"\n\
+                 consumer_repository = \"example/apt\"\n",
+            ),
+        ) {
+            Ok(_) => panic!("an incomplete apt declaration must fail closed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("incomplete release contract"), "{error}");
+        assert!(error.contains("signer_fingerprint"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_config_values_cannot_inject_shell_or_yaml() {
+        // Every value that reaches the shell is either a validated scalar
+        // (whose charset excludes metacharacters) or single-quoted; the
+        // hostile shapes below never survive validation.
+        let hostile: &[(&str, &str)] = &[
+            ("package", "x\"; echo pwned; echo \""),
+            ("binary", "x`id`"),
+            ("source_repository", "example/app$(id)"),
+            (
+                "signer_fingerprint",
+                "0123456789ABCDEF0123456789ABCDEF0123456;id",
+            ),
+            ("passphrase_secret", "A;B"),
+            ("signing_key_secret", "A;B"),
+            ("keyring_path", "a.gpg; id"),
+            ("apt_origin", "a`id`"),
+            ("apt_identity_dir", "a/b"),
+            ("apt_feed_url", "https://feed.example.test/a`id`"),
+        ];
+        for (field, value) in hostile {
+            let mut spec = apt_spec_for_render();
+            match *field {
+                "package" => spec.package = value.to_string(),
+                "binary" => spec.binary = value.to_string(),
+                "source_repository" => spec.source_repository = value.to_string(),
+                "signer_fingerprint" => spec.signer_fingerprint = value.to_string(),
+                "passphrase_secret" => spec.passphrase_secret = value.to_string(),
+                "signing_key_secret" => spec.signing_key_secret = value.to_string(),
+                "keyring_path" => spec.keyring_path = value.to_string(),
+                "apt_origin" => spec.apt_origin = value.to_string(),
+                "apt_identity_dir" => spec.apt_identity_dir = value.to_string(),
+                "apt_feed_url" => spec.apt_feed_url = value.to_string(),
+                _ => panic!("unknown hostile field {field}"),
+            }
+            let validation = apt_release_spec(&spec);
+            let error = match crate::apt::AptContract::resolve(&validation) {
+                Ok(_) => panic!("hostile {field} must fail validation"),
+                Err(error) => error.to_string(),
+            };
+            assert!(!error.is_empty(), "{field}");
+        }
+        // And the rendered feed quotes what it interpolates: no raw config
+        // bytes outside validated scalars and single quotes.
+        let (release, root) = apt_release_yml(
+            &apt_args("example", "example/app", "example/apt", "Example Feed 2.0"),
+            "apt-quoting",
+        );
+        assert!(release.contains("--origin 'Example Feed 2.0'"), "{release}");
+        assert!(!release.contains("Example Feed 2.0\n"), "{release}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_feed_render_is_deterministic() {
+        let config = config(&["release.yml"], Some(apt_spec_for_render()));
+        let release = must_some(config.release.clone(), "fixture carries apt");
+        let first = render_release(&config, &release);
+        let second = render_release(&config, &release);
+        assert_eq!(first, second, "the apt feed must render byte-identically");
+        assert!(!first.contains("omitted"), "{first}");
     }
 
     #[test]
@@ -9300,6 +10064,15 @@ cp "$record" "$out"
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
+            apt_arches: Vec::new(),
+            signer_fingerprint: String::new(),
+            passphrase_secret: String::new(),
+            signing_key_secret: String::new(),
+            keyring_path: String::new(),
+            apt_origin: String::new(),
+            apt_identity_dir: String::new(),
+            apt_feed_url: String::new(),
+            retention: 0,
             dockerfile: String::new(),
             context: String::new(),
             platforms: Vec::new(),
