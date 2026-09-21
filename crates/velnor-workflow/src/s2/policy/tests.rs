@@ -885,6 +885,26 @@ fn trusted_conjunct_members_pass_and_near_misses_fail() {
     }
 }
 
+/// The maintenance prune admission is a top-level `||` over `pull_request`,
+/// so the bare gate fails closed on a local lane; parenthesized and
+/// conjoined with the trusted-event predicate — the shape the renderer
+/// emits for local maintenance — it passes.
+#[test]
+fn maintenance_prune_gate_needs_the_trusted_conjunct_on_local_lanes() {
+    let functional = "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')";
+    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+    let bare = format!("${{{{ {functional} }}}}");
+    assert!(
+        !has_exact_trusted_conjunct(&bare),
+        "the bare prune admission fails closed: {bare}"
+    );
+    let gated = format!("${{{{ ({functional}) && {trusted} }}}}");
+    assert!(
+        has_exact_trusted_conjunct(&gated),
+        "the conjoined prune gate passes: {gated}"
+    );
+}
+
 #[test]
 fn a_second_pull_request_target_workflow_is_refused() {
     let root = velnor_tree("semantic-prt", &gated_trusted_job());
