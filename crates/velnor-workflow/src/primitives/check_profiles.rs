@@ -75,6 +75,31 @@ impl Primitive for ScheduledChecks {
     }
 }
 
+/// A profile with an extra repository token capability must never run from a
+/// pull-request trigger. Pull-request jobs execute contributor-controlled
+/// task code; granting that code access to Actions history would turn a
+/// read-only capability into an information-disclosure path. Scheduled and
+/// default-branch push/dispatch jobs remain eligible, while a mixed file fails
+/// closed instead of relying on a task author to remember an event distinction.
+fn validate_profile_permissions(
+    profiles: &[&CheckProfileSpec],
+    events: &[String],
+    file: &str,
+) -> Result<(), GeneratorError> {
+    if !events.iter().any(|event| event == "pull_request") {
+        return Ok(());
+    }
+    for profile in profiles {
+        if !profile.permissions.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "`{file}` cannot grant permissions to check profile `{}` because `pull_request` runs contributor-controlled tasks; place the read capability on a schedule/push/dispatch-only file",
+                profile.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The profiles one `scheduled-checks` row renders, in configuration order.
 ///
 /// An absent `profiles` argument selects every configured profile. Selection
@@ -360,6 +385,7 @@ fn render_checks_file(
     branches: &[String],
     lanes_input: bool,
 ) -> Result<String, GeneratorError> {
+    validate_profile_permissions(profiles, events, file)?;
     let stem = file.strip_suffix(".yml").unwrap_or(file);
     let name = name.unwrap_or_else(|| stem.to_owned());
     let schedule = profiles
@@ -525,6 +551,19 @@ fn render_profile_job(
     if profile.advisory {
         output.push_str("    continue-on-error: true\n");
     }
+    if !profile.permissions.is_empty() {
+        // GitHub replaces a job-level permissions map instead of merging it
+        // with the workflow default. Keep checkout access explicit while
+        // adding only the validated read-only capabilities.
+        let mut permissions = profile.permissions.clone();
+        permissions
+            .entry("contents".to_owned())
+            .or_insert_with(|| "read".to_owned());
+        output.push_str("    permissions:\n");
+        for (scope, level) in &permissions {
+            let _ = writeln!(output, "      {scope}: {level}");
+        }
+    }
     if !profile.env.is_empty() {
         output.push_str("    env:\n");
         for (key, value) in &profile.env {
@@ -666,6 +705,7 @@ mod tests {
             artifacts: Vec::new(),
             advisory: false,
             env: BTreeMap::new(),
+            permissions: BTreeMap::new(),
         }
     }
 
@@ -1039,6 +1079,61 @@ mod tests {
         assert!(
             !workflow.contains("\"Daily probes\" · "),
             "a quoted part followed by more content is not valid YAML: {workflow}"
+        );
+    }
+
+    #[test]
+    fn actions_read_is_job_scoped_and_preserves_checkout_access() {
+        let mut collector = profile("collector");
+        collector
+            .permissions
+            .insert("actions".to_owned(), "read".to_owned());
+        let config = profile_config(vec![collector]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select the collector profile",
+        );
+        let workflow = render(&config, None, &selected);
+        assert!(
+            workflow.contains("    permissions:\n      actions: read\n      contents: read\n"),
+            "the capability must be scoped to the collector job and retain checkout access: {workflow}"
+        );
+        assert_eq!(
+            workflow.matches("permissions:\n").count(),
+            2,
+            "workflow and collector job each carry an explicit permission map: {workflow}"
+        );
+        assert_eq!(
+            workflow.matches("      actions: read\n").count(),
+            1,
+            "no unrelated job receives Actions history access: {workflow}"
+        );
+    }
+
+    #[test]
+    fn actions_read_is_rejected_on_pull_request_files() {
+        let mut collector = profile("collector");
+        collector
+            .permissions
+            .insert("actions".to_owned(), "read".to_owned());
+        let config = profile_config(vec![collector]);
+        let error = must_fail(
+            render_checks_file(
+                &config,
+                "collector.yml",
+                None,
+                &[&config.check_profiles[0]],
+                &["pull_request".to_owned()],
+                &[],
+                false,
+            ),
+            "Actions history access on pull-request tasks must fail closed",
+        );
+        assert!(error.to_string().contains("pull_request"), "{error}");
+        assert!(
+            error.to_string().contains("contributor-controlled"),
+            "{error}"
         );
     }
 

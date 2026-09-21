@@ -4513,7 +4513,6 @@ on:
         type: string
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
@@ -4526,6 +4525,9 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
     runs-on: __MAINTENANCE_PRUNE_RUNNER__
     timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
     steps:
       - name: Delete merge-ref cache namespace
         env:
@@ -5546,6 +5548,16 @@ cp "$record" "$out"
     }
 
     fn assert_cache_retention_has_actions_write(workflow: &str) {
+        let workflow_permissions = workflow.split("jobs:").next().unwrap_or_default();
+        assert!(
+            !workflow_permissions.contains("actions: write"),
+            "maintenance must not grant cache mutation to every job: {workflow}"
+        );
+        let prune = yaml_job(workflow, "prune-pr-cache");
+        assert!(
+            prune.contains("permissions:\n      actions: write\n      contents: read"),
+            "closed-PR pruning must hold its own minimal cache mutation permission: {prune}"
+        );
         let job = yaml_job(workflow, "cache-budget");
         assert!(
             job.contains("name: Cache retention"),
