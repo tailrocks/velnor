@@ -33,6 +33,7 @@ mod renovate_renderer;
 mod reuse;
 mod runners;
 pub(crate) mod runtime;
+mod rust_include;
 pub(crate) mod s2;
 mod scan;
 mod template_memory;

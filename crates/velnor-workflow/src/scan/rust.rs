@@ -2,17 +2,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
 use std::path::Path;
 
 use super::file_walk::{
     files_named, has_extension, join_repo_path, path_prefix, resolve_repo_path,
 };
 use super::{RepositoryShape, ScanContext};
+use crate::rust_include::{parse_include_paths, resolve_include_path, IncludePathError};
 use crate::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
     GeneratorError, RustToolchain, Unit, UnitKind, ValidationPhase,
 };
+
+#[cfg(test)]
+pub(crate) use crate::rust_include::parse_include_str_literals;
 
 /// The scanner's Rust dependency-policy unit. Its commands resolve the
 /// advisory databases themselves, so the Cargo-network restrictions applied to
@@ -806,242 +809,38 @@ fn include_str_paths(
     }) {
         let source_contents = fs::read_to_string(root.join(source))
             .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
-        let included_paths = parse_include_str_literals(&source_contents).map_err(|error| {
+        let included_paths = parse_include_paths(&source_contents).map_err(|error| {
             GeneratorError::usage(format!("{error} in {}", root.join(source).display()))
         })?;
         for included in included_paths {
-            let target = resolve_repo_path(&parent_path(source), &included).ok_or_else(|| {
-                GeneratorError::usage(format!(
-                    "include_str! escapes the repository from {}: {included}",
-                    root.join(source).display()
-                ))
-            })?;
-            let target = if file_set.contains(&target) || static_github_input_exists(root, &target)?
-            {
-                target
-            } else if let Some(resolved) = resolve_tracked_include_path(root, &target, file_set)? {
-                resolved
-            } else {
-                return Err(GeneratorError::usage(format!(
+            let target = resolve_include_path(
+                root,
+                &parent_path(source),
+                package_root,
+                &included,
+                file_set,
+            )
+            .map_err(|error| match error {
+                IncludePathError::Escapes => GeneratorError::usage(format!(
+                    "include_str! escapes the repository from {}: {}",
+                    root.join(source).display(),
+                    included.display()
+                )),
+                IncludePathError::Missing => GeneratorError::usage(format!(
                     "include_str! target does not exist: {} -> {}",
                     root.join(source).display(),
-                    target
-                )));
-            };
+                    included.display()
+                )),
+                IncludePathError::Io {
+                    operation,
+                    path,
+                    source,
+                } => GeneratorError::io(operation, &path, &source),
+            })?;
             targets.insert(target);
         }
     }
     Ok(targets.into_iter().collect())
-}
-
-/// Resolve an include path through a symlink to the tracked path that owns its
-/// bytes. The final canonical path must stay under the repository root; an
-/// existing but untracked or external target is not valid scan input.
-fn resolve_tracked_include_path(
-    root: &Path,
-    target: &str,
-    file_set: &BTreeSet<String>,
-) -> Result<Option<String>, GeneratorError> {
-    let canonical_root = fs::canonicalize(root)
-        .map_err(|error| GeneratorError::io("canonicalize repository root", root, &error))?;
-    let path = root.join(target);
-    let canonical_target = match fs::canonicalize(&path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(GeneratorError::io(
-                "resolve include_str target",
-                &path,
-                &error,
-            ));
-        }
-    };
-    let Ok(relative) = canonical_target.strip_prefix(&canonical_root) else {
-        return Ok(None);
-    };
-    let relative = relative
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
-    if file_set.contains(&relative) {
-        Ok(Some(relative))
-    } else {
-        Ok(None)
-    }
-}
-
-pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, String> {
-    const MACRO: &str = "include_str!";
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    let mut included = Vec::new();
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
-            cursor = skip_line_comment(bytes, cursor + 2);
-            continue;
-        }
-        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
-            cursor = skip_block_comment(bytes, cursor + 2);
-            continue;
-        }
-        if let Some(end) = skip_raw_string(bytes, cursor) {
-            cursor = end;
-            continue;
-        }
-        if bytes[cursor] == b'"' {
-            cursor = skip_quoted_literal(bytes, cursor, b'"')
-                .map_err(|error| format!("{error} at byte {cursor}"))?;
-            continue;
-        }
-        if bytes[cursor] == b'\'' && is_char_literal_start(bytes, cursor) {
-            cursor = skip_quoted_literal(bytes, cursor, b'\'')
-                .map_err(|error| format!("{error} at byte {cursor}"))?;
-            continue;
-        }
-
-        if bytes[cursor..].starts_with(MACRO.as_bytes())
-            && (cursor == 0 || !is_rust_identifier_byte(bytes[cursor - 1]))
-        {
-            let mut argument = cursor + MACRO.len();
-            while bytes.get(argument).is_some_and(u8::is_ascii_whitespace) {
-                argument += 1;
-            }
-            if bytes.get(argument) != Some(&b'(') {
-                cursor += MACRO.len();
-                continue;
-            }
-            argument += 1;
-            while bytes.get(argument).is_some_and(u8::is_ascii_whitespace) {
-                argument += 1;
-            }
-            if bytes.get(argument) != Some(&b'"') {
-                return Err("include_str! must use a plain string literal".to_owned());
-            }
-            let literal_end = skip_quoted_literal(bytes, argument, b'"')
-                .map_err(|error| format!("{error} at byte {argument}"))?;
-            let literal = &source[argument..literal_end];
-            let value = serde_json::from_str::<String>(literal).map_err(|error| {
-                format!("include_str! must use a plain string literal: {error}")
-            })?;
-            let mut close = literal_end;
-            while bytes.get(close).is_some_and(u8::is_ascii_whitespace) {
-                close += 1;
-            }
-            if bytes.get(close) != Some(&b')') {
-                return Err("unterminated include_str!".to_owned());
-            }
-            included.push(value);
-            cursor = close + 1;
-            continue;
-        }
-        cursor += 1;
-    }
-    Ok(included)
-}
-
-fn is_rust_identifier_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor < bytes.len() && bytes[cursor] != b'\n' {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn skip_block_comment(bytes: &[u8], mut cursor: usize) -> usize {
-    let mut depth = 1;
-    while cursor + 1 < bytes.len() {
-        if bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
-            depth += 1;
-            cursor += 2;
-        } else if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
-            depth -= 1;
-            cursor += 2;
-            if depth == 0 {
-                return cursor;
-            }
-        } else {
-            cursor += 1;
-        }
-    }
-    bytes.len()
-}
-
-fn skip_raw_string(bytes: &[u8], cursor: usize) -> Option<usize> {
-    let (hash_start, content_start) = match bytes.get(cursor..) {
-        Some([b'r', rest @ ..]) => (
-            cursor + 1,
-            cursor + 1 + rest.iter().take_while(|byte| **byte == b'#').count(),
-        ),
-        Some([b'b', b'r', rest @ ..]) => (
-            cursor + 2,
-            cursor + 2 + rest.iter().take_while(|byte| **byte == b'#').count(),
-        ),
-        _ => return None,
-    };
-    if bytes.get(content_start) != Some(&b'"') {
-        return None;
-    }
-    let hashes = content_start - hash_start;
-    let mut end = content_start + 1;
-    while end < bytes.len() {
-        if bytes[end] == b'"'
-            && bytes
-                .get(end + 1..end + 1 + hashes)
-                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
-        {
-            return Some(end + 1 + hashes);
-        }
-        end += 1;
-    }
-    Some(bytes.len())
-}
-
-fn is_char_literal_start(bytes: &[u8], cursor: usize) -> bool {
-    match bytes.get(cursor + 1) {
-        Some(b'\\') => true,
-        Some(byte) if *byte != b'\'' && *byte != b'\n' => bytes.get(cursor + 2) == Some(&b'\''),
-        _ => false,
-    }
-}
-
-fn skip_quoted_literal(bytes: &[u8], mut cursor: usize, delimiter: u8) -> Result<usize, String> {
-    cursor += 1;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\\' => cursor = cursor.saturating_add(2),
-            character if character == delimiter => return Ok(cursor + 1),
-            b'\n' if delimiter == b'\'' => {
-                return Err(format!("unterminated quoted literal at byte {cursor}"));
-            }
-            _ => cursor += 1,
-        }
-    }
-    Err(format!("unterminated quoted literal at byte {cursor}"))
-}
-
-pub(crate) fn static_github_input_exists(
-    root: &Path,
-    target: &str,
-) -> Result<bool, GeneratorError> {
-    if !target.starts_with(".github/")
-        || target == ".github/UNIFIED-ACTIONS.md"
-        || target.starts_with(".github/ci/")
-        || target.starts_with(".github/workflows/")
-    {
-        return Ok(false);
-    }
-    let path = root.join(target);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(GeneratorError::io(
-            "inspect include_str target",
-            &path,
-            &error,
-        )),
-    }
 }
 
 pub(crate) fn cargo_dependency_name(key: &str) -> &str {
@@ -1497,6 +1296,147 @@ mod tests {
     }
 
     #[test]
+    fn include_str_manifest_dir_concat_tracks_package_source_and_ignores_docs_template() {
+        let root = scratch("manifest-dir-concat");
+        must(
+            fs::create_dir_all(root.join("crates/app/src")),
+            "create package source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/app/assets")),
+            "create package asset directory",
+        );
+        must(
+            fs::create_dir_all(root.join("docs/templates")),
+            "create docs template directory",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/src/lib.rs"),
+                "const SOURCE: &str = include_str!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/src/lib.rs\",\n));\nconst FONT: &[u8] = include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/font.ttf\"));\n",
+            ),
+            "write package source",
+        );
+        must(
+            fs::write(root.join("crates/app/assets/font.ttf"), b"font\n"),
+            "write package asset",
+        );
+        must(
+            fs::write(
+                root.join("docs/templates/example.rs"),
+                "const DOC: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/missing.rs\"));\n",
+            ),
+            "write docs template",
+        );
+
+        let files = vec![
+            "crates/app/assets/font.ttf".to_owned(),
+            "crates/app/src/lib.rs".to_owned(),
+            "docs/templates/example.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let targets = must(
+            include_str_paths(&root, &files, &file_set, "crates/app"),
+            "resolve manifest-dir include",
+        );
+
+        assert_eq!(
+            targets,
+            vec!["crates/app/assets/font.ttf", "crates/app/src/lib.rs"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_manifest_dir_concat_preserves_exact_boundary() {
+        let root = scratch("manifest-dir-exact-boundary");
+        must(
+            fs::create_dir_all(root.join("crates/app/src")),
+            "create package source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/appsrc")),
+            "create exact-concat target directory",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/src/lib.rs"),
+                "const SOURCE: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"src/lib.rs\"));\n",
+            ),
+            "write package source",
+        );
+        must(
+            fs::write(root.join("crates/appsrc/lib.rs"), "exact\n"),
+            "write exact-concat target",
+        );
+
+        let files = vec![
+            "crates/app/src/lib.rs".to_owned(),
+            "crates/appsrc/lib.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let targets = must(
+            include_str_paths(&root, &files, &file_set, "crates/app"),
+            "resolve exact concat include",
+        );
+
+        assert_eq!(targets, vec!["crates/appsrc/lib.rs"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_manifest_dir_traversal_is_rejected() {
+        let root = scratch("manifest-dir-traversal");
+        must(
+            fs::create_dir_all(root.join("crates/app/src")),
+            "create package source directory",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/src/lib.rs"),
+                "const SOURCE: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../../outside.txt\"));\n",
+            ),
+            "write package source",
+        );
+        let files = vec!["crates/app/src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        match include_str_paths(&root, &files, &file_set, "crates/app") {
+            Err(error) => assert!(
+                error.to_string().contains("escapes the repository"),
+                "{error}"
+            ),
+            Ok(targets) => assert!(!targets.is_empty(), "manifest-dir traversal was ignored"),
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_dynamic_expression_is_rejected() {
+        let root = scratch("dynamic-include");
+        must(
+            fs::create_dir_all(root.join("crates/app/src")),
+            "create package source directory",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/src/lib.rs"),
+                "const PATH: &str = \"src/lib.rs\"; const SOURCE: &str = include_str!(PATH);\n",
+            ),
+            "write package source",
+        );
+        let files = vec!["crates/app/src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        match include_str_paths(&root, &files, &file_set, "crates/app") {
+            Err(error) => assert!(
+                error.to_string().contains("static string expression"),
+                "{error}"
+            ),
+            Ok(targets) => assert!(!targets.is_empty(), "dynamic include was ignored"),
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn release_build_feature_is_detected_per_package() {
         let root = scratch("release-build");
         must(
@@ -1643,6 +1583,46 @@ mod tests {
         reason = "the test must distinguish an accepted external target from the expected error"
     )]
     #[test]
+    fn include_str_through_external_github_parent_is_rejected() {
+        let root = scratch("external-github-parent");
+        let outside = scratch("external-github-parent-target");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::write(outside.join("manifest.yml"), "external\n"),
+            "write external target",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "const MANIFEST: &str = include_str!(\"../.github/manifest.yml\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            symlink(&outside, root.join(".github")),
+            "create external .github symlink directory",
+        );
+
+        let files = vec!["src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let error = match include_str_paths(&root, &files, &file_set, ".") {
+            Ok(targets) => panic!("external .github include target was accepted: {targets:?}"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("escapes the repository"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "the test must distinguish an accepted external target from the expected error"
+    )]
+    #[test]
     fn include_str_through_external_symlink_is_rejected() {
         let root = scratch("external-symlink");
         let outside = scratch("external-symlink-target");
@@ -1673,9 +1653,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error
-            .to_string()
-            .contains("include_str! target does not exist"));
+        assert!(error.to_string().contains("escapes the repository"));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
