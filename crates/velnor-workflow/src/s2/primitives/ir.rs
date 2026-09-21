@@ -4814,9 +4814,10 @@ impl WorkflowIr {
             self.runs_on_yaml(self.control_plane_provider()),
         );
         // The aggregate scores first, the shell verdict re-confirms after:
-        // conjunction, so either side failing fails the check. The control
-        // plane is always hosted, so the verified plan-artifact runtime is
-        // always published for this download.
+        // conjunction, so either side failing fails the check. A hosted
+        // control plane downloads the verified plan-artifact runtime the
+        // plan publishes for this download; a local control plane scores
+        // with the ambient fleet runtime, like every other local job.
         let runtime_steps =
             workflow_runtime_download(self.control_plane_provider(), &self.workflow_revision);
         output.push_str(&render_aggregate_score_steps(
@@ -6135,10 +6136,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             expected_work_dir = EXPECTED_WORK_DIR,
         );
         output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
-        // `ci-required` runs on the hosted control plane on every universe
-        // and downloads this artifact for its aggregate step, so the plan
-        // always publishes it — even where no hosted unit job consumes it.
-        output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
+        // The runtime artifact feeds hosted consumers only: hosted unit
+        // jobs and the hosted aggregate download it for their verified
+        // runtime. A local control plane plans ambient — no setup step, so
+        // no `steps.runtime` closure for Prepare to check — and every
+        // local job runs the fleet binary, so the plan publishes only for
+        // a hosted control plane and never orphans an artifact.
+        if control_plane == ProviderId::GithubHosted {
+            output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
+        }
     }
 
     pub(crate) fn render_policy(&self, output: &mut String) {

@@ -10182,7 +10182,34 @@ mod tests {
     }
 
     #[test]
-    fn plan_always_publishes_runtime_for_the_required_check_aggregate() {
+    fn hosted_plan_publishes_runtime_for_the_required_check_aggregate() {
+        let config = must(
+            scan_repository_with_default_branch(
+                &fixture_root(),
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan fixture for hosted runtime handoff",
+        );
+        let workflow = generated_ci_main(&WorkflowIr::from_config(&config));
+        let plan = yaml_job(&workflow, "plan");
+        assert!(
+            plan.contains("name: Prepare Velnor workflow runtime"),
+            "a hosted plan prepares the runtime artifact: {plan}"
+        );
+        assert!(
+            plan.contains("name: Publish Velnor workflow runtime"),
+            "a hosted plan publishes the runtime artifact: {plan}"
+        );
+        let required = yaml_job(&workflow, "ci-required");
+        assert!(
+            required.contains("name: Download Velnor workflow runtime"),
+            "a hosted ci-required downloads the runtime for its aggregate step: {required}"
+        );
+    }
+
+    #[test]
+    fn velnor_runtime_does_not_publish_an_orphan_artifact() {
         let mut config = must(
             scan_repository_with_default_branch(
                 &fixture_root(),
@@ -10192,7 +10219,7 @@ mod tests {
             "scan fixture for Velnor runtime handoff",
         );
         // A machinery test: the public fixture scans hosted, then the
-        // universe is overridden to Velnor-only to render the handoff shape.
+        // universe is overridden to Velnor-only to render the local shape.
         config.providers = provider_set([ProviderId::Velnor]);
         config.automatic_providers = provider_set([ProviderId::Velnor]);
         config.selectors.insert(
@@ -10214,22 +10241,31 @@ mod tests {
             plan.contains("github.event.pull_request.head.repo.fork"),
             "a local control plane carries the trusted-event gate: {plan}"
         );
-        // `ci-required` runs on the hosted control plane on every universe
-        // and downloads this artifact for its aggregate step, so the plan
-        // always publishes it — the artifact is never an orphan.
+        // `ci-required` scores with the ambient fleet runtime on a local
+        // control plane, like every other local job, so the plan publishes
+        // nothing — the artifact is never an orphan.
         assert!(
-            plan.contains("name: Prepare Velnor workflow runtime"),
-            "the plan prepares the runtime artifact on every universe: {plan}"
+            !plan.contains("name: Set up Velnor workflow runtime"),
+            "Velnor Planning must use the ambient runtime: {plan}"
         );
         assert!(
-            plan.contains("name: Publish Velnor workflow runtime"),
-            "the plan publishes the runtime artifact on every universe: {plan}"
+            !plan.contains("name: Prepare Velnor workflow runtime"),
+            "Velnor Planning must not prepare a runtime artifact: {plan}"
+        );
+        assert!(
+            !plan.contains("name: Publish Velnor workflow runtime"),
+            "Velnor Planning must not publish a runtime artifact: {plan}"
         );
         let required = yaml_job(&workflow, "ci-required");
         assert!(
-            required.contains("name: Download Velnor workflow runtime"),
-            "ci-required downloads the runtime for its aggregate step: {required}"
+            !required.contains("name: Download Velnor workflow runtime"),
+            "a local ci-required scores with the ambient runtime: {required}"
         );
+        assert!(
+            required.contains("velnor-workflow aggregate --expected"),
+            "a local ci-required still scores expected work: {required}"
+        );
+        assert!(!workflow.contains("name: Download Velnor workflow runtime"));
         assert!(!workflow.contains("  github-hosted-"));
         assert!(workflow.contains("  velnor-"));
     }
@@ -16734,7 +16770,7 @@ lockfile = true
     }
 
     #[test]
-    fn generated_planning_follows_a_velnor_only_universe_and_publishes_the_aggregate_runtime() {
+    fn generated_planning_follows_a_velnor_only_universe_without_the_hosted_aggregate_runtime() {
         let config = scanned_fixture(provider_set([ProviderId::Velnor]));
         let files = must(generated_files(&config), "generate");
         let workflow = must_some(
@@ -16758,12 +16794,12 @@ lockfile = true
             "a local control plane carries the trusted-event gate: {plan}"
         );
         assert!(
-            plan.contains("name: Prepare Velnor workflow runtime"),
-            "the plan prepares the runtime artifact ci-required aggregates with: {plan}"
+            !plan.contains("name: Prepare Velnor workflow runtime"),
+            "a local plan prepares no runtime artifact: ci-required scores ambient: {plan}"
         );
         assert!(
-            plan.contains("name: Publish Velnor workflow runtime"),
-            "the plan publishes the runtime artifact ci-required aggregates with: {plan}"
+            !plan.contains("name: Publish Velnor workflow runtime"),
+            "a local plan publishes no runtime artifact: ci-required scores ambient: {plan}"
         );
         let all_runs_on: Vec<&str> = workflow
             .lines()
