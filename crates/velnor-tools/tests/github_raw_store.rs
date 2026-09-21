@@ -150,6 +150,26 @@ fn sidecar_path(root: &Path, reference: &RawObjectRef) -> PathBuf {
     root.join("refs").join(format!("{}.json", reference.raw_id))
 }
 
+#[cfg(unix)]
+fn transaction_journal_bytes(reference: &RawObjectRef) -> Vec<u8> {
+    must(
+        serde_json::to_vec(&serde_json::json!({
+            "raw_id": reference.raw_id,
+            "request_id": reference.request_id,
+            "object_kind": reference.object_kind,
+            "canonicalization": reference.canonicalization,
+            "sha256": reference.sha256,
+            "byte_length": reference.byte_length,
+            "original_sha256": reference.original_sha256,
+            "original_byte_length": reference.original_byte_length,
+            "media_type": reference.media_type,
+            "storage_ref": reference.storage_ref,
+            "original_storage_ref": reference.original_storage_ref,
+        })),
+        "serialize transaction journal",
+    )
+}
+
 #[test]
 fn stores_safe_bytes_with_distinct_original_provenance() {
     let root = fixture("provenance");
@@ -264,6 +284,8 @@ fn stores_safe_bytes_with_distinct_original_provenance() {
 #[cfg(unix)]
 #[test]
 fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
+    use std::os::unix::fs::PermissionsExt;
+
     let root = fixture("transaction-recovery");
     let mut store = must(RawObjectFileStore::new(&root), "open transaction store");
     let reference = must(
@@ -273,8 +295,16 @@ fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
     let sidecar = sidecar_path(&root, &reference);
     let transaction = root.join("refs").join("recover-complete.txn");
     must(
-        fs::rename(&sidecar, &transaction),
-        "move sidecar to durable transaction journal",
+        fs::remove_file(&sidecar),
+        "remove complete sidecar before journaling",
+    );
+    must(
+        fs::write(&transaction, transaction_journal_bytes(&reference)),
+        "write compact durable transaction journal",
+    );
+    must(
+        fs::set_permissions(&transaction, fs::Permissions::from_mode(0o400)),
+        "restrict complete transaction journal",
     );
     drop(store);
 
@@ -298,8 +328,19 @@ fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
     let incomplete_sidecar = sidecar_path(&root, &incomplete_reference);
     let incomplete_transaction = root.join("refs").join("recover-incomplete.txn");
     must(
-        fs::rename(&incomplete_sidecar, &incomplete_transaction),
-        "move incomplete sidecar to journal",
+        fs::remove_file(&incomplete_sidecar),
+        "remove incomplete sidecar before journaling",
+    );
+    must(
+        fs::write(
+            &incomplete_transaction,
+            transaction_journal_bytes(&incomplete_reference),
+        ),
+        "write compact incomplete transaction journal",
+    );
+    must(
+        fs::set_permissions(&incomplete_transaction, fs::Permissions::from_mode(0o400)),
+        "restrict incomplete transaction journal",
     );
     must(
         fs::remove_file(object_path(&root, &incomplete_reference)),
@@ -318,6 +359,89 @@ fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
     must(
         recovered.verify(&reference),
         "verify surviving complete bundle",
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovers_max_size_valid_compact_transaction_without_payload_duplicate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const MAX_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+    let root = fixture("transaction-recovery-max");
+    let mut store = must(RawObjectFileStore::new(&root), "open max transaction store");
+    let reference = must(
+        store.store(capture(
+            "recover-max",
+            b"small-original",
+            &vec![b's'; MAX_OBJECT_BYTES],
+        )),
+        "store max recoverable bundle",
+    );
+    let sidecar = sidecar_path(&root, &reference);
+    let transaction = root.join("refs").join("recover-max.txn");
+    must(
+        fs::remove_file(&sidecar),
+        "remove max sidecar before journaling",
+    );
+    let journal = transaction_journal_bytes(&reference);
+    // The compact journal carries metadata and digest claims only; a full
+    // sidecar here would duplicate the 64 MiB payload as ~85 MiB of base64.
+    assert!(
+        journal.len() < 4096,
+        "compact journal stays small: {} bytes",
+        journal.len()
+    );
+    must(
+        fs::write(&transaction, journal),
+        "write max compact transaction journal",
+    );
+    must(
+        fs::set_permissions(&transaction, fs::Permissions::from_mode(0o400)),
+        "restrict max transaction journal",
+    );
+    drop(store);
+
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "recover max compact transaction journal",
+    );
+    assert!(sidecar.exists());
+    assert!(!transaction.exists());
+    must(reopened.verify(&reference), "verify max recovered bundle");
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovers_legacy_full_sidecar_transaction_journal() {
+    let root = fixture("transaction-recovery-legacy");
+    let mut store = must(
+        RawObjectFileStore::new(&root),
+        "open legacy transaction store",
+    );
+    let reference = must(
+        store.store(capture("recover-legacy", b"source", b"safe")),
+        "store legacy recoverable bundle",
+    );
+    let sidecar = sidecar_path(&root, &reference);
+    let transaction = root.join("refs").join("recover-legacy.txn");
+    must(
+        fs::rename(&sidecar, &transaction),
+        "move full sidecar to legacy transaction journal",
+    );
+    drop(store);
+
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "recover legacy full-sidecar journal",
+    );
+    assert!(sidecar.exists());
+    assert!(!transaction.exists());
+    must(
+        reopened.verify(&reference),
+        "verify legacy recovered bundle",
     );
     remove_fixture(&root);
 }
