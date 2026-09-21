@@ -229,11 +229,8 @@ fn acquire_iokit(name: &str) -> Option<u32> {
             return None;
         }
 
-        let cf_name = CFStringCreateWithCString(
-            std::ptr::null(),
-            c_name.as_ptr(),
-            K_CF_STRING_ENCODING_UTF8,
-        );
+        let cf_name =
+            CFStringCreateWithCString(std::ptr::null(), c_name.as_ptr(), K_CF_STRING_ENCODING_UTF8);
         if cf_name.is_null() {
             CFRelease(cf_type);
             return None;

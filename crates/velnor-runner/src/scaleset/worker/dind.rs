@@ -557,7 +557,10 @@ mod tests {
         // The state bind is the worker's own dir at the identical path.
         assert!(args.contains(&format!("/tmp/velnor-test-dind-state:{STATE_MOUNT}")));
         // Workspace and tool cache volumes mounted at identical paths to runner.
-        assert!(args.contains(&format!("{}:{WORK_DIR}", spec.identity().workspace_volume())));
+        assert!(args.contains(&format!(
+            "{}:{WORK_DIR}",
+            spec.identity().workspace_volume()
+        )));
         assert!(args.contains(&format!(
             "{}:{TOOL_CACHE_DIR}",
             spec.identity().tool_cache_volume()
@@ -575,7 +578,10 @@ mod tests {
         let spec = spec();
         let args = spec.create_args().join("\n");
         assert!(
-            args.contains(&format!("{}:{WORK_DIR}", spec.identity().workspace_volume())),
+            args.contains(&format!(
+                "{}:{WORK_DIR}",
+                spec.identity().workspace_volume()
+            )),
             "DinD argv must mount workspace at {WORK_DIR}:\n{args}"
         );
         assert!(

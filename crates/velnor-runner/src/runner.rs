@@ -10982,10 +10982,8 @@ fn execute_script_job(
     teardown_slot: &TeardownSlot,
     runner_name: &str,
 ) -> Result<ScriptJobResult> {
-    let _power_assertion = crate::platform::PowerAssertionGuard::acquire(&format!(
-        "velnor-job-{}",
-        job.job_id
-    ));
+    let _power_assertion =
+        crate::platform::PowerAssertionGuard::acquire(&format!("velnor-job-{}", job.job_id));
     let slot_work_dir = slot_work_dir(config_dir, work_dir.as_deref());
     let job_dir = slot_work_dir.join(sanitize_path_segment(&job.job_id));
     register_job_cache_session(job);
