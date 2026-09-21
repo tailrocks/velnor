@@ -1032,16 +1032,18 @@ mod tests {
                 reads_closed: unit.reads_closed,
             })
             .collect::<Vec<_>>();
-        crate::s2::reuse::select_affected(
-            &units,
-            &[crate::s2::reuse::ChangedPath {
-                path: path.to_owned(),
-                previous: None,
-                status: crate::s2::reuse::ChangeKind::Modified,
-            }],
-            &[],
+        must_ok(
+            crate::s2::reuse::select_affected(
+                &units,
+                &[crate::s2::reuse::ChangedPath {
+                    path: path.to_owned(),
+                    previous: None,
+                    status: crate::s2::reuse::ChangeKind::Modified,
+                }],
+                &[],
+            ),
+            "product input selection",
         )
-        .expect("product input selection")
         .required
     }
 
