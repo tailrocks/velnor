@@ -1661,6 +1661,92 @@ mod tests {
     }
 
     #[test]
+    fn native_join_escalates_producer_and_appends_pack() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "clients/desktop/Package.swift",
+                &native_package(
+                    ".binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/BridgeCore.xcframework\")",
+                ),
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let producer = must_some(
+            shape.units.iter().find(|unit| {
+                unit.kind == crate::s2::UnitKind::Rust && unit.root == "libs/bridge-ffi"
+            }),
+            "rust producer unit",
+        );
+        // The pack runs Apple tooling, so the producer inherits the macOS
+        // requirement instead of staying a portable Linux unit.
+        assert_eq!(producer.platform, crate::s2::provider::Platform::MacosArm64);
+        assert!(producer.capabilities.native_macos_arm64);
+        // The typed recipe lands after the unit's own checks, in both lanes.
+        let pack = [
+            "rm -rf 'target/xcframework/BridgeCore.xcframework'".to_owned(),
+            "cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned(),
+        ];
+        for commands in [&producer.pr_commands, &producer.full_commands] {
+            assert!(commands.len() > pack.len(), "{commands:?}");
+            assert_eq!(&commands[commands.len() - pack.len()..], &pack);
+        }
+        assert!(
+            producer
+                .pr_commands
+                .iter()
+                .any(|command| command.contains("boltffi") && command.contains("pack apple")),
+            "pack commands must trip the tool predicate: {:?}",
+            producer.pr_commands
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_packs_once_for_two_consumers() {
+        let target = ".binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/BridgeCore.xcframework\")";
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            ("clients/desktop/Package.swift", &native_package(target)),
+            ("clients/laptop/Package.swift", &native_package(target)),
+        ]);
+        let shape = scan_native(&root);
+        let producer = must_some(
+            shape.units.iter().find(|unit| {
+                unit.kind == crate::s2::UnitKind::Rust && unit.root == "libs/bridge-ffi"
+            }),
+            "rust producer unit",
+        );
+        assert_eq!(producer.products.len(), 1);
+        assert_eq!(
+            producer
+                .pr_commands
+                .iter()
+                .filter(|command| command.contains("pack apple"))
+                .count(),
+            1,
+            "one pack serves every consumer: {:?}",
+            producer.pr_commands
+        );
+        for id in [
+            "swift-package-clients-desktop",
+            "swift-package-clients-laptop",
+        ] {
+            let consumer = must_some(
+                shape.units.iter().find(|unit| unit.id == id),
+                "swift consumer unit",
+            );
+            assert_eq!(consumer.prerequisites.len(), 1);
+            assert_eq!(consumer.prerequisites[0].product, "xcframework-bridgecore");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn native_join_rejects_module_mismatch() {
         let root = native_fixture(&[
             ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),

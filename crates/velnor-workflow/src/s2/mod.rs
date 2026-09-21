@@ -1410,6 +1410,10 @@ fn scan_target(
     // render `install_args` the runner's own lock check rejects; refuse it at
     // generation time instead of shipping a failing job.
     crate::s2::primitives::validate_nextest_tools_are_locked(&config.units, &mise_lock_keys)?;
+    // A unit that runs the joined BoltFFI pack while the lock does not pin
+    // its tool id would fail at pack time instead; refuse it at generation
+    // time with the exact missing key.
+    crate::s2::primitives::validate_boltffi_tools_are_locked(&config.units, &mise_lock_keys)?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;

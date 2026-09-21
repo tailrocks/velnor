@@ -211,6 +211,57 @@ mod tests {
         unit
     }
 
+    /// One hand-built Rust unit carrying the joined native pack, mirroring
+    /// what the scan appends to a `BoltFFI` producer.
+    fn boltffi_unit(id: &str) -> Unit {
+        let mut unit = rust_unit(id, "libs/bridge-ffi");
+        unit.pr_commands
+            .push("cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned());
+        unit.full_commands
+            .push("cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned());
+        unit
+    }
+
+    #[test]
+    fn boltffi_need_installs_the_locked_tool_id() {
+        let unit = boltffi_unit("rust-producer");
+        assert!(super::needs_boltffi(&unit));
+        assert!(!super::needs_boltffi(&rust_unit("rust-plain", ".")));
+        let mut across_separator = rust_unit("rust-echo", ".");
+        across_separator.pr_commands = vec!["echo boltffi && make pack".to_owned()];
+        assert!(!super::needs_boltffi(&across_separator));
+        let lock = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        assert_eq!(
+            super::mise_tool_ids(&unit, &lock),
+            vec![super::BOLTFFI_TOOL.to_owned()]
+        );
+        assert!(super::mise_tool_ids(&rust_unit("rust-plain", "."), &lock).is_empty());
+    }
+
+    #[test]
+    fn boltffi_validation_refuses_an_unpinned_pack() {
+        let unit = boltffi_unit("rust-producer");
+        let pinned = BTreeSet::from([super::BOLTFFI_TOOL.to_owned()]);
+        assert!(
+            super::validate_boltffi_tools_are_locked(std::slice::from_ref(&unit), &pinned).is_ok()
+        );
+        let plain = rust_unit("rust-plain", ".");
+        assert!(super::validate_boltffi_tools_are_locked(
+            std::slice::from_ref(&plain),
+            &BTreeSet::new()
+        )
+        .is_ok());
+        let missing = BTreeSet::from(["rust".to_owned()]);
+        let error = must_err(
+            super::validate_boltffi_tools_are_locked(std::slice::from_ref(&unit), &missing),
+            "unpinned pack must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("rust-producer"), "{message}");
+        assert!(message.contains(super::BOLTFFI_TOOL), "{message}");
+        assert!(message.contains("rust"), "{message}");
+    }
+
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
         WorkflowIr {
             default_branch: "main".to_owned(),
@@ -581,6 +632,17 @@ mod tests {
         match value {
             Some(value) => value,
             None => panic!("{context}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_err<T: std::fmt::Debug, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(value) => panic!("{context}: unexpectedly succeeded with {value:?}"),
+            Err(error) => error,
         }
     }
 
@@ -2563,11 +2625,44 @@ pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<St
     if needs_nextest(unit) {
         push_mise_tool(&mut tools, nextest_tool_id(lock_keys).to_owned());
     }
+    if needs_boltffi(unit) {
+        push_mise_tool(&mut tools, BOLTFFI_TOOL.to_owned());
+    }
     for declared in &unit.mise_tools {
         push_mise_tool(&mut tools, declared.clone());
     }
     tools
 }
+
+/// Whether any of the unit's commands drive the `BoltFFI` pack the native join
+/// appends to a producing Rust unit. One predicate feeds both the mise
+/// install list and the lock validation, so the two can never disagree
+/// about what a unit needs.
+pub(crate) fn needs_boltffi(unit: &Unit) -> bool {
+    unit_commands(unit).any(|command| {
+        let mut seen_boltffi = false;
+        command.split_whitespace().any(|token| {
+            // Shell separators start a new simple command: a `pack` past
+            // one belongs to whatever follows, not to the earlier `boltffi`.
+            if matches!(token, "&&" | "||" | ";" | "|") {
+                seen_boltffi = false;
+                return false;
+            }
+            if seen_boltffi {
+                token == "pack"
+            } else {
+                seen_boltffi = token == "boltffi" || token.ends_with("/boltffi");
+                false
+            }
+        })
+    })
+}
+
+/// The single mise spelling the `BoltFFI` CLI pins under: the cargo backend
+/// serving the `boltffi_cli` crate, as evidenced by the `mise.lock` key.
+/// `mise --locked` requires install args to equal the lock keys byte for
+/// byte, so validation refuses any other state before rendering.
+pub(crate) const BOLTFFI_TOOL: &str = "cargo:boltffi_cli";
 
 pub(crate) fn needs_cargo_deny(unit: &Unit) -> bool {
     unit_commands(unit)
@@ -2660,6 +2755,33 @@ pub(crate) fn validate_nextest_tools_are_locked(
             let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
             return Err(GeneratorError::usage(format!(
                 "unit {} runs cargo-nextest but mise.lock pins neither {QUALIFIED_NEXTEST_TOOL} nor {BARE_NEXTEST_TOOL}; install one and re-lock so install_args match the lock, known keys: {known}",
+                unit.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a unit that needs `BoltFFI` while the root lock does not pin its
+/// tool id: rendering anything else would emit `install_args` the runner's
+/// own lock check rejects, and unlike nextest there is no cargo-bin
+/// fallback, so an absent lock fails here rather than at pack time.
+///
+/// # Errors
+/// Returns a usage error naming the first unit whose `BoltFFI` need the lock
+/// does not pin, with every key the lock does pin.
+pub(crate) fn validate_boltffi_tools_are_locked(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if lock_keys.contains(BOLTFFI_TOOL) {
+        return Ok(());
+    }
+    for unit in units {
+        if needs_boltffi(unit) {
+            let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(GeneratorError::usage(format!(
+                "unit {} runs boltffi pack but mise.lock does not pin {BOLTFFI_TOOL}; pin it and re-lock so install_args match the lock, known keys: {known}",
                 unit.id
             )));
         }

@@ -86,8 +86,15 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   unknown layout / escaping output fail closed; FFI module
   honors `ffi_module_name`; facts flow to `NamedProduct`
   with together-or-empty validation; 8 new tests, lib 1933
-  green. 4c-ii next: staging + binding-drift check before
-  install;
+  green. Recipe + join + tool done: `BoltffiRecipe`
+  (profile/locked/verbose, digest excludes verbosity, wipe
+  before pack, `--locked` iff Cargo.lock governs) renders
+  producer commands; join escalates producer to
+  macOS-arm64 + native cap and appends recipe once per
+  product; `needs_boltffi`/`cargo:boltffi_cli` install +
+  generation-time lock validation mirror nextest; 6 new
+  tests, lib 1939 green, clippy clean. Next: staging +
+  binding-drift check before install;
   4d verified cross-job artifact transport; 4e per-layer
   cache-state reporting (`snapshot.rs`). Follow-ups: `.build`
   intermediates need multi-layer cache support; scoped
@@ -100,7 +107,7 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: 4c-ii staging + binding-drift check —
+2. Next edit surface: staging + binding-drift check —
    `s2/primitives/prepared_tools.rs` (staging dir + manifest
    write/verify reuse), adapter recipe + verification-step
    rendering from product `bindings_dir`/`bindings_file`

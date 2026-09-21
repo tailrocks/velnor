@@ -206,6 +206,16 @@ fn wire_native_edge(
                 inputs_unknown: producer.inputs_unknown.clone(),
                 inputs_digest: producer.inputs_digest.clone(),
             });
+        // The pack runs Apple tooling, so the producing unit inherits the
+        // macOS requirement and carries the typed recipe commands after
+        // its own checks. A second consumer of the same product reuses
+        // the materialized output instead of appending a second pack.
+        let unit = &mut shape.units[producer_index];
+        unit.platform = crate::s2::provider::Platform::MacosArm64;
+        unit.capabilities.native_macos_arm64 = true;
+        let recipe_commands = producer.recipe.commands(&producer.root, &producer.output);
+        unit.pr_commands.extend(recipe_commands.clone());
+        unit.full_commands.extend(recipe_commands);
     }
     shape.units[consumer_index]
         .prerequisites

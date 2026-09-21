@@ -1217,7 +1217,8 @@ fn toml_inline_string(value: &str, wanted_key: &str) -> Option<String> {
 /// `{apple.output}/Sources`, plus `BoltFFI` under the split SPM layout, and
 /// the binding file is `{PascalCase(crate)}BoltFFI.swift` inside it. Paths
 /// resolve against the manifest directory, the working directory `BoltFFI`
-/// itself assumes.
+/// itself assumes. The recipe carries the pack policy (profile, lock
+/// enforcement, verbosity) and renders the producer commands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BoltffiProducer {
     pub(crate) manifest: String,
@@ -1236,6 +1237,8 @@ pub(crate) struct BoltffiProducer {
     pub(crate) bindings_file: String,
     /// The Apple deployment target that shapes generated manifests.
     pub(crate) deployment_target: String,
+    /// The typed pack recipe: profile, lock enforcement, verbosity.
+    pub(crate) recipe: BoltffiRecipe,
     /// The Rust unit owning the producing crate, resolved at detect time.
     pub(crate) unit: Option<String>,
     /// The expected structural output files: the framework manifest plus,
@@ -1670,11 +1673,66 @@ pub(crate) fn native_input_closure(
     Ok((inputs, gaps))
 }
 
-/// Adapter operation identity bound into the product inputs digest. The
-/// typed execution recipe (Increment 4c) supersedes this label; until then it
-/// distinguishes a `BoltFFI` Apple pack from any future adapter sharing a
-/// source closure.
-const BOLTFFI_APPLE_RECIPE: &str = "boltffi:pack:apple";
+/// The typed `BoltFFI` Apple pack execution recipe: the policy half of a
+/// native producer. `profile` selects the Cargo profile through
+/// `--cargo-arg` (`None` keeps `BoltFFI`'s own default, today Debug);
+/// `locked` passes `--cargo-arg=--locked` so nested Cargo invocations
+/// enforce the committed resolution instead of drifting; `verbose`
+/// streams the target build's compiler output (`-v`) so a long native
+/// link leaves liveness evidence instead of silence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoltffiRecipe {
+    pub(crate) profile: Option<String>,
+    pub(crate) locked: bool,
+    pub(crate) verbose: bool,
+}
+
+impl BoltffiRecipe {
+    /// The recipe half of the exact inputs digest: profile and lock
+    /// enforcement change the produced artifacts, so they participate in
+    /// the identity. Verbosity only changes streamed diagnostics and is
+    /// deliberately absent: a quiet and a verbose run over the same
+    /// closure produce the same bytes.
+    pub(crate) fn digest_identity(&self) -> String {
+        format!(
+            "boltffi:pack:apple:profile={}:locked={}",
+            self.profile.as_deref().unwrap_or("default"),
+            self.locked,
+        )
+    }
+
+    /// Render the producer commands: wipe the previous framework bundle
+    /// first (`BoltFFI` merges into an existing output directory, which
+    /// would keep stale slices), then pack from the manifest root, the
+    /// working directory `BoltFFI` itself assumes.
+    pub(crate) fn commands(&self, manifest_root: &str, output: &str) -> Vec<String> {
+        let mut pack = String::from("boltffi");
+        if self.verbose {
+            pack.push_str(" -v");
+        }
+        if self.locked {
+            pack.push_str(" --cargo-arg=--locked");
+        }
+        if let Some(profile) = &self.profile {
+            pack.push_str(" --cargo-arg=--profile --cargo-arg=");
+            pack.push_str(&shell_quote(profile));
+        }
+        pack.push_str(" pack apple");
+        vec![
+            format!("rm -rf {}", shell_quote(output)),
+            format!("{}{pack}", shell_change_dir(manifest_root)),
+        ]
+    }
+}
+
+/// Locked resolution applies exactly when a `Cargo.lock` governs the
+/// producer closure: `--locked` without a lockfile fails every build,
+/// while omitting it with a committed lock lets nested Cargo drift.
+fn boltffi_recipe_locked(inputs: &[String]) -> bool {
+    inputs
+        .iter()
+        .any(|input| input == "Cargo.lock" || input.ends_with("/Cargo.lock"))
+}
 
 /// Expand validated closure patterns against tracked files and read the
 /// matched bytes. A pattern matching nothing contributes nothing (like
@@ -1728,6 +1786,7 @@ fn boltffi_inputs_digest(
     manifest_path: &str,
     inputs: &[String],
     inputs_unknown: &[String],
+    recipe: &BoltffiRecipe,
     diagnostics: &mut Vec<String>,
 ) -> Result<Option<String>, GeneratorError> {
     if !inputs_unknown.is_empty() {
@@ -1744,7 +1803,7 @@ fn boltffi_inputs_digest(
             // which subsumes the parsed lock/toolchain facts.
             locks: Vec::new(),
             sources,
-            recipe: vec![BOLTFFI_APPLE_RECIPE.to_owned()],
+            recipe: vec![recipe.digest_identity()],
             toolchain: Vec::new(),
         },
     )))
@@ -1787,6 +1846,29 @@ fn boltffi_producer_crate(
 /// Parse one `boltffi.toml` into a producer, pushing a diagnostic and
 /// returning `Ok(None)` when the manifest cannot yield a joinable edge.
 /// I/O and closure errors propagate because they may hide a real producer.
+/// Resolve the framework name for a `BoltFFI` manifest: the explicit
+/// `XCFramework` name wins, then the Swift module name, then `PascalCase`
+/// over the package name. An unusable segment is a diagnostic, never a guess.
+fn boltffi_framework_name(
+    parsed: &BoltffiManifest,
+    manifest_path: &str,
+    package: &str,
+    diagnostics: &mut Vec<String>,
+) -> Option<String> {
+    let framework = parsed
+        .xcframework_name
+        .clone()
+        .or(parsed.swift_module_name.clone())
+        .unwrap_or_else(|| boltffi_pascal_case(package));
+    if !valid_framework_segment(&framework) {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} resolves framework name `{framework}`, which is not a valid path segment; no producer edge was constructed."
+        ));
+        return None;
+    }
+    Some(framework)
+}
+
 fn boltffi_producer_from_manifest(
     context: &ScanContext<'_>,
     manifest_path: &String,
@@ -1815,17 +1897,10 @@ fn boltffi_producer_from_manifest(
         ));
         return Ok(None);
     };
-    let framework = parsed
-        .xcframework_name
-        .clone()
-        .or(parsed.swift_module_name.clone())
-        .unwrap_or_else(|| boltffi_pascal_case(&package));
-    if !valid_framework_segment(&framework) {
-        diagnostics.push(format!(
-            "BoltFFI manifest {manifest_path} resolves framework name `{framework}`, which is not a valid path segment; no producer edge was constructed."
-        ));
+    let Some(framework) = boltffi_framework_name(&parsed, manifest_path, &package, diagnostics)
+    else {
         return Ok(None);
-    }
+    };
     let declared_parent = parsed
         .xcframework_output
         .as_deref()
@@ -1866,11 +1941,20 @@ fn boltffi_producer_from_manifest(
         &root,
         std::slice::from_ref(manifest_path),
     )?;
+    // The scanner never invents a Cargo profile: `None` keeps `BoltFFI`'s
+    // own default. A typed profile policy arrives with declared Apple
+    // facts; until then the recipe records exactly what the scan knows.
+    let recipe = BoltffiRecipe {
+        profile: None,
+        locked: boltffi_recipe_locked(&inputs),
+        verbose: true,
+    };
     let inputs_digest = boltffi_inputs_digest(
         context,
         manifest_path,
         &inputs,
         &inputs_unknown,
+        &recipe,
         diagnostics,
     )?;
     Ok(Some(BoltffiProducer {
@@ -1885,6 +1969,7 @@ fn boltffi_producer_from_manifest(
         bindings_file: bindings.file,
         deployment_target: bindings.deployment_target,
         framework,
+        recipe,
         unit: None,
         inputs,
         inputs_unknown,
@@ -2864,5 +2949,78 @@ mod tests {
         deduped.dedup();
         assert_eq!(inputs, deduped, "closure patterns are sorted and unique");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_recipe_digest_separates_policy_from_verbosity() {
+        use super::BoltffiRecipe;
+        let quiet = BoltffiRecipe {
+            profile: None,
+            locked: false,
+            verbose: false,
+        };
+        let loud = BoltffiRecipe {
+            profile: None,
+            locked: false,
+            verbose: true,
+        };
+        assert_eq!(
+            quiet.digest_identity(),
+            "boltffi:pack:apple:profile=default:locked=false"
+        );
+        assert_eq!(quiet.digest_identity(), loud.digest_identity());
+        let profiled = BoltffiRecipe {
+            profile: Some("desktop-release".to_owned()),
+            locked: false,
+            verbose: false,
+        };
+        assert_eq!(
+            profiled.digest_identity(),
+            "boltffi:pack:apple:profile=desktop-release:locked=false"
+        );
+        assert_ne!(quiet.digest_identity(), profiled.digest_identity());
+        let locked = BoltffiRecipe {
+            profile: None,
+            locked: true,
+            verbose: false,
+        };
+        assert_eq!(
+            locked.digest_identity(),
+            "boltffi:pack:apple:profile=default:locked=true"
+        );
+        assert_ne!(quiet.digest_identity(), locked.digest_identity());
+    }
+
+    #[test]
+    fn boltffi_recipe_renders_wipe_before_pack() {
+        use super::BoltffiRecipe;
+        let recipe = BoltffiRecipe {
+            profile: None,
+            locked: false,
+            verbose: true,
+        };
+        assert_eq!(
+            recipe.commands(
+                "libs/bridge-ffi",
+                "target/xcframework/BridgeCore.xcframework"
+            ),
+            vec![
+                "rm -rf 'target/xcframework/BridgeCore.xcframework'".to_owned(),
+                "cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned(),
+            ]
+        );
+        let shipping = BoltffiRecipe {
+            profile: Some("desktop-release".to_owned()),
+            locked: true,
+            verbose: false,
+        };
+        assert_eq!(
+            shipping.commands(".", "dist/apple/BridgeCore.xcframework"),
+            vec![
+                "rm -rf 'dist/apple/BridgeCore.xcframework'".to_owned(),
+                "boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='desktop-release' pack apple"
+                    .to_owned(),
+            ]
+        );
     }
 }
