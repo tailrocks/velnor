@@ -1716,13 +1716,52 @@ pub(crate) fn is_unit_id(value: &str) -> bool {
         && value.as_bytes()[0].is_ascii_lowercase()
 }
 
+/// The event kind admitted to the schema-1 planner. Parsing happens at the
+/// boundary so later routing cannot replace an event with a look-alike string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlanEvent {
+    PullRequest,
+    Push,
+    Schedule,
+    MergeGroup,
+    WorkflowDispatch,
+    Local,
+}
+
+impl PlanEvent {
+    fn from_env() -> Result<Self, GeneratorError> {
+        match env::var("EVENT_NAME").unwrap_or_default().as_str() {
+            "pull_request" => Ok(Self::PullRequest),
+            "push" => Ok(Self::Push),
+            "schedule" => Ok(Self::Schedule),
+            "merge_group" => Ok(Self::MergeGroup),
+            "workflow_dispatch" => Ok(Self::WorkflowDispatch),
+            "" => Ok(Self::Local),
+            other => Err(GeneratorError::usage(format!(
+                "unsupported CI event `{other}`"
+            ))),
+        }
+    }
+
+    const fn scope_name(self) -> &'static str {
+        match self {
+            Self::PullRequest => "pull_request",
+            Self::Push => "push",
+            Self::Schedule => "schedule",
+            Self::MergeGroup => "merge_group",
+            Self::WorkflowDispatch => "workflow_dispatch",
+            Self::Local => "",
+        }
+    }
+}
+
 /// Everything `plan` reads from its environment, as one injectable bundle.
 /// Production builds it from the live process; tests build fixture values,
 /// so the end-to-end plan path runs without mutating process-global env —
 /// which parallel tests also read.
 struct PlanInputs {
     root: PathBuf,
-    event: String,
+    event: PlanEvent,
     scope_override: Option<String>,
     base: String,
     head: String,
@@ -1735,7 +1774,7 @@ struct PlanInputs {
 impl PlanInputs {
     fn from_env() -> Result<Self, GeneratorError> {
         Ok(Self {
-            event: env::var("EVENT_NAME").unwrap_or_default(),
+            event: PlanEvent::from_env()?,
             scope_override: env::var("CI_SCOPE_OVERRIDE")
                 .ok()
                 .filter(|value| !value.is_empty()),
@@ -1760,7 +1799,10 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
 /// injectable environment, so tests drive file writing and outputs exactly.
 fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    let scope = match scope_for_event_values(&inputs.event, inputs.scope_override.as_deref())? {
+    let scope = match scope_for_event_values(
+        inputs.event.scope_name(),
+        inputs.scope_override.as_deref(),
+    )? {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
@@ -2015,7 +2057,7 @@ fn planned_no_work_reason(selection: &UnitSelection<'_>) -> Result<Option<String
 
 #[cfg(test)]
 mod scope_event_tests {
-    use super::scope_for_event_values;
+    use super::{scope_for_event_values, PlanEvent};
     use crate::GeneratorError;
 
     #[expect(
@@ -2038,6 +2080,13 @@ mod scope_event_tests {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn typed_event_kind_cannot_be_an_arbitrary_runtime_string() {
+        assert_eq!(PlanEvent::PullRequest.scope_name(), "pull_request");
+        assert_eq!(PlanEvent::MergeGroup.scope_name(), "merge_group");
+        assert_eq!(PlanEvent::Local.scope_name(), "");
     }
 
     #[test]
@@ -9147,7 +9196,7 @@ workspace_check = true
                 &config_path,
                 &PlanInputs {
                     root: root.clone(),
-                    event: "pull_request".to_owned(),
+                    event: PlanEvent::PullRequest,
                     scope_override: None,
                     base,
                     head,
@@ -10177,7 +10226,7 @@ velnor_full_commands = ["true"]
                 &config_path,
                 &PlanInputs {
                     root: root.clone(),
-                    event: "pull_request".to_owned(),
+                    event: PlanEvent::PullRequest,
                     scope_override: None,
                     base: base.clone(),
                     head: head.clone(),
