@@ -367,6 +367,13 @@ pub(crate) struct CheckProfileSection {
     status: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
+    /// Job-level read-only GitHub token capabilities. The scheduled-check
+    /// renderer keeps the workflow default at `contents: read`; a profile may
+    /// request the Actions history read capability for collectors that query
+    /// the Actions API. Other scopes and levels are rejected below so a
+    /// scheduled profile cannot silently become a write-capable job.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    permissions: BTreeMap<String, String>,
 }
 
 /// One named-task job a `kind = "tasks"` release renders into `release.yml`.
@@ -1108,6 +1115,10 @@ impl CheckProfileSection {
 
     pub(crate) fn env(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+
+    pub(crate) fn permissions(&self) -> &BTreeMap<String, String> {
+        &self.permissions
     }
 }
 
@@ -2648,6 +2659,13 @@ pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
 /// The access levels a `[[release.job]]` permission override may grant.
 pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
 
+/// The only extra token capability a scheduled-check profile may request.
+/// `contents: read` is supplied by the workflow default and is added to any
+/// job-level override by the renderer because GitHub replaces, rather than
+/// merges, a job's permissions map.
+pub(crate) const CHECK_PROFILE_PERMISSIONS: &[&str] = &["actions"];
+pub(crate) const CHECK_PROFILE_PERMISSION_LEVELS: &[&str] = &["read"];
+
 /// The OCI platforms the `docker` publisher builds. Native builders exist
 /// for exactly these; anything else fails closed instead of silently
 /// emulating an architecture under QEMU.
@@ -3503,6 +3521,18 @@ fn validate_check_profile_result(
             )));
         }
     }
+    for (scope, level) in &row.permissions {
+        if !CHECK_PROFILE_PERMISSIONS.contains(&scope.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} permissions names `{scope}`, which is not an allowed scheduled-check capability; use `actions = \"read\"`"
+            )));
+        }
+        if !CHECK_PROFILE_PERMISSION_LEVELS.contains(&level.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} permissions `{scope}` must be `read`, found `{level}`"
+            )));
+        }
+    }
     match row.status.as_deref() {
         None | Some("required" | "advisory") => {}
         Some(status) => {
@@ -4208,6 +4238,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn schema_one_product_inputs_are_typed_and_validated() {
         let config = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-ffi\"\nkind = \"rust\"\n\n[[units.products]]\nname = \"xcframework\"\ntask = \"build-xcframework\"\ninputs = [\"libs/bridge-ffi/boltffi.toml\", \"libs/sibling/**/*.rs\"]\n",
@@ -4233,6 +4264,48 @@ mod tests {
             "duplicate product input must fail",
         );
         assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn check_profile_actions_read_permission_is_typed() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[check_profile]]\nid = \"collector\"\ntasks = [\"collect\"]\n\n\
+             [check_profile.permissions]\nactions = \"read\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate the Actions history capability",
+        );
+        assert_eq!(
+            config.check_profiles()[0].permissions().get("actions"),
+            Some(&"read".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_profile_permissions_reject_write_and_unknown_scopes() {
+        for (declaration, expected) in [
+            ("actions = \"write\"", "must be `read`"),
+            (
+                "contents = \"read\"",
+                "not an allowed scheduled-check capability",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[check_profile]]\nid = \"collector\"\ntasks = [\"collect\"]\n\n\
+                 [check_profile.permissions]\n{declaration}\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "unsafe check-profile capability must fail closed",
+            );
+            assert!(
+                error.to_string().contains(expected),
+                "{declaration}: {error}"
+            );
+        }
     }
 
     /// A test-owned `package-update.yml` body: the grant rules are validated
