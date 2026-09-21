@@ -1359,6 +1359,11 @@ pub(crate) fn need_record(need: &PreparedToolNeed) -> String {
     )
 }
 
+/// The caller-input records for every need, in declaration order.
+pub(crate) fn need_records(needs: &[PreparedToolNeed]) -> Vec<String> {
+    needs.iter().map(need_record).collect()
+}
+
 /// The exact-key expression a consumer restores: the requested identity with
 /// the platform ABI and the current run id interpolated by the runner. An
 /// exact current-run producer output hits this key.
