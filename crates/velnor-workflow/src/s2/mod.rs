@@ -6228,7 +6228,7 @@ pub(crate) fn hosted_cargo_bin_toolchain_restore() -> String {
 /// shims can satisfy `command -v` without making `cargo deny` usable.
 pub(crate) fn hosted_cargo_bin_toolchain_verify(tool_list: &str) -> String {
     format!(
-        "      - name: Verify cargo bin tools\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit == 'true' }}}}\n        id: cargo-bin-verify\n        shell: bash\n        env:\n          CARGO_BIN_TOOLS: {tool_list}\n        run: |\n          set -euo pipefail\n          missing=0\n          IFS=',' read -ra tools <<< \"$CARGO_BIN_TOOLS\"\n          for tool in \"${{tools[@]}}\"; do\n            tool=\"${{tool#\"${{tool%%[![:space:]]*}}\"}}\"\n            tool=\"${{tool%\"${{tool##*[![:space:]]}}\"}}\"\n            [[ -z \"$tool\" ]] && continue\n            if ! command -v \"$tool\" >/dev/null; then\n              missing=1\n              break\n            fi\n            if ! \"$tool\" --version >/dev/null 2>&1; then\n              missing=1\n              break\n            fi\n            if [[ \"$tool\" == cargo-* ]]; then\n              subcommand=\"${{tool#cargo-}}\"\n              if ! cargo \"$subcommand\" --version >/dev/null 2>&1; then\n                missing=1\n                break\n              fi\n            fi\n          done\n          echo \"missing=$missing\" >> \"$GITHUB_OUTPUT\"\n"
+        "      - name: Verify cargo bin tools\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit == 'true' }}}}\n        id: cargo-bin-verify\n        shell: bash\n        env:\n          CARGO_BIN_TOOLS: {tool_list}\n        run: |\n          set -euo pipefail\n          missing=false\n          IFS=',' read -ra tools <<< \"$CARGO_BIN_TOOLS\"\n          for tool in \"${{tools[@]}}\"; do\n            tool=\"${{tool#\"${{tool%%[![:space:]]*}}\"}}\"\n            tool=\"${{tool%\"${{tool##*[![:space:]]}}\"}}\"\n            [[ -z \"$tool\" ]] && continue\n            if ! command -v \"$tool\" >/dev/null; then\n              missing=true\n              break\n            fi\n            if ! \"$tool\" --version >/dev/null 2>&1; then\n              missing=true\n              break\n            fi\n            if [[ \"$tool\" == cargo-* ]]; then\n              subcommand=\"${{tool#cargo-}}\"\n              if ! cargo \"$subcommand\" --version >/dev/null 2>&1; then\n                missing=true\n                break\n              fi\n            fi\n          done\n          echo \"missing=$missing\" >> \"$GITHUB_OUTPUT\"\n"
     )
 }
 
@@ -6273,6 +6273,10 @@ mod hosted_cargo_bin_toolchain_tests {
         assert!(block.contains("cargo-bin-verify.outputs.missing == 'true'"));
         assert!(block.contains("cargo \"$subcommand\" --version"));
         assert!(block.contains("velnor-cargo-bin-v2-"));
+        assert!(
+            block.contains("missing=false") && block.contains("missing=true"),
+            "the verify step must emit the booleans the install/save gates test: {block}"
+        );
     }
 }
 
