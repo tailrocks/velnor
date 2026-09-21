@@ -189,6 +189,21 @@ fn parse_toolchain_table(contents: &str, path: &Path) -> Result<RustToolchain, G
     })
 }
 
+/// Whether `value` survives being rendered into a quoted shell word on a
+/// runner: no whitespace, control characters, or shell metacharacters. The
+/// pin parser and the `[[units]]` toolchain declaration share this charset,
+/// so a declared channel is always safe to interpolate into install commands
+/// and cache keys.
+pub(crate) fn valid_toolchain_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || !matches!(character,
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '-' | '_' | '/' | ':' | '+')
+        })
+}
+
 /// Reject anything that would not survive being rendered into a quoted shell
 /// word on a runner: whitespace, control characters, and shell metacharacters.
 fn validate_toolchain_value(
@@ -196,14 +211,7 @@ fn validate_toolchain_value(
     value: &str,
     path: &Path,
 ) -> Result<String, GeneratorError> {
-    let valid = !value.is_empty()
-        && !value.chars().any(|character| {
-            character.is_whitespace()
-                || character.is_control()
-                || !matches!(character,
-                    'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '-' | '_' | '/' | ':' | '+')
-        });
-    if valid {
+    if valid_toolchain_identifier(value) {
         Ok(value.to_owned())
     } else {
         Err(GeneratorError::usage(format!(

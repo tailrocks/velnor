@@ -6480,6 +6480,7 @@ cp "$record" "$out"
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: vec![unit("rust-example")],
             workflow_templates: BTreeMap::new(),

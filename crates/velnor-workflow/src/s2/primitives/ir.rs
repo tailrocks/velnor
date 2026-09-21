@@ -170,9 +170,9 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
-        ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
-        XcodeToolchain, REQUIRED_CHECK,
+        explicit_toolchain_step_id, provider_input, unit_owns_workflow_crate, GraphNode, Pins,
+        ProviderAdmission, ProviderId, ProviderSet, RequiredCaller, RustNeeds, RustToolchain, Unit,
+        UnitKind, WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
     };
     use crate::s2::platform::{NamedProduct, Prerequisite};
     use crate::s2::{
@@ -390,6 +390,7 @@ mod tests {
             pins: Pins::resolved(),
             mise_lock_keys: BTreeSet::new(),
             declared_ruleset_contexts: String::new(),
+            rust_pin: None,
         }
     }
 
@@ -2876,6 +2877,283 @@ mod tests {
             "one record step per provider job across the split: {kind}"
         );
     }
+
+    /// The repository pin, as the scan parses it: channel plus the file's
+    /// own components, targets, and profile.
+    fn pin_toolchain() -> RustToolchain {
+        RustToolchain {
+            channel: "1.91.1".to_owned(),
+            components: vec!["clippy".to_owned(), "rustfmt".to_owned()],
+            targets: vec!["wasm32-unknown-unknown".to_owned()],
+            profile: Some("minimal".to_owned()),
+        }
+    }
+
+    /// A declared per-unit channel: a bare channel string with no pin facts.
+    fn declared_toolchain(channel: &str) -> RustToolchain {
+        RustToolchain {
+            channel: channel.to_owned(),
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        }
+    }
+
+    /// A hosted-only IR over `units` with the recorded pin: multi-channel
+    /// coverage renders without the local providers the matrix refuses.
+    fn matrix_test_ir(units: Vec<Unit>, rust_pin: Option<RustToolchain>) -> WorkflowIr {
+        let mut ir = owner_test_ir("example/toolchain-matrix", units);
+        ir.providers = BTreeSet::from([ProviderId::GithubHosted]);
+        ir.automatic_providers = BTreeSet::from([ProviderId::GithubHosted]);
+        ir.rust_pin = rust_pin;
+        ir
+    }
+
+    fn caller_toolchain(ir: &WorkflowIr, unit: &Unit) -> Option<String> {
+        ir.unit_provider_callers(unit, "ci-unit-rust.yml", None)
+            .iter()
+            .find_map(|caller| {
+                caller
+                    .inputs
+                    .iter()
+                    .find(|(name, _)| *name == provider_input::TOOLCHAIN)
+                    .map(|(_, value)| value.clone())
+            })
+    }
+
+    #[test]
+    fn single_channel_kind_carries_no_toolchain_input() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        let mut second = rust_unit("rust-second", "crates/second");
+        second.toolchain = Some(pin.clone());
+        let ir = matrix_test_ir(vec![primary.clone(), second], Some(pin));
+        let kind = must_render_kind(&ir);
+        assert!(
+            !kind.contains("inputs.toolchain"),
+            "a single-channel kind provisions without any input: {kind}"
+        );
+        assert!(
+            !kind.contains("toolchain:\n        required: false"),
+            "a single-channel kind declares no toolchain input: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install --profile minimal"),
+            "the pin leg keeps the file-driven install: {kind}"
+        );
+        assert!(
+            caller_toolchain(&ir, &primary).is_none(),
+            "single-channel callers pass no toolchain input"
+        );
+    }
+
+    #[test]
+    fn two_channel_kind_renders_one_gated_leg_per_channel() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![primary.clone(), msrv.clone()], Some(pin));
+        let kind = must_render_kind(&ir);
+        // The callee declares the leg input; each caller passes its unit's
+        // own channel. No `strategy.matrix`: callers already fan out one job
+        // per unit, so a matrix would run every unit on every channel.
+        assert!(
+            kind.contains("      toolchain:\n        required: false\n        type: string"),
+            "the kind reusable declares the toolchain input: {kind}"
+        );
+        assert!(
+            !kind.contains("strategy:") && !kind.contains("matrix."),
+            "legs ride per-unit inputs, never a multiplied matrix: {kind}"
+        );
+        assert_eq!(
+            caller_toolchain(&ir, &primary).as_deref(),
+            Some("1.91.1"),
+            "the primary caller passes the pin channel"
+        );
+        assert_eq!(
+            caller_toolchain(&ir, &msrv).as_deref(),
+            Some("1.88.0"),
+            "the MSRV caller passes its declared channel"
+        );
+        // The pin leg: file-driven, gated, today's cache key and step id.
+        assert!(
+            kind.contains("if: ${{ inputs.toolchain == '1.91.1' }}"),
+            "the pin leg gates on its channel: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install --profile minimal\n"),
+            "the pin leg keeps the file-driven install: {kind}"
+        );
+        // The MSRV leg: explicit install, leg-suffixed key and step id, and
+        // the export that retargets every later plain `cargo` invocation.
+        assert!(
+            kind.contains("if: ${{ inputs.toolchain == '1.88.0' }}"),
+            "the MSRV leg gates on its channel: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install '1.88.0' --profile 'minimal'\n"),
+            "the MSRV leg installs its channel explicitly: {kind}"
+        );
+        assert!(
+            kind.contains("key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-1.88.0"),
+            "the MSRV leg keys its cache on the channel: {kind}"
+        );
+        assert!(
+            kind.contains("id: rustup-toolchain-1-88-0"),
+            "the MSRV leg restores under its own step id: {kind}"
+        );
+        assert!(
+            kind.contains("steps.rustup-toolchain-1-88-0.outputs.cache-hit != 'true'"),
+            "the MSRV save gate reads its own leg's cache-hit: {kind}"
+        );
+        assert!(
+            kind.contains("echo \"RUSTUP_TOOLCHAIN=1.88.0\" >> \"$GITHUB_ENV\""),
+            "the MSRV leg retargets later cargo invocations: {kind}"
+        );
+        assert!(
+            !kind.contains("+1.88.0"),
+            "both legs run plain commands, never `cargo +toolchain`: {kind}"
+        );
+    }
+
+    #[test]
+    fn declared_pin_channel_joins_the_pin_leg() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        // A bare declaration equal to the pin channel is still the pin leg:
+        // the file's own facts provision it, not the bare declaration.
+        let mut alias = rust_unit("rust-alias", "crates/primary");
+        alias.toolchain = Some(declared_toolchain("1.91.1"));
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![primary, alias, msrv], Some(pin));
+        let kind = must_render_kind(&ir);
+        // Two legs, each gating its restore/provision/save steps on its own
+        // channel: the alias rides the pin leg instead of a third.
+        let pin_gates = kind.matches("inputs.toolchain == '1.91.1'").count();
+        let msrv_gates = kind.matches("inputs.toolchain == '1.88.0'").count();
+        assert!(
+            pin_gates > 0 && pin_gates == msrv_gates,
+            "two symmetric legs, no third: {kind}"
+        );
+        assert!(
+            kind.contains("rustup target add 'wasm32-unknown-unknown'"),
+            "the pin leg provisions the file's targets: {kind}"
+        );
+    }
+
+    #[test]
+    fn channel_collision_refuses() {
+        let pin = pin_toolchain();
+        let mut first = rust_unit("rust-first", "crates/first");
+        first.toolchain = Some(RustToolchain {
+            targets: vec!["wasm32-unknown-unknown".to_owned()],
+            ..declared_toolchain("1.88.0")
+        });
+        let mut second = rust_unit("rust-second", "crates/second");
+        second.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![first, second], Some(pin));
+        let error = must_err(
+            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            "one channel with two toolchains must fail",
+        );
+        assert!(
+            error.to_string().contains("1.88.0"),
+            "the refusal names the collided channel: {error}"
+        );
+    }
+
+    #[test]
+    fn explicit_step_ids_sanitize_and_dedupe() {
+        let mut taken = BTreeSet::from(["rustup-toolchain".to_owned()]);
+        assert_eq!(
+            explicit_toolchain_step_id("1.88.0", &mut taken),
+            "rustup-toolchain-1-88-0"
+        );
+        assert_eq!(
+            explicit_toolchain_step_id("1-88-0", &mut taken),
+            "rustup-toolchain-1-88-0-2",
+            "channels that sanitize alike still restore under disjoint ids"
+        );
+        assert_eq!(
+            explicit_toolchain_step_id("nightly", &mut taken),
+            "rustup-toolchain-nightly"
+        );
+    }
+
+    #[test]
+    fn matrix_on_a_local_provider_refuses_at_render() {
+        let pin = pin_toolchain();
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(pin.clone());
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        // The full provider universe: the local jobs cannot provision legs.
+        let mut ir = owner_test_ir("example/toolchain-local", vec![primary, msrv]);
+        ir.rust_pin = Some(pin);
+        let error = must_err(
+            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            "a matrix on a local provider must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("cannot provision per-leg toolchains"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn unknown_pin_renders_every_leg_explicitly() {
+        let mut primary = rust_unit("rust", "crates/primary");
+        primary.toolchain = Some(declared_toolchain("stable"));
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![primary, msrv], None);
+        let kind = must_render_kind(&ir);
+        assert!(
+            kind.contains("rustup toolchain install 'stable' --profile 'minimal'"),
+            "without a recorded pin no leg may assume the file: {kind}"
+        );
+        assert!(
+            kind.contains("rustup toolchain install '1.88.0' --profile 'minimal'"),
+            "without a recorded pin no leg may assume the file: {kind}"
+        );
+        assert!(
+            !kind.contains("Restore Rust toolchain\n"),
+            "without a recorded pin no leg renders the file-driven block: {kind}"
+        );
+    }
+
+    #[test]
+    fn literal_provision_follows_the_unit_leg() {
+        let pin = pin_toolchain();
+        let mut pinned = rust_unit("rust", "crates/primary");
+        pinned.toolchain = Some(pin.clone());
+        let mut msrv = rust_unit("rust-msrv", "crates/primary");
+        msrv.toolchain = Some(declared_toolchain("1.88.0"));
+        let ir = matrix_test_ir(vec![pinned.clone(), msrv.clone()], Some(pin));
+        let mut file_driven = String::new();
+        ir.render_tool_provisioning(&mut file_driven, ProviderId::GithubHosted, &pinned, true);
+        assert!(
+            file_driven.contains("rustup toolchain install --profile minimal\n"),
+            "the pin leg provisions file-driven: {file_driven}"
+        );
+        let mut explicit = String::new();
+        ir.render_tool_provisioning(&mut explicit, ProviderId::GithubHosted, &msrv, true);
+        assert!(
+            explicit.contains("rustup toolchain install '1.88.0' --profile 'minimal'"),
+            "a non-pin leg provisions explicitly: {explicit}"
+        );
+        assert!(
+            explicit.contains("echo \"RUSTUP_TOOLCHAIN=1.88.0\" >> \"$GITHUB_ENV\""),
+            "a non-pin leg retargets later cargo invocations: {explicit}"
+        );
+    }
 }
 
 /// The units a snapshot-carrying unit compiles: the unit itself plus the
@@ -3824,6 +4102,85 @@ pub(crate) fn render_pinned_toolchain_steps(
     }
 }
 
+/// Render one explicit-channel provision leg of a multi-channel Rust kind:
+/// restore the leg-suffixed `~/.rustup` cache, install the leg's channel by
+/// name, and export `RUSTUP_TOOLCHAIN` so every later cargo invocation —
+/// fetch, checks, tool installs — resolves to the leg instead of the pin
+/// file the checkout carries. The pin leg keeps the file-driven install
+/// above; only legs whose channel differs from the pin render here.
+///
+/// The cache key names the channel instead of hashing the pin files: every
+/// leg checks out the same pin file, so a file hash would collide across
+/// legs and restore another channel's toolchain state.
+pub(crate) fn render_explicit_toolchain_steps(
+    output: &mut String,
+    cache_restore: &str,
+    cache_save: &str,
+    toolchain: &RustToolchain,
+    step_id: &str,
+    save_gate: Option<&str>,
+) {
+    let (paths, _) = rendered_cache_values(&CacheSpec {
+        key_files: Vec::new(),
+        paths: vec!["~/.rustup".to_owned()],
+        purpose: CachePurpose::Toolchains,
+        mbx_output_cache_justification: None,
+        mutable_mount_seed: false,
+    });
+    let channel = crate::s2::shell_quote(&toolchain.channel);
+    let key = format!(
+        "velnor-rustup-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}",
+        toolchain.channel
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Restore Rust toolchain ({})\n        id: {step_id}\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}",
+        toolchain.channel
+    );
+    // A declared channel carries no components, targets, or profile of its
+    // own: the leg provisions it with a minimal profile, so pin-only
+    // components can never leak onto a channel that lacks them. Targets are
+    // qualified with `--toolchain`: the checkout's pin file still resolves
+    // every unqualified rustup invocation to the pin channel.
+    let profile = toolchain.profile.as_deref().unwrap_or("minimal");
+    let mut install = format!(
+        "rustup toolchain install {channel} --profile {}",
+        crate::s2::shell_quote(profile)
+    );
+    for component in &toolchain.components {
+        let _ = write!(install, " -c {}", crate::s2::shell_quote(component));
+    }
+    let _ = writeln!(
+        output,
+        "      - name: Provision Rust toolchain ({})\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}",
+        toolchain.channel
+    );
+    if !toolchain.targets.is_empty() {
+        let targets = toolchain
+            .targets
+            .iter()
+            .map(|target| crate::s2::shell_quote(target))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            output,
+            "          rustup target add --toolchain {channel} {targets}"
+        );
+    }
+    let _ = writeln!(
+        output,
+        "          echo \"RUSTUP_TOOLCHAIN={}\" >> \"$GITHUB_ENV\"",
+        toolchain.channel
+    );
+    if let Some(save_gate) = save_gate {
+        let _ = writeln!(
+            output,
+            "      - name: Save Rust toolchain ({})\n        if: {save_gate}\n        uses: {cache_save}\n        with:\n          path: |\n{paths}\n          key: {key}",
+            toolchain.channel
+        );
+    }
+}
+
 /// Trusted GitHub Actions cache save gate for unit lanes: default-branch push,
 /// schedule, and default-branch `workflow_dispatch`. Excludes every
 /// `pull_request` variant and `merge_group` (D7, D8).
@@ -4489,6 +4846,9 @@ pub(crate) struct WorkflowIr {
     /// Tool keys the root `mise.lock` pins. Detected `install_args` resolve
     /// their spelling from these; empty when the scan root has no lock.
     pub(crate) mise_lock_keys: BTreeSet<String>,
+    /// The repository's own parsed Rust pin: the file-driven provision leg.
+    /// A unit leg whose channel differs provisions explicitly instead.
+    pub(crate) rust_pin: Option<RustToolchain>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -4896,6 +5256,10 @@ pub(crate) mod provider_input {
     /// the default depth-1 shallow clone. Diff-aware gates (merge-base
     /// against the base SHA) need ancestry the shallow checkout lacks.
     pub(crate) const FULL_HISTORY: &str = "full_history";
+    /// The Rust channel the selected unit verifies under. Declared only when
+    /// the kind spans more than one channel; every caller of such a kind
+    /// passes its unit's channel so the provision legs gate on it.
+    pub(crate) const TOOLCHAIN: &str = "toolchain";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -4929,6 +5293,7 @@ pub(crate) mod provider_input {
         PRODUCT_TRANSPORT_READY,
         VALIDATION_PHASES,
         FULL_HISTORY,
+        TOOLCHAIN,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -4987,6 +5352,87 @@ pub(crate) mod provider_input {
     }
 }
 
+/// The distinct Rust channels a unit set verifies under. More than one means
+/// the kind file carries the `toolchain` input and provisions one leg per
+/// channel; one or zero keeps today's single file-driven provision.
+fn rust_toolchain_channels<'a>(units: impl Iterator<Item = &'a Unit>) -> BTreeSet<&'a str> {
+    units
+        .filter(|unit| unit.kind == UnitKind::Rust)
+        .filter_map(|unit| unit.toolchain.as_ref().map(|pin| pin.channel.as_str()))
+        .collect()
+}
+
+/// Group a collapsed provider job's members into provision legs, in channel
+/// order: one leg per distinct channel, each leg carrying the toolchain its
+/// provision block installs. A channel that matches the repository pin
+/// renders the pin's own file facts — a declared bare channel equal to the
+/// pin simply joins the pin leg — while any other channel requires every
+/// member on it to agree exactly, or generation refuses the contradiction.
+///
+/// The error is the disagreement fragment the caller wraps: members that mix
+/// pinned and unpinned toolchains, or that disagree within one channel.
+fn toolchain_leg_groups(
+    members: &[&Unit],
+    pin: Option<&RustToolchain>,
+) -> Result<Vec<RustToolchain>, String> {
+    let mut by_channel: BTreeMap<&str, Vec<&RustToolchain>> = BTreeMap::new();
+    let mut saw_unpinned = false;
+    for unit in members {
+        match unit.toolchain.as_ref() {
+            None => saw_unpinned = true,
+            Some(toolchain) => by_channel
+                .entry(toolchain.channel.as_str())
+                .or_default()
+                .push(toolchain),
+        }
+    }
+    if saw_unpinned && !by_channel.is_empty() {
+        return Err("the Rust toolchain pin".to_owned());
+    }
+    let mut legs = Vec::new();
+    for (channel, toolchains) in &by_channel {
+        if let Some(pin) = pin
+            && pin.channel == *channel
+        {
+            legs.push(pin.clone());
+        } else if toolchains
+            .iter()
+            .all(|candidate| *candidate == toolchains[0])
+        {
+            legs.push(toolchains[0].clone());
+        } else {
+            return Err(format!("the Rust toolchain pin for channel `{channel}`"));
+        }
+    }
+    Ok(legs)
+}
+
+/// The restore-step id of an explicit provision leg: the pinned leg keeps
+/// `rustup-toolchain`, and every other leg suffixes it with its sanitized
+/// channel so the save gate reads its own step's `cache-hit`. Step ids admit
+/// only letters, digits, `_`, and `-`; anything else folds to `-`, with a
+/// numeric suffix when two channels sanitize alike.
+fn explicit_toolchain_step_id(channel: &str, taken: &mut BTreeSet<String>) -> String {
+    let sanitized: String = channel
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut candidate = format!("rustup-toolchain-{sanitized}");
+    let mut suffix = 2;
+    while taken.contains(&candidate) {
+        candidate = format!("rustup-toolchain-{sanitized}-{suffix}");
+        suffix += 1;
+    }
+    taken.insert(candidate.clone());
+    candidate
+}
+
 /// The snapshot identity of one unit on one namespace, split into the parts
 /// a caller passes through inputs: the compatibility digest, the dependency
 /// inputs, and the freshness (state) inputs.
@@ -5041,14 +5487,16 @@ pub(crate) struct ProviderStepFacts {
     /// Whether the unit's checkout clones full history. Provider-independent:
     /// the same value travels per (unit, provider) invocation.
     pub(crate) full_history: bool,
+    /// The Rust channel the unit verifies under. Set only when the unit's
+    /// kind spans more than one channel; single-channel kinds provision the
+    /// pin without any input.
+    pub(crate) toolchain: Option<String>,
 }
 
 impl ProviderStepFacts {
     /// The `with:` values a caller passes: one entry per non-empty fact.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one branch per workflow_call input, in declaration order"
-    )]
+    /// Tailed groups (transport, verification selectors) live in their own
+    /// push helpers so this list stays under the line budget.
     pub(crate) fn input_values(&self) -> Vec<(&'static str, String)> {
         let mut values = Vec::new();
         if !self.mise_tools.is_empty() {
@@ -5147,6 +5595,14 @@ impl ProviderStepFacts {
             ));
         }
         self.push_transport_values(&mut values);
+        self.push_verification_values(&mut values);
+        values
+    }
+
+    /// The tail `with:` values, in declaration order: the unit's validation
+    /// phases, its full-history checkout flag, plus its toolchain channel
+    /// when the kind spans more than one.
+    fn push_verification_values(&self, values: &mut Vec<(&'static str, String)>) {
         if !self.validation_phases.is_empty() {
             values.push((
                 provider_input::VALIDATION_PHASES,
@@ -5156,7 +5612,9 @@ impl ProviderStepFacts {
         if self.full_history {
             values.push((provider_input::FULL_HISTORY, "true".to_owned()));
         }
-        values
+        if let Some(channel) = &self.toolchain {
+            values.push((provider_input::TOOLCHAIN, channel.clone()));
+        }
     }
 
     /// The transport `with:` values: the records this unit publishes, plus
@@ -5424,6 +5882,7 @@ impl WorkflowIr {
             units: config.units.clone(),
             pins: Pins::resolved(),
             mise_lock_keys: config.mise_lock_keys.clone(),
+            rust_pin: config.rust_pin.clone(),
         }
     }
 
@@ -6049,6 +6508,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 continue;
             }
+            // The toolchain input is declared only when the kind's members
+            // span more than one channel: a single-channel kind provisions
+            // the pin file-driven, exactly as before, byte for byte.
+            if *name == provider_input::TOOLCHAIN
+                && rust_toolchain_channels(members.iter().copied()).len() < 2
+            {
+                continue;
+            }
             let _ = writeln!(output, "{}", provider_input::declaration(name));
         }
         if !env.is_empty() {
@@ -6496,7 +6963,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             product_transport_ready: Self::transport_ready(&self.units, unit, provider),
             validation_phases: unit.runnable_phases(),
             full_history: unit.full_history,
+            toolchain: Self::toolchain_fact_for_kind(&self.units, unit),
         }
+    }
+
+    /// The channel fact a caller passes for `unit`: the unit's own channel,
+    /// but only when its kind spans more than one — the header declares the
+    /// input under the same predicate, so the two sides always agree.
+    fn toolchain_fact_for_kind(units: &[Unit], unit: &Unit) -> Option<String> {
+        if unit.kind != UnitKind::Rust {
+            return None;
+        }
+        if rust_toolchain_channels(units.iter()).len() < 2 {
+            return None;
+        }
+        unit.toolchain.as_ref().map(|pin| pin.channel.clone())
     }
 
     /// The mise tool ids one unit installs on `hosted`: the hosted spell
@@ -6769,16 +7250,25 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             saves.into_iter().next().unwrap_or(false)
         };
-        let toolchain = {
-            let pins = members
+        // One provision leg per channel: a single leg renders today's
+        // file-driven provision untouched, while several legs render one
+        // gated block each. Local providers provision no toolchain at all,
+        // so a matrix there would verify every leg under the image's
+        // toolchain instead — refused here as well as at load validation.
+        let toolchain_legs = toolchain_leg_groups(members, self.rust_pin.as_ref())
+            .map_err(|what| disagreement(&what))?;
+        if provider.is_local() && toolchain_legs.len() > 1 {
+            let channels = toolchain_legs
                 .iter()
-                .map(|unit| unit.toolchain.clone())
-                .collect::<Vec<_>>();
-            if pins.iter().any(|pin| pin != &pins[0]) {
-                return Err(disagreement("the Rust toolchain pin"));
-            }
-            pins.into_iter().next().flatten()
-        };
+                .map(|leg| leg.channel.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(GeneratorError::usage(format!(
+                "collapsed {} provider job for {} units spans more than one toolchain channel ({channels}), but a local provider cannot provision per-leg toolchains",
+                provider.as_str(),
+                kind.label(),
+            )));
+        }
         let xcode = {
             let pins = members
                 .iter()
@@ -6844,10 +7334,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_velnor_mise_install_from_input(&mut block);
             output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS));
         }
-        if !local_skips_pinned_rust_toolchain(provider)
-            && let Some(toolchain) = &toolchain
-        {
-            self.render_rust_toolchain_steps(output, toolchain, cache_save);
+        if !local_skips_pinned_rust_toolchain(provider) && !toolchain_legs.is_empty() {
+            if toolchain_legs.len() == 1 {
+                self.render_rust_toolchain_steps(output, &toolchain_legs[0], cache_save);
+            } else {
+                self.render_toolchain_matrix_legs(output, &toolchain_legs, cache_save);
+            }
         }
         if hosted
             && kind == UnitKind::Swift
@@ -7736,13 +8228,86 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let save_gate = cache_save.then(|| {
             format!("({trusted_cache}) && steps.rustup-toolchain.outputs.cache-hit != 'true'")
         });
-        render_pinned_toolchain_steps(
-            output,
-            self.pins.cache_restore,
-            self.pins.cache_save,
-            toolchain,
-            save_gate.as_deref(),
-        );
+        // The pin leg provisions file-driven, exactly as before; a leg whose
+        // channel differs from the recorded pin provisions explicitly,
+        // because the checkout's pin file would resolve a file-driven
+        // install to the wrong channel. An unknown pin keeps the file-driven
+        // shape: hand-built configs record none, and a declared channel
+        // without a pin file has no Rust sources to verify (the scan
+        // refuses pin-less Rust repositories), so its checks fail at
+        // runtime regardless of which toolchain provisions.
+        if self
+            .rust_pin
+            .as_ref()
+            .is_none_or(|pin| pin.channel == toolchain.channel)
+        {
+            render_pinned_toolchain_steps(
+                output,
+                self.pins.cache_restore,
+                self.pins.cache_save,
+                toolchain,
+                save_gate.as_deref(),
+            );
+        } else {
+            render_explicit_toolchain_steps(
+                output,
+                self.pins.cache_restore,
+                self.pins.cache_save,
+                toolchain,
+                "rustup-toolchain",
+                save_gate.as_deref(),
+            );
+        }
+    }
+
+    /// The provision legs of a multi-channel collapsed provider job: the pin
+    /// leg keeps the file-driven block, every other channel renders an
+    /// explicit block, and each block gates on the caller's `toolchain`
+    /// input. Legs render in channel order with disjoint restore-step ids,
+    /// so each save gate reads its own leg's `cache-hit`.
+    fn render_toolchain_matrix_legs(
+        &self,
+        output: &mut String,
+        legs: &[RustToolchain],
+        cache_save: bool,
+    ) {
+        let trusted_cache = trusted_cache_save_expression(&self.default_branch);
+        let mut taken = BTreeSet::from(["rustup-toolchain".to_owned()]);
+        for leg in legs {
+            let pin_leg = self
+                .rust_pin
+                .as_ref()
+                .is_some_and(|pin| pin.channel == leg.channel);
+            let step_id = if pin_leg {
+                "rustup-toolchain".to_owned()
+            } else {
+                explicit_toolchain_step_id(&leg.channel, &mut taken)
+            };
+            let save_gate = cache_save.then(|| {
+                format!("({trusted_cache}) && steps.{step_id}.outputs.cache-hit != 'true'")
+            });
+            let mut block = String::new();
+            if pin_leg {
+                render_pinned_toolchain_steps(
+                    &mut block,
+                    self.pins.cache_restore,
+                    self.pins.cache_save,
+                    leg,
+                    save_gate.as_deref(),
+                );
+            } else {
+                render_explicit_toolchain_steps(
+                    &mut block,
+                    self.pins.cache_restore,
+                    self.pins.cache_save,
+                    leg,
+                    &step_id,
+                    save_gate.as_deref(),
+                );
+            }
+            let gate = format!("inputs.{} == '{}'", provider_input::TOOLCHAIN, leg.channel);
+            output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
+        }
     }
 
     /// The hosted-provider Xcode contract: select the installed Xcode
