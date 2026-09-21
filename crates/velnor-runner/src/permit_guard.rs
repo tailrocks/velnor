@@ -19,7 +19,8 @@
 use std::path::{Path, PathBuf};
 
 use velnor_control::permit_ledger::{
-    unix_now, AcquireOutcome, AdoptOutcome, LedgerError, PermitLane, PermitLedger, PermitState,
+    deferred_wait, unix_now, AcquireOutcome, AdoptOutcome, LedgerError, PermitLane, PermitLedger,
+    PermitState, DEFERRED_WAIT_BUDGET,
 };
 
 /// Environment override for the host-wide ledger database.
@@ -213,7 +214,12 @@ impl NativePermitGuard {
             .observe_demand(&holder, PermitLane::Native, scope, observed, observed)
             .map_err(GuardError::Storage)?;
         let pid = std::process::id();
-        for _ in 0..32 {
+        // Younger waiters must outlive the older attempts ahead of them
+        // (see DEFERRED_WAIT_BUDGET); every departure below parks its
+        // demand so it cannot head-block younger work.
+        let deadline = std::time::Instant::now() + DEFERRED_WAIT_BUDGET;
+        let mut deferred_attempts = 0u32;
+        loop {
             let generation = ledger.generation().map_err(GuardError::Storage)?;
             match ledger
                 .acquire(
@@ -244,17 +250,37 @@ impl NativePermitGuard {
                         AdoptOutcome::LiveHolder => {
                             return Ok(Some(Self::unowned(ledger_path, holder)));
                         }
-                        AdoptOutcome::Missing | AdoptOutcome::StaleGeneration => continue,
+                        AdoptOutcome::Missing | AdoptOutcome::StaleGeneration => {
+                            if std::time::Instant::now() >= deadline {
+                                park_departed(&mut ledger, &holder);
+                                return Ok(None);
+                            }
+                        }
                     }
                 }
-                AcquireOutcome::Full | AcquireOutcome::Closed => return Ok(None),
-                AcquireOutcome::Deferred | AcquireOutcome::StaleGeneration => continue,
+                AcquireOutcome::Full | AcquireOutcome::Closed => {
+                    park_departed(&mut ledger, &holder);
+                    return Ok(None);
+                }
+                AcquireOutcome::Deferred => {
+                    if std::time::Instant::now() >= deadline {
+                        park_departed(&mut ledger, &holder);
+                        return Ok(None);
+                    }
+                    std::thread::sleep(deferred_wait(deferred_attempts));
+                    deferred_attempts = deferred_attempts.saturating_add(1);
+                }
+                AcquireOutcome::StaleGeneration => {
+                    if std::time::Instant::now() >= deadline {
+                        park_departed(&mut ledger, &holder);
+                        return Ok(None);
+                    }
+                }
                 AcquireOutcome::NotConfigured => {
                     return Err(GuardError::NotConfigured);
                 }
             }
         }
-        Ok(None)
     }
 
     fn owned(ledger_path: &Path, holder: String) -> Self {
@@ -442,6 +468,16 @@ impl Drop for NativePermitGuard {
                 );
             }
         }
+    }
+}
+
+/// Yield our queue place without losing our age: a departed waiter must
+/// not head-block younger demand. Best-effort: on storage failure the
+/// demand stays eligible (younger waiters defer to it) rather than
+/// failing the departure.
+fn park_departed(ledger: &mut PermitLedger, holder: &str) {
+    if let Err(error) = ledger.park_demand(holder) {
+        eprintln!("Warning: permit demand park failed for {holder}: {error}");
     }
 }
 

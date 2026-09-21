@@ -1781,3 +1781,109 @@ fn dangling_render_symlink_is_an_error() {
     let _ = fs::remove_dir_all(rendered);
     let _ = fs::remove_dir_all(tree);
 }
+
+fn declared_tree(required_checks: &[&str]) -> DeclaredTree {
+    DeclaredTree {
+        pin: None,
+        repository: None,
+        default_branch: "main".to_owned(),
+        excludes: BTreeSet::new(),
+        velnor_policy: VelnorPolicyContract::default(),
+        required_checks: required_checks
+            .iter()
+            .map(|context| (*context).to_owned())
+            .collect(),
+        external_checks: Vec::new(),
+    }
+}
+
+const REQUIRED_CHECKS_PR_AGGREGATE: &str = "jobs:\n  ci-required:\n    name: ci-required\n";
+const REQUIRED_CHECKS_POLICY_ENTRYPOINT: &str = "jobs:\n  policy:\n    name: Policy\n";
+
+fn write_required_checks_fixture(root: &Path, entrypoint: bool) {
+    write(
+        &root.join(PULL_REQUEST_AGGREGATE),
+        REQUIRED_CHECKS_PR_AGGREGATE,
+    );
+    if entrypoint {
+        write(
+            &root.join(POLICY_ENTRYPOINT),
+            REQUIRED_CHECKS_POLICY_ENTRYPOINT,
+        );
+    }
+}
+
+#[test]
+fn required_checks_accepts_policy_from_the_entrypoint() {
+    let root = temporary_directory("required-checks-policy");
+    write_required_checks_fixture(&root, true);
+    let declared = declared_tree(&["ci-required", "Policy"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(
+        report.passed,
+        "{}: {}",
+        report.reason,
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_rejects_contexts_absent_from_both_workflows() {
+    let root = temporary_directory("required-checks-bogus");
+    write_required_checks_fixture(&root, true);
+    let declared = declared_tree(&["ci-required", "Policy", "bogus-context"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(!report.passed, "a bogus context must fail the rule");
+    assert!(
+        report
+            .details
+            .iter()
+            .any(|finding| finding.contains("bogus-context")),
+        "the rule names the absent context: {}",
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_has_no_hard_coded_policy_exemption() {
+    let root = temporary_directory("required-checks-no-entrypoint");
+    write_required_checks_fixture(&root, false);
+    let declared = declared_tree(&["Policy"]);
+    let report = required_checks(&root, &declared, None);
+    assert!(
+        !report.passed,
+        "Policy without a rendered entrypoint must fail the rule"
+    );
+    assert!(
+        report
+            .details
+            .iter()
+            .any(|finding| finding.contains("Policy")),
+        "the rule names the absent context: {}",
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_checks_passes_when_live_matches_declared_plus_entrypoint() {
+    let root = temporary_directory("required-checks-live");
+    write_required_checks_fixture(&root, true);
+    let mut declared = declared_tree(&["ci-required", "Policy"]);
+    declared.external_checks = vec!["DCO".to_owned()];
+    let live = vec![
+        "ci-required".to_owned(),
+        "DCO".to_owned(),
+        "Policy".to_owned(),
+    ];
+    let report = required_checks(&root, &declared, Some(&live));
+    assert!(
+        report.passed,
+        "{}: {}",
+        report.reason,
+        report.details.join("; ")
+    );
+    let _ = fs::remove_dir_all(root);
+}
