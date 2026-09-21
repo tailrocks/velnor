@@ -524,6 +524,16 @@ pub(crate) struct ReleaseSection {
     artifact_path: Option<String>,
     description: Option<String>,
     manifest_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    apt_arches: Vec<String>,
+    signer_fingerprint: Option<String>,
+    passphrase_secret: Option<String>,
+    signing_key_secret: Option<String>,
+    keyring_path: Option<String>,
+    apt_origin: Option<String>,
+    apt_identity_dir: Option<String>,
+    apt_feed_url: Option<String>,
+    retention: Option<i64>,
     dockerfile: Option<String>,
     context: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -997,6 +1007,42 @@ impl ReleaseSection {
 
     pub(crate) fn manifest_schema(&self) -> Option<&str> {
         self.manifest_schema.as_deref()
+    }
+
+    pub(crate) fn apt_arches(&self) -> &[String] {
+        &self.apt_arches
+    }
+
+    pub(crate) fn signer_fingerprint(&self) -> Option<&str> {
+        self.signer_fingerprint.as_deref()
+    }
+
+    pub(crate) fn passphrase_secret(&self) -> Option<&str> {
+        self.passphrase_secret.as_deref()
+    }
+
+    pub(crate) fn signing_key_secret(&self) -> Option<&str> {
+        self.signing_key_secret.as_deref()
+    }
+
+    pub(crate) fn keyring_path(&self) -> Option<&str> {
+        self.keyring_path.as_deref()
+    }
+
+    pub(crate) fn apt_origin(&self) -> Option<&str> {
+        self.apt_origin.as_deref()
+    }
+
+    pub(crate) fn apt_identity_dir(&self) -> Option<&str> {
+        self.apt_identity_dir.as_deref()
+    }
+
+    pub(crate) fn apt_feed_url(&self) -> Option<&str> {
+        self.apt_feed_url.as_deref()
+    }
+
+    pub(crate) fn retention(&self) -> Option<i64> {
+        self.retention
     }
 
     pub(crate) fn dockerfile(&self) -> Option<&str> {
