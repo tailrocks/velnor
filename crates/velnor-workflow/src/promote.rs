@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::s2::dispatch::dir_is_schema2;
 use super::s2::policy::GENERATION_CONFIG;
@@ -34,6 +35,27 @@ use super::{
     create_generator_symlink, is_full_revision, resolve_default_branch, GeneratorError, RunnerMode,
     SOURCE_CLOSURE, SOURCE_FEATURES, SOURCE_PROFILE,
 };
+
+#[path = "promote_readiness.rs"]
+mod promote_readiness;
+
+use self::promote_readiness::PublicationReadinessManifest;
+
+/// Validate the trusted publisher's local hand-off before promotion mutates a
+/// pin or generated file.  The caller supplies the exact closure/revision
+/// binding and the clock; this helper performs no discovery or network I/O.
+pub(crate) fn validate_publication_readiness(
+    manifest: &Path,
+    expected_closure: &str,
+    expected_revision: &str,
+    now_unix_seconds: u64,
+) -> Result<(), GeneratorError> {
+    PublicationReadinessManifest::from_file(manifest)?.validate_for_activation(
+        expected_closure,
+        expected_revision,
+        now_unix_seconds,
+    )
+}
 
 /// Promotion intent, separated from the CLI surface for testing.
 #[derive(Clone)]
@@ -47,6 +69,9 @@ pub(crate) struct PromoteOptions {
     /// binding. Defaults to `repo` (owner self-promotion); fleet promotion
     /// of a consumer tree points it at a product checkout containing the pin.
     pub(crate) generator_repo: Option<PathBuf>,
+    /// Trusted publisher evidence that all supported renderer products are
+    /// available for the exact closure and revision being activated.
+    pub(crate) publication_readiness: PathBuf,
     /// Default branch for branch gates. Defaults to the repository's own,
     /// exactly like a plain generator run.
     pub(crate) default_branch: Option<String>,
@@ -113,6 +138,11 @@ pub(crate) fn run_promote(options: &PromoteOptions) -> Result<PromoteReport, Gen
     // written: only the generator at the pin (or a closure-identical twin)
     // may stamp it.
     let closure = verify_render_stamp_binding(&generator_repo, &options.rev)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| GeneratorError::usage(format!("resolve promotion clock: {error}")))?
+        .as_secs();
+    validate_publication_readiness(&options.publication_readiness, &closure, &options.rev, now)?;
     require_promotion_clean(&repo)?;
     let pin_path = repo.join(GENERATION_CONFIG);
     // The pin stamp writes through to the config bytes, but the snapshot

@@ -746,69 +746,6 @@ fn pin_build_honors_cargo_net_offline() {
     );
 }
 
-/// The `VELNOR_WORKFLOW_CANDIDATE_MANIFEST` environment fallback binds the
-/// env-slot candidate: a provisioned pin whose render differs reaches the
-/// candidate exception, and a manifest naming another tree fails loudly.
-#[cfg(unix)]
-#[test]
-fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let (root, pin, _output) = stale_pin_check_fixture("check-manifest-env");
-    // A pin the fixture history cannot contain, so resolution takes the
-    // revision fallback against the provisioned fake below.
-    let foreign_pin = "0123456789abcdef0123456789abcdef01234567";
-    let config = root.join(".github-gen/velnor-workflow.toml");
-    let body = fs::read_to_string(&config).unwrap();
-    fs::write(
-        &config,
-        body.replace(
-            &format!("revision = \"{pin}\"\n"),
-            &format!("revision = \"{foreign_pin}\"\n"),
-        ),
-    )
-    .unwrap();
-    let generated = generate(&root);
-    let output = generated.output;
-    let head = git_output(&root, &["rev-parse", "HEAD"]);
-    let shim_dir = unique_dir("check-manifest-env-shim");
-    // The fake proves the foreign pin through the revision fallback, then
-    // renders drift so the candidate exception is reached. It lives outside
-    // the fixture root so the scan never sees it.
-    let fake = shim_dir.join("fake-pin");
-    fs::write(
-        &fake,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {foreign_pin}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; exit 0; fi\nmkdir -p \"$3/drift\"\necho junk > \"$3/drift/file.txt\"\nexit 0\n"
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-    let manifest = shim_dir.join("candidate-manifest.json");
-    fs::write(
-        &manifest,
-        format!(
-            "{{\"profile\":\"debug\",\"platform\":\"Linux-X64\",\"repository\":\"example/monorepo\",\"run_id\":\"1\",\"revision\":\"{head}\",\"closure\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binary_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}"
-        ),
-    )
-    .unwrap();
-    let sentinel = write_cargo_shim(&shim_dir);
-    let outcome = check_command(&root, &output, &shim_dir, &sentinel)
-        .env("VELNOR_WORKFLOW_PINNED_BINARY", &fake)
-        .env("VELNOR_WORKFLOW_CANDIDATE_MANIFEST", &manifest)
-        .output()
-        .expect("check with env manifest");
-    assert!(!outcome.status.success());
-    let stderr = String::from_utf8_lossy(&outcome.stderr);
-    assert!(
-        stderr.contains("names closure"),
-        "the env manifest is honored and its mismatch fails loudly: {stderr}"
-    );
-    assert!(
-        stderr.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        "the failure names the manifest closure: {stderr}"
-    );
-}
-
 #[test]
 fn delete_generated_outputs_and_regenerate_from_evidence() {
     let root = unique_dir("regen-from-evidence");

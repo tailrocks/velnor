@@ -9,11 +9,10 @@
 //! The static tests in `lib.rs` and `runtime_products.rs` pin the consumer
 //! scripts' text. These tests execute the scripts: each case runs the real
 //! `setup-velnor-workflow` step bodies (extracted from the shipped
-//! `action.yml`), the real rendered Velnor provisioner, or the real
-//! candidate-acquire verification tail under `bash`, with a stub `gh`, a
-//! logging `jq` shim, and fixture git history. Rejections exit nonzero with
-//! the scripts' precise errors, and the stub logs prove which trust gates
-//! ran.
+//! `action.yml`) or the real rendered Velnor provisioner under `bash`, with
+//! a stub `gh`, a logging `jq` shim, and fixture git history. Rejections exit
+//! nonzero with the scripts' precise errors, and the stub logs prove which
+//! trust gates ran.
 //!
 //! Trust boundaries of the harness:
 //! * `gh` is a stub: it serves fixture release/attestation/run answers and
@@ -36,12 +35,6 @@
 //!   at a nonexistent local path, so an unexpected outbound call fails
 //!   fast instead of dialing out.
 //!
-//! The candidate-acquire case executes the verification tail of
-//! `policy_candidate_step` (artifact download through manifest binding) with
-//! the locally computed head candidate supplied as `$head_candidate`. The head
-//! of that step (PR-run polling plus `velnor-workflow closure` calls) is
-//! liveness, not trust: the tail is the whole trust decision.
-
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -49,9 +42,7 @@ use std::process::{Command, Output};
 
 use sha2::{Digest, Sha256};
 
-use crate::closure::{
-    candidate_closure_of_tree, closure_of_tree, is_full_closure, CI_FEATURES, PROFILE_RELEASE,
-};
+use crate::closure::{closure_of_tree, is_full_closure, CI_FEATURES, PROFILE_RELEASE};
 use crate::primitives::runtime_products::RUNTIME_PRODUCTS_FILE;
 
 /// `RUNNER_OS`-`RUNNER_ARCH` platform the fixtures serve.
@@ -143,37 +134,6 @@ if [[ "$command" == "attestation" && "$subcommand" == "verify" ]]; then
     echo "attestation verification failed for $subject" >&2
     exit 1
   fi
-  exit 0
-fi
-if [[ "$command" == "run" && "$subcommand" == "download" ]]; then
-  run_id="${3:-}"
-  shift 3
-  name=""
-  dir=""
-  repo=""
-  while [[ $# -gt 0 ]]; do
-    case "${1:-}" in
-      --name)
-        name="${2:-}"
-        shift 2
-        ;;
-      --dir)
-        dir="${2:-}"
-        shift 2
-        ;;
-      --repo)
-        repo="${2:-}"
-        shift 2
-        ;;
-      *)
-        shift
-        ;;
-    esac
-  done
-  log "run-download id=$run_id name=$name repo=$repo"
-  for file in velnor-workflow candidate-manifest.json; do
-    cp "$GH_STUB_DIR/$file" "$dir/$file"
-  done
   exit 0
 fi
 if [[ "$command" == "api" ]]; then
@@ -431,34 +391,6 @@ fn velnor_provisioner_script(checkout: &str) -> String {
     dedent(&step[at + marker.len()..], 10)
 }
 
-/// The candidate-acquire verification tail: artifact download through
-/// manifest binding. The extraction point is pinned — the tail must open
-/// with the download block and still contain every trust gate — so script
-/// drift fails here instead of silently testing less.
-fn candidate_verify_tail(revision: &str) -> String {
-    let step = crate::policy_candidate_step(revision);
-    let marker = "candidate=\"$RUNNER_TEMP/velnor-workflow-candidate\"";
-    let at = must_some(step.find(marker), "locate candidate download block");
-    let line_start = step[..at].rfind('\n').map_or(0, |index| index + 1);
-    let tail = dedent(&step[line_start..], 10);
-    assert!(
-        tail.starts_with("candidate=\"$RUNNER_TEMP/velnor-workflow-candidate\"\n"),
-        "the tail opens with the download block"
-    );
-    for gate in [
-        "gh run download",
-        "candidate digest mismatch",
-        "is not the head's candidate",
-        "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=",
-    ] {
-        assert!(
-            tail.contains(gate),
-            "the candidate tail still contains the {gate} gate"
-        );
-    }
-    tail
-}
-
 fn github_output_value(path: &Path, key: &str) -> String {
     let needle = format!("{key}=");
     let content = must(fs::read_to_string(path), "read step output file");
@@ -554,7 +486,6 @@ struct ConsumerFixture {
     checkout: PathBuf,
     revision: String,
     closure: String,
-    candidate_closure: String,
     gh_log: PathBuf,
     jq_log: PathBuf,
     install_log: PathBuf,
@@ -581,14 +512,6 @@ impl ConsumerFixture {
             "closure of fixture",
         );
         assert!(is_full_closure(&closure), "fixture closure is full hex");
-        let candidate_closure = must(
-            candidate_closure_of_tree(&checkout, &revision),
-            "candidate closure of fixture",
-        );
-        assert!(
-            is_full_closure(&candidate_closure),
-            "fixture candidate closure is full hex"
-        );
         let real_jq = find_on_path("jq");
         write_executable(&bin.join("gh"), STUB_GH);
         write_executable(&bin.join("jq"), STUB_JQ);
@@ -604,7 +527,6 @@ impl ConsumerFixture {
             checkout,
             revision,
             closure,
-            candidate_closure,
             gh_log,
             jq_log,
             install_log,
@@ -888,66 +810,6 @@ impl ConsumerFixture {
             env_file,
         )
     }
-
-    fn run_candidate_tail(
-        &self,
-        name: &str,
-        run_id: &str,
-        head_candidate: &str,
-        extra: &[(&str, &str)],
-    ) -> (Output, PathBuf) {
-        let tail = candidate_verify_tail(&self.revision);
-        let runner_temp = self.root.join("runner-temp");
-        must(fs::create_dir_all(&runner_temp), "create runner temp");
-        let runner_temp_str = must_some(runner_temp.to_str(), "runner temp is UTF-8");
-        let env_file = self
-            .root
-            .join(format!("github-env-{}", crate::unique_suffix()));
-        let env_str = must_some(env_file.to_str(), "env file is UTF-8");
-        let mut env: Vec<(&str, &str)> = vec![
-            ("RUNNER_TEMP", runner_temp_str),
-            ("GITHUB_ENV", env_str),
-            (
-                "GITHUB_REPOSITORY",
-                crate::workflow_setup_action_repository(),
-            ),
-            ("name", name),
-            ("run_id", run_id),
-            ("head_candidate", head_candidate),
-        ];
-        env.extend_from_slice(extra);
-        (self.run_script("candidate", &tail, &env, None), env_file)
-    }
-}
-
-fn candidate_manifest(fixture: &ConsumerFixture, closure: &str, digest: &str) -> serde_json::Value {
-    serde_json::json!({
-        "profile": "debug",
-        "platform": FIXTURE_PLATFORM,
-        "repository": crate::workflow_setup_action_repository(),
-        "run_id": "12345678",
-        "revision": fixture.revision.as_str(),
-        "closure": closure,
-        "binary_sha256": digest,
-    })
-}
-
-fn serve_candidate(fixture: &ConsumerFixture, reported_closure: &str, closure: &str) {
-    let bytes = stub_binary_script(reported_closure, &fixture.revision);
-    must(
-        fs::write(fixture.serve.join("velnor-workflow"), &bytes),
-        "serve candidate binary",
-    );
-    let digest = sha256_hex(bytes.as_bytes());
-    let manifest = candidate_manifest(fixture, closure, &digest);
-    let rendered = must(
-        serde_json::to_string(&manifest),
-        "render candidate manifest",
-    );
-    must(
-        fs::write(fixture.serve.join("candidate-manifest.json"), rendered),
-        "serve candidate manifest",
-    );
 }
 
 fn pinned_signer_flags() -> (String, String) {
@@ -1457,89 +1319,6 @@ fn velnor_provisioner_reuses_slot_only_on_digest_match() {
     assert!(
         env.contains(&format!("VELNOR_WORKFLOW_PINNED_BINARY={}", slot.display())),
         "the slot exports for the guard: {env}"
-    );
-}
-
-#[test]
-fn candidate_acquire_recomputes_the_digest() {
-    let fixture = ConsumerFixture::open("candidate-digest");
-    let bytes = stub_binary_script(&fixture.candidate_closure, &fixture.revision);
-    must(
-        fs::write(fixture.serve.join("velnor-workflow"), &bytes),
-        "serve candidate binary",
-    );
-    let digest = sha256_hex(bytes.as_bytes());
-    let manifest = candidate_manifest(
-        &fixture,
-        &fixture.candidate_closure,
-        &flipped_hex(&digest, 2),
-    );
-    let rendered = must(serde_json::to_string(&manifest), "render manifest");
-    must(
-        fs::write(fixture.serve.join("candidate-manifest.json"), rendered),
-        "serve candidate manifest",
-    );
-    let prefix = &fixture.candidate_closure[..16];
-    let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
-    let candidate = fixture.candidate_closure.clone();
-    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
-    assert!(!output.status.success(), "a wrong candidate digest rejects");
-    let stderr = stderr_of(&output);
-    assert!(
-        stderr.contains("candidate digest mismatch"),
-        "the error names the mismatch: {stderr}"
-    );
-}
-
-#[test]
-fn candidate_checksum_alone_confers_no_trust() {
-    let fixture = ConsumerFixture::open("candidate-checksum");
-    let foreign = flipped_hex(&fixture.candidate_closure, 21);
-    serve_candidate(&fixture, &foreign, &foreign);
-    let prefix = &fixture.candidate_closure[..16];
-    let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
-    let candidate = fixture.candidate_closure.clone();
-    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
-    assert!(
-        !output.status.success(),
-        "a foreign closure rejects despite a matching checksum"
-    );
-    let stderr = stderr_of(&output);
-    assert!(
-        !stderr.contains("digest mismatch"),
-        "the digest gate passed, so the binding must reject: {stderr}"
-    );
-    assert!(
-        stderr.contains("is not the head's candidate"),
-        "the closure binding rejects: {stderr}"
-    );
-}
-
-#[test]
-fn candidate_acquire_exports_bound_product() {
-    let fixture = ConsumerFixture::open("candidate-good");
-    let candidate = fixture.candidate_closure.clone();
-    serve_candidate(&fixture, &candidate, &candidate);
-    let prefix = &candidate[..16];
-    let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
-    let (output, env_file) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
-    assert!(
-        output.status.success(),
-        "a bound candidate acquires: {}",
-        stderr_of(&output)
-    );
-    let env = must(fs::read_to_string(&env_file), "read github env");
-    assert!(
-        env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "the binary exports: {env}"
-    );
-    assert!(
-        env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),
-        "the manifest exports for the validator binding: {env}"
-    );
-    assert!(
-        fixture.gh_log_text().contains("run-download"),
-        "the artifact came from the run download"
     );
 }
 

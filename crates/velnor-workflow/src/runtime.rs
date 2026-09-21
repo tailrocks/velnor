@@ -421,13 +421,16 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-/// `velnor-workflow promote --rev SHA|HEAD [--repo PATH] [--generator-repo PATH]
-/// [--default-branch BRANCH] [--runners MODE] [--message TEXT] [--dry-run]`:
+/// `velnor-workflow promote --rev SHA|HEAD --publication-readiness PATH
+/// [--repo PATH] [--generator-repo PATH] [--default-branch BRANCH]
+/// [--runners MODE] [--message TEXT] [--dry-run]`:
 /// stamp the D19 pin and regenerate the whole tree in one atomic commit. The
 /// running binary must render with exactly the source closure the pin names
-/// (render with X ⇒ stamp X); anything else fails closed before touching the
-/// tree. `--generator-repo` points fleet promotion at a product checkout
-/// holding the pin's history; it defaults to the promoted repository itself.
+/// (render with X ⇒ stamp X), and the trusted publication-readiness handoff
+/// must prove every supported renderer product exists for that exact identity;
+/// anything else fails closed before touching the tree.
+/// `--generator-repo` points fleet promotion at a product checkout holding the
+/// pin's history; it defaults to the promoted repository itself.
 /// `velnor-workflow visibility (check|refresh) [--repo PATH]
 /// [--repository owner/name]`: the metadata-acquisition side of the
 /// visibility-based runner policy. `check` compares the checked-in evidence
@@ -491,6 +494,7 @@ fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "rev",
             "repo",
             "generator-repo",
+            "publication-readiness",
             "default-branch",
             "runners",
             "message",
@@ -499,6 +503,12 @@ fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let rev = options
         .get("rev")
         .ok_or_else(|| GeneratorError::usage("promote requires --rev SHA".to_owned()))?;
+    let publication_readiness = options.get("publication-readiness").ok_or_else(|| {
+        GeneratorError::usage(
+            "promote requires --publication-readiness PATH (trusted publication evidence)"
+                .to_owned(),
+        )
+    })?;
     let repo = match options.get("repo") {
         Some(path) => PathBuf::from(path.as_str()),
         None => env::current_dir()
@@ -515,6 +525,7 @@ fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
         generator_repo: options
             .get("generator-repo")
             .map(|path| PathBuf::from(path.as_str())),
+        publication_readiness: PathBuf::from(publication_readiness),
         default_branch: options.get("default-branch").cloned(),
         runners,
         message: options.get("message").cloned(),
