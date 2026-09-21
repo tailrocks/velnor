@@ -991,20 +991,34 @@ fn map_workflow(
         observed_at_utc: observed_at_utc.to_owned(),
         raw_object_refs: workflow.source_raw_object_refs.clone(),
     };
+    let reviewed_workflow = workflow.path == manifest.workflow_path;
     let source_jobs = workflow
         .source_jobs
         .iter()
         .map(|job| {
-            let expected = manifest
-                .expected_jobs
-                .iter()
-                .find(|expected| expected.job_id == job.job_id)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "workflow source job {} is absent from reviewed manifest",
-                        job.job_id
-                    )
-                })?;
+            // Only the reviewed workflow path consults the expected-job
+            // manifest here; auxiliary workflows emit their observed job IDs
+            // with empty typed identity so a coincidental job-id match can
+            // never inherit reviewed workload/provider/target metadata.
+            // Typed identity stays enforced by the checker gate
+            // check_g0_source_jobs (evidence_check.rs), which only runs for
+            // the reviewed workflow path and revision.
+            let expected = if reviewed_workflow {
+                Some(
+                    manifest
+                        .expected_jobs
+                        .iter()
+                        .find(|expected| expected.job_id == job.job_id)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "workflow source job {} is absent from reviewed manifest",
+                                job.job_id
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
             validate_raw_references(
                 &job.raw_object_refs,
                 raw_by_id,
@@ -1012,13 +1026,33 @@ fn map_workflow(
                 &format!("workflow source job {}", job.job_id),
                 &["workflow.source"],
             )?;
+            let (workload_id, provider, platform, architecture, required) = expected.map_or_else(
+                || {
+                    (
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        false,
+                    )
+                },
+                |expected| {
+                    (
+                        expected.workload_id.clone(),
+                        expected.provider.clone(),
+                        expected.platform.clone(),
+                        expected.architecture.clone(),
+                        expected.required,
+                    )
+                },
+            );
             Ok(G0SourceJob {
                 job_id: job.job_id.clone(),
-                workload_id: expected.workload_id.clone(),
-                provider: expected.provider.clone(),
-                platform: expected.platform.clone(),
-                architecture: expected.architecture.clone(),
-                required: expected.required,
+                workload_id,
+                provider,
+                platform,
+                architecture,
+                required,
                 raw_object_refs: job.raw_object_refs.clone(),
             })
         })
@@ -1814,6 +1848,203 @@ mod tests {
         let mut wrong_kind = model.clone();
         wrong_kind.object_kind = "caller.claim".to_owned();
         assert!(CapturedModelSession::from_raw_object(&wrong_kind).is_err());
+    }
+
+    #[test]
+    fn source_jobs_enforce_manifest_only_for_reviewed_workflow_path() {
+        use crate::evidence_check::ExpectedJobSpec;
+        use crate::github_acquisition::live_collector::LiveSourceJob;
+        use crate::github_acquisition::PageState;
+
+        fn complete_request(raw_id: &str) -> RequestRecord {
+            RequestRecord {
+                request_id: format!("{raw_id}-request"),
+                api: ApiKind::Rest,
+                method: HttpMethod::Get,
+                endpoint_or_operation: "https://api.github.com/repos/tailrocks/example".to_owned(),
+                query_base64: String::new(),
+                variables_base64: String::new(),
+                query_sha256: None,
+                variables_sha256: None,
+                redacted_variables: None,
+                auth_identity_ref: "collector.auth".to_owned(),
+                started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+                http_status: None,
+                api_request_id: None,
+                rate_limit: None,
+                safe_scopes: None,
+                page: PageState {
+                    number: 1,
+                    per_page: Some(100),
+                    link_next: None,
+                    cursor_in: None,
+                    cursor_out: None,
+                    has_next_page: None,
+                    items_returned: 0,
+                },
+                response_raw_ref: Some(raw_id.to_owned()),
+                error_raw_ref: None,
+                state: AcquisitionState::Complete,
+                complete: true,
+                truncation_reason: None,
+            }
+        }
+
+        let source_bytes = b"jobs:\n  release:\n    steps: []\n";
+        let source_base64 = BASE64.encode(source_bytes);
+        let digest = sha256_digest(source_bytes);
+        let digest_hex = digest.strip_prefix("sha256:").expect("digest prefix");
+        let raw_src = RawObjectRef {
+            raw_id: "raw-src".to_owned(),
+            request_id: "raw-src-request".to_owned(),
+            object_kind: "workflow.source".to_owned(),
+            canonicalization: "raw-utf8".to_owned(),
+            sha256: digest.clone(),
+            byte_length: source_bytes.len() as u64,
+            original_sha256: digest.clone(),
+            original_byte_length: source_bytes.len() as u64,
+            bytes_base64: source_base64.clone(),
+            media_type: "text/yaml".to_owned(),
+            storage_ref: format!("sha256://{digest_hex}"),
+            original_storage_ref: format!("sha256://{digest_hex}"),
+        };
+        let raw_wf = raw_object("workflows", "raw-wf", serde_json::json!({"path": "x"}));
+        let raw_by_id: BTreeMap<String, &RawObjectRef> = [
+            ("raw-src".to_owned(), &raw_src),
+            ("raw-wf".to_owned(), &raw_wf),
+        ]
+        .into_iter()
+        .collect();
+        let request_src = complete_request("raw-src");
+        let request_wf = complete_request("raw-wf");
+        let request_by_id: BTreeMap<String, &RequestRecord> = [
+            ("raw-src-request".to_owned(), &request_src),
+            ("raw-wf-request".to_owned(), &request_wf),
+        ]
+        .into_iter()
+        .collect();
+        let repository = LiveRepository {
+            repository: "tailrocks/example".to_owned(),
+            repository_id: 1,
+            default_branch: "main".to_owned(),
+            default_branch_sha: "0123456789012345678901234567890123456789".to_owned(),
+            rulesets: Vec::new(),
+            workflows: Vec::new(),
+            open_prs: Vec::new(),
+            artifacts: Vec::new(),
+            main_executions: Vec::new(),
+            main_checks: Vec::new(),
+            closing_repository_id: 1,
+            closing_default_branch: "main".to_owned(),
+            closing_default_branch_sha: "0123456789012345678901234567890123456789".to_owned(),
+            source_invalidated: false,
+            access_state: "ok".to_owned(),
+            access_gaps: Vec::new(),
+            raw_object_refs: Vec::new(),
+        };
+        let manifest = ManifestRepository {
+            repository: "tailrocks/example".to_owned(),
+            workflow_path: ".github/workflows/ci.yml".to_owned(),
+            expected_jobs: vec![ExpectedJobSpec {
+                job_id: "unit".to_owned(),
+                workload_id: "tailrocks/example:unit".to_owned(),
+                provider: "github".to_owned(),
+                platform: "linux".to_owned(),
+                architecture: "x64".to_owned(),
+                required: true,
+                child_workflow: None,
+            }],
+            ..ManifestRepository::default()
+        };
+        let workflow = LiveWorkflow {
+            path: ".github/workflows/release.yml".to_owned(),
+            revision: "0123456789012345678901234567890123456789".to_owned(),
+            source_sha: "0123456789012345678901234567890123456789".to_owned(),
+            source_url: "https://api.github.com/repos/tailrocks/example/contents/x".to_owned(),
+            source_bytes_base64: source_base64,
+            source_raw_object_refs: vec!["raw-src".to_owned()],
+            events: vec!["push".to_owned()],
+            source_jobs: vec![LiveSourceJob {
+                job_id: "release".to_owned(),
+                raw_object_refs: vec!["raw-src".to_owned()],
+            }],
+            reusable_workflows: Vec::new(),
+            actions: Vec::new(),
+            scanners: Vec::new(),
+            raw_object_refs: vec!["raw-wf".to_owned()],
+        };
+
+        let mapped = map_workflow(
+            &workflow,
+            &repository,
+            &manifest,
+            &raw_by_id,
+            &request_by_id,
+            "2026-09-20T00:00:00Z",
+        )
+        .expect("auxiliary workflow keeps observed job IDs");
+        assert_eq!(mapped.source_jobs.len(), 1);
+        assert_eq!(mapped.source_jobs[0].job_id, "release");
+        assert_eq!(mapped.source_jobs[0].raw_object_refs, vec!["raw-src"]);
+        assert!(mapped.source_jobs[0].workload_id.is_empty());
+        assert!(mapped.source_jobs[0].provider.is_empty());
+        assert!(mapped.source_jobs[0].platform.is_empty());
+        assert!(mapped.source_jobs[0].architecture.is_empty());
+        assert!(!mapped.source_jobs[0].required);
+
+        // A coincidental job-id match on an auxiliary path must not inherit
+        // reviewed typed identity.
+        let mut coincidental = workflow.clone();
+        coincidental.source_jobs = vec![LiveSourceJob {
+            job_id: "unit".to_owned(),
+            raw_object_refs: vec!["raw-src".to_owned()],
+        }];
+        let mapped = map_workflow(
+            &coincidental,
+            &repository,
+            &manifest,
+            &raw_by_id,
+            &request_by_id,
+            "2026-09-20T00:00:00Z",
+        )
+        .expect("auxiliary workflow keeps coincidental job IDs");
+        assert_eq!(mapped.source_jobs[0].job_id, "unit");
+        assert!(mapped.source_jobs[0].workload_id.is_empty());
+        assert!(!mapped.source_jobs[0].required);
+
+        let mut reviewed_mismatch = workflow.clone();
+        reviewed_mismatch.path = ".github/workflows/ci.yml".to_owned();
+        let err = map_workflow(
+            &reviewed_mismatch,
+            &repository,
+            &manifest,
+            &raw_by_id,
+            &request_by_id,
+            "2026-09-20T00:00:00Z",
+        )
+        .expect_err("reviewed-path mismatch still bails");
+        assert_eq!(
+            err.to_string(),
+            "workflow source job release is absent from reviewed manifest"
+        );
+
+        let mut reviewed_match = reviewed_mismatch;
+        reviewed_match.source_jobs = vec![LiveSourceJob {
+            job_id: "unit".to_owned(),
+            raw_object_refs: vec!["raw-src".to_owned()],
+        }];
+        let mapped = map_workflow(
+            &reviewed_match,
+            &repository,
+            &manifest,
+            &raw_by_id,
+            &request_by_id,
+            "2026-09-20T00:00:00Z",
+        )
+        .expect("reviewed workflow keeps typed identity");
+        assert_eq!(mapped.source_jobs[0].workload_id, "tailrocks/example:unit");
+        assert!(mapped.source_jobs[0].required);
     }
 
     #[test]

@@ -108,7 +108,7 @@ sequenceDiagram
     V->>R: Acquire full job payload
     V->>L: Claim identity and persist in-flight state
     V->>A: Validate policy, capabilities, actions, limits
-    A-->>V: Validated execution plan or rejection
+    A-->>V: Validated job execution plan or rejection
     V->>R: Renew job lease while active
     V->>E: Reserve, prepare, start, execute
     E-->>V: Step output, status, logs, artifacts
@@ -172,7 +172,7 @@ order. The shared local order is not GitHub submission-order FIFO.
 | Native step status and logs | Native Velnor runner | Authenticated uploads to Results Service and timeline/feed services; progress publishing is best effort and bounded. |
 | Native completion | Native Velnor runner | Authenticated Run Service request/response carrying terminal result, outputs, and metadata. |
 | Scale Set job protocol | Official runner container | The unmodified official runner handles its job session, lease renewal, cancellation, status/log publishing, and completion with GitHub. |
-| Workflow generation | `velnor-workflow` | Static repository scan, owned workflow/config rendering, affected-unit planning, policy, and release checks. It does not schedule GitHub work. |
+| Workflow generation | `velnor-workflow` | Static repository scan, owned workflow/config rendering, affected-unit planning ([change-aware planning](/concepts/change-aware-planning)), policy, and release checks. It does not schedule GitHub work. |
 | Workflow monitoring | `velnor-tools` | Read-only correlation of GitHub run state with Velnor control-plane evidence. GitHub owns the terminal result. |
 | Operator inspection | Operator | Local Unix-socket control API, local health files, metrics files, and bounded local logs, normally through `velnorctl`. |
 

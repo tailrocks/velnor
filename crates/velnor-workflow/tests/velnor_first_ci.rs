@@ -1144,7 +1144,17 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
         !unit.contains("inputs.unit == '"),
         "the collapsed steps are rendered once, not once per unit"
     );
-    assert_eq!(unit.matches("- name: Run unit checks").count(), 2);
+    for step in ["Formatting check", "Clippy check", "Tests"] {
+        assert_eq!(
+            unit.matches(&format!("- name: {step}")).count(),
+            2,
+            "each phase step renders once per lane"
+        );
+    }
+    assert!(
+        !unit.contains("- name: Run unit checks"),
+        "phased units drop the legacy single checks step"
+    );
     let pr = generated.workflow("ci-pr.yml");
     for index in 0..8 {
         assert!(

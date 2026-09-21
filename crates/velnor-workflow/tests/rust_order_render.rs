@@ -115,14 +115,36 @@ fn command_labels(commands: &[toml::Value]) -> Vec<&'static str> {
         .collect()
 }
 
-fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
-    let document: toml::Value = toml::from_str(project).unwrap();
-    let units = document["unit"].as_array().unwrap();
-    let keys = if schema == 1 {
-        &COMMAND_KEYS_SCHEMA_1[..]
+/// Whether the fixture unit earns a doctest phase, asserting its phase list
+/// and prerequisite check command. Doctest coverage follows the package lib
+/// shape: nextest cannot run doctests, so nextest repositories verify lib
+/// crates through an explicit doctest phase. Schema 1's gamma is bin-only
+/// and schema 2's polyglot package ships no sources, so neither earns the
+/// phase; without nextest `cargo test` covers doctests inline.
+fn assert_rust_unit_phases(unit: &toml::Value, unit_id: &str, use_nextest: bool) -> bool {
+    let wants_doctest = use_nextest && !matches!(unit_id, "rust-gamma" | "rust-fixture");
+    let expected_phases: &[&str] = if wants_doctest {
+        &["fmt", "clippy", "test", "doctest"]
     } else {
-        &COMMAND_KEYS_SCHEMA_2[..]
+        &["fmt", "clippy", "test"]
     };
+    let phases = unit["phases"].as_array().unwrap();
+    let phase_ids = phases
+        .iter()
+        .map(|phase| phase.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(phase_ids, expected_phases, "{unit_id} phases");
+    let check_commands = unit["check_commands"].as_array().unwrap();
+    assert_eq!(check_commands.len(), 1, "{unit_id} check_commands");
+    let check = check_commands[0].as_str().unwrap();
+    assert!(check.contains(" check "), "{check}");
+    assert!(check.contains("--profile test"), "{check}");
+    assert!(check.contains("--all-targets"), "{check}");
+    assert!(check.contains("--all-features"), "{check}");
+    wants_doctest
+}
+
+fn assert_policy_gate(units: &[toml::Value], keys: &[&str], schema: u8) {
     let policy_gate = units
         .iter()
         .find(|unit| unit["id"].as_str() == Some("rust-policy-gate"));
@@ -154,6 +176,17 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
     if schema == 2 {
         assert_eq!(policy_gate["workspace_check"].as_bool(), Some(true));
     }
+}
+
+fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
+    let document: toml::Value = toml::from_str(project).unwrap();
+    let units = document["unit"].as_array().unwrap();
+    let keys = if schema == 1 {
+        &COMMAND_KEYS_SCHEMA_1[..]
+    } else {
+        &COMMAND_KEYS_SCHEMA_2[..]
+    };
+    assert_policy_gate(units, keys, schema);
     let mut checked = 0;
     for unit in units {
         if unit["kind"].as_str() != Some("rust") {
@@ -168,6 +201,7 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
         if unit_id == "rust-policy-gate" {
             continue;
         }
+        let wants_doctest = assert_rust_unit_phases(unit, unit_id, use_nextest);
         for key in keys {
             let commands = unit.get(*key).and_then(toml::Value::as_array);
             assert!(
@@ -176,10 +210,12 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
             );
             let commands = commands.unwrap();
             let labels = command_labels(commands);
-            let expected = if use_nextest {
-                ["fmt", "clippy", "nextest"]
+            let expected: &[&str] = if wants_doctest {
+                &["fmt", "clippy", "nextest", "test"]
+            } else if use_nextest {
+                &["fmt", "clippy", "nextest"]
             } else {
-                ["fmt", "clippy", "test"]
+                &["fmt", "clippy", "test"]
             };
             assert_eq!(
                 labels.len(),
@@ -206,6 +242,17 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
                 assert!(nextest.is_some(), "{unit_id} {key} omitted nextest");
                 let nextest = nextest.unwrap();
                 assert!(nextest.contains("--no-tests pass"), "{nextest}");
+            }
+            let doctest = command_text
+                .iter()
+                .find(|command| command.contains("--doc "));
+            assert_eq!(
+                doctest.is_some(),
+                wants_doctest,
+                "{unit_id} {key} doctest command"
+            );
+            if let Some(doctest) = doctest {
+                assert!(doctest.contains("--all-features"), "{doctest}");
             }
             checked += 1;
         }

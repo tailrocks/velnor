@@ -17,7 +17,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
 use sha2::{Digest, Sha256};
@@ -1195,15 +1194,24 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
 /// Score reported results against the planner's expected work: the same
 /// [`crate::reuse::aggregate`] the generator's tests exercise, run against
 /// the expected-work file the plan wrote and the results file the unit jobs
-/// collected. Prints the audit report and fails when the aggregate rejects.
+/// collected. The file's recorded plan SHAs must match this job's own
+/// checkout (`BASE_SHA`/`HEAD_SHA`, defaulting exactly like the selection
+/// artifact's binding); a stale or mis-threaded file fails before any
+/// verdict. Prints the audit report and fails when the aggregate rejects.
 fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorError> {
     let expected_text = fs::read_to_string(expected)
         .map_err(|error| GeneratorError::io("read expected work", expected, &error))?;
     let results_text = fs::read_to_string(results)
         .map_err(|error| GeneratorError::io("read reported results", results, &error))?;
-    let verdict = crate::reuse::aggregate_files(&expected_text, &results_text)
-        .map_err(GeneratorError::usage)?;
+    let base_sha = env::var("BASE_SHA").unwrap_or_default();
+    let head_sha = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    let verdict =
+        crate::reuse::aggregate_files(&expected_text, &results_text, &base_sha, &head_sha)
+            .map_err(GeneratorError::usage)?;
     print!("{}", crate::reuse::render_report(&verdict));
+    if let Some(line) = explicit_no_work_line(&expected_text, &verdict) {
+        println!("{line}");
+    }
     if verdict.passed {
         Ok(())
     } else {
@@ -1211,6 +1219,49 @@ fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorErr
             "aggregate: expected work did not complete",
         ))
     }
+}
+
+/// The machine-readable no-work line for an explicit-no-work PASS: the
+/// planner's marker plus zero expected units plus a passing verdict. `None`
+/// for every other verdict — real-work output, and failed no-work verdicts,
+/// stay byte-identical. A missing `units` key reads as empty, matching the
+/// schema default the aggregate itself scores.
+fn explicit_no_work_line(
+    expected_json: &str,
+    verdict: &crate::reuse::AggregateVerdict,
+) -> Option<String> {
+    if !verdict.passed {
+        return None;
+    }
+    let document: serde_json::Value = serde_json::from_str(expected_json).ok()?;
+    if document
+        .get("planned_no_work")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let empty = document
+        .get("units")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(Vec::is_empty);
+    if !empty {
+        return None;
+    }
+    let extras = verdict
+        .explanations
+        .iter()
+        .filter(|explanation| explanation.disposition == crate::reuse::Disposition::Extra)
+        .count();
+    Some(match extras {
+        0 => "no_work_reason=planner selected zero workload units and no workload results were reported"
+            .to_owned(),
+        1 => "no_work_reason=planner selected zero workload units; 1 reported result ignored as outside the plan"
+            .to_owned(),
+        extras => format!(
+            "no_work_reason=planner selected zero workload units; {extras} reported results ignored as outside the plan"
+        ),
+    })
 }
 
 /// Print the affected selection for a diff as JSON: the auditable
@@ -1232,6 +1283,15 @@ fn select_command(
             id: unit.id.clone(),
             watch: unit.watch.clone(),
             depends_on: unit.depends_on.clone(),
+            kind: unit.kind.clone(),
+            commands: unit
+                .github_pr_commands
+                .iter()
+                .chain(&unit.github_full_commands)
+                .chain(&unit.velnor_pr_commands)
+                .chain(&unit.velnor_full_commands)
+                .cloned()
+                .collect(),
         })
         .collect();
     if scope == Scope::Full {
@@ -1243,6 +1303,7 @@ fn select_command(
                 .iter()
                 .map(|unit| (unit.id.clone(), "full scope requested".to_owned()))
                 .collect(),
+            fallback_reason: None,
         });
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
@@ -1644,20 +1705,58 @@ pub(crate) fn is_unit_id(value: &str) -> bool {
         && value.as_bytes()[0].is_ascii_lowercase()
 }
 
+/// Everything `plan` reads from its environment, as one injectable bundle.
+/// Production builds it from the live process; tests build fixture values,
+/// so the end-to-end plan path runs without mutating process-global env —
+/// which parallel tests also read.
+struct PlanInputs {
+    root: PathBuf,
+    event: String,
+    scope_override: Option<String>,
+    base: String,
+    head: String,
+    lanes: String,
+    selection_file: Option<PathBuf>,
+    expected_file: Option<PathBuf>,
+    github_output: Option<PathBuf>,
+}
+
+impl PlanInputs {
+    fn from_env() -> Result<Self, GeneratorError> {
+        Ok(Self {
+            event: env::var("EVENT_NAME").unwrap_or_default(),
+            scope_override: env::var("CI_SCOPE_OVERRIDE")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            root: env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
+            base: env::var("BASE_SHA").unwrap_or_default(),
+            head: env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+            lanes: env::var("VELNOR_LANES").unwrap_or_default(),
+            selection_file: env::var_os("VELNOR_SELECTION_FILE").map(PathBuf::from),
+            expected_file: env::var_os("VELNOR_EXPECTED_WORK_FILE").map(PathBuf::from),
+            github_output: env::var_os("GITHUB_OUTPUT").map(PathBuf::from),
+        })
+    }
+}
+
 fn plan(config_path: &Path) -> Result<(), GeneratorError> {
+    let inputs = PlanInputs::from_env()?;
+    plan_with(config_path, &inputs)
+}
+
+/// Run the planner against explicit inputs: `plan`'s whole body behind an
+/// injectable environment, so tests drive file writing and outputs exactly.
+fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    let scope = match scope_for_event()? {
+    let scope = match scope_for_event_values(&inputs.event, inputs.scope_override.as_deref())? {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
-    let root = env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-    let base = env::var("BASE_SHA").unwrap_or_default();
-    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    let lanes = plan_lanes()?;
+    let lanes = plan_lanes_for_value(&inputs.lanes)?;
     let selection = selection_for_lanes(
         &config,
-        selection_for_diff(&root, &config, scope, &base, &head)?,
+        selection_for_diff(&inputs.root, &config, scope, &inputs.base, &inputs.head)?,
         lanes,
     );
     let units = selection
@@ -1672,38 +1771,53 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         .cloned()
         .collect::<Vec<_>>()
         .join(",");
-    if let Some(path) = env::var_os("VELNOR_SELECTION_FILE") {
-        write_selection_file(
-            &PathBuf::from(path),
-            &base,
-            &head,
-            scope,
-            &units,
-            &full_units,
-        )?;
+    // Before any artifact escapes: an unproven empty selection must fail
+    // here, not after writing a no-work file for it.
+    let no_work = planned_no_work_reason(&selection)?;
+    if let Some(path) = &inputs.selection_file {
+        write_selection_file(path, &inputs.base, &inputs.head, scope, &units, &full_units)?;
     }
-    if let Some(output) = env::var_os("GITHUB_OUTPUT") {
-        let output_path = PathBuf::from(output);
+    if let Some(path) = &inputs.expected_file {
+        write_expected_work_file(path, &selection, lanes, &inputs.base, &inputs.head)?;
+    }
+    if let Some(output_path) = &inputs.github_output {
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&output_path)
-            .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
+            .open(output_path)
+            .map_err(|error| GeneratorError::io("open GitHub output", output_path, &error))?;
         writeln!(file, "scope={}", scope_name(scope))
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
-        writeln!(file, "base_sha={base}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
-        writeln!(file, "head_sha={head}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+            .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+        writeln!(file, "base_sha={}", inputs.base)
+            .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+        writeln!(file, "head_sha={}", inputs.head)
+            .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
         writeln!(file, "units={units}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+            .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
         writeln!(file, "full_units={full_units}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
-        write_kind_matrices(&mut file, &config, &selection, &output_path)?;
+            .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+        if let Some(reason) = &selection.fallback_reason {
+            writeln!(file, "fallback_reason={reason}")
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+        }
+        if let Some(reason) = &no_work {
+            writeln!(file, "planned_no_work=true")
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+            writeln!(file, "no_work_reason={reason}")
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+        }
+        write_kind_matrices(&mut file, &config, &selection, output_path)?;
     }
     println!("scope={}", scope_name(scope));
     println!("units={units}");
     println!("full_units={full_units}");
+    if let Some(reason) = &selection.fallback_reason {
+        println!("fallback_reason={reason}");
+    }
+    if let Some(reason) = &no_work {
+        println!("planned_no_work=true");
+        println!("no_work_reason={reason}");
+    }
     Ok(())
 }
 
@@ -1750,14 +1864,6 @@ fn unit_matrix_output(unit: &CiUnit) -> String {
     format!("{}_matrix", unit.kind.as_str())
 }
 
-fn scope_for_event() -> Result<Option<String>, GeneratorError> {
-    let event = env::var("EVENT_NAME").unwrap_or_default();
-    let override_scope = env::var("CI_SCOPE_OVERRIDE")
-        .ok()
-        .filter(|value| !value.is_empty());
-    scope_for_event_values(&event, override_scope.as_deref())
-}
-
 pub(crate) fn scope_for_event_values(
     event: &str,
     override_scope: Option<&str>,
@@ -1802,10 +1908,6 @@ fn scope_name(scope: Scope) -> &'static str {
 /// Both-mode plan step sets to `needs.lane-admission.outputs.lanes`.
 /// Absent or empty means `both`: single-lane aggregates and local runs plan
 /// without lane filtering, exactly as before.
-fn plan_lanes() -> Result<RunnerMode, GeneratorError> {
-    plan_lanes_for_value(env::var("VELNOR_LANES").unwrap_or_default().as_str())
-}
-
 fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
     match value.trim() {
         "" | "both" => Ok(RunnerMode::Both),
@@ -1847,18 +1949,56 @@ fn selection_for_lanes<'a>(
                     || crate::lane_supports_unit_kind(RunnerMode::Velnor, parsed))
         })
     };
+    let incoming_empty = selection.units.is_empty();
+    let units: Vec<&'a CiUnit> = selection
+        .units
+        .into_iter()
+        .filter(|unit| supported(unit.kind.as_str()))
+        .collect();
+    // Lane admission narrowing a real selection to zero is no-work for its
+    // own reason — nothing runnable, not nothing affected. A recorded
+    // no-work reason survives narrowing untouched.
+    let no_work_reason = if units.is_empty() {
+        selection.no_work_reason.or(if incoming_empty {
+            None
+        } else {
+            Some("no selected workload unit runs on the admitted lanes".to_owned())
+        })
+    } else {
+        None
+    };
     UnitSelection {
-        units: selection
-            .units
-            .into_iter()
-            .filter(|unit| supported(unit.kind.as_str()))
-            .collect(),
+        units,
         full_units: selection
             .full_units
             .into_iter()
             .filter(|id| kinds.get(id.as_str()).is_none_or(|kind| supported(kind)))
             .collect(),
+        fallback_reason: selection.fallback_reason,
+        no_work_reason,
     }
+}
+
+/// The explicit no-work reason for a finished selection: the planner's
+/// recorded reason when it selected nothing, and `None` for real-work
+/// plans. An empty selection without a recorded reason is a plan error,
+/// never a silent pass: every selection arm that can go empty must prove
+/// why, so no future arm can silently become a no-work PASS. `plan` checks
+/// this before writing any artifact and surfaces the reason beside the
+/// `planned_no_work` marker; the aggregate binds it to its explicit
+/// no-work pass.
+fn planned_no_work_reason(selection: &UnitSelection<'_>) -> Result<Option<String>, GeneratorError> {
+    if !selection.units.is_empty() {
+        return Ok(None);
+    }
+    selection.no_work_reason.clone().map_or_else(
+        || {
+            Err(GeneratorError::usage(
+                "plan selected zero workload units without a recorded no-work reason",
+            ))
+        },
+        |reason| Ok(Some(reason)),
+    )
 }
 
 #[cfg(test)]
@@ -2190,6 +2330,14 @@ pub(crate) fn run_units(
     run_units_with_selection_file(root, config_path, scope, only_unit, phase, &selection_file)
 }
 
+/// Whether an event is trusted: push, schedule, and merge-queue validation
+/// always run full scope, mirroring [`scope_for_event_values`]. Unit jobs
+/// re-check the plan-time verdict so a narrowed job scope can never execute
+/// under a trusted event.
+fn event_requires_full_scope(event: &str) -> bool {
+    matches!(event, "push" | "schedule" | "merge_group")
+}
+
 pub(crate) fn run_units_with_selection_file(
     root: &Path,
     config_path: &Path,
@@ -2199,7 +2347,8 @@ pub(crate) fn run_units_with_selection_file(
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
+    if event_requires_full_scope(&env::var("EVENT_NAME").unwrap_or_default())
+        && scope != Scope::Full
     {
         return Err(GeneratorError::usage(
             "trusted events require full CI scope",
@@ -2231,7 +2380,22 @@ pub(crate) fn run_units_with_selection_file(
     }
     let full_units = selection.full_units;
     let selected = select_units_for_job(selected, only_unit)?;
+    if selected.is_empty() {
+        // `select_units_for_job` already failed closed when a unit was
+        // requested: reaching here means nothing was asked for and the
+        // validated, SHA-bound artifact selects nothing. That is planner
+        // success with no work, reported explicitly — never silent, never
+        // an error.
+        println!("{}", no_work_report_line());
+        return Ok(());
+    }
     run_layers(root, &selected, scope, &full_units, phase)
+}
+
+/// The machine-readable line a validated empty selection reports instead of
+/// succeeding silently.
+fn no_work_report_line() -> &'static str {
+    "no_work_reason=CI selection artifact selects zero workload units; nothing to run"
 }
 
 fn select_units_for_job<'a>(
@@ -2254,6 +2418,13 @@ fn select_units_for_job<'a>(
 struct UnitSelection<'a> {
     units: Vec<&'a CiUnit>,
     full_units: BTreeSet<String>,
+    /// Why the full set was chosen by fallback. `None` for requested-full,
+    /// narrow, and empty selections; surfaced additively by `plan`.
+    fallback_reason: Option<String>,
+    /// Why the planner selected zero workload units. `Some` exactly when
+    /// `units` is empty for a proven no-work plan; `None` for real-work
+    /// plans. The aggregate binds this reason to its explicit no-work pass.
+    no_work_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2267,6 +2438,114 @@ struct PlannedSelection {
 
 pub(crate) const SELECTION_FILE_VERSION: &str = "1";
 
+/// Write the planner's expected-work file: the aggregate's binding to this
+/// plan, in the [`crate::reuse::ExpectedWorkFile`] schema. The aggregate
+/// scores exactly this document against the collected results, so the writer
+/// mirrors the runner's own rules:
+///
+/// - lanes: every admitted lane supporting the unit's kind, in canonical
+///   github-then-velnor order — one verdict per lane caller, matching what
+///   the required check already scores. A selected unit with no lane fails
+///   the plan closed: it is contradictory, not empty.
+/// - matrix: always empty. Units carry no per-unit matrix in the plan
+///   model, and an empty matrix means exactly one unmatrixed item — the
+///   unit's single verdict on that lane — never zero, never many.
+/// - required: always true. A selected, admitted unit must succeed.
+/// - `planned_skip`: never set. The planner removes units from the selection
+///   instead of pre-skipping them; a reported skip still needs the
+///   planner's recorded reason to hold.
+/// - prerequisites: the in-plan `depends_on` edges only. Out-of-plan
+///   prerequisites neither gate the runner (`run_layers` filters edges
+///   outside the executed set) nor enter the aggregate's graph, so the
+///   aggregate scores the same graph the runner executed. An in-plan
+///   prerequisite that did not pass fails its dependents closed.
+/// - `planned_no_work`: set exactly when the selection is empty, with the
+///   [`planned_no_work_reason`] on the plan's outputs beside it.
+/// - `base_sha`/`head_sha`: the plan's transport identity, exactly as the
+///   plan saw it. The aggregate compares these against its own checkout and
+///   rejects any file from another plan — including a stale no-work file.
+fn write_expected_work_file(
+    path: &Path,
+    selection: &UnitSelection<'_>,
+    lanes: RunnerMode,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<(), GeneratorError> {
+    let selected: BTreeSet<&str> = selection
+        .units
+        .iter()
+        .map(|unit| unit.id.as_str())
+        .collect();
+    let mut units = Vec::with_capacity(selection.units.len());
+    let mut prerequisites = BTreeMap::new();
+    for unit in &selection.units {
+        units.push(serde_json::json!({
+            "id": unit.id,
+            "lanes": expected_lanes_for_unit(unit, lanes)?,
+            "matrix": Vec::<String>::new(),
+            "required": true,
+        }));
+        prerequisites.insert(
+            unit.id.clone(),
+            unit.depends_on
+                .iter()
+                .map(String::as_str)
+                .filter(|dependency| selected.contains(dependency))
+                .collect::<Vec<_>>(),
+        );
+    }
+    let document = serde_json::json!({
+        "planned_no_work": selection.units.is_empty(),
+        "units": units,
+        "prerequisites": prerequisites,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+    });
+    let text = serde_json::to_string_pretty(&document)
+        .map_err(|error| GeneratorError::usage(format!("serialize expected work: {error}")))?;
+    // The plan job runs in a fresh checkout with no parent directory, so
+    // the writer creates its own instead of relying on a pre-existing dir.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            GeneratorError::io("create expected work directory", parent, &error)
+        })?;
+    }
+    fs::write(path, format!("{text}\n"))
+        .map_err(|error| GeneratorError::io("write expected work", path, &error))
+}
+
+/// The aggregate lanes one selected unit must report: the admitted plan
+/// lanes supporting its kind, in canonical github-then-velnor order.
+/// Unknown kinds report on every admitted lane — the planner keeps units it
+/// does not recognize, so the aggregate must hear from all of them.
+fn expected_lanes_for_unit(
+    unit: &CiUnit,
+    lanes: RunnerMode,
+) -> Result<Vec<&'static str>, GeneratorError> {
+    let lanes = [
+        (RunnerMode::Github, "github"),
+        (RunnerMode::Velnor, "velnor"),
+    ]
+    .into_iter()
+    .filter(|(lane, _)| {
+        (lanes == RunnerMode::Both || lanes == *lane)
+            && UnitKind::from_prefix(unit.kind.as_str())
+                .is_none_or(|parsed| crate::lane_supports_unit_kind(*lane, parsed))
+    })
+    .map(|(_, name)| name)
+    .collect::<Vec<_>>();
+    if lanes.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "CI unit `{}` is selected but runnable on no admitted lane",
+            unit.id
+        )));
+    }
+    Ok(lanes)
+}
+
 fn write_selection_file(
     path: &Path,
     base_sha: &str,
@@ -2279,6 +2558,14 @@ fn write_selection_file(
         "version={SELECTION_FILE_VERSION}\nbase_sha={base_sha}\nhead_sha={head_sha}\nscope={}\nunits={units}\nfull_units={full_units}\n",
         scope_name(scope)
     );
+    // A nested selection path must not need a pre-existing directory.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| GeneratorError::io("create CI selection directory", parent, &error))?;
+    }
     fs::write(path, contents)
         .map_err(|error| GeneratorError::io("write CI selection", path, &error))
 }
@@ -2384,6 +2671,20 @@ fn selected_units_for_diff<'a>(
     Ok(selection_for_diff(root, config, scope, base, head)?.units)
 }
 
+/// The no-work reason for an affected selection that classified to empty.
+/// Unknown paths fail closed to full before classification runs, so every
+/// remaining path was irrelevant to every workload unit, or release-scoped,
+/// and emptiness here is proven no-work. `None` for real-work selections.
+fn empty_selection_no_work_reason(selected: &BTreeSet<String>) -> Option<String> {
+    selected
+        .is_empty()
+        .then_some("no changed path selected a workload unit".to_owned())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "selection dispatch carries the no-work reason channel on every arm"
+)]
 fn selection_for_diff<'a>(
     root: &Path,
     config: &'a CiConfig,
@@ -2392,22 +2693,24 @@ fn selection_for_diff<'a>(
     head: &str,
 ) -> Result<UnitSelection<'a>, GeneratorError> {
     if scope == Scope::Full {
-        return full_selection(config);
+        return full_selection(config, None);
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
-        return full_selection(config);
+        return full_selection(config, Some("no affected base; fell back to full"));
     }
-    let Some(changed) = git_changed_files(root, base, head)? else {
-        return full_selection(config);
+    let Some(raw) = git_name_status_nul(root, base, head)? else {
+        return full_selection(config, Some("git diff unavailable; fell back to full"));
+    };
+    let Some(changed) = parse_name_status_nul(&raw) else {
+        return full_selection(config, Some("unparseable change entry; fell back to full"));
     };
     if changed.is_empty() {
         return Ok(UnitSelection {
             units: Vec::new(),
             full_units: BTreeSet::new(),
+            fallback_reason: None,
+            no_work_reason: Some("empty diff selects no workload units".to_owned()),
         });
-    }
-    if changed.iter().any(|file| file.starts_with(".github/")) {
-        return full_selection(config);
     }
     if version_bump_matches(
         root,
@@ -2428,43 +2731,68 @@ fn selection_for_diff<'a>(
         return Ok(UnitSelection {
             units: ordered_units(&config.unit, Some(&selected))?,
             full_units: selected,
+            fallback_reason: None,
+            no_work_reason: None,
         });
     }
-    let matchers = config
+    let watched: Vec<crate::reuse::WatchedUnit> = config
         .unit
         .iter()
-        .map(|unit| {
-            let mut builder = GlobSetBuilder::new();
-            for pattern in &unit.watch {
-                let glob = Glob::new(pattern).map_err(|error| {
-                    GeneratorError::usage(format!("invalid watch pattern {pattern}: {error}"))
-                })?;
-                builder.add(glob);
-            }
-            let matcher = builder
-                .build()
-                .map_err(|error| GeneratorError::usage(format!("build watch matcher: {error}")))?;
-            Ok::<_, GeneratorError>((unit, matcher))
+        .map(|unit| crate::reuse::WatchedUnit {
+            id: unit.id.clone(),
+            watch: unit.watch.clone(),
+            depends_on: unit.depends_on.clone(),
+            kind: unit.kind.clone(),
+            commands: unit
+                .github_pr_commands
+                .iter()
+                .chain(&unit.github_full_commands)
+                .chain(&unit.velnor_pr_commands)
+                .chain(&unit.velnor_full_commands)
+                .cloned()
+                .collect(),
         })
-        .collect::<Result<Vec<(&CiUnit, GlobSet)>, _>>()?;
+        .collect();
+    let compiled = crate::reuse::compile_ownership(&watched)?;
     let mut selected = BTreeSet::new();
     for file in &changed {
-        let mut matched = false;
-        for (unit, matcher) in &matchers {
-            if matcher.is_match(file) {
-                selected.insert(unit.id.clone());
-                matched = true;
+        if let Some(verdict) = crate::reuse::github_verdict(file) {
+            match verdict {
+                crate::reuse::GithubVerdict::Global { reason }
+                | crate::reuse::GithubVerdict::Unknown { reason } => {
+                    return full_selection(config, Some(&reason));
+                }
+                crate::reuse::GithubVerdict::Kind { kind } => {
+                    selected.extend(
+                        config
+                            .unit
+                            .iter()
+                            .filter(|unit| unit.kind.eq_ignore_ascii_case(&kind))
+                            .map(|unit| unit.id.clone()),
+                    );
+                }
+                crate::reuse::GithubVerdict::ReleaseScope => {}
             }
+            continue;
         }
-        if !matched {
-            return full_selection(config);
+        match crate::reuse::classify_path(&compiled, file) {
+            crate::reuse::PathVerdict::Owned { units } => {
+                selected.extend(units);
+            }
+            crate::reuse::PathVerdict::Unknown { reason } => {
+                return full_selection(config, Some(&reason));
+            }
+            crate::reuse::PathVerdict::Irrelevant => {}
         }
     }
     extend_workspace_checks_for_cargo_roots(config, &mut selected);
     let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
+    let no_work_reason = empty_selection_no_work_reason(&selected);
     Ok(UnitSelection {
         units: ordered_units(&config.unit, Some(&selected))?,
         full_units,
+        fallback_reason: None,
+        no_work_reason,
     })
 }
 
@@ -2495,10 +2823,15 @@ fn extend_workspace_checks_for_cargo_roots(config: &CiConfig, selected: &mut BTr
     );
 }
 
-fn full_selection(config: &CiConfig) -> Result<UnitSelection<'_>, GeneratorError> {
+fn full_selection<'a>(
+    config: &'a CiConfig,
+    fallback_reason: Option<&str>,
+) -> Result<UnitSelection<'a>, GeneratorError> {
     Ok(UnitSelection {
         units: ordered_units(&config.unit, None)?,
         full_units: config.unit.iter().map(|unit| unit.id.clone()).collect(),
+        fallback_reason: fallback_reason.map(ToOwned::to_owned),
+        no_work_reason: None,
     })
 }
 
@@ -2610,28 +2943,82 @@ fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSe
     expand_affected_units_with_full(units, changed).0
 }
 
-fn git_changed_files(
+/// Collect the plan-path change list as raw `git diff --name-status -M -z`
+/// bytes. `-z` NUL-delimits entries so unusual filenames (spaces, quotes,
+/// unicode, newlines, glob metacharacters) arrive exactly instead of
+/// C-quoted; `-M` reports renames with both sides so the matcher sees the
+/// old and the new owner atomically with collection. `None` means git
+/// failed: the caller falls back to full, never to empty.
+fn git_name_status_nul(
     root: &Path,
     base: &str,
     head: &str,
-) -> Result<Option<Vec<String>>, GeneratorError> {
+) -> Result<Option<Vec<u8>>, GeneratorError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["diff", "--name-only"])
+        .args(["diff", "--name-status", "-M", "-z"])
         .arg(format!("{base}...{head}"))
         .output()
         .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
     if !output.status.success() {
         return Ok(None);
     }
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-    ))
+    Ok(Some(output.stdout))
+}
+
+/// Parse `--name-status -z` bytes into the matchable path list, mirroring the
+/// select path's rename/delete semantics: a rename contributes its target
+/// then its source (both owners match), a copy contributes its target only,
+/// and a delete keeps its path (its owner still matches). `None` means the
+/// input is truncated, malformed, or non-UTF-8: the caller falls back to
+/// full instead of matching a mangled name.
+fn parse_name_status_nul(output: &[u8]) -> Option<Vec<String>> {
+    if output.is_empty() {
+        return Some(Vec::new());
+    }
+    let text = std::str::from_utf8(output).ok()?;
+    let mut records = text.split('\0');
+    let mut changed = Vec::new();
+    loop {
+        let status = records.next()?;
+        if status.is_empty() {
+            // The trailing NUL terminates the stream: anything after it is a
+            // malformed record, not an empty diff.
+            return records.next().is_none().then_some(changed);
+        }
+        if let Some(score) = status.strip_prefix('R') {
+            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let from = records.next()?;
+            let to = records.next()?;
+            if from.is_empty() || to.is_empty() {
+                return None;
+            }
+            changed.push(to.to_owned());
+            changed.push(from.to_owned());
+        } else if let Some(score) = status.strip_prefix('C') {
+            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let from = records.next()?;
+            let to = records.next()?;
+            if from.is_empty() || to.is_empty() {
+                return None;
+            }
+            changed.push(to.to_owned());
+        } else {
+            if !matches!(status, "A" | "M" | "T" | "D") {
+                return None;
+            }
+            let path = records.next()?;
+            if path.is_empty() {
+                return None;
+            }
+            changed.push(path.to_owned());
+        }
+    }
 }
 
 fn ordered_units<'a>(
@@ -5048,6 +5435,75 @@ pub(crate) mod tests {
         }
     }
 
+    /// A polyglot consumer without a docs unit: rust, bun, docker, and swift
+    /// watches shaped like a real analyzed estate. A root-level contributor
+    /// document matches none of them.
+    fn polyglot_selection_config() -> CiConfig {
+        let unit = |id: &str, kind: &str, watch: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: kind.to_owned(),
+            root: ".".to_owned(),
+            watch: watch.iter().map(|value| (*value).to_owned()).collect(),
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        CiConfig {
+            schema: 2,
+            repository: "example/repository".to_owned(),
+            profile: "polyglot-no-docs".to_owned(),
+            verified: true,
+            default_branch: "main".to_owned(),
+            runners: "github".to_owned(),
+            automatic: "github".to_owned(),
+            analysis: Analysis::default(),
+            workflow: Workflow::default(),
+            release: Release::default(),
+            unit: vec![
+                unit(
+                    "rust-alpha",
+                    "rust",
+                    &[
+                        "Cargo.lock",
+                        "Cargo.toml",
+                        "crates/alpha/**/*.rs",
+                        "crates/alpha/Cargo.toml",
+                        "crates/alpha/src/**",
+                        "rust-toolchain.toml",
+                    ],
+                ),
+                unit(
+                    "bun-web",
+                    "bun",
+                    &[
+                        "web/**/*.ts",
+                        "web/**/*.tsx",
+                        "web/bun.lock",
+                        "web/package.json",
+                    ],
+                ),
+                unit("docker-construct", "docker", &["docker/construct/**"]),
+                unit(
+                    "swift-native",
+                    "swift",
+                    &[
+                        "native/**/*.swift",
+                        "native/Package.swift",
+                        "native/Package.resolved",
+                    ],
+                ),
+            ],
+        }
+    }
+
     fn selection_git_fixture(
         name: &str,
         changed: &str,
@@ -5110,6 +5566,101 @@ pub(crate) mod tests {
         )?
         .trim()
         .to_owned();
+        Ok((root, base, head))
+    }
+
+    fn git_fixture_head(root: &std::path::Path) -> Result<String, Box<dyn Error>> {
+        Ok(String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned())
+    }
+
+    /// A two-commit fixture whose diff is a pure rename: `from` exists at
+    /// base, `to` carries identical content at head, so `-M` reports `R100`
+    /// with both sides.
+    fn selection_git_rename_fixture(
+        name: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        let id = crate::unique_suffix();
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let run = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        run(&["init", "-q"])?;
+        run(&["config", "user.email", "test@example.invalid"])?;
+        run(&["config", "user.name", "Velnor test"])?;
+        let from_path = root.join(from);
+        let parent = from_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename source parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(&from_path, "line one\nline two\nline three\n")?;
+        run(&["add", "."])?;
+        run(&["commit", "-qm", "base"])?;
+        let base = git_fixture_head(&root)?;
+        if let Some(parent) = root.join(to).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        run(&["mv", from, to])?;
+        run(&["commit", "-qm", "rename"])?;
+        let head = git_fixture_head(&root)?;
+        Ok((root, base, head))
+    }
+
+    /// A two-commit fixture whose diff deletes `deleted`: the path exists at
+    /// base and is gone at head, so the diff reports `D` with the old path.
+    fn selection_git_delete_fixture(
+        name: &str,
+        deleted: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        let id = crate::unique_suffix();
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let run = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        run(&["init", "-q"])?;
+        run(&["config", "user.email", "test@example.invalid"])?;
+        run(&["config", "user.name", "Velnor test"])?;
+        for path in [deleted, "keeper.txt"] {
+            let path = root.join(path);
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "delete fixture parent")
+            })?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(path, "initial\n")?;
+        }
+        run(&["add", "."])?;
+        run(&["commit", "-qm", "base"])?;
+        let base = git_fixture_head(&root)?;
+        run(&["rm", "-q", deleted])?;
+        run(&["commit", "-qm", "delete"])?;
+        let head = git_fixture_head(&root)?;
         Ok((root, base, head))
     }
 
@@ -5507,7 +6058,7 @@ workspace_check = true
         let config = lanes_selection_config();
         let narrowed = selection_for_lanes(
             &config,
-            must(full_selection(&config), "full selection"),
+            must(full_selection(&config, None), "full selection"),
             RunnerMode::Velnor,
         );
         let ids = narrowed
@@ -5526,7 +6077,7 @@ workspace_check = true
         for lanes in [RunnerMode::Github, RunnerMode::Both] {
             let narrowed = selection_for_lanes(
                 &config,
-                must(full_selection(&config), "full selection"),
+                must(full_selection(&config, None), "full selection"),
                 lanes,
             );
             let ids = narrowed
@@ -5550,6 +6101,8 @@ workspace_check = true
         let selection = UnitSelection {
             units,
             full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
         };
         let narrowed = selection_for_lanes(&config, selection, RunnerMode::Velnor);
         assert!(narrowed.full_units.is_empty());
@@ -5567,7 +6120,7 @@ workspace_check = true
         let config = lanes_selection_config();
         let narrowed = selection_for_lanes(
             &config,
-            full_selection(&config).map_err(|error| error.to_string())?,
+            full_selection(&config, None).map_err(|error| error.to_string())?,
             RunnerMode::Velnor,
         );
         let units = narrowed
@@ -5999,6 +6552,15 @@ workspace_check = true
                 id: unit.id.clone(),
                 watch: unit.watch.clone(),
                 depends_on: unit.depends_on.clone(),
+                kind: unit.kind.clone(),
+                commands: unit
+                    .github_pr_commands
+                    .iter()
+                    .chain(&unit.github_full_commands)
+                    .chain(&unit.velnor_pr_commands)
+                    .chain(&unit.velnor_full_commands)
+                    .cloned()
+                    .collect(),
             })
             .collect();
         for changed in [
@@ -6012,8 +6574,8 @@ workspace_check = true
             let (root, base, head) = selection_git_fixture("slice-c", changed)?;
             let runtime_selection =
                 selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-            let changed_files =
-                git_changed_files(&root, &base, &head)?.ok_or("the diff must resolve")?;
+            let raw = git_name_status_nul(&root, &base, &head)?.ok_or("the diff must resolve")?;
+            let changed_files = parse_name_status_nul(&raw).ok_or("the diff must parse")?;
             let changes: Vec<crate::reuse::ChangedPath> = changed_files
                 .into_iter()
                 .map(|path| crate::reuse::ChangedPath {
@@ -6049,18 +6611,96 @@ workspace_check = true
     }
 
     #[test]
-    fn affected_selection_falls_back_to_full_for_global_or_unmatched_changes(
+    fn affected_selection_falls_back_to_full_for_unknown_contract_changes(
     ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture("github", ".github/workflows/ci.yml")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer", "docs"]
+        );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("classification table")),
+            "the planner surfaces the fallback reason: {:?}",
+            selection.fallback_reason
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_selects_nothing_for_an_unowned_transparent_change(
+    ) -> Result<(), Box<dyn Error>> {
+        // `README.md` matches no watch and every unit is transparent (rust
+        // units running the no-op), so the planner selects nothing.
+        let (root, base, head) = selection_git_fixture("unmatched", "README.md")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(selection.units.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_narrows_a_kind_reusable_to_that_kind() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) =
+            selection_git_fixture("kind", ".github/workflows/ci-unit-rust.yml")?;
+        let config = polyglot_selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(selected_ids(selection.units), vec!["rust-alpha"]);
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_selects_nothing_for_release_lanes() -> Result<(), Box<dyn Error>> {
         for (name, changed) in [
-            ("github", ".github/workflows/ci.yml"),
-            ("unmatched", "README.md"),
+            ("release", ".github/workflows/release.yml"),
+            ("maintenance", ".github/workflows/maintenance.yml"),
         ] {
             let (root, base, head) = selection_git_fixture(name, changed)?;
-            let config = selection_config();
-            let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-            assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
+            let config = polyglot_selection_config();
+            let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+            assert!(
+                selection.units.is_empty() && selection.full_units.is_empty(),
+                "release lanes select nothing in affected scope: {changed}"
+            );
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_falls_back_when_a_package_unit_is_opaque() -> Result<(), Box<dyn Error>> {
+        // The polyglot fixture's package unit runs the no-op (transparent);
+        // real package commands make it opaque, so the same unmatched change
+        // falls back with the consulted sources in the reason.
+        let (root, base, head) = selection_git_fixture("opaque", "AGENTS.md")?;
+        let mut config = polyglot_selection_config();
+        let bun = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "bun-web")
+            .ok_or("the polyglot fixture must carry bun-web")?;
+        bun.github_pr_commands = vec!["bun run build".to_owned()];
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(selected_ids(selection.units).len(), 4);
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("command read-globs")),
+            "the fallback reason names the consulted sources: {:?}",
+            selection.fallback_reason
+        );
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -6073,6 +6713,307 @@ workspace_check = true
         assert!(selection.full_units.is_empty());
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn unmatched_root_doc_selects_no_workload_units() -> Result<(), Box<dyn Error>> {
+        // A change no watch owns selects nothing: the planner records
+        // explicit no-work instead of running the estate.
+        let (root, base, head) = selection_git_fixture("polyglot-unmatched", "AGENTS.md")?;
+        let config = polyglot_selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(
+            selection.units.is_empty() && selection.full_units.is_empty(),
+            "an unmatched AGENTS.md must select no units, got {:?}",
+            selection.full_units,
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_matches_both_rename_sides() -> Result<(), Box<dyn Error>> {
+        // A rename invalidates the old owner (the file left) and the new
+        // owner (the file arrived): both select, plus the dependent closure.
+        let (root, base, head) = selection_git_rename_fixture(
+            "rename-both",
+            "crates/base/src/lib.rs",
+            "crates/app/src/moved.rs",
+        )?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "base", "consumer"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_matches_the_rename_source_when_the_target_is_unowned(
+    ) -> Result<(), Box<dyn Error>> {
+        // The target matches nothing, but the source still selects its owner:
+        // a rename out of a watched tree is not a disappearance.
+        let (root, base, head) = selection_git_rename_fixture(
+            "rename-source",
+            "crates/base/src/lib.rs",
+            "notes/moved.md",
+        )?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "base", "consumer"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_selects_the_owner_of_a_deleted_file() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) =
+            selection_git_delete_fixture("delete-owned", "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "consumer"].into_iter().map(str::to_owned).collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_matches_unusual_owned_filenames_exactly() -> Result<(), Box<dyn Error>> {
+        // Quotes and glob metacharacters in an owned path match their owner
+        // exactly instead of failing closed on the quoted form.
+        let (root, base, head) = selection_git_fixture("unusual-owned", "crates/app/we\"ird?.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "consumer"].into_iter().map(str::to_owned).collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_unusual_filename_selects_nothing() -> Result<(), Box<dyn Error>> {
+        // Spaces, quotes, and newlines in an unowned path parse exactly and
+        // select nothing instead of failing closed on the quoted form.
+        let (root, base, head) =
+            selection_git_fixture("unusual-unowned", "notes/with \"quotes\" and\nnewline.txt")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(selection.units.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plan_selection_agrees_with_select_path_on_rename_and_delete() -> Result<(), Box<dyn Error>> {
+        // The plan path and the select path share one rename/delete model: a
+        // rename matches both owners, a delete matches its owner.
+        let config = selection_config();
+        let watched: Vec<crate::reuse::WatchedUnit> = config
+            .unit
+            .iter()
+            .map(|unit| crate::reuse::WatchedUnit {
+                id: unit.id.clone(),
+                watch: unit.watch.clone(),
+                depends_on: unit.depends_on.clone(),
+                kind: unit.kind.clone(),
+                commands: unit
+                    .github_pr_commands
+                    .iter()
+                    .chain(&unit.github_full_commands)
+                    .chain(&unit.velnor_pr_commands)
+                    .chain(&unit.velnor_full_commands)
+                    .cloned()
+                    .collect(),
+            })
+            .collect();
+        let (root, base, head) = selection_git_rename_fixture(
+            "parity-rename",
+            "crates/base/src/lib.rs",
+            "crates/app/src/moved.rs",
+        )?;
+        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let model = crate::reuse::select_affected(
+            &watched,
+            &[crate::reuse::ChangedPath {
+                path: "crates/app/src/moved.rs".to_owned(),
+                previous: Some("crates/base/src/lib.rs".to_owned()),
+                status: crate::reuse::ChangeKind::Renamed,
+            }],
+            crate::reuse::FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selected_id_set(&runtime_selection),
+            model.required,
+            "required set for the rename"
+        );
+        assert_eq!(
+            runtime_selection.full_units, model.full_units,
+            "full set for the rename"
+        );
+        std::fs::remove_dir_all(root)?;
+        let (root, base, head) =
+            selection_git_delete_fixture("parity-delete", "crates/app/src/lib.rs")?;
+        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let model = crate::reuse::select_affected(
+            &watched,
+            &[crate::reuse::ChangedPath {
+                path: "crates/app/src/lib.rs".to_owned(),
+                previous: None,
+                status: crate::reuse::ChangeKind::Deleted,
+            }],
+            crate::reuse::FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selected_id_set(&runtime_selection),
+            model.required,
+            "required set for the delete"
+        );
+        assert_eq!(
+            runtime_selection.full_units, model.full_units,
+            "full set for the delete"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn name_status_nul_parses_exact_paths() {
+        // Status entries arrive verbatim: spaces, quotes, unicode, newlines,
+        // and glob metacharacters survive because NUL delimits records.
+        // Renames contribute target then source; copies contribute the target
+        // only; deletes keep their path.
+        for (input, expected) in [
+            ("".as_bytes(), Vec::new()),
+            ("M\0src/lib.rs\0".as_bytes(), vec!["src/lib.rs".to_owned()]),
+            (
+                "A\0dir with space/f ile.txt\0".as_bytes(),
+                vec!["dir with space/f ile.txt".to_owned()],
+            ),
+            (
+                "M\0we\"ird?.rs\0".as_bytes(),
+                vec!["we\"ird?.rs".to_owned()],
+            ),
+            (
+                "M\0ünïcode/[bracket]*.rs\0".as_bytes(),
+                vec!["ünïcode/[bracket]*.rs".to_owned()],
+            ),
+            (
+                "M\0with\nnewline.txt\0".as_bytes(),
+                vec!["with\nnewline.txt".to_owned()],
+            ),
+            ("D\0gone.rs\0".as_bytes(), vec!["gone.rs".to_owned()]),
+            ("T\0link.rs\0".as_bytes(), vec!["link.rs".to_owned()]),
+            (
+                "R100\0old.rs\0new.rs\0".as_bytes(),
+                vec!["new.rs".to_owned(), "old.rs".to_owned()],
+            ),
+            (
+                "R050\0a.rs\0b.rs\0".as_bytes(),
+                vec!["b.rs".to_owned(), "a.rs".to_owned()],
+            ),
+            ("C75\0a.rs\0b.rs\0".as_bytes(), vec!["b.rs".to_owned()]),
+            (
+                "M\0a.rs\0D\0b.rs\0R100\0c.rs\0d.rs\0".as_bytes(),
+                vec![
+                    "a.rs".to_owned(),
+                    "b.rs".to_owned(),
+                    "d.rs".to_owned(),
+                    "c.rs".to_owned(),
+                ],
+            ),
+        ] {
+            assert_eq!(
+                parse_name_status_nul(input),
+                Some(expected),
+                "input {input:?} must parse exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn name_status_nul_fails_closed_on_malformed_input() {
+        // Unknown statuses, truncated records, empty paths, trailing
+        // garbage, and non-UTF-8 bytes never parse: the caller falls back to
+        // full instead of matching a mangled name.
+        for input in [
+            "X\0a.rs\0".as_bytes(),
+            "U\0a.rs\0".as_bytes(),
+            "m\0a.rs\0".as_bytes(),
+            "R\0a.rs\0b.rs\0".as_bytes(),
+            "Rx\0a.rs\0b.rs\0".as_bytes(),
+            "C\0a.rs\0b.rs\0".as_bytes(),
+            "M\0".as_bytes(),
+            "M\0a.rs".as_bytes(),
+            "R100\0a.rs\0".as_bytes(),
+            "R100\0a.rs".as_bytes(),
+            "M\0\0".as_bytes(),
+            "R100\0\0b.rs\0".as_bytes(),
+            "M\0a.rs\0junk".as_bytes(),
+            "A\0a.rs\0\0".as_bytes(),
+            "\0".as_bytes(),
+            b"M\0\xff.rs\0".as_slice(),
+        ] {
+            assert_eq!(
+                parse_name_status_nul(input),
+                None,
+                "input {input:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_jobs_require_full_scope_for_trusted_events() {
+        // The unit-job guard mirrors the plan-time verdict: push, schedule,
+        // and merge-queue validation always run full scope.
+        for event in ["push", "schedule", "merge_group"] {
+            assert!(
+                event_requires_full_scope(event),
+                "{event} is a trusted event"
+            );
+        }
+        for event in ["", "pull_request", "workflow_dispatch"] {
+            assert!(
+                !event_requires_full_scope(event),
+                "{event} admits affected scope"
+            );
+        }
     }
 
     #[test]
@@ -8013,5 +8954,1168 @@ workspace_check = true
         assert_eq!(response.status, 403);
         assert!(split_curl_response("no trailer here").is_none());
         assert!(split_curl_response("body\n__PREPARED_TOOL_STATUS:banana\n").is_none());
+    }
+
+    // S4 aggregate wiring cut: the planner's expected work binds the
+    // required-check aggregate, and a proven no-work plan passes via planner
+    // + aggregate only, with an explicit machine-readable reason.
+
+    /// A scratch directory for one S4 aggregate/run fixture.
+    fn s4_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-workflow-s4-{name}-{}-{}",
+            std::process::id(),
+            crate::unique_suffix()
+        ));
+        must(std::fs::create_dir_all(&dir), "create s4 fixture");
+        dir
+    }
+
+    /// The ambient checkout SHAs the aggregate command binds against, so
+    /// writer fixtures pass under any outer environment (mirrors
+    /// `s4_run_paths`).
+    fn s4_ambient_shas() -> (String, String) {
+        (
+            std::env::var("BASE_SHA").unwrap_or_default(),
+            std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+        )
+    }
+
+    /// The expected-work JSON the planner writes for `selection`, bound to
+    /// the ambient checkout SHAs.
+    fn s4_expected_for_selection(selection: &UnitSelection<'_>, lanes: RunnerMode) -> String {
+        let dir = s4_dir("expected");
+        let path = dir.join("expected.json");
+        let (base, head) = s4_ambient_shas();
+        must(
+            write_expected_work_file(&path, selection, lanes, &base, &head),
+            "write expected work",
+        );
+        let text = must(std::fs::read_to_string(&path), "read expected work");
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+        text
+    }
+
+    /// Score one expected/results pair against the ambient checkout SHAs —
+    /// the same binding the aggregate command verifies.
+    fn s4_score(
+        expected_json: &str,
+        results_json: &str,
+    ) -> Result<crate::reuse::AggregateVerdict, String> {
+        let (base, head) = s4_ambient_shas();
+        crate::reuse::aggregate_files(expected_json, results_json, &base, &head)
+    }
+
+    /// All-success results JSON covering every (unit, lane) the expected-work
+    /// JSON names. Tests mutate one entry to prove each fail-closed case.
+    fn s4_success_results_for(expected_json: &str) -> String {
+        let document: serde_json::Value =
+            must(serde_json::from_str(expected_json), "parse expected work");
+        let units = must_some(
+            document.get("units").and_then(serde_json::Value::as_array),
+            "expected units array",
+        );
+        let mut results = Vec::new();
+        for unit in units {
+            let id = must_some(
+                unit.get("id").and_then(serde_json::Value::as_str),
+                "expected unit id",
+            );
+            let lanes = must_some(
+                unit.get("lanes").and_then(serde_json::Value::as_array),
+                "expected unit lanes",
+            );
+            for lane in lanes {
+                results.push(serde_json::json!({
+                    "unit": id,
+                    "lane": must_some(lane.as_str(), "expected lane name"),
+                    "outcome": "success",
+                }));
+            }
+        }
+        must(
+            serde_json::to_string(&serde_json::json!({ "results": results })),
+            "serialize success results",
+        )
+    }
+
+    /// Rewrite one (unit, lane) entry's outcome, attaching extra fields
+    /// (`reason`, `reused_from`) beside it.
+    fn s4_set_result(
+        results_json: &str,
+        unit: &str,
+        lane: &str,
+        outcome: &str,
+        extra: &[(&str, &str)],
+    ) -> String {
+        let mut document: serde_json::Value =
+            must(serde_json::from_str(results_json), "parse results");
+        let results = must_some(
+            document
+                .get_mut("results")
+                .and_then(serde_json::Value::as_array_mut),
+            "results array",
+        );
+        let mut patched = false;
+        for entry in results.iter_mut() {
+            let same_unit = entry.get("unit").and_then(serde_json::Value::as_str) == Some(unit);
+            let same_lane = entry.get("lane").and_then(serde_json::Value::as_str) == Some(lane);
+            if same_unit && same_lane {
+                entry["outcome"] = serde_json::Value::String(outcome.to_owned());
+                for (key, value) in extra {
+                    entry[*key] = serde_json::Value::String((*value).to_owned());
+                }
+                patched = true;
+            }
+        }
+        assert!(patched, "missing result entry for {unit} {lane}");
+        must(serde_json::to_string(&document), "serialize results")
+    }
+
+    /// Drop one (unit, lane) entry from a results JSON document.
+    fn s4_drop_result(results_json: &str, unit: &str, lane: &str) -> String {
+        let mut document: serde_json::Value =
+            must(serde_json::from_str(results_json), "parse results");
+        let results = must_some(
+            document
+                .get_mut("results")
+                .and_then(serde_json::Value::as_array_mut),
+            "results array",
+        );
+        let before = results.len();
+        results.retain(|entry| {
+            entry.get("unit").and_then(serde_json::Value::as_str) != Some(unit)
+                || entry.get("lane").and_then(serde_json::Value::as_str) != Some(lane)
+        });
+        assert_eq!(
+            results.len() + 1,
+            before,
+            "missing result entry for {unit} {lane}"
+        );
+        must(serde_json::to_string(&document), "serialize results")
+    }
+
+    /// Score one expected/results pair through the aggregate CLI wiring and
+    /// return the core verdict beside the CLI exit, so tests pin both the
+    /// exact failure lines and the pass/fail behavior.
+    fn s4_verdict(
+        dir: &Path,
+        expected_json: &str,
+        results_json: &str,
+    ) -> (crate::reuse::AggregateVerdict, Result<(), GeneratorError>) {
+        let expected_path = dir.join("expected.json");
+        let results_path = dir.join("results.json");
+        must(
+            std::fs::write(&expected_path, expected_json),
+            "write expected work",
+        );
+        must(
+            std::fs::write(&results_path, results_json),
+            "write reported results",
+        );
+        let verdict = must(s4_score(expected_json, results_json), "score expected work");
+        let exit = aggregate_command(&expected_path, &results_path);
+        (verdict, exit)
+    }
+
+    /// The real-work binding input: an owned change's planned selection plus
+    /// the expected-work JSON the planner writes for it, on both lanes.
+    fn s4_owned_binding(
+        name: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture(name, "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Both);
+        let results = s4_success_results_for(&expected);
+        Ok((root, expected, results))
+    }
+
+    const S4_RUN_CONFIG_TOML: &str = r#"schema = 2
+repository = "example/s4"
+profile = "s4-no-work"
+verified = true
+default_branch = "main"
+
+[[unit]]
+id = "base"
+kind = "rust"
+watch = ["crates/base/**"]
+github_pr_commands = ["true"]
+github_full_commands = ["true"]
+velnor_pr_commands = ["true"]
+velnor_full_commands = ["true"]
+"#;
+
+    /// A plan-level config mirroring `polyglot_selection_config`: a root
+    /// contributor document matches no watch, so the plan is proven no-work.
+    const S4_PLAN_CONFIG_TOML: &str = r#"schema = 2
+repository = "example/s4-plan"
+profile = "s4-plan-e2e"
+verified = true
+default_branch = "main"
+
+[[unit]]
+id = "rust-alpha"
+kind = "rust"
+watch = ["Cargo.lock", "Cargo.toml", "crates/alpha/**/*.rs", "crates/alpha/Cargo.toml", "crates/alpha/src/**", "rust-toolchain.toml"]
+github_pr_commands = ["true"]
+github_full_commands = ["true"]
+velnor_pr_commands = ["true"]
+velnor_full_commands = ["true"]
+
+[[unit]]
+id = "bun-web"
+kind = "bun"
+watch = ["web/**/*.ts", "web/**/*.tsx", "web/bun.lock", "web/package.json"]
+github_pr_commands = ["true"]
+github_full_commands = ["true"]
+velnor_pr_commands = ["true"]
+velnor_full_commands = ["true"]
+
+[[unit]]
+id = "docker-construct"
+kind = "docker"
+watch = ["docker/construct/**"]
+github_pr_commands = ["true"]
+github_full_commands = ["true"]
+velnor_pr_commands = ["true"]
+velnor_full_commands = ["true"]
+
+[[unit]]
+id = "swift-native"
+kind = "swift"
+watch = ["native/**/*.swift", "native/Package.swift", "native/Package.resolved"]
+github_pr_commands = ["true"]
+github_full_commands = ["true"]
+velnor_pr_commands = ["true"]
+velnor_full_commands = ["true"]
+"#;
+
+    /// The scope the ambient job environment demands: trusted events run
+    /// full, everything else runs affected. The test adapts to the outer
+    /// environment instead of mutating process-global env.
+    fn s4_run_scope() -> Scope {
+        if event_requires_full_scope(&std::env::var("EVENT_NAME").unwrap_or_default()) {
+            Scope::Full
+        } else {
+            Scope::Affected
+        }
+    }
+
+    /// A runnable config plus a selection file matching the ambient SHAs, so
+    /// the SHA binding passes under any outer environment.
+    fn s4_run_paths(dir: &Path, scope: Scope, units: &str, full_units: &str) -> (PathBuf, PathBuf) {
+        let config_path = dir.join("project.toml");
+        must(
+            std::fs::write(&config_path, S4_RUN_CONFIG_TOML),
+            "write s4 config",
+        );
+        let selection_path = dir.join("velnor-ci-selection");
+        let base = std::env::var("BASE_SHA").unwrap_or_default();
+        let head = std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+        must(
+            write_selection_file(&selection_path, &base, &head, scope, units, full_units),
+            "write s4 selection",
+        );
+        (config_path, selection_path)
+    }
+
+    #[test]
+    fn no_work_plan_passes_aggregate_with_explicit_reason() -> Result<(), Box<dyn Error>> {
+        // The S0 shape end to end: an unmatched root doc selects nothing,
+        // the planner records why, and planner success plus zero workload
+        // results passes the aggregate with a machine-readable reason.
+        let (root, base, head) = selection_git_fixture("s4-unmatched", "AGENTS.md")?;
+        let config = polyglot_selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(selection.units.is_empty() && selection.full_units.is_empty());
+        assert_eq!(
+            selection.no_work_reason.as_deref(),
+            Some("no changed path selected a workload unit"),
+        );
+        assert_eq!(
+            must(
+                planned_no_work_reason(&selection),
+                "record the no-work reason"
+            )
+            .as_deref(),
+            Some("no changed path selected a workload unit"),
+        );
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Both);
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+        );
+        assert_eq!(
+            document
+                .get("units")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+        );
+        let dir = s4_dir("no-work");
+        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"results": []}"#);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(exit.is_ok(), "no-work must pass the aggregate: {exit:?}");
+        assert_eq!(
+            explicit_no_work_line(&expected, &verdict).as_deref(),
+            Some(
+                "no_work_reason=planner selected zero workload units and no workload results were reported"
+            ),
+        );
+        // A stray report beside a no-work plan stays extra and ignored: the
+        // pass stands, and the reason names the ignored report.
+        let stray = r#"{"results": [{"unit": "ghost", "lane": "github", "outcome": "success"}]}"#;
+        let (verdict, exit) = s4_verdict(&dir, &expected, stray);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            exit.is_ok(),
+            "extra results never red a no-work plan: {exit:?}"
+        );
+        assert_eq!(
+            explicit_no_work_line(&expected, &verdict).as_deref(),
+            Some(
+                "no_work_reason=planner selected zero workload units; 1 reported result ignored as outside the plan"
+            ),
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn empty_diff_and_lane_narrowing_carry_reasons_while_unproven_empty_errors(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, _) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        assert!(selection.units.is_empty());
+        assert_eq!(
+            must(
+                planned_no_work_reason(&selection),
+                "record the empty-diff reason"
+            )
+            .as_deref(),
+            Some("empty diff selects no workload units"),
+        );
+        std::fs::remove_dir_all(root)?;
+
+        // Lane admission narrowing a real selection to zero is no-work for
+        // its own reason: nothing runnable, not nothing affected.
+        let config = lanes_selection_config();
+        let swift = config.unit.iter().find(|unit| unit.id == "swift-app");
+        let selection = UnitSelection {
+            units: swift.into_iter().collect(),
+            full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let narrowed = selection_for_lanes(&config, selection, RunnerMode::Velnor);
+        assert!(narrowed.units.is_empty());
+        assert_eq!(
+            must(
+                planned_no_work_reason(&narrowed),
+                "record the lane-narrowing reason"
+            )
+            .as_deref(),
+            Some("no selected workload unit runs on the admitted lanes"),
+        );
+
+        // An empty selection that somehow carries no recorded reason is a
+        // plan error, never a silent no-work pass: no future selection arm
+        // can go empty without proving why. Reachable only by construction —
+        // every selection arm that can go empty records its reason.
+        let degenerate = UnitSelection {
+            units: Vec::new(),
+            full_units: BTreeSet::new(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let error = must_fail(
+            planned_no_work_reason(&degenerate),
+            "an unproven empty selection must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without a recorded no-work reason"),
+            "{error}",
+        );
+        // A recorded reason survives lane narrowing untouched.
+        let recorded = UnitSelection {
+            units: Vec::new(),
+            full_units: BTreeSet::new(),
+            fallback_reason: None,
+            no_work_reason: Some("empty diff selects no workload units".to_owned()),
+        };
+        let narrowed = selection_for_lanes(&config, recorded, RunnerMode::Velnor);
+        assert_eq!(
+            must(
+                planned_no_work_reason(&narrowed),
+                "a recorded reason survives narrowing"
+            )
+            .as_deref(),
+            Some("empty diff selects no workload units"),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expected_work_writer_maps_units_lanes_and_in_plan_prerequisites(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture("s4-owned", "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units.clone()),
+            vec!["base", "app", "consumer"]
+        );
+        assert!(must(
+            planned_no_work_reason(&selection),
+            "real work carries no no-work reason"
+        )
+        .is_none());
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Both);
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+        );
+        let (ambient_base, ambient_head) = s4_ambient_shas();
+        assert_eq!(
+            document.get("base_sha").and_then(serde_json::Value::as_str),
+            Some(ambient_base.as_str()),
+            "the writer binds the plan's base SHA",
+        );
+        assert_eq!(
+            document.get("head_sha").and_then(serde_json::Value::as_str),
+            Some(ambient_head.as_str()),
+            "the writer binds the plan's head SHA",
+        );
+        let units = document
+            .get("units")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("the writer must emit a units array")?;
+        assert_eq!(units.len(), 3);
+        for unit in units {
+            assert_eq!(
+                unit.get("lanes"),
+                Some(&serde_json::json!(["github", "velnor"])),
+                "every admitted lane supporting rust must hear a verdict",
+            );
+            assert_eq!(unit.get("matrix"), Some(&serde_json::json!([])));
+            assert_eq!(
+                unit.get("required").and_then(serde_json::Value::as_bool),
+                Some(true),
+            );
+            assert!(
+                unit.get("planned_skip").is_none(),
+                "the planner removes instead of pre-skipping",
+            );
+        }
+        assert_eq!(
+            document.get("prerequisites"),
+            Some(&serde_json::json!({
+                "app": ["base"],
+                "base": [],
+                "consumer": ["app"],
+            })),
+        );
+        std::fs::remove_dir_all(root)?;
+
+        // Dependency skipping follows the executed set: a prerequisite the
+        // plan did not select neither gates the runner (`run_layers` filters
+        // out-of-plan edges) nor appears in the aggregate's graph, so the
+        // dependent's own success holds.
+        let config = selection_config();
+        let app = config.unit.iter().find(|unit| unit.id == "app");
+        let selection = UnitSelection {
+            units: app.into_iter().collect(),
+            full_units: ["app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Github);
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document.get("prerequisites"),
+            Some(&serde_json::json!({ "app": [] })),
+            "out-of-plan prerequisites leave the expected graph",
+        );
+        let results = s4_success_results_for(&expected);
+        let verdict = s4_score(&expected, &results)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        Ok(())
+    }
+
+    #[test]
+    fn expected_work_writer_creates_a_missing_nested_parent() -> Result<(), Box<dyn Error>> {
+        // Live-CI shape: the plan job runs in a fresh checkout with no
+        // `.velnor-ci-expected-work/` directory, so the writer must create
+        // its own parent instead of relying on a pre-existing dir.
+        let config = selection_config();
+        let app = config.unit.iter().find(|unit| unit.id == "app");
+        let selection = UnitSelection {
+            units: app.into_iter().collect(),
+            full_units: ["app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let dir = s4_dir("expected-nested-parent");
+        let path = dir.join("does/not/exist/expected-work.json");
+        let (base, head) = s4_ambient_shas();
+        must(
+            write_expected_work_file(&path, &selection, RunnerMode::Both, &base, &head),
+            "write expected work through a missing nested parent",
+        );
+        let text = must(std::fs::read_to_string(&path), "read expected work");
+        let document: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+        );
+        assert_eq!(
+            document.get("units"),
+            Some(&serde_json::json!([{
+                "id": "app",
+                "lanes": ["github", "velnor"],
+                "matrix": [],
+                "required": true,
+            }])),
+        );
+        assert_eq!(
+            document.get("prerequisites"),
+            Some(&serde_json::json!({ "app": [] })),
+        );
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+        Ok(())
+    }
+
+    #[test]
+    fn selection_writer_creates_a_missing_nested_parent() {
+        // The selection writer shares the expected-work writer's contract:
+        // a nested `VELNOR_SELECTION_FILE` path must not need a
+        // pre-existing directory.
+        let dir = s4_dir("selection-nested-parent");
+        let path = dir.join("does/not/exist/velnor-ci-selection");
+        must(
+            write_selection_file(
+                &path,
+                "base-sha",
+                "head-sha",
+                Scope::Affected,
+                "app",
+                "app,base",
+            ),
+            "write selection through a missing nested parent",
+        );
+        let text = must(std::fs::read_to_string(&path), "read selection");
+        assert_eq!(
+            text,
+            format!(
+                "version={SELECTION_FILE_VERSION}\nbase_sha=base-sha\nhead_sha=head-sha\nscope=affected\nunits=app\nfull_units=app,base\n",
+            ),
+        );
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+    }
+
+    #[test]
+    fn selected_but_missing_result_fails_aggregate() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-missing")?;
+        // Sanity: full coverage passes before one verdict goes missing.
+        let clean = s4_score(&expected, &results)?;
+        assert!(clean.passed, "failures: {:?}", clean.failures);
+        let results = s4_drop_result(&results, "consumer", "velnor");
+        let dir = s4_dir("missing");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("missing result for consumer velnor")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(exit.is_err(), "a missing result must fail the aggregate");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unexpected_skip_fails_aggregate() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-skip")?;
+        let results = s4_set_result(
+            &results,
+            "app",
+            "github",
+            "skipped",
+            &[("reason", "runner drained the queue")],
+        );
+        let dir = s4_dir("skip");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("unexpected skip of app github")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(exit.is_err(), "an unplanned skip must fail the aggregate");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn partial_matrix_fails_while_empty_matrix_expects_one_verdict() -> Result<(), Box<dyn Error>> {
+        // A matrixed unit must report every entry: one missing entry fails
+        // the aggregate as an incomplete matrix.
+        let (base, head) = s4_ambient_shas();
+        let expected = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "planned_no_work": false,
+                "units": [{"id": "shard", "lanes": ["github"], "matrix": ["a", "b"], "required": true}],
+                "prerequisites": {"shard": []},
+            })),
+            "serialize matrixed plan",
+        );
+        let results = r#"{"results": [{"unit": "shard", "lane": "github", "matrix": "a", "outcome": "success"}]}"#;
+        let dir = s4_dir("matrix");
+        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("missing result for shard github[b]")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(
+            verdict
+                .explanations
+                .iter()
+                .any(|explanation| explanation.detail.contains("incomplete matrix")),
+            "the explanation must name the incomplete matrix",
+        );
+        assert!(exit.is_err(), "a partial matrix must fail the aggregate");
+
+        // The empty-matrix rule: no matrix means exactly one unmatrixed
+        // item — the unit's single verdict — never zero, never many.
+        let config = selection_config();
+        let base = config.unit.iter().find(|unit| unit.id == "base");
+        let selection = UnitSelection {
+            units: base.into_iter().collect(),
+            full_units: ["base"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Github);
+        let results = r#"{"results": [{"unit": "base", "lane": "github", "outcome": "success"}]}"#;
+        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            exit.is_ok(),
+            "one verdict satisfies an empty matrix: {exit:?}"
+        );
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_result_fails_aggregate() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-cancelled")?;
+        let results = s4_set_result(&results, "base", "github", "cancelled", &[]);
+        let dir = s4_dir("cancelled");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("cancelled required work base github")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(exit.is_err(), "a cancellation has no verdict and must fail");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_prerequisite_blocks_its_dependent() -> Result<(), Box<dyn Error>> {
+        let (root, expected, results) = s4_owned_binding("s4-prereq")?;
+        let results = s4_set_result(&results, "base", "github", "failure", &[]);
+        let results = s4_set_result(&results, "base", "velnor", "failure", &[]);
+        let dir = s4_dir("prereq");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("prerequisite `base` of `app` did not pass")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+        assert!(
+            exit.is_err(),
+            "a success behind a failed prerequisite proves nothing"
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unplanned_reports_never_green_or_red_planned_work() -> Result<(), Box<dyn Error>> {
+        // Extra reports are noted and ignored beside real work too: they
+        // green nothing and red nothing — not even an extra failure.
+        let (root, expected, results) = s4_owned_binding("s4-extra")?;
+        let mut document: serde_json::Value = serde_json::from_str(&results)?;
+        document["results"]
+            .as_array_mut()
+            .ok_or("results array")?
+            .push(serde_json::json!({"unit": "ghost", "lane": "github", "outcome": "failure"}));
+        let results = must(serde_json::to_string(&document), "serialize results");
+        let verdict = s4_score(&expected, &results)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            verdict
+                .explanations
+                .iter()
+                .any(|explanation| explanation.disposition == crate::reuse::Disposition::Extra),
+            "the stray report must be noted as extra",
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn planner_failure_leaves_no_green_path() -> Result<(), Box<dyn Error>> {
+        // No plan artifacts, no green: missing files are hard errors, never
+        // an empty pass.
+        let dir = s4_dir("planner-failure");
+        let missing = dir.join("absent.json");
+        let error = must_fail(
+            aggregate_command(&missing, &missing),
+            "a missing expected-work file must fail",
+        );
+        assert!(error.to_string().contains("read expected work"), "{error}");
+        let expected_path = dir.join("expected.json");
+        must(
+            std::fs::write(&expected_path, r#"{"planned_no_work": true, "units": []}"#),
+            "write expected",
+        );
+        let error = must_fail(
+            aggregate_command(&expected_path, &missing),
+            "missing results must fail",
+        );
+        assert!(
+            error.to_string().contains("read reported results"),
+            "{error}"
+        );
+
+        let scope = s4_run_scope();
+        let (config_path, _) = s4_run_paths(&dir, scope, "", "");
+        let error = must_fail(
+            run_units_with_selection_file(&dir, &config_path, scope, None, None, &missing),
+            "a missing selection artifact must fail",
+        );
+        assert!(error.to_string().contains("read CI selection"), "{error}");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_plan_fails_closed() -> Result<(), Box<dyn Error>> {
+        // An unparseable plan is a usage error, never a pass.
+        let error = must_fail(
+            crate::reuse::aggregate_files("{not json", "{}", "", "").map_err(GeneratorError::usage),
+            "an unparseable plan must fail",
+        );
+        assert!(error.to_string().contains("not valid JSON"), "{error}");
+        let dir = s4_dir("invalid");
+        let expected_path = dir.join("expected.json");
+        let results_path = dir.join("results.json");
+        must(
+            std::fs::write(&expected_path, "{not json"),
+            "write bad expected",
+        );
+        must(std::fs::write(&results_path, "{}"), "write results");
+        let error = must_fail(
+            aggregate_command(&expected_path, &results_path),
+            "an unparseable plan must fail the command",
+        );
+        assert!(error.to_string().contains("not valid JSON"), "{error}");
+
+        // A contradictory plan — the no-work marker beside listed units —
+        // fails inside the verdict.
+        let (base, head) = s4_ambient_shas();
+        let expected = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "planned_no_work": true,
+                "units": [{"id": "base", "lanes": ["github"]}],
+            })),
+            "serialize contradictory plan",
+        );
+        let verdict = s4_score(&expected, r#"{"results": []}"#)?;
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("contradictory")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+
+        // So does unmarked emptiness: zero units without the explicit
+        // marker is a broken plan, not proven no-work.
+        let expected = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "units": [],
+            })),
+            "serialize unmarked plan",
+        );
+        let verdict = s4_score(&expected, r#"{"results": []}"#)?;
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("without the explicit no-work marker")),
+            "failures: {:?}",
+            verdict.failures,
+        );
+
+        // And a malformed selection artifact fails the runner before any
+        // unit — or any no-work line — runs.
+        let scope = s4_run_scope();
+        let (config_path, _) = s4_run_paths(&dir, scope, "", "");
+        let bad_selection = dir.join("bad-selection");
+        must(
+            std::fs::write(&bad_selection, "version=99\n"),
+            "write bad selection",
+        );
+        let error = must_fail(
+            run_units_with_selection_file(&dir, &config_path, scope, None, None, &bad_selection),
+            "a malformed selection artifact must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported CI selection artifact version"),
+            "{error}",
+        );
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reused_evidence_still_passes_aggregate() -> Result<(), Box<dyn Error>> {
+        // A success backed by producing evidence holds exactly like an
+        // executed one: the wiring must not regress reuse acceptance.
+        let (root, expected, results) = s4_owned_binding("s4-reuse")?;
+        let results = s4_set_result(
+            &results,
+            "app",
+            "velnor",
+            "success",
+            &[("reused_from", "run-7f3a")],
+        );
+        let dir = s4_dir("reuse");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(exit.is_ok(), "reused evidence must still pass: {exit:?}");
+        assert!(
+            verdict
+                .explanations
+                .iter()
+                .any(|explanation| explanation.disposition == crate::reuse::Disposition::Reused),
+            "the reused verdict must be recorded as reused",
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_empty_selection_reports_explicit_no_work() -> Result<(), Box<dyn Error>> {
+        // A validated empty selection succeeds explicitly: the machine-
+        // readable reason, not a silent pass and not an error.
+        assert_eq!(
+            no_work_report_line(),
+            "no_work_reason=CI selection artifact selects zero workload units; nothing to run",
+        );
+        let dir = s4_dir("run-no-work");
+        let scope = s4_run_scope();
+        let (config_path, selection_path) = s4_run_paths(&dir, scope, "", "");
+        must(
+            run_units_with_selection_file(&dir, &config_path, scope, None, None, &selection_path)
+                .map_err(|error| error.to_string()),
+            "an empty selection must succeed explicitly",
+        );
+        // Asking for a unit the plan did not select is never no-work.
+        let error = must_fail(
+            run_units_with_selection_file(
+                &dir,
+                &config_path,
+                scope,
+                Some("base"),
+                None,
+                &selection_path,
+            ),
+            "an unselected unit must fail closed",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not include requested unit `base`"),
+            "{error}",
+        );
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_no_work_line_stays_silent_for_real_work() -> Result<(), Box<dyn Error>> {
+        // Real-work verdicts print the audit report only: the no-work line
+        // never reshapes their bytes.
+        let (root, expected, results) = s4_owned_binding("s4-silence")?;
+        let verdict = s4_score(&expected, &results)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(explicit_no_work_line(&expected, &verdict).is_none());
+        // Failed no-work verdicts stay silent too: only a PASS carries the
+        // machine-readable reason.
+        let (base, head) = s4_ambient_shas();
+        let unmarked = must(
+            serde_json::to_string(&serde_json::json!({
+                "base_sha": base,
+                "head_sha": head,
+                "units": [],
+            })),
+            "serialize unmarked plan",
+        );
+        let verdict = s4_score(&unmarked, r#"{"results": []}"#)?;
+        assert!(!verdict.passed);
+        assert!(explicit_no_work_line(&unmarked, &verdict).is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_but_runnable_nowhere_fails_the_plan_closed() {
+        // A selected unit with no admitted lane is a contradictory plan, not
+        // an empty one: the writer fails instead of emitting a unit the
+        // aggregate could never hear from. Unreachable after lane narrowing
+        // (which drops such units with its own reason), proven here so the
+        // guard cannot silently rot.
+        let config = lanes_selection_config();
+        let swift = config.unit.iter().find(|unit| unit.id == "swift-app");
+        let selection = UnitSelection {
+            units: swift.into_iter().collect(),
+            full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let dir = s4_dir("nowhere");
+        let (base, head) = s4_ambient_shas();
+        let error = must_fail(
+            write_expected_work_file(
+                &dir.join("expected.json"),
+                &selection,
+                RunnerMode::Velnor,
+                &base,
+                &head,
+            ),
+            "a unit runnable nowhere must fail the plan",
+        );
+        assert!(
+            error.to_string().contains("runnable on no admitted lane"),
+            "{error}",
+        );
+        // Unknown kinds stay on every admitted lane: the planner keeps
+        // units it does not recognize, so the aggregate hears all of them.
+        let future = config.unit.iter().find(|unit| unit.id == "future-app");
+        let selection = UnitSelection {
+            units: future.into_iter().collect(),
+            full_units: ["future-app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Both);
+        let document: serde_json::Value = must(serde_json::from_str(&expected), "parse expected");
+        assert_eq!(
+            document
+                .get("units")
+                .and_then(|units| units.get(0))
+                .and_then(|unit| unit.get("lanes")),
+            Some(&serde_json::json!(["github", "velnor"])),
+        );
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+    }
+
+    #[test]
+    fn stale_expected_work_fails_the_aggregate_closed() -> Result<(), Box<dyn Error>> {
+        // A no-work file from an earlier run paired with zero results must
+        // FAIL, never PASS: the identity binding — not artifact threading —
+        // proves the file is this plan's. The stale SHAs derive from the
+        // ambient checkout so the mismatch holds under any outer env.
+        let (ambient_base, ambient_head) = s4_ambient_shas();
+        let stale = must(
+            serde_json::to_string(&serde_json::json!({
+                "planned_no_work": true,
+                "units": [],
+                "prerequisites": {},
+                "base_sha": format!("{ambient_base}-earlier-run"),
+                "head_sha": format!("{ambient_head}-earlier-run"),
+            })),
+            "serialize stale plan",
+        );
+        let error = must_fail(
+            s4_score(&stale, r#"{"results": []}"#).map_err(GeneratorError::usage),
+            "a stale no-work file must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not match this aggregate checkout"),
+            "{error}",
+        );
+        // The command binds the same ambient SHAs: the stale file fails the
+        // CLI exit too, as does a file with no identity at all.
+        let dir = s4_dir("stale");
+        let expected_path = dir.join("expected.json");
+        let results_path = dir.join("results.json");
+        must(
+            std::fs::write(&expected_path, &stale),
+            "write stale expected",
+        );
+        must(
+            std::fs::write(&results_path, r#"{"results": []}"#),
+            "write results",
+        );
+        let error = must_fail(
+            aggregate_command(&expected_path, &results_path),
+            "a stale no-work file must fail the command",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not match this aggregate checkout"),
+            "{error}",
+        );
+        must(
+            std::fs::write(&expected_path, r#"{"planned_no_work": true, "units": []}"#),
+            "write unbound expected",
+        );
+        let error = must_fail(
+            aggregate_command(&expected_path, &results_path),
+            "an unbound file must fail the command",
+        );
+        assert!(error.to_string().contains("missing base_sha"), "{error}");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plan_writes_expected_work_file_and_no_work_marker() -> Result<(), Box<dyn Error>> {
+        // The planner end to end: a no-work diff writes the expected-work
+        // file — identity, marker, and empty units — and emits the marker to
+        // `GITHUB_OUTPUT`. Driven through injected env, never process-global
+        // mutation (which parallel tests also read).
+        let (root, base, head) = selection_git_fixture("s4-plan-e2e", "AGENTS.md")?;
+        let dir = s4_dir("plan-e2e");
+        let config_path = dir.join("project.toml");
+        must(
+            std::fs::write(&config_path, S4_PLAN_CONFIG_TOML),
+            "write s4 plan config",
+        );
+        let expected_path = dir.join("expected.json");
+        let output_path = dir.join("github-output");
+        must(
+            plan_with(
+                &config_path,
+                &PlanInputs {
+                    root: root.clone(),
+                    event: "pull_request".to_owned(),
+                    scope_override: None,
+                    base: base.clone(),
+                    head: head.clone(),
+                    lanes: String::new(),
+                    selection_file: None,
+                    expected_file: Some(expected_path.clone()),
+                    github_output: Some(output_path.clone()),
+                },
+            ),
+            "plan the no-work diff",
+        );
+        let expected = must(
+            std::fs::read_to_string(&expected_path),
+            "read expected work",
+        );
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document.get("base_sha").and_then(serde_json::Value::as_str),
+            Some(base.as_str()),
+            "the file binds the plan's base SHA",
+        );
+        assert_eq!(
+            document.get("head_sha").and_then(serde_json::Value::as_str),
+            Some(head.as_str()),
+            "the file binds the plan's head SHA",
+        );
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+        );
+        assert_eq!(
+            document
+                .get("units")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+        );
+        // The bound file scores against the same SHAs: proven no-work plus
+        // zero results passes with the machine-readable reason.
+        let verdict = crate::reuse::aggregate_files(&expected, r#"{"results": []}"#, &base, &head)?;
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert_eq!(
+            explicit_no_work_line(&expected, &verdict).as_deref(),
+            Some(
+                "no_work_reason=planner selected zero workload units and no workload results were reported"
+            ),
+        );
+        let outputs = must(std::fs::read_to_string(&output_path), "read github output");
+        assert!(outputs.contains("planned_no_work=true"), "{outputs}");
+        assert!(
+            outputs.contains("no_work_reason=no changed path selected a workload unit"),
+            "{outputs}",
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

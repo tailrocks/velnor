@@ -33,6 +33,7 @@ mod renovate_renderer;
 mod reuse;
 mod runners;
 pub(crate) mod runtime;
+mod rust_include;
 pub(crate) mod s2;
 mod scan;
 mod template_memory;
@@ -13209,12 +13210,24 @@ channel = "stable"
             "clippy must use the test profile to match nextest: {}",
             rust.pr_commands[clippy_index]
         );
-        // The scan leaves units unphased until the phase activation
-        // lands; the order contract holds on the commands alone.
-        assert!(
-            rust.phases.is_empty() && rust.check_commands.is_empty(),
-            "scan units carry no phase tags yet: {:?}",
-            rust.phases
+        // The phase activation tags scan units: the order contract holds
+        // on the commands and the phase list mirrors them. The fixture
+        // ships no lib target, so no doctest phase follows the tests.
+        assert_eq!(
+            rust.phases,
+            vec![
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ],
+            "scan units carry phase tags: {}",
+            rust.pr_commands.join(" | ")
+        );
+        assert_eq!(
+            rust.check_commands.len(),
+            1,
+            "scan units carry one prerequisite check: {:?}",
+            rust.check_commands
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -16076,9 +16089,13 @@ channel = "stable"
                 }),
             "large required-check block",
         );
+        // The aggregate steps precede the verdict step; anchor on the
+        // verdict step's name so the expression budget covers the shell
+        // verdict, not the constant-size collection scripts.
         let required_script = must_some(
             required_block
-                .split_once("        run: |\n")
+                .split_once("- name: Validate generated stack results")
+                .and_then(|(_, step)| step.split_once("        run: |\n"))
                 .map(|(_, script)| script),
             "large required-check script",
         );
@@ -16759,10 +16776,13 @@ channel = "stable"
         );
         // GitHub loads the callee once per caller into one template-memory
         // budget, so the callee must not grow with the kind's unit count.
-        // 25 both-lane rust units (50 callers) stay under the 5 MiB ceiling
+        // 23 both-lane rust units (46 callers) stay under the 5 MiB ceiling
         // the generator enforces on the aggregate; the ceiling itself is
-        // covered by `template_memory`'s tests.
-        for index in 0..24 {
+        // covered by `template_memory`'s tests. The drift since the 5 MiB
+        // ceiling recalibration (unit-result record/upload blocks,
+        // expected-work aggregate steps) honestly costs the headroom the
+        // old 25-unit stress level consumed.
+        for index in 0..22 {
             let mut unit = rust.clone();
             unit.id = format!("rust-pad{index:02}");
             unit.label = format!("Rust crate (pad{index:02})");
@@ -16789,7 +16809,7 @@ channel = "stable"
         let growth = padded_rust.len().saturating_sub(baseline_rust.len());
         assert!(
             growth < 32 * 256,
-            "the kind reusable grew by {growth} bytes for 32 extra units; the step blocks must not be per unit"
+            "the kind reusable grew by {growth} bytes for 22 extra units; the step blocks must not be per unit"
         );
         for name in ["ci-pr.yml", "ci-main.yml"] {
             let workflow = must_some(
