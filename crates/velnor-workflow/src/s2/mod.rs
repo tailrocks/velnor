@@ -5835,7 +5835,8 @@ pub(crate) fn rust_dependency_needs(
 /// workspace, so their consumers rebuild or reuse in place. An edge whose
 /// producer cannot run here, or whose product declares no outputs, yields
 /// no edge because no artifact contract exists. A declared transport edge is
-/// mandatory: its consumer never rebuilds around a skipped or failed producer.
+/// mandatory only when its producer is selected and admitted; an out-of-plan
+/// or inadmissible producer is intentionally a local-rebuild fallback.
 pub(crate) fn product_dependency_needs(
     provider: provider::ProviderId,
     unit: &Unit,
