@@ -2453,6 +2453,16 @@ fn write_expected_work_file(
     });
     let text = serde_json::to_string_pretty(&document)
         .map_err(|error| GeneratorError::usage(format!("serialize expected work: {error}")))?;
+    // The plan job runs in a fresh checkout with no parent directory, so
+    // the writer creates its own instead of relying on a pre-existing dir.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            GeneratorError::io("create expected work directory", parent, &error)
+        })?;
+    }
     fs::write(path, format!("{text}\n"))
         .map_err(|error| GeneratorError::io("write expected work", path, &error))
 }
@@ -2498,6 +2508,14 @@ fn write_selection_file(
         "version={SELECTION_FILE_VERSION}\nbase_sha={base_sha}\nhead_sha={head_sha}\nscope={}\nunits={units}\nfull_units={full_units}\n",
         scope_name(scope)
     );
+    // A nested selection path must not need a pre-existing directory.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| GeneratorError::io("create CI selection directory", parent, &error))?;
+    }
     fs::write(path, contents)
         .map_err(|error| GeneratorError::io("write CI selection", path, &error))
 }
@@ -9384,6 +9402,79 @@ velnor_full_commands = ["true"]
         let verdict = s4_score(&expected, &results)?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         Ok(())
+    }
+
+    #[test]
+    fn expected_work_writer_creates_a_missing_nested_parent() -> Result<(), Box<dyn Error>> {
+        // Live-CI shape: the plan job runs in a fresh checkout with no
+        // `.velnor-ci-expected-work/` directory, so the writer must create
+        // its own parent instead of relying on a pre-existing dir.
+        let config = selection_config();
+        let app = config.unit.iter().find(|unit| unit.id == "app");
+        let selection = UnitSelection {
+            units: app.into_iter().collect(),
+            full_units: ["app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
+            no_work_reason: None,
+        };
+        let dir = s4_dir("expected-nested-parent");
+        let path = dir.join("does/not/exist/expected-work.json");
+        let (base, head) = s4_ambient_shas();
+        must(
+            write_expected_work_file(&path, &selection, RunnerMode::Both, &base, &head),
+            "write expected work through a missing nested parent",
+        );
+        let text = must(std::fs::read_to_string(&path), "read expected work");
+        let document: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+        );
+        assert_eq!(
+            document.get("units"),
+            Some(&serde_json::json!([{
+                "id": "app",
+                "lanes": ["github", "velnor"],
+                "matrix": [],
+                "required": true,
+            }])),
+        );
+        assert_eq!(
+            document.get("prerequisites"),
+            Some(&serde_json::json!({ "app": [] })),
+        );
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+        Ok(())
+    }
+
+    #[test]
+    fn selection_writer_creates_a_missing_nested_parent() {
+        // The selection writer shares the expected-work writer's contract:
+        // a nested `VELNOR_SELECTION_FILE` path must not need a
+        // pre-existing directory.
+        let dir = s4_dir("selection-nested-parent");
+        let path = dir.join("does/not/exist/velnor-ci-selection");
+        must(
+            write_selection_file(
+                &path,
+                "base-sha",
+                "head-sha",
+                Scope::Affected,
+                "app",
+                "app,base",
+            ),
+            "write selection through a missing nested parent",
+        );
+        let text = must(std::fs::read_to_string(&path), "read selection");
+        assert_eq!(
+            text,
+            format!(
+                "version={SELECTION_FILE_VERSION}\nbase_sha=base-sha\nhead_sha=head-sha\nscope=affected\nunits=app\nfull_units=app,base\n",
+            ),
+        );
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
     }
 
     #[test]

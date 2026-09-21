@@ -40,8 +40,14 @@ pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
 /// plan's file before scoring anything.
 pub(crate) const EXPECTED_WORK_ARTIFACT: &str = "velnor-expected-work";
 
+/// The workspace-relative expected-work directory: the plan step creates it
+/// before invoking `plan`, so the runtime's write never needs a
+/// pre-existing dir — including under the pinned older product.
+pub(crate) const EXPECTED_WORK_DIR: &str = ".velnor-ci-expected-work";
+
 /// The workspace-relative expected-work file: the plan step writes it here
 /// (via [`EXPECTED_WORK_FILE_ENV`]) and the upload step publishes this path.
+/// It always lives directly inside [`EXPECTED_WORK_DIR`].
 pub(crate) const EXPECTED_WORK_FILE: &str = ".velnor-ci-expected-work/expected-work.json";
 
 /// The env var binding `plan` to its expected-work file. Spelled identically
@@ -90,7 +96,7 @@ fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
 /// zero records anyway; every other step fails the check.
 fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
     format!(
-        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: .velnor-ci-expected-work\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
     )
 }
 
@@ -1480,6 +1486,35 @@ mod tests {
     }
 
     #[test]
+    fn plan_step_creates_expected_work_dir_before_invoking_plan() {
+        // The pinned product predates the runtime's own parent creation, so
+        // the branch-controlled render prepares the dir for the old binary.
+        let ir = owner_test_ir(
+            "example/s4-plan-mkdir",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let mut plan = String::new();
+        ir.render_plan(&mut plan, RunnerMode::Both, false);
+        let mkdir = must_some(
+            plan.find(&format!("mkdir -p {}\n", super::EXPECTED_WORK_DIR)),
+            "expected-work dir creation",
+        );
+        let invoke = must_some(
+            plan.find("velnor-workflow plan --config"),
+            "plan invocation",
+        );
+        assert!(
+            mkdir < invoke,
+            "the plan step creates the expected-work dir before invoking plan: {plan}"
+        );
+        assert_eq!(
+            super::EXPECTED_WORK_FILE,
+            format!("{}/expected-work.json", super::EXPECTED_WORK_DIR),
+            "the env-bound file stays inside the created dir",
+        );
+    }
+
+    #[test]
     fn no_work_branch_contract_is_presence_only() {
         let ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
         let nodes = aggregate_fixture_nodes(&ir);
@@ -1558,6 +1593,45 @@ mod tests {
         assert!(
             rendered.contains("selected CI job"),
             "the shell verdict still evaluates every caller: {rendered}"
+        );
+    }
+
+    #[test]
+    fn record_step_creates_result_dir_before_first_write() {
+        let steps =
+            super::render_unit_result_steps("actions/upload-artifact@pinned", "github", "always()");
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let write = must_some(
+            steps.find("> \".velnor-ci-results/result-"),
+            "first result write",
+        );
+        assert!(
+            mkdir < write,
+            "the record step creates the result dir before writing: {steps}"
+        );
+        assert!(
+            steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github.json"),
+            "the upload publishes exactly what the record step wrote: {steps}"
+        );
+    }
+
+    #[test]
+    fn collect_step_creates_result_dir_before_first_read() {
+        let steps = super::render_aggregate_score_steps("", "actions/download-artifact@pinned");
+        let mkdir = must_some(
+            steps.find("mkdir -p .velnor-ci-results"),
+            "result dir creation",
+        );
+        let glob = must_some(
+            steps.find("files=(.velnor-ci-results/result-*.json)"),
+            "result glob",
+        );
+        assert!(
+            mkdir < glob,
+            "the collect step creates the result dir before globbing: {steps}"
         );
     }
 
@@ -6338,7 +6412,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
         let _ = writeln!(
             output,
-            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          {expected_work_env}: {expected_work_file}\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          {expected_work_env}: {expected_work_file}\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::control_job_name("Planning"),
             self.runner_for(runners),
             outputs.join("\n"),
@@ -6346,6 +6420,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             base_sha = base_sha,
             expected_work_env = EXPECTED_WORK_FILE_ENV,
             expected_work_file = EXPECTED_WORK_FILE,
+            expected_work_dir = EXPECTED_WORK_DIR,
         );
         output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
         if runners != RunnerMode::Velnor {

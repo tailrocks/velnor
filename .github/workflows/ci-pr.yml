@@ -84,6 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
+          mkdir -p .velnor-ci-expected-work
           velnor-workflow plan --config .github/ci/project.toml
 
       - name: Publish expected work
