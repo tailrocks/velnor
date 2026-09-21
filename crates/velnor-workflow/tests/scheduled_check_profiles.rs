@@ -295,6 +295,12 @@ fn evented_file_renders_push_pr_merge_group_cron_and_pr_only_cancel() {
         daily.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
         "{daily}"
     );
+    assert!(
+        daily.contains(
+            "group: scheduled-daily-${{ github.repository }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}"
+        ),
+        "PR attempts may supersede, while committed and merge-queue attempts remain keyed by SHA: {daily}"
+    );
 
     let weekly = generated.workflow("scheduled-weekly.yml");
     assert!(!weekly.contains("  push:\n"), "{weekly}");
@@ -320,6 +326,10 @@ fn push_only_file_queues_committed_main_evidence() {
     assert!(
         daily.contains("cancel-in-progress: false"),
         "committed main evidence must not be canceled by the next push: {daily}"
+    );
+    assert!(
+        daily.contains("group: scheduled-daily-${{ github.repository }}-${{ github.sha }}"),
+        "committed main evidence must not share a ref-scoped pending slot: {daily}"
     );
 }
 
