@@ -77,7 +77,9 @@ diff (fetch-depth 0, no truncation).
 - S3 diff robustness: `-z` NUL parsing + `-M` rename handling atomic
   with matcher; `run_units` merge_group guard symmetry
   (`runtime.rs:2044`, `s2/runtime.rs:2129`); merge_group trigger work
-  DEMOTED (deliberately omitted per `lib.rs:16143`). [pending]
+  DEMOTED (deliberately omitted per `lib.rs:16143`). [done: NUL
+  plan-path collection, rename-both-sides, trusted-event guard helper;
+  independent review INTEGRATE, select-path -z accepted as follow-up]
 - S4 live no-work proof only (caller skip + ci-required tolerance
   already work; `ExpectedWork` aggregate is CLI-only/unwired — cut
   as new scope). [pending]
