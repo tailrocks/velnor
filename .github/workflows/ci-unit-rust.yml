@@ -483,8 +483,8 @@ jobs:
           if ! git cat-file -e "$pin^{commit}" 2>/dev/null; then
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$pin"
           fi
-      - name: Formatting check
-        if: ${{ contains(format(',{0},', inputs.validation_phases), ',fmt,') }}
+      - name: Preconditions
+        if: ${{ contains(format(',{0},', inputs.validation_phases), ',precondition,') }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -507,6 +507,24 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" --phase precondition 2>&1 | tee -a "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          exit $rc
+      - name: Formatting check
+        if: ${{ contains(format(',{0},', inputs.validation_phases), ',fmt,') }}
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: ${{ inputs.cargo_net_offline }}
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" --phase fmt 2>&1 | tee -a "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
           exit $rc

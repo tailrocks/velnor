@@ -2068,7 +2068,7 @@ mod tests {
     }
 
     #[test]
-    fn native_join_escalates_producer_and_appends_pack() {
+    fn native_join_escalates_producer_and_prepends_pack() {
         let root = native_fixture(&[
             ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
             ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
@@ -2091,34 +2091,34 @@ mod tests {
         // requirement instead of staying a portable Linux unit.
         assert_eq!(producer.platform, crate::s2::provider::Platform::MacosArm64);
         assert!(producer.capabilities.native_macos_arm64);
-        // The typed recipe lands after the unit's own checks, in both lanes:
+        // The typed recipe lands before the unit's own checks, in both lanes:
         // wipe, two snapshots, pack, two drift diffs (the fixture keeps
         // the default generated `Package.swift`).
         for commands in [&producer.pr_commands, &producer.full_commands] {
             assert!(commands.len() > 6, "{commands:?}");
-            let tail = &commands[commands.len() - 6..];
+            let head = &commands[..6];
             assert_eq!(
-                tail[0],
+                head[0],
                 "rm -rf 'target/xcframework/BridgeCore.xcframework'"
             );
             assert!(
-                tail[1].contains("cp -R ") && tail[1].contains("velnor-boltffi-staging"),
+                head[1].contains("cp -R ") && head[1].contains("velnor-boltffi-staging"),
                 "bindings snapshot: {}",
-                tail[1]
+                head[1]
             );
             assert!(
-                tail[2].contains("Package.swift") && tail[2].contains("cp "),
+                head[2].contains("Package.swift") && head[2].contains("cp "),
                 "package snapshot: {}",
-                tail[2]
+                head[2]
             );
             assert_eq!(
-                tail[3],
+                head[3],
                 "cd -- 'libs/bridge-ffi' && MACOSX_DEPLOYMENT_TARGET='16.0' boltffi -v pack apple"
             );
             assert!(
-                tail[4].starts_with("diff -r ") && tail[5].starts_with("diff "),
+                head[4].starts_with("diff -r ") && head[5].starts_with("diff "),
                 "drift diffs: {:?}",
-                &tail[4..]
+                head
             );
         }
         assert!(
