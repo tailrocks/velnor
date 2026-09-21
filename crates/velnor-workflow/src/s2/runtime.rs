@@ -1646,18 +1646,71 @@ struct PlannedExclusion {
     reason: ExclusionReason,
 }
 
+/// The event identity admitted to the planner. Event kind and trust travel
+/// together so no caller can reclassify an untrusted source by substituting a
+/// loose boolean at a later routing boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlanEvent {
+    PullRequest { trusted: bool },
+    Push,
+    Schedule,
+    MergeGroup,
+    WorkflowDispatch,
+    Local,
+}
+
+impl PlanEvent {
+    fn from_env() -> Result<Self, GeneratorError> {
+        let value = env::var("EVENT_NAME").unwrap_or_default();
+        let trusted =
+            env::var("VELNOR_EVENT_TRUSTED").map_or(true, |value| value.trim() != "false");
+        match value.as_str() {
+            "pull_request" => Ok(Self::PullRequest { trusted }),
+            "push" => Ok(Self::Push),
+            "schedule" => Ok(Self::Schedule),
+            "merge_group" => Ok(Self::MergeGroup),
+            "workflow_dispatch" => Ok(Self::WorkflowDispatch),
+            "" => Ok(Self::Local),
+            other => Err(GeneratorError::usage(format!(
+                "unsupported CI event `{other}`"
+            ))),
+        }
+    }
+
+    const fn trusted(self) -> bool {
+        match self {
+            Self::PullRequest { trusted } => trusted,
+            Self::Push
+            | Self::Schedule
+            | Self::MergeGroup
+            | Self::WorkflowDispatch
+            | Self::Local => true,
+        }
+    }
+
+    const fn scope_name(self) -> &'static str {
+        match self {
+            Self::PullRequest { .. } => "pull_request",
+            Self::Push => "push",
+            Self::Schedule => "schedule",
+            Self::MergeGroup => "merge_group",
+            Self::WorkflowDispatch => "workflow_dispatch",
+            Self::Local => "",
+        }
+    }
+}
+
 /// Everything `plan` reads from its environment, as one injectable bundle.
 /// Production builds it from the live process; tests build fixture values,
 /// so the end-to-end plan path runs without mutating process-global env —
 /// which parallel tests also read.
 struct PlanInputs {
     root: PathBuf,
-    event: String,
+    event: PlanEvent,
     scope_override: Option<String>,
     base: String,
     head: String,
     providers: String,
-    event_trusted: String,
     selection_file: Option<PathBuf>,
     expected_file: Option<PathBuf>,
     github_output: Option<PathBuf>,
@@ -1666,7 +1719,7 @@ struct PlanInputs {
 impl PlanInputs {
     fn from_env() -> Result<Self, GeneratorError> {
         Ok(Self {
-            event: env::var("EVENT_NAME").unwrap_or_default(),
+            event: PlanEvent::from_env()?,
             scope_override: env::var("CI_SCOPE_OVERRIDE")
                 .ok()
                 .filter(|value| !value.is_empty()),
@@ -1675,7 +1728,6 @@ impl PlanInputs {
             base: env::var("BASE_SHA").unwrap_or_default(),
             head: env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
             providers: env::var("VELNOR_PROVIDERS").unwrap_or_default(),
-            event_trusted: env::var("VELNOR_EVENT_TRUSTED").unwrap_or_default(),
             selection_file: env::var_os("VELNOR_SELECTION_FILE").map(PathBuf::from),
             expected_file: env::var_os("VELNOR_EXPECTED_WORK_FILE").map(PathBuf::from),
             github_output: env::var_os("GITHUB_OUTPUT").map(PathBuf::from),
@@ -1696,13 +1748,16 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
 )]
 fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    let scope = match scope_for_event_values(&inputs.event, inputs.scope_override.as_deref())? {
+    let scope = match scope_for_event_values(
+        inputs.event.scope_name(),
+        inputs.scope_override.as_deref(),
+    )? {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
     let universe = parse_provider_set(&config.providers, "providers")?;
     let effective = plan_providers_for_value(&inputs.providers, &universe)?;
-    let event_trusted = event_trusted_for_value(&inputs.event_trusted);
+    let event_trusted = inputs.event.trusted();
     let selection = selection_for_diff(&inputs.root, &config, scope, &inputs.base, &inputs.head)?;
     let selected: BTreeSet<&str> = selection
         .units
@@ -2005,19 +2060,9 @@ fn plan_providers_for_value(
     Ok(providers)
 }
 
-/// Whether the current event is trusted. The generated plan step renders
-/// `VELNOR_EVENT_TRUSTED` from the controller-side verdict (fork and bot PRs
-/// are untrusted); local runs without the variable are trusted.
-/// Whether the plan's event is trusted, from the `VELNOR_EVENT_TRUSTED`
-/// environment: trusted unless explicitly `"false"`. Absent means trusted —
-/// local runs plan without trust narrowing, exactly as before.
-fn event_trusted_for_value(value: &str) -> bool {
-    value.trim() != "false"
-}
-
 #[cfg(test)]
 mod scope_event_tests {
-    use super::scope_for_event_values;
+    use super::{scope_for_event_values, PlanEvent};
     use crate::s2::GeneratorError;
 
     #[expect(
@@ -2040,6 +2085,15 @@ mod scope_event_tests {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn event_identity_keeps_pr_trust_attached_to_its_kind() {
+        let untrusted = PlanEvent::PullRequest { trusted: false };
+        assert!(!untrusted.trusted());
+        assert_eq!(untrusted.scope_name(), "pull_request");
+        assert!(PlanEvent::MergeGroup.trusted());
+        assert_eq!(PlanEvent::MergeGroup.scope_name(), "merge_group");
     }
 
     #[test]
@@ -9426,12 +9480,11 @@ workspace_check = true
                 &config_path,
                 &PlanInputs {
                     root: root.clone(),
-                    event: "pull_request".to_owned(),
+                    event: PlanEvent::PullRequest { trusted: true },
                     scope_override: None,
                     base,
                     head,
                     providers: providers.to_owned(),
-                    event_trusted: String::new(),
                     selection_file: None,
                     expected_file: Some(expected_path.clone()),
                     github_output: None,
@@ -10399,12 +10452,11 @@ trust = "untrusted-ok"
                 &config_path,
                 &PlanInputs {
                     root: root.clone(),
-                    event: "pull_request".to_owned(),
+                    event: PlanEvent::PullRequest { trusted: true },
                     scope_override: None,
                     base: base.clone(),
                     head: head.clone(),
                     providers: String::new(),
-                    event_trusted: String::new(),
                     selection_file: None,
                     expected_file: Some(expected_path.clone()),
                     github_output: Some(output_path.clone()),
