@@ -726,6 +726,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -782,6 +783,7 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
             velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
         };

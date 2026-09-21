@@ -262,6 +262,7 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         };
@@ -366,6 +367,24 @@ mod tests {
         );
         let workflow = must(render_renovate(&config, spec), "render renovate workflow");
         assert!(workflow.contains("velnor-native"));
+    }
+
+    #[test]
+    fn renovate_writer_uses_the_hosted_selector() {
+        // The writer renders through the control-plane runner, so a
+        // public (hosted-singleton) repository renders the same writer
+        // on its hosted labels: placement is never velnor-only.
+        let mut config = renovate_config();
+        config.providers = BTreeSet::from([crate::s2::provider::ProviderId::GithubHosted]);
+        config.automatic_providers =
+            BTreeSet::from([crate::s2::provider::ProviderId::GithubHosted]);
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
+        let workflow = must(render_renovate(&config, spec), "render renovate workflow");
+        assert!(workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
+        assert!(workflow.contains("secrets.GH_RENOVATE_TOKEN"));
     }
 
     #[test]

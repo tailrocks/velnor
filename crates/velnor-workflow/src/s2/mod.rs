@@ -255,9 +255,9 @@ impl ActionPin {
             Self::Bun => "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0",
             // actions/setup-node v7.0.0
             Self::Node => "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0",
-            // taiki-e/install-action v2.87.3
+            // taiki-e/install-action v2.87.16
             Self::RustTool => {
-                "taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3"
+                "taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16"
             }
             // jdx/mise-action v4.3.0
             Self::Mise => "jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0",
@@ -288,17 +288,17 @@ impl ActionPin {
             Self::DockerLogin => {
                 "docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0"
             }
-            // docker/setup-buildx-action v4
+            // docker/setup-buildx-action v4.4.1
             Self::DockerBuildx => {
-                "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0"
+                "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1"
             }
-            // docker/setup-qemu-action v4.3.0
+            // docker/setup-qemu-action v4.4.0
             Self::DockerQemu => {
-                "docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0"
+                "docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0"
             }
-            // docker/build-push-action v7
+            // docker/build-push-action v7.4.0
             Self::DockerBuild => {
-                "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0"
+                "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0"
             }
             // sigstore/cosign-installer v4.1.2
             Self::Cosign => {
@@ -669,6 +669,10 @@ impl ValidationPhase {
 
 /// A scanner-derived verification unit serialized to TOML.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "unit shape: one bool per independent unit flag"
+)]
 pub struct Unit {
     pub(crate) id: String,
     pub(crate) label: String,
@@ -736,6 +740,13 @@ pub struct Unit {
     /// runtimes reject unknown unit fields, and the emitted command list
     /// carries the contract.
     pub(crate) workspace_check: bool,
+    /// Whether the unit's owner asserted a closed world: a uniform
+    /// `complete` read contract claims the declared paths plus the scan
+    /// watch are the unit's entire read set. The watch-graph primitive
+    /// renders it; the runtime classifier excludes closed units from the
+    /// opaque fallback. Emitted only when true, so trees without complete
+    /// contracts render byte-identical bytes for pinned runtimes.
+    pub(crate) reads_closed: bool,
     /// Whether the unit's checkout clones full history. Generation-time
     /// only, like [`Unit::services`]: pinned Planning runtimes reject
     /// unknown unit fields, so the flag is skipped from serialization and
@@ -1290,6 +1301,11 @@ pub struct ProjectConfig {
     /// lock, in which case identity checking is skipped. Never serialized:
     /// the lock itself is the source of truth.
     pub(crate) mise_lock_keys: BTreeSet<String>,
+    /// Install dependencies the root `mise.toml` declares, over which
+    /// derived `install_args` subsets close. Empty when the scan root has
+    /// no mise configuration. Never serialized: the config itself is the
+    /// source of truth.
+    pub(crate) mise_install_deps: config::MiseInstallDeps,
     /// Generator-only GitHub cache retention from `[cache.github]`. Never
     /// serialized into `project.toml`.
     pub(crate) github_cache: config::CacheGithubSection,
@@ -1453,6 +1469,13 @@ impl ProjectConfig {
             }
             if !unit.depends_on.is_empty() {
                 write_toml_array(&mut output, "depends_on", &unit.depends_on);
+            }
+            // A uniform `complete` read contract closes the unit for the
+            // runtime classifier. Emitted only when true: pinned Planning
+            // runtimes deny unknown unit fields, so trees without complete
+            // contracts must render not one byte of difference.
+            if unit.reads_closed {
+                let _ = writeln!(output, "reads_closed = true");
             }
             if let Some(version) = &unit.tool_version {
                 write_toml_string(&mut output, "tool_version", version);
@@ -1834,6 +1857,11 @@ fn scan_target(
     // `config::mise_lock_keys_for_root` for the per-unit-lock gap.
     let mise_lock_keys = config::mise_lock_keys_for_root(root)?;
     config.mise_lock_keys.clone_from(&mise_lock_keys);
+    // The root config's install edges close every derived subset: a subset
+    // that omits a configured dependency fails at install time on the
+    // runner, so both validation and rendering resolve against these.
+    let mise_install_deps = config::mise_install_deps_for_root(root)?;
+    config.mise_install_deps.clone_from(&mise_install_deps);
     validate_actionlint_pin_coherence(root)?;
     // The repo-owned config is validated against the resolved surface before
     // it can influence anything: a declared unit the scan did not find, or a
@@ -1862,6 +1890,14 @@ fn scan_target(
     // would fail at install time on the runner instead; refuse it at
     // generation time with the exact missing key.
     crate::s2::primitives::validate_xcodegen_tools_are_locked(&config.units, &mise_lock_keys)?;
+    // A subset that omits a configured install dependency fails at install
+    // time on the runner instead; refuse it at generation time with the
+    // exact missing edge.
+    crate::s2::primitives::validate_mise_install_deps_are_closed(
+        &config.units,
+        &mise_lock_keys,
+        &mise_install_deps,
+    )?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
@@ -3054,6 +3090,7 @@ fn apply_unit_row(
                 .unwrap_or(provider::Platform::LinuxX64),
             capabilities: provider::Capabilities::default(),
             workspace_check: row.workspace_check(),
+            reads_closed: false,
             full_history: row.full_history(),
             products,
             prerequisites,
@@ -11163,6 +11200,7 @@ mod tests {
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             platform,
             products: Vec::new(),
@@ -11246,6 +11284,7 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         }
@@ -12597,6 +12636,57 @@ mod tests {
         must(
             runtime::read_config_for_test(&path),
             "the emitted contract parses through the runtime parser",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_closed_emits_only_when_set_and_parses_through_runtime_config() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n";
+        let root = configured_repository("reads-closed-emission", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        let plain = scanned.config.toml();
+        assert!(
+            !plain.contains("reads_closed"),
+            "trees without complete contracts render no new key: {plain}"
+        );
+        let mut closed = scanned.config.clone();
+        let unit = must_some(closed.units.first_mut(), "a scanned unit");
+        unit.reads_closed = true;
+        let emitted = closed.toml();
+        assert!(
+            emitted.contains("reads_closed = true"),
+            "a closed unit emits its flag: {emitted}"
+        );
+        let path = root.join(".github/ci/project.toml");
+        must(
+            fs::create_dir_all(must_some(path.parent(), "runtime config parent")),
+            "create runtime config directory",
+        );
+        must(fs::write(&path, &emitted), "write emitted runtime config");
+        must(
+            runtime::read_config_for_test(&path),
+            "the emitted flag must parse through the runtime contract",
+        );
+        let document: toml::Table = must(toml::from_str(&emitted), "parse emitted config");
+        let units = must_some(
+            document.get("unit").and_then(toml::Value::as_array),
+            "emitted [[unit]] tables",
+        );
+        assert!(
+            units.iter().any(|unit| {
+                unit.get("reads_closed").and_then(toml::Value::as_bool) == Some(true)
+            }),
+            "the emitted unit table carries the closed flag"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -14145,6 +14235,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -14175,6 +14266,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -14205,6 +14297,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -14588,6 +14681,7 @@ channel = "stable"
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             platform: provider::Platform::LinuxX64,
             products: Vec::new(),
@@ -18894,6 +18988,7 @@ lockfile = true
                 platform: provider::Platform::LinuxX64,
                 capabilities: provider::Capabilities::default(),
                 workspace_check: false,
+                reads_closed: false,
                 full_history: false,
                 products: Vec::new(),
                 prerequisites: Vec::new(),
@@ -18985,6 +19080,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -19049,6 +19145,7 @@ lockfile = true
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_install_deps: config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         };
@@ -20688,6 +20785,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -21024,6 +21122,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -21152,6 +21251,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -21227,6 +21327,10 @@ lockfile = true
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test pins every root and lane combination in one explicit contract"
+    )]
     fn cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles() {
         let workspace_member = |id: &str, root: &str| Unit {
             xcode: None,
@@ -21256,6 +21360,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -21360,6 +21465,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -21467,6 +21573,7 @@ lockfile = true
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -21593,6 +21700,10 @@ lockfile = true
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test pins every root and lane combination in one explicit contract"
+    )]
     fn velnor_recovery_concurrency_and_serial_stack_groups() {
         let config = ProjectConfig {
             providers: std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
@@ -21625,6 +21736,7 @@ lockfile = true
                     platform: crate::s2::provider::Platform::LinuxX64,
                     capabilities: crate::s2::provider::Capabilities::default(),
                     workspace_check: false,
+                    reads_closed: false,
                     full_history: false,
                     products: Vec::new(),
                     prerequisites: Vec::new(),
@@ -21655,6 +21767,7 @@ lockfile = true
                     platform: crate::s2::provider::Platform::LinuxX64,
                     capabilities: crate::s2::provider::Capabilities::default(),
                     workspace_check: false,
+                    reads_closed: false,
                     full_history: false,
                     products: Vec::new(),
                     prerequisites: Vec::new(),
@@ -24332,6 +24445,174 @@ lockfile = true
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A public repository's `[renovate]` contract on the hosted
+    /// singleton (declared hosted providers, hosted selector, writer +
+    /// validator declare rows).
+    fn public_hosted_renovate_config() -> String {
+        "schema = 2\n\n\
+             [generator]\n\
+             repository = \"example/fixture\"\n\n\
+             [workflow]\n\
+             providers = [\"github-hosted\"]\n\
+             automatic_providers = [\"github-hosted\"]\n\
+             files = [\"ci-pr.yml\", \"ci-policy.yml\", \"ci-main.yml\", \"nightly.yml\", \"maintenance.yml\", \"renovate.yml\", \"renovate-validate.yml\"]\n\n\
+             [workflow.selectors.github-hosted]\n\
+             runs_on = [\"ubuntu-24.04\"]\n\n\
+             [renovate]\n\
+             enabled = true\n\
+             reason = \"Hosted Renovate for repository dependencies.\"\n\n\
+             [[declare]]\n\
+             primitive = \"renovate\"\n\
+             file = \"renovate.yml\"\n\n\
+             [[declare]]\n\
+             primitive = \"renovate-validate\"\n\
+             file = \"renovate-validate.yml\"\n"
+            .to_owned()
+    }
+
+    #[test]
+    fn public_hosted_renovate_renders_writer_on_hosted_runner() {
+        let config = public_hosted_renovate_config();
+        let root = renovate_repository("renovate-public-hosted", Some(&config));
+        let scanned = must(
+            scan_target(&root, None, "main"),
+            "scan public renovate repository",
+        );
+        let spec = must_some(
+            scanned.config.renovate.as_ref(),
+            "the hosted contract produces a renovate spec",
+        );
+        assert_eq!(spec.token, "GH_RENOVATE_TOKEN");
+        let files = must(
+            generated_files(&scanned.config),
+            "render public renovate repository",
+        );
+        let renovate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate.yml")),
+            "generated renovate.yml",
+        );
+        assert!(renovate.contains("runs-on: ubuntu-24.04"), "{renovate}");
+        assert!(renovate.contains("secrets.GH_RENOVATE_TOKEN"));
+        assert!(!renovate.contains("velnor-native"));
+        let validate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate-validate.yml")),
+            "generated renovate-validate.yml",
+        );
+        assert!(validate.contains("renovate-config-validator"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_derived_singleton_renovate_renders_writer() {
+        // No declared providers or selectors: the visibility evidence
+        // derives the hosted singleton, and the writer follows it.
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nfiles = [\"renovate.yml\"]\n\n\
+             [renovate]\nenabled = true\nreason = \"Hosted Renovate for repository dependencies.\"\n\n\
+             [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n";
+        let root = renovate_repository("renovate-public-derived", Some(config));
+        let scanned = must(
+            scan_target(&root, None, "main"),
+            "scan derived-singleton renovate repository",
+        );
+        assert!(scanned.config.renovate.is_some());
+        let files = must(
+            generated_files(&scanned.config),
+            "render derived-singleton renovate repository",
+        );
+        let renovate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate.yml")),
+            "generated renovate.yml",
+        );
+        assert!(renovate.contains("runs-on: ubuntu-24.04"), "{renovate}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_renovate_rejects_velnor_provider() {
+        // The cross shape: a public repository declaring the velnor
+        // provider stays a visibility contradiction with [renovate] on.
+        let config = renovate_generation_config();
+        let root = renovate_repository("renovate-public-velnor", Some(&config));
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "public repo with velnor provider must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow] providers"),
+            "error must reject the cross-visibility provider: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_renovate_rejects_velnor_selector() {
+        // Hosted providers with a velnor selector: the pre-fix validator
+        // demanded this selector, the visibility policy forbids it, and
+        // the fixed validator must not resurrect the demand.
+        let config = format!(
+            "{}\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n",
+            public_hosted_renovate_config(),
+            fleet_label()
+        );
+        let root = renovate_repository("renovate-public-selector", Some(&config));
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "public repo with velnor selector must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow.selectors.velnor]"),
+            "error must reject the cross-visibility selector: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_renovate_rejects_hosted_provider() {
+        // The mirrored cross shape: a private repository declaring the
+        // hosted provider stays a visibility contradiction.
+        let config = public_hosted_renovate_config();
+        let root = renovate_repository("renovate-private-hosted", Some(&config));
+        rebind_visibility_evidence(&root, "private");
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "private repo with hosted provider must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow] providers"),
+            "error must reject the cross-visibility provider: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renovate_rejects_both_providers() {
+        // An ambiguous universe stays rejected: the visibility policy
+        // admits only singletons, with [renovate] on or off.
+        let config = public_hosted_renovate_config().replace(
+            "providers = [\"github-hosted\"]\nautomatic_providers = [\"github-hosted\"]",
+            "providers = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]",
+        );
+        let root = renovate_repository("renovate-both", Some(&config));
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "both-providers universe must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow] providers"),
+            "error must reject the ambiguous universe: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn configured_repository(name: &str, config: Option<&str>) -> PathBuf {
         let root = temporary_repository(name);
         must(
@@ -24844,6 +25125,7 @@ lockfile = true
             trust: provider::TrustReq::UntrustedOk,
             capabilities: provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             platform: provider::Platform::LinuxX64,
             products: Vec::new(),

@@ -179,6 +179,7 @@ pub(crate) fn unit(
         services: Vec::new(),
         requires_trusted: false,
         workspace_check: false,
+        reads_closed: false,
         platform: crate::platform::PlatformRequirement::portable(),
         products: Vec::new(),
         prerequisites: Vec::new(),

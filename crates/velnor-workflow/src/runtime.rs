@@ -148,6 +148,12 @@ struct CiUnit {
     /// workspace coverage without broadening every topology match.
     #[serde(default)]
     workspace_check: bool,
+    /// Whether the unit's owner asserted a closed world: the declared
+    /// reads plus the scan watch are the unit's complete read set, so an
+    /// opaque unit with the flag provably excludes paths nothing owns.
+    /// Emitted only when true; absent means open.
+    #[serde(default)]
+    reads_closed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1275,20 +1281,13 @@ fn explicit_no_work_line(
     })
 }
 
-/// Print the affected selection for a diff as JSON: the auditable
-/// [`crate::reuse::select_affected`] core over the runtime's own unit table.
-/// Unlike `plan`, this command answers one question only — which units a
-/// change list affects — without lane filtering, workspace gates, or outputs.
-fn select_command(
-    root: &Path,
-    config_path: &Path,
-    scope: Scope,
-    base: &str,
-    head: &str,
-) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
-    let watched: Vec<crate::reuse::WatchedUnit> = config
-        .unit
+/// Project the runtime unit table onto the selection model's watched view:
+/// the id, the watch (with generation-time declared reads unioned in), the
+/// dependency edges, the kind, every lane command, and the closed-world
+/// flag. The single projection behind `select`, the plan path, and the
+/// planner's input log.
+fn watched_units(units: &[CiUnit]) -> Vec<crate::reuse::WatchedUnit> {
+    units
         .iter()
         .map(|unit| crate::reuse::WatchedUnit {
             id: unit.id.clone(),
@@ -1303,12 +1302,30 @@ fn select_command(
                 .chain(&unit.velnor_full_commands)
                 .cloned()
                 .collect(),
+            reads_closed: unit.reads_closed,
         })
-        .collect();
+        .collect()
+}
+
+/// Print the affected selection for a diff as JSON: the auditable
+/// [`crate::reuse::select_affected`] core over the runtime's own unit table.
+/// Unlike `plan`, this command answers one question only — which units a
+/// change list affects — without lane filtering, workspace gates, or outputs.
+fn select_command(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    let watched = watched_units(&config.unit);
     if scope == Scope::Full {
         return print_selection(&crate::reuse::AffectedSelection {
             required: watched.iter().map(|unit| unit.id.clone()).collect(),
             full_units: watched.iter().map(|unit| unit.id.clone()).collect(),
+            prereq_inputs: BTreeSet::new(),
+            closed_excluded: BTreeSet::new(),
             fallback_full: false,
             explanations: watched
                 .iter()
@@ -1807,11 +1824,16 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
         None => Scope::Full,
     };
     let lanes = plan_lanes_for_value(&inputs.lanes)?;
-    let selection = selection_for_lanes(
+    // The exclusion record flows around lane filtering: excluded units were
+    // never selected, so admission cannot change who the fallback skipped.
+    let (diff_selection, closed_excluded) = selection_for_diff_with_closed_excluded(
+        &inputs.root,
         &config,
-        selection_for_diff(&inputs.root, &config, scope, &inputs.base, &inputs.head)?,
-        lanes,
-    );
+        scope,
+        &inputs.base,
+        &inputs.head,
+    )?;
+    let selection = selection_for_lanes(&config, diff_selection, lanes);
     let units = selection
         .units
         .iter()
@@ -1824,6 +1846,26 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
         .cloned()
         .collect::<Vec<_>>()
         .join(",");
+    // The build inputs behind the verify set, for the log audit trail:
+    // prerequisites the verify jobs provide in-job instead of scheduling.
+    // Computed from the post-lane verify set through the shared walk, so
+    // the log can never diverge from the closure's input record.
+    let prereq_inputs = crate::reuse::prerequisite_inputs(
+        &watched_units(&config.unit),
+        &selection
+            .units
+            .iter()
+            .map(|unit| unit.id.clone())
+            .collect::<BTreeSet<_>>(),
+    )
+    .into_iter()
+    .collect::<Vec<_>>()
+    .join(",");
+    // The closed-world exclusions behind the verdict, for the log audit
+    // trail: opaque units an unmatched path skipped only because their
+    // owner's `complete` contract asserts the path unreadable. The set is
+    // sorted, like every recorded set; empty when no contract fired.
+    let closed_excluded = closed_excluded.into_iter().collect::<Vec<_>>().join(",");
     // Before any artifact escapes: an unproven empty selection must fail
     // here, not after writing a no-work file for it.
     let no_work = planned_no_work_reason(&selection)?;
@@ -1864,6 +1906,8 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     println!("scope={}", scope_name(scope));
     println!("units={units}");
     println!("full_units={full_units}");
+    println!("prereq_inputs={prereq_inputs}");
+    println!("closed_excluded={closed_excluded}");
     if let Some(reason) = &selection.fallback_reason {
         println!("fallback_reason={reason}");
     }
@@ -2142,7 +2186,9 @@ mod scope_event_tests {
 
 #[cfg(test)]
 mod runner_lane_tests {
-    use super::{collect_manifests, expand_affected_units, CiUnit, RunnerLane, Scope};
+    use super::{
+        collect_manifests, expand_affected_units, watched_units, CiUnit, RunnerLane, Scope,
+    };
     use std::path::Path;
 
     #[test]
@@ -2188,6 +2234,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         assert_eq!(
             unit.commands(RunnerLane::Github, Scope::Affected),
@@ -2226,6 +2273,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                reads_closed: false,
             },
             CiUnit {
                 id: "changed".to_owned(),
@@ -2243,6 +2291,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                reads_closed: false,
             },
             CiUnit {
                 id: "sibling".to_owned(),
@@ -2260,6 +2309,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                reads_closed: false,
             },
             CiUnit {
                 id: "leaf".to_owned(),
@@ -2277,15 +2327,21 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                reads_closed: false,
             },
         ];
-        let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
+        let selected = expand_affected_units(&units, &["changed".to_owned()].into_iter().collect());
         assert_eq!(
             selected,
-            ["base", "changed", "leaf"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
+            ["changed", "leaf"].into_iter().map(str::to_owned).collect()
+        );
+        let closure = crate::reuse::expand_selection_closure(
+            &watched_units(&units),
+            &["changed".to_owned()].into_iter().collect(),
+        );
+        assert_eq!(
+            closure.prereq_inputs,
+            ["base".to_owned()].into_iter().collect()
         );
     }
 
@@ -2307,6 +2363,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         // A Swift consumer of a Rust FFI producer: the closure is kind-blind,
         // so an FFI change selects the Swift unit without naming its kind.
@@ -2315,7 +2372,8 @@ mod runner_lane_tests {
             unit("swift-app", "swift", &["rust-ffi"]),
             unit("unrelated", "rust", &[]),
         ];
-        let selected = expand_affected_units(&units, ["rust-ffi".to_owned()].into_iter().collect());
+        let selected =
+            expand_affected_units(&units, &["rust-ffi".to_owned()].into_iter().collect());
         assert_eq!(
             selected,
             ["rust-ffi", "swift-app"]
@@ -2347,6 +2405,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         let units = vec![
             unit("rust-base", "rust", &[]),
@@ -2354,7 +2413,7 @@ mod runner_lane_tests {
             unit("swift-app", "swift", &["rust-ffi"]),
         ];
         let selected =
-            expand_affected_units(&units, ["rust-base".to_owned()].into_iter().collect());
+            expand_affected_units(&units, &["rust-base".to_owned()].into_iter().collect());
         assert_eq!(
             selected,
             ["rust-base", "rust-ffi", "swift-app"]
@@ -2517,11 +2576,12 @@ pub(crate) const SELECTION_FILE_VERSION: &str = "1";
 /// - `planned_skip`: never set. The planner removes units from the selection
 ///   instead of pre-skipping them; a reported skip still needs the
 ///   planner's recorded reason to hold.
-/// - prerequisites: the in-plan `depends_on` edges only. Out-of-plan
-///   prerequisites neither gate the runner (`run_layers` filters edges
-///   outside the executed set) nor enter the aggregate's graph, so the
-///   aggregate scores the same graph the runner executed. An in-plan
-///   prerequisite that did not pass fails its dependents closed.
+/// - prerequisites: every `depends_on` edge of the listed units, in-plan
+///   or not. In-plan edges gate the run exactly as before (the runner
+///   orders on them; an in-plan prerequisite that did not pass fails its
+///   dependents closed). Out-of-plan edges declare the build inputs the
+///   verify jobs provided in-job: the aggregate notes them instead of
+///   scoring them, so the file carries the complete input declaration.
 /// - `planned_no_work`: set exactly when the selection is empty, with the
 ///   [`planned_no_work_reason`] on the plan's outputs beside it.
 /// - `base_sha`/`head_sha`: the plan's transport identity, exactly as the
@@ -2534,11 +2594,6 @@ fn write_expected_work_file(
     base_sha: &str,
     head_sha: &str,
 ) -> Result<(), GeneratorError> {
-    let selected: BTreeSet<&str> = selection
-        .units
-        .iter()
-        .map(|unit| unit.id.as_str())
-        .collect();
     let mut units = Vec::with_capacity(selection.units.len());
     let mut prerequisites = BTreeMap::new();
     for unit in &selection.units {
@@ -2553,7 +2608,6 @@ fn write_expected_work_file(
             unit.depends_on
                 .iter()
                 .map(String::as_str)
-                .filter(|dependency| selected.contains(dependency))
                 .collect::<Vec<_>>(),
         );
     }
@@ -2744,10 +2798,7 @@ fn empty_selection_no_work_reason(selected: &BTreeSet<String>) -> Option<String>
         .then_some("no changed path selected a workload unit".to_owned())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "selection dispatch carries the no-work reason channel on every arm"
-)]
+#[cfg(test)]
 fn selection_for_diff<'a>(
     root: &Path,
     config: &'a CiConfig,
@@ -2755,25 +2806,54 @@ fn selection_for_diff<'a>(
     base: &str,
     head: &str,
 ) -> Result<UnitSelection<'a>, GeneratorError> {
+    // The exclusion-blind face: every existing caller keeps its shape; only
+    // `plan` needs the closed-world exclusion record for its log line.
+    Ok(selection_for_diff_with_closed_excluded(root, config, scope, base, head)?.0)
+}
+
+/// Select the affected units and record the closed-world exclusions behind
+/// the verdict: the opaque units an unmatched path skipped only because
+/// their owner's `complete` contract asserts the path unreadable. Every
+/// degenerate arm returns an empty record — requested-full, unusable
+/// inputs, an empty diff, and the version-bump allowlist classify nothing,
+/// and a full fallback excludes nothing — so only the classified loop
+/// below accumulates.
+#[allow(
+    clippy::too_many_lines,
+    reason = "selection dispatch carries the no-work reason channel on every arm"
+)]
+fn selection_for_diff_with_closed_excluded<'a>(
+    root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<(UnitSelection<'a>, BTreeSet<String>), GeneratorError> {
     if scope == Scope::Full {
-        return full_selection(config, None);
+        return full_selection(config, None).map(|selection| (selection, BTreeSet::new()));
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
-        return full_selection(config, Some("no affected base; fell back to full"));
+        return full_selection(config, Some("no affected base; fell back to full"))
+            .map(|selection| (selection, BTreeSet::new()));
     }
     let Some(raw) = git_name_status_nul(root, base, head)? else {
-        return full_selection(config, Some("git diff unavailable; fell back to full"));
+        return full_selection(config, Some("git diff unavailable; fell back to full"))
+            .map(|selection| (selection, BTreeSet::new()));
     };
     let Some(changed) = parse_name_status_nul(&raw) else {
-        return full_selection(config, Some("unparseable change entry; fell back to full"));
+        return full_selection(config, Some("unparseable change entry; fell back to full"))
+            .map(|selection| (selection, BTreeSet::new()));
     };
     if changed.is_empty() {
-        return Ok(UnitSelection {
-            units: Vec::new(),
-            full_units: BTreeSet::new(),
-            fallback_reason: None,
-            no_work_reason: Some("empty diff selects no workload units".to_owned()),
-        });
+        return Ok((
+            UnitSelection {
+                units: Vec::new(),
+                full_units: BTreeSet::new(),
+                fallback_reason: None,
+                no_work_reason: Some("empty diff selects no workload units".to_owned()),
+            },
+            BTreeSet::new(),
+        ));
     }
     if version_bump_matches(
         root,
@@ -2791,40 +2871,28 @@ fn selection_for_diff<'a>(
             .collect::<BTreeSet<_>>();
         let mut selected = allowlist.clone();
         extend_workspace_checks_for_cargo_roots(config, &mut selected);
-        return Ok(UnitSelection {
-            units: ordered_units(&config.unit, Some(&selected))?,
-            full_units: selected,
-            fallback_reason: None,
-            no_work_reason: None,
-        });
+        return Ok((
+            UnitSelection {
+                units: ordered_units(&config.unit, Some(&selected))?,
+                full_units: selected,
+                fallback_reason: None,
+                no_work_reason: None,
+            },
+            BTreeSet::new(),
+        ));
     }
-    let watched: Vec<crate::reuse::WatchedUnit> = config
-        .unit
-        .iter()
-        .map(|unit| crate::reuse::WatchedUnit {
-            id: unit.id.clone(),
-            watch: unit.watch.clone(),
-            depends_on: unit.depends_on.clone(),
-            kind: unit.kind.clone(),
-            commands: unit
-                .github_pr_commands
-                .iter()
-                .chain(&unit.github_full_commands)
-                .chain(&unit.velnor_pr_commands)
-                .chain(&unit.velnor_full_commands)
-                .cloned()
-                .collect(),
-        })
-        .collect();
+    let watched = watched_units(&config.unit);
     let compiled = crate::reuse::compile_ownership(&watched)?;
     let mut selected = BTreeSet::new();
     let mut opaque_reasons: Vec<String> = Vec::new();
+    let mut closed_excluded: BTreeSet<String> = BTreeSet::new();
     for file in &changed {
         if let Some(verdict) = crate::reuse::github_verdict(file) {
             match verdict {
                 crate::reuse::GithubVerdict::Global { reason }
                 | crate::reuse::GithubVerdict::Unknown { reason } => {
-                    return full_selection(config, Some(&reason));
+                    return full_selection(config, Some(&reason))
+                        .map(|selection| (selection, BTreeSet::new()));
                 }
                 crate::reuse::GithubVerdict::Kind { kind } => {
                     selected.extend(
@@ -2839,31 +2907,43 @@ fn selection_for_diff<'a>(
             }
             continue;
         }
-        if let Some(reason) =
-            fold_affected_file(&compiled, file, &mut selected, &mut opaque_reasons)
-        {
-            return full_selection(config, Some(&reason));
+        if let Some(reason) = fold_affected_file(
+            &compiled,
+            file,
+            &mut selected,
+            &mut opaque_reasons,
+            &mut closed_excluded,
+        ) {
+            return full_selection(config, Some(&reason))
+                .map(|selection| (selection, BTreeSet::new()));
         }
     }
     extend_workspace_checks_for_cargo_roots(config, &mut selected);
-    let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
+    let closure = crate::reuse::expand_selection_closure(&watched, &selected);
+    let (selected, full_units) = (closure.required.clone(), closure.required);
     let no_work_reason = empty_selection_no_work_reason(&selected);
-    Ok(UnitSelection {
-        units: ordered_units(&config.unit, Some(&selected))?,
-        full_units,
-        fallback_reason: crate::reuse::join_opaque_reasons(opaque_reasons),
-        no_work_reason,
-    })
+    Ok((
+        UnitSelection {
+            units: ordered_units(&config.unit, Some(&selected))?,
+            full_units,
+            fallback_reason: crate::reuse::join_opaque_reasons(opaque_reasons),
+            no_work_reason,
+        },
+        closed_excluded,
+    ))
 }
 
 /// Fold one non-contract changed file into the affected set: owned units join
 /// directly, opaque-narrowed units join with their reason recorded, and an
 /// unprovable path returns its full-fallback reason for the caller to honor.
+/// Unmatched paths also record the closed-world units they excluded, so the
+/// plan log names what the fallback skipped.
 fn fold_affected_file(
     compiled: &[crate::reuse::CompiledUnit<'_>],
     file: &str,
     selected: &mut BTreeSet<String>,
     opaque_reasons: &mut Vec<String>,
+    closed_excluded: &mut BTreeSet<String>,
 ) -> Option<String> {
     match crate::reuse::classify_path(compiled, file) {
         crate::reuse::PathVerdict::Owned { units } => {
@@ -2873,10 +2953,14 @@ fn fold_affected_file(
         crate::reuse::PathVerdict::Opaque { units, reason } => {
             selected.extend(units);
             opaque_reasons.push(reason);
+            closed_excluded.extend(crate::reuse::closed_excluded_units(compiled, file));
             None
         }
         crate::reuse::PathVerdict::Unknown { reason } => Some(reason),
-        crate::reuse::PathVerdict::Irrelevant => None,
+        crate::reuse::PathVerdict::Irrelevant => {
+            closed_excluded.extend(crate::reuse::closed_excluded_units(compiled, file));
+            None
+        }
     }
 }
 
@@ -2988,43 +3072,9 @@ fn version_bump_matches(
     Ok(changed_lines > 0)
 }
 
-fn expand_affected_units_with_full(
-    units: &[CiUnit],
-    changed: BTreeSet<String>,
-) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut affected = changed.clone();
-    let mut pending = changed.into_iter().collect::<Vec<_>>();
-    while let Some(changed_id) = pending.pop() {
-        for unit in units {
-            if unit
-                .depends_on
-                .iter()
-                .any(|dependency| dependency == &changed_id)
-                && affected.insert(unit.id.clone())
-            {
-                pending.push(unit.id.clone());
-            }
-        }
-    }
-    let full_units = affected.clone();
-    let mut required = affected;
-    let mut pending = required.iter().cloned().collect::<Vec<_>>();
-    while let Some(unit_id) = pending.pop() {
-        let Some(unit) = units.iter().find(|unit| unit.id == unit_id) else {
-            continue;
-        };
-        for dependency in &unit.depends_on {
-            if required.insert(dependency.clone()) {
-                pending.push(dependency.clone());
-            }
-        }
-    }
-    (required, full_units)
-}
-
 #[cfg(test)]
-fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSet<String> {
-    expand_affected_units_with_full(units, changed).0
+fn expand_affected_units(units: &[CiUnit], changed: &BTreeSet<String>) -> BTreeSet<String> {
+    crate::reuse::expand_selection_closure(&watched_units(units), changed).required
 }
 
 /// Collect the plan-path change list as raw `git diff --name-status -M -z`
@@ -5409,6 +5459,7 @@ pub(crate) mod tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         CiConfig {
             schema: 2,
@@ -5450,6 +5501,7 @@ pub(crate) mod tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         CiConfig {
             schema: 2,
@@ -6001,6 +6053,7 @@ workspace_check = true
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         CiConfig {
             schema: 2,
@@ -6214,6 +6267,7 @@ workspace_check = true
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         assert_eq!(
             must(
@@ -6298,6 +6352,7 @@ workspace_check = true
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         assert_eq!(
             must(
@@ -6392,6 +6447,7 @@ workspace_check = true
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         for (lane, tool) in [(RunnerLane::Github, "cargo"), (RunnerLane::Velnor, "mbx")] {
             for scope in [Scope::Affected, Scope::Full] {
@@ -6521,10 +6577,7 @@ workspace_check = true
 
         let (root, base, head) = selection_git_fixture("prerequisite", "crates/app/src/lib.rs")?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        assert_eq!(
-            selected_ids(selection.units),
-            vec!["base", "app", "consumer"]
-        );
+        assert_eq!(selected_ids(selection.units), vec!["app", "consumer"]);
         assert_eq!(
             selection.full_units,
             ["app", "consumer"].into_iter().map(str::to_owned).collect()
@@ -6540,24 +6593,7 @@ workspace_check = true
         // on both paths. The fixture carries no workspace gates or version
         // bumps, so the planner's refinements stay out of the comparison.
         let config = selection_config();
-        let watched: Vec<crate::reuse::WatchedUnit> = config
-            .unit
-            .iter()
-            .map(|unit| crate::reuse::WatchedUnit {
-                id: unit.id.clone(),
-                watch: unit.watch.clone(),
-                depends_on: unit.depends_on.clone(),
-                kind: unit.kind.clone(),
-                commands: unit
-                    .github_pr_commands
-                    .iter()
-                    .chain(&unit.github_full_commands)
-                    .chain(&unit.velnor_pr_commands)
-                    .chain(&unit.velnor_full_commands)
-                    .cloned()
-                    .collect(),
-            })
-            .collect();
+        let watched = watched_units(&config.unit);
         for changed in [
             "crates/base/src/lib.rs",
             "crates/app/src/lib.rs",
@@ -6628,6 +6664,95 @@ workspace_check = true
     }
 
     #[test]
+    fn closed_opaque_unit_is_excluded_from_unmatched_selection() -> Result<(), Box<dyn Error>> {
+        // `AGENTS.md` matches no watch and the only opaque unit carries a
+        // closed-world contract excluding it, so the planner selects
+        // nothing — no fallback, no reason beyond the proven no-work.
+        let (root, base, head) = selection_git_fixture("closed-opaque", "AGENTS.md")?;
+        let mut config = selection_config();
+        let app = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "app")
+            .ok_or("the fixture must carry the app unit")?;
+        app.kind = "bun".to_owned();
+        app.github_pr_commands = vec!["bun run build".to_owned()];
+        app.reads_closed = true;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(selection.units.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(selection.fallback_reason.is_none());
+        assert_eq!(
+            selection.no_work_reason.as_deref(),
+            Some("no changed path selected a workload unit"),
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_selection_narrows_to_the_open_opaque_sibling() -> Result<(), Box<dyn Error>> {
+        // Two opaque units, one closed: the unmatched path selects the open
+        // sibling while the closed unit stays out, and the missing-contract
+        // hint names the open unit only.
+        let (root, base, head) = selection_git_fixture("mixed-opaque", "AGENTS.md")?;
+        let mut config = selection_config();
+        for (id, closed) in [("app", true), ("consumer", false)] {
+            let unit = config
+                .unit
+                .iter_mut()
+                .find(|unit| unit.id == id)
+                .ok_or("the fixture must carry the estate units")?;
+            unit.kind = "bun".to_owned();
+            unit.github_pr_commands = vec!["bun run build".to_owned()];
+            unit.reads_closed = closed;
+        }
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(selected_ids(selection.units), vec!["consumer"]);
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("consumer"),
+            "the reason names the open opaque unit: {reason:?}"
+        );
+        assert!(
+            !reason.contains("`app`"),
+            "the closed unit needs no contract for an excluded path: {reason:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reads_closed_parses_through_runtime_config() -> Result<(), Box<dyn Error>> {
+        let dir = s4_dir("reads-closed-config");
+        let path = dir.join("project.toml");
+        must(
+            std::fs::write(&path, SELECTION_PROJECT_CONFIG),
+            "write selection config",
+        );
+        let config = read_config(&path)?;
+        assert!(
+            config.unit.iter().all(|unit| !unit.reads_closed),
+            "absent means open"
+        );
+        let closed = SELECTION_PROJECT_CONFIG.replacen(
+            "id = \"rust-leaf\"",
+            "id = \"rust-leaf\"\nreads_closed = true",
+            1,
+        );
+        must(std::fs::write(&path, &closed), "write closed config");
+        let config = read_config(&path)?;
+        let leaf = config
+            .unit
+            .iter()
+            .find(|unit| unit.id == "rust-leaf")
+            .ok_or("the config must carry rust-leaf")?;
+        assert!(leaf.reads_closed, "the flag parses through");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn affected_selection_selects_nothing_for_an_unowned_transparent_change(
     ) -> Result<(), Box<dyn Error>> {
         // `README.md` matches no watch and every unit is transparent (rust
@@ -6646,8 +6771,9 @@ workspace_check = true
     fn affected_selection_narrows_an_unmatched_path_to_opaque_units() -> Result<(), Box<dyn Error>>
     {
         // `AGENTS.md` matches no watch; only `app` runs unprovable package
-        // commands, so the planner selects it plus its prerequisite and
-        // dependent — not the transparent units, not the full set.
+        // commands, so the planner selects it plus its dependent — not the
+        // transparent units, not the full set. The prerequisite stays a
+        // build input: no verification of its own.
         let (root, base, head) = selection_git_fixture("opaque", "AGENTS.md")?;
         let mut config = selection_config();
         let app = config
@@ -6658,14 +6784,11 @@ workspace_check = true
         app.kind = "bun".to_owned();
         app.github_pr_commands = vec!["bun run build".to_owned()];
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        assert_eq!(
-            selected_ids(selection.units),
-            vec!["base", "app", "consumer"]
-        );
+        assert_eq!(selected_ids(selection.units), vec!["app", "consumer"]);
         assert_eq!(
             selection.full_units,
             BTreeSet::from(["app".to_owned(), "consumer".to_owned()]),
-            "the prerequisite joins the required set, not full"
+            "the verify set runs full scope"
         );
         assert!(
             selection
@@ -6772,6 +6895,110 @@ workspace_check = true
     }
 
     #[test]
+    fn closed_exclusion_surfaces_on_the_plan_path_beside_unchanged_no_work(
+    ) -> Result<(), Box<dyn Error>> {
+        // The plan path records what the fallback skipped: a closed opaque
+        // unit an unmatched path excludes names itself in the exclusion
+        // record, while the selection still proves explicit no-work — and
+        // the exclusion-blind wrapper agrees on every channel.
+        let (root, base, head) = selection_git_fixture("closed-excluded", "AGENTS.md")?;
+        let mut config = polyglot_selection_config();
+        let bun = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "bun-web")
+            .ok_or("the fixture must carry the bun-web unit")?;
+        bun.github_pr_commands = vec!["bun run build".to_owned()];
+        bun.reads_closed = true;
+        let (selection, closed_excluded) =
+            selection_for_diff_with_closed_excluded(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(
+            selection.units.is_empty() && selection.full_units.is_empty(),
+            "an unmatched AGENTS.md must select no units, got {:?}",
+            selection.full_units,
+        );
+        assert!(selection.fallback_reason.is_none());
+        assert_eq!(
+            selection.no_work_reason.as_deref(),
+            Some("no changed path selected a workload unit"),
+        );
+        assert_eq!(
+            closed_excluded,
+            BTreeSet::from(["bun-web".to_owned()]),
+            "the record names the closed unit the fallback skipped"
+        );
+        let blind = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(blind.units.clone()),
+            selected_ids(selection.units.clone())
+        );
+        assert_eq!(blind.full_units, selection.full_units);
+        assert_eq!(blind.fallback_reason, selection.fallback_reason);
+        assert_eq!(blind.no_work_reason, selection.no_work_reason);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plan_path_records_closed_exclusion_beside_opaque_narrowing() -> Result<(), Box<dyn Error>> {
+        // A mixed plan narrows to the openly opaque while recording the
+        // closed exclusion beside it: `app` verifies with its dependent,
+        // and the record names the closed unit the fallback skipped.
+        let (root, base, head) = selection_git_fixture("closed-narrowed", "AGENTS.md")?;
+        let mut config = selection_config();
+        let app = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "app")
+            .ok_or("the fixture must carry the app unit")?;
+        app.kind = "bun".to_owned();
+        app.github_pr_commands = vec!["bun run build".to_owned()];
+        let docs = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "docs")
+            .ok_or("the fixture must carry the docs unit")?;
+        docs.kind = "bun".to_owned();
+        docs.github_pr_commands = vec!["bun run build".to_owned()];
+        docs.reads_closed = true;
+        let (selection, closed_excluded) =
+            selection_for_diff_with_closed_excluded(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units.clone()),
+            vec!["app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            BTreeSet::from(["app".to_owned(), "consumer".to_owned()]),
+            "the verify set runs full scope"
+        );
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("selects only opaque units") && reason.contains("app"),
+            "the reason names the open opaque unit: {reason:?}"
+        );
+        assert!(
+            !reason.contains("docs"),
+            "the closed unit needs no contract for an excluded path: {reason:?}"
+        );
+        assert_eq!(
+            closed_excluded,
+            BTreeSet::from(["docs".to_owned()]),
+            "the record names the excluded closed unit"
+        );
+        let blind = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(blind.units.clone()),
+            selected_ids(selection.units.clone())
+        );
+        assert_eq!(blind.full_units, selection.full_units);
+        assert_eq!(blind.fallback_reason, selection.fallback_reason);
+        assert_eq!(blind.no_work_reason, selection.no_work_reason);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn affected_selection_matches_both_rename_sides() -> Result<(), Box<dyn Error>> {
         // A rename invalidates the old owner (the file left) and the new
         // owner (the file arrived): both select, plus the dependent closure.
@@ -6832,10 +7059,7 @@ workspace_check = true
             selection_git_delete_fixture("delete-owned", "crates/app/src/lib.rs")?;
         let config = selection_config();
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        assert_eq!(
-            selected_ids(selection.units),
-            vec!["base", "app", "consumer"]
-        );
+        assert_eq!(selected_ids(selection.units), vec!["app", "consumer"]);
         assert_eq!(
             selection.full_units,
             ["app", "consumer"].into_iter().map(str::to_owned).collect()
@@ -6852,10 +7076,7 @@ workspace_check = true
         let (root, base, head) = selection_git_fixture("unusual-owned", "crates/app/we\"ird?.rs")?;
         let config = selection_config();
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        assert_eq!(
-            selected_ids(selection.units),
-            vec!["base", "app", "consumer"]
-        );
+        assert_eq!(selected_ids(selection.units), vec!["app", "consumer"]);
         assert_eq!(
             selection.full_units,
             ["app", "consumer"].into_iter().map(str::to_owned).collect()
@@ -6885,24 +7106,7 @@ workspace_check = true
         // The plan path and the select path share one rename/delete model: a
         // rename matches both owners, a delete matches its owner.
         let config = selection_config();
-        let watched: Vec<crate::reuse::WatchedUnit> = config
-            .unit
-            .iter()
-            .map(|unit| crate::reuse::WatchedUnit {
-                id: unit.id.clone(),
-                watch: unit.watch.clone(),
-                depends_on: unit.depends_on.clone(),
-                kind: unit.kind.clone(),
-                commands: unit
-                    .github_pr_commands
-                    .iter()
-                    .chain(&unit.github_full_commands)
-                    .chain(&unit.velnor_pr_commands)
-                    .chain(&unit.velnor_full_commands)
-                    .cloned()
-                    .collect(),
-            })
-            .collect();
+        let watched = watched_units(&config.unit);
         let (root, base, head) = selection_git_rename_fixture(
             "parity-rename",
             "crates/base/src/lib.rs",
@@ -7105,6 +7309,7 @@ workspace_check = true
             tool_version: None,
             cache: None,
             workspace_check: false,
+            reads_closed: false,
         };
         let mut config = selection_config();
         config.workflow.version_bump_units = vec![
@@ -7166,12 +7371,12 @@ workspace_check = true
         )?;
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let expected_selected = ["rust-base", "rust-leaf"]
+        let expected_selected = ["rust-leaf"]
             .into_iter()
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
         // `full_units` carries the affected set (the changed unit and its
-        // dependents); the dependency closure lives on the selected side.
+        // dependents); the prerequisite stays a recorded build input.
         let expected_full = ["rust-leaf"]
             .into_iter()
             .map(str::to_owned)
@@ -7241,7 +7446,7 @@ velnor_full_commands = ["markdownlint docs"]
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         assert_eq!(
             selected_id_set(&selection),
-            ["rust-base", "rust-leaf", "rust-workspace"]
+            ["rust-leaf", "rust-workspace"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect()
@@ -7356,7 +7561,6 @@ workspace_check = true
         assert_eq!(
             selected_id_set(&selection),
             [
-                "rust-base",
                 "rust-contract",
                 "rust-contract-workspace",
                 "rust-leaf",
@@ -9450,14 +9654,14 @@ velnor_full_commands = ["true"]
     }
 
     #[test]
-    fn expected_work_writer_maps_units_lanes_and_in_plan_prerequisites(
+    fn expected_work_writer_maps_units_lanes_and_full_prerequisite_edges(
     ) -> Result<(), Box<dyn Error>> {
         let (root, base, head) = selection_git_fixture("s4-owned", "crates/app/src/lib.rs")?;
         let config = selection_config();
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         assert_eq!(
             selected_ids(selection.units.clone()),
-            vec!["base", "app", "consumer"]
+            vec!["app", "consumer"]
         );
         assert!(must(
             planned_no_work_reason(&selection),
@@ -9487,7 +9691,7 @@ velnor_full_commands = ["true"]
             .get("units")
             .and_then(serde_json::Value::as_array)
             .ok_or("the writer must emit a units array")?;
-        assert_eq!(units.len(), 3);
+        assert_eq!(units.len(), 2);
         for unit in units {
             assert_eq!(
                 unit.get("lanes"),
@@ -9508,16 +9712,17 @@ velnor_full_commands = ["true"]
             document.get("prerequisites"),
             Some(&serde_json::json!({
                 "app": ["base"],
-                "base": [],
                 "consumer": ["app"],
             })),
+            "only listed units get keys, but every edge is declared — \
+            `base` verifies nowhere yet stays `app`'s recorded input",
         );
         std::fs::remove_dir_all(root)?;
 
-        // Dependency skipping follows the executed set: a prerequisite the
-        // plan did not select neither gates the runner (`run_layers` filters
-        // out-of-plan edges) nor appears in the aggregate's graph, so the
-        // dependent's own success holds.
+        // Build inputs stay in the expected graph: a prerequisite the plan
+        // did not select still declares its edge, and the aggregate notes
+        // it as an in-job input instead of scoring it, so the dependent's
+        // own success holds.
         let config = selection_config();
         let app = config.unit.iter().find(|unit| unit.id == "app");
         let selection = UnitSelection {
@@ -9530,12 +9735,20 @@ velnor_full_commands = ["true"]
         let document: serde_json::Value = serde_json::from_str(&expected)?;
         assert_eq!(
             document.get("prerequisites"),
-            Some(&serde_json::json!({ "app": [] })),
-            "out-of-plan prerequisites leave the expected graph",
+            Some(&serde_json::json!({ "app": ["base"] })),
+            "out-of-plan prerequisites stay in the graph as build inputs",
         );
         let results = s4_success_results_for(&expected);
         let verdict = s4_score(&expected, &results)?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(
+            verdict.explanations.iter().any(|explanation| {
+                explanation.disposition == crate::reuse::Disposition::BuildInput
+                    && explanation.detail.contains("base")
+            }),
+            "the aggregate notes the build input: {:?}",
+            verdict.explanations
+        );
         Ok(())
     }
 
@@ -9578,7 +9791,8 @@ velnor_full_commands = ["true"]
         );
         assert_eq!(
             document.get("prerequisites"),
-            Some(&serde_json::json!({ "app": [] })),
+            Some(&serde_json::json!({ "app": ["base"] })),
+            "the writer declares every edge, in-plan or build input",
         );
         must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
         Ok(())
@@ -9807,7 +10021,7 @@ velnor_full_commands = ["true"]
     #[test]
     fn cancelled_result_fails_aggregate() -> Result<(), Box<dyn Error>> {
         let (root, expected, results) = s4_owned_binding("s4-cancelled")?;
-        let results = s4_set_result(&results, "base", "github", "cancelled", &[]);
+        let results = s4_set_result(&results, "app", "github", "cancelled", &[]);
         let dir = s4_dir("cancelled");
         let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(!verdict.passed);
@@ -9815,7 +10029,7 @@ velnor_full_commands = ["true"]
             verdict
                 .failures
                 .iter()
-                .any(|failure| failure.contains("cancelled required work base github")),
+                .any(|failure| failure.contains("cancelled required work app github")),
             "failures: {:?}",
             verdict.failures,
         );
@@ -9827,7 +10041,13 @@ velnor_full_commands = ["true"]
 
     #[test]
     fn failed_prerequisite_blocks_its_dependent() -> Result<(), Box<dyn Error>> {
-        let (root, expected, results) = s4_owned_binding("s4-prereq")?;
+        // A changed prerequisite verifies in-plan, so its failure still
+        // blocks the dependent behind it.
+        let (root, base, head) = selection_git_fixture("s4-prereq", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Both);
+        let results = s4_success_results_for(&expected);
         let results = s4_set_result(&results, "base", "github", "failure", &[]);
         let results = s4_set_result(&results, "base", "velnor", "failure", &[]);
         let dir = s4_dir("prereq");

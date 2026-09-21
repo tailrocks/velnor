@@ -369,9 +369,9 @@ impl ActionPin {
             Self::Bun => "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0",
             // actions/setup-node v7.0.0
             Self::Node => "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0",
-            // taiki-e/install-action v2.87.3
+            // taiki-e/install-action v2.87.16
             Self::RustTool => {
-                "taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3"
+                "taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16"
             }
             // jdx/mise-action v4.3.0
             Self::Mise => "jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0",
@@ -402,17 +402,17 @@ impl ActionPin {
             Self::DockerLogin => {
                 "docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0"
             }
-            // docker/setup-buildx-action v4
+            // docker/setup-buildx-action v4.4.1
             Self::DockerBuildx => {
-                "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0"
+                "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1"
             }
-            // docker/setup-qemu-action v4.3.0
+            // docker/setup-qemu-action v4.4.0
             Self::DockerQemu => {
-                "docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0"
+                "docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0"
             }
-            // docker/build-push-action v7
+            // docker/build-push-action v7.4.0
             Self::DockerBuild => {
-                "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0"
+                "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0"
             }
             // sigstore/cosign-installer v4.1.2
             Self::Cosign => {
@@ -815,6 +815,10 @@ impl ValidationPhase {
 
 /// A scanner-derived verification unit serialized to TOML.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "unit shape: one bool per independent unit flag"
+)]
 pub struct Unit {
     pub(crate) id: String,
     pub(crate) label: String,
@@ -875,6 +879,13 @@ pub struct Unit {
     /// runtimes reject unknown unit fields, and the emitted command list
     /// carries the contract.
     pub(crate) workspace_check: bool,
+    /// Whether the unit's owner asserted a closed world: a uniform
+    /// `complete` read contract claims the declared paths plus the scan
+    /// watch are the unit's entire read set. The watch-graph primitive
+    /// renders it; the runtime classifier excludes closed units from the
+    /// opaque fallback. Emitted only when true, so trees without complete
+    /// contracts render byte-identical bytes for pinned runtimes.
+    pub(crate) reads_closed: bool,
     /// What the unit needs from its executor, in provider-independent
     /// vocabulary (OS, architecture, SDK capabilities). The scan derives it
     /// from evidence; a `[[units]]` row overrides what it names.
@@ -1547,6 +1558,13 @@ impl ProjectConfig {
             }
             if !unit.depends_on.is_empty() {
                 write_toml_array(&mut output, "depends_on", &unit.depends_on);
+            }
+            // A uniform `complete` read contract closes the unit for the
+            // runtime classifier. Emitted only when true: pinned Planning
+            // runtimes deny unknown unit fields, so trees without complete
+            // contracts must render not one byte of difference.
+            if unit.reads_closed {
+                let _ = writeln!(output, "reads_closed = true");
             }
             if let Some(version) = &unit.tool_version {
                 write_toml_string(&mut output, "tool_version", version);
@@ -2974,6 +2992,7 @@ fn apply_unit_row(
             services: Vec::new(),
             requires_trusted: row.requires_trusted(),
             workspace_check: row.workspace_check(),
+            reads_closed: false,
             platform,
             products,
             prerequisites,
@@ -11036,6 +11055,7 @@ mod tests {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -11756,6 +11776,51 @@ mod tests {
         must(
             runtime::read_config_for_test(&path),
             "emitted workspace metadata must parse through the runtime contract",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_closed_emits_only_when_set_and_parses_through_runtime_config() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n";
+        let root = configured_repository("reads-closed-emission", Some(config));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan configured repository",
+        );
+        let plain = scanned.config.toml();
+        assert!(
+            !plain.contains("reads_closed"),
+            "trees without complete contracts render no new key: {plain}"
+        );
+        let mut closed = scanned.config.clone();
+        let unit = must_some(closed.units.first_mut(), "a scanned unit");
+        unit.reads_closed = true;
+        let emitted = closed.toml();
+        assert!(
+            emitted.contains("reads_closed = true"),
+            "a closed unit emits its flag: {emitted}"
+        );
+        let path = root.join(".github/ci/project.toml");
+        must(
+            fs::create_dir_all(must_some(path.parent(), "runtime config parent")),
+            "create runtime config directory",
+        );
+        must(fs::write(&path, &emitted), "write emitted runtime config");
+        must(
+            runtime::read_config_for_test(&path),
+            "the emitted flag must parse through the runtime contract",
+        );
+        let document: toml::Table = must(toml::from_str(&emitted), "parse emitted config");
+        let units = must_some(
+            document.get("unit").and_then(toml::Value::as_array),
+            "emitted [[unit]] tables",
+        );
+        assert!(
+            units.iter().any(|unit| {
+                unit.get("reads_closed").and_then(toml::Value::as_bool) == Some(true)
+            }),
+            "the emitted unit table carries the closed flag"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -12928,6 +12993,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -12959,6 +13025,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -12990,6 +13057,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -13280,6 +13348,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -17204,6 +17273,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -18725,6 +18795,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -19000,6 +19071,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -19114,6 +19186,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -19212,6 +19285,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -19308,6 +19382,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -19414,6 +19489,7 @@ channel = "stable"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -19558,6 +19634,7 @@ channel = "stable"
                     services: Vec::new(),
                     requires_trusted: false,
                     workspace_check: false,
+                    reads_closed: false,
                     platform: crate::platform::PlatformRequirement::portable(),
                     products: Vec::new(),
                     prerequisites: Vec::new(),
@@ -19589,6 +19666,7 @@ channel = "stable"
                     services: Vec::new(),
                     requires_trusted: false,
                     workspace_check: false,
+                    reads_closed: false,
                     platform: crate::platform::PlatformRequirement::portable(),
                     products: Vec::new(),
                     prerequisites: Vec::new(),
