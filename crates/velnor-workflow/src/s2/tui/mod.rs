@@ -30,6 +30,7 @@ use super::{
     GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
     WriteOutcome,
 };
+use crate::generated_symlinks;
 
 const MIN_WIDTH: u16 = 52;
 const MIN_HEIGHT: u16 = 16;
@@ -545,7 +546,7 @@ impl App {
             );
             return;
         };
-        let plan = match plan_generated_write(output_root, &files, &inputs) {
+        let plan = match plan_generated_write(output_root, &files, &generated_symlinks(), &inputs) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());
@@ -578,6 +579,7 @@ impl App {
             }
         };
         let files_for_worker = files.clone();
+        let symlinks_for_worker = generated_symlinks();
         let dry_run = self.cli.dry_run;
         let check = self.cli.check;
         let force = self.cli.force;
@@ -600,6 +602,7 @@ impl App {
             let result = complete_generation(
                 &output_root,
                 &files_for_worker,
+                &symlinks_for_worker,
                 &inputs,
                 dry_run,
                 check,
@@ -664,24 +667,37 @@ impl App {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the review worker replays the exact write contract the plan was built with"
+)]
 fn complete_generation(
     output_root: &std::path::Path,
     files: &std::collections::BTreeMap<std::path::PathBuf, String>,
+    symlinks: &std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf>,
     inputs: &GenerationInputs,
     dry_run: bool,
     check: bool,
     force: bool,
     reviewed_plan: &GeneratedWritePlan,
 ) -> Result<GenerationCompletion, GeneratorError> {
-    let plan = plan_generated_write(output_root, files, inputs)?;
+    let plan = plan_generated_write(output_root, files, symlinks, inputs)?;
     if &plan != reviewed_plan {
         return Ok(GenerationCompletion::PlanChanged(plan));
     }
     if check && plan.has_drift() {
         return Ok(GenerationCompletion::CheckDrift(plan));
     }
-    let outcome =
-        apply_generated_write_plan(output_root, files, inputs, dry_run, check, force, &plan)?;
+    let outcome = apply_generated_write_plan(
+        output_root,
+        files,
+        symlinks,
+        inputs,
+        dry_run,
+        check,
+        force,
+        &plan,
+    )?;
     Ok(GenerationCompletion::Finished { outcome, plan })
 }
 
@@ -1253,7 +1269,12 @@ mod tests {
         let content = format!("{}name: CI\n", crate::s2::GENERATED_HEADER);
         let files = BTreeMap::from([(relative.clone(), content.clone())]);
         assert!(fs::create_dir_all(root.join(".github/workflows")).is_ok());
-        let reviewed = crate::s2::plan_generated_write(&root, &files, &test_inputs());
+        let reviewed = crate::s2::plan_generated_write(
+            &root,
+            &files,
+            &crate::generated_symlinks(),
+            &test_inputs(),
+        );
         assert!(reviewed.is_ok());
         let Some(reviewed) = reviewed.ok() else {
             return;
@@ -1263,6 +1284,7 @@ mod tests {
         let result = super::complete_generation(
             &root,
             &files,
+            &crate::generated_symlinks(),
             &test_inputs(),
             true,
             false,
