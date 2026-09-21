@@ -1858,6 +1858,10 @@ fn scan_target(
     // its tool id would fail at pack time instead; refuse it at generation
     // time with the exact missing key.
     crate::s2::primitives::validate_boltffi_tools_are_locked(&config.units, &mise_lock_keys)?;
+    // A unit that runs XcodeGen while the lock does not pin its tool id
+    // would fail at install time on the runner instead; refuse it at
+    // generation time with the exact missing key.
+    crate::s2::primitives::validate_xcodegen_tools_are_locked(&config.units, &mise_lock_keys)?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
@@ -11982,6 +11986,13 @@ mod tests {
             ),
             "write project.yml",
         );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.xcodegen]]\nversion = \"2.46.0\"\nbackend = \"aqua:yonaskolb/XcodeGen\"\n",
+            ),
+            "pin the generator CLI the app unit installs",
+        );
         let config = must(
             scan_repository(
                 &root,
@@ -12029,6 +12040,13 @@ mod tests {
         must(
             fs::write(root.join("part.yml"), "include: project.yml\n"),
             "write part.yml",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.xcodegen]]\nversion = \"2.46.0\"\nbackend = \"aqua:yonaskolb/XcodeGen\"\n",
+            ),
+            "pin the generator CLI the app unit installs",
         );
         let config = must(
             scan_repository(
