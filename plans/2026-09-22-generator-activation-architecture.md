@@ -96,6 +96,11 @@ speedup.
   PR #1044. The active renderer regenerated the ownership state at `11342007`.
 - Transportable same-run prerequisites now require producer `success`; a
   skipped, failed, or cancelled producer cannot unlock a consumer-side rebuild.
+- The setup action now refreshes and attests the immutable release manifest on
+  every invocation, including a cache hit; cached executable bytes are then
+  checked against that freshly authenticated manifest. This removes the
+  cache-hit provenance gap without making cache availability a correctness
+  condition.
 - Focused policy, policy-rendering, promotion, readiness, and transport
   regressions have been exercised locally. The implementation is not yet
   activated into `.github`, protected-integrated, or fully hosted-verified.
@@ -127,6 +132,10 @@ speedup.
   artifact transfer, and generator-change-to-activation paths. The observed
   hosted critical path is currently above 120s; no performance acceptance is
   claimed until causes are measured and feasible remedies are verified.
+- Local actionlint is temporarily unavailable: the unauthenticated GitHub API
+  rate limit returned HTTP 403 while `mise` attempted to install
+  `actionlint@1.7.10`. This is an external tooling block, not a passing lint
+  result; hosted actionlint still remains required.
 
 Completion requires all items above, independent security/correctness review,
 protected integration, hosted evidence, and an honest remaining-violation
