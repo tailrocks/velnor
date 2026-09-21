@@ -93,10 +93,16 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   macOS-arm64 + native cap and appends recipe once per
   product; `needs_boltffi`/`cargo:boltffi_cli` install +
   generation-time lock validation mirror nextest; 6 new
-  tests, lib 1939 green, clippy clean. Next: staging +
-  binding-drift check before install;
-  4d verified cross-job artifact transport; 4e per-layer
-  cache-state reporting (`snapshot.rs`). Follow-ups: `.build`
+  tests, lib 1939 green, clippy clean. Drift done:
+  `BoltffiDriftSurface` (bindings dir + generated
+  `Package.swift` unless skipped; headers live in
+  upstream scratch) with snapshot/diff render around the
+  pack — `pack apple` has no output redirect, verified
+  against pinned `boltffi_cli` CLI; 4 new tests incl a
+  behavioral shell test, lib 1948 green, clippy clean.
+  Next: 4d verified cross-job artifact transport;
+  4e per-layer cache-state reporting (`snapshot.rs`).
+  Follow-ups: `.build`
   intermediates need multi-layer cache support; scoped
   `derivedDataPath` per unit; runtime actual-Xcode probe (needs
   macOS runs).
@@ -107,7 +113,7 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: staging + binding-drift check —
+2. Next edit surface: 4d verified cross-job artifact transport —
    `s2/primitives/prepared_tools.rs` (staging dir + manifest
    write/verify reuse), adapter recipe + verification-step
    rendering from product `bindings_dir`/`bindings_file`

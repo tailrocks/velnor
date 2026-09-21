@@ -1237,6 +1237,10 @@ pub(crate) struct BoltffiProducer {
     pub(crate) bindings_file: String,
     /// The Apple deployment target that shapes generated manifests.
     pub(crate) deployment_target: String,
+    /// The generated `Package.swift` the drift check snapshots, if the
+    /// manifest does not skip it. Render-local: the recipe consumes it at
+    /// join time, so it stays off the product until transport needs it.
+    pub(crate) package_swift: Option<String>,
     /// The typed pack recipe: profile, lock enforcement, verbosity.
     pub(crate) recipe: BoltffiRecipe,
     /// The Rust unit owning the producing crate, resolved at detect time.
@@ -1271,6 +1275,8 @@ struct BoltffiManifest {
     swift_output: Option<String>,
     swift_ffi_module_name: Option<String>,
     spm_layout: Option<String>,
+    spm_output: Option<String>,
+    skip_package_swift: bool,
     include_macos: bool,
     /// `None` means the key is absent and `BoltFFI` defaults apply; `Some`
     /// (possibly empty) is an explicit list, where empty disables the slice.
@@ -1352,6 +1358,12 @@ fn parse_boltffi_manifest(contents: &str) -> BoltffiManifest {
             }
             ("targets.apple.spm", "layout") => {
                 manifest.spm_layout = toml_string_value(&value);
+            }
+            ("targets.apple.spm", "output") => {
+                manifest.spm_output = toml_string_value(&value);
+            }
+            ("targets.apple.spm", "skip_package_swift") => {
+                manifest.skip_package_swift = value == "true";
             }
             _ => {}
         }
@@ -1495,11 +1507,18 @@ fn boltffi_expected_files(output: &str, crate_name: &str, slices: &[String]) -> 
 /// outside the repository is an `Err` for a scan diagnostic.
 /// The `generate swift` binding facts: output directory, expected binding
 /// file, deployment target, and FFI module name.
+#[derive(Debug)]
 struct BoltffiBindings {
     dir: String,
     file: String,
     deployment_target: String,
     ffi_module: String,
+    /// The generated `Package.swift` `pack apple` emits at
+    /// `<spm output>/Package.swift` (`SpmPackageGenerator::generate`),
+    /// unless `skip_package_swift` opts out. The SPM output falls back
+    /// through `[targets.apple].output` to `dist/apple`
+    /// (`Config::apple_spm_output`).
+    package_swift: Option<String>,
 }
 
 /// Resolve the binding facts for a manifest rooted at `root`. The directory
@@ -1554,6 +1573,26 @@ fn boltffi_binding_facts(
         format!("{pascal}BoltFFI")
     };
     let file = join_repo_path(&dir, &format!("{stem}.swift"));
+    let package_swift = if parsed.skip_package_swift {
+        None
+    } else {
+        let base = parsed.spm_output.as_deref().map_or_else(
+            || {
+                parsed
+                    .apple_output
+                    .as_deref()
+                    .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT)
+                    .to_owned()
+            },
+            str::to_owned,
+        );
+        let Some(resolved) = resolve_repo_path(root, &base) else {
+            return Err(format!(
+                "declares SPM output `{base}`, which is absolute or escapes the repository"
+            ));
+        };
+        Some(join_repo_path(&resolved, "Package.swift"))
+    };
     Ok(BoltffiBindings {
         dir,
         file,
@@ -1565,6 +1604,7 @@ fn boltffi_binding_facts(
             .swift_ffi_module_name
             .clone()
             .unwrap_or_else(|| format!("{framework}FFI")),
+        package_swift,
     })
 }
 
@@ -1680,6 +1720,52 @@ pub(crate) fn native_input_closure(
 /// enforce the committed resolution instead of drifting; `verbose`
 /// streams the target build's compiler output (`-v`) so a long native
 /// link leaves liveness evidence instead of silence.
+/// The in-repo surface `pack apple` rewrites and the drift check guards:
+/// the Swift bindings directory, always, plus the generated `Package.swift`
+/// unless the manifest skips it. Headers land in `BoltFFI` scratch, never
+/// the repo, so they stay outside this surface. `framework` scopes the
+/// staging directory when one crate produces several frameworks.
+pub(crate) struct BoltffiDriftSurface<'a> {
+    pub(crate) bindings_dir: &'a str,
+    pub(crate) package_swift: Option<&'a str>,
+    pub(crate) framework: &'a str,
+}
+
+/// Render the pre-pack snapshot, one command per surface member so each
+/// failure keeps its own precise error: refuse a missing member (a fresh
+/// checkout without committed bindings is drift, not a silent skip),
+/// wipe any stale staging, then copy the surface.
+fn boltffi_snapshot_commands(
+    surface: &BoltffiDriftSurface<'_>,
+    staging: &str,
+    snapshot: &str,
+) -> Vec<String> {
+    let mut commands = vec![format!(
+        "test -d {} || {{ echo {} >&2; exit 1; }} && rm -rf {} && mkdir -p {} && cp -R {} {}",
+        shell_quote(surface.bindings_dir),
+        shell_quote(&format!(
+            "error: committed Swift bindings `{}` are missing from the checkout; the native pack needs them to compare against",
+            surface.bindings_dir
+        )),
+        shell_quote(staging),
+        shell_quote(staging),
+        shell_quote(surface.bindings_dir),
+        shell_quote(snapshot),
+    )];
+    if let Some(package_swift) = surface.package_swift {
+        commands.push(format!(
+            "test -f {} || {{ echo {} >&2; exit 1; }} && cp {} {}",
+            shell_quote(package_swift),
+            shell_quote(&format!(
+                "error: committed `{package_swift}` is missing from the checkout; the native pack needs it to compare against"
+            )),
+            shell_quote(package_swift),
+            shell_quote(&join_repo_path(staging, "Package.swift")),
+        ));
+    }
+    commands
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BoltffiRecipe {
     pub(crate) profile: Option<String>,
@@ -1703,9 +1789,25 @@ impl BoltffiRecipe {
 
     /// Render the producer commands: wipe the previous framework bundle
     /// first (`BoltFFI` merges into an existing output directory, which
-    /// would keep stale slices), then pack from the manifest root, the
-    /// working directory `BoltFFI` itself assumes.
-    pub(crate) fn commands(&self, manifest_root: &str, output: &str) -> Vec<String> {
+    /// would keep stale slices), snapshot the committed bindings, pack
+    /// from the manifest root (the working directory `BoltFFI` itself
+    /// assumes), then diff the snapshot against the rewritten tree.
+    /// `pack apple` offers no output redirect, so the snapshot is the
+    /// staging: a pack that rewrites tracked bindings fails the unit
+    /// instead of silently testing only the rewritten tree.
+    pub(crate) fn commands(
+        &self,
+        manifest_root: &str,
+        output: &str,
+        surface: &BoltffiDriftSurface<'_>,
+    ) -> Vec<String> {
+        let staging = join_repo_path(
+            &join_repo_path(manifest_root, "target/velnor-boltffi-staging"),
+            surface.framework,
+        );
+        let snapshot = join_repo_path(&staging, "bindings");
+        let mut commands = vec![format!("rm -rf {}", shell_quote(output))];
+        commands.extend(boltffi_snapshot_commands(surface, &staging, &snapshot));
         let mut pack = String::from("boltffi");
         if self.verbose {
             pack.push_str(" -v");
@@ -1718,10 +1820,27 @@ impl BoltffiRecipe {
             pack.push_str(&shell_quote(profile));
         }
         pack.push_str(" pack apple");
-        vec![
-            format!("rm -rf {}", shell_quote(output)),
-            format!("{}{pack}", shell_change_dir(manifest_root)),
-        ]
+        commands.push(format!("{}{pack}", shell_change_dir(manifest_root)));
+        commands.push(format!(
+            "diff -r {} {} || {{ echo {} >&2; exit 1; }}",
+            shell_quote(&snapshot),
+            shell_quote(surface.bindings_dir),
+            shell_quote(&format!(
+                "error: committed Swift bindings in `{}` drifted from regeneration; rerun the native pack locally and commit the result",
+                surface.bindings_dir
+            )),
+        ));
+        if let Some(package_swift) = surface.package_swift {
+            commands.push(format!(
+                "diff {} {} || {{ echo {} >&2; exit 1; }}",
+                shell_quote(&join_repo_path(&staging, "Package.swift")),
+                shell_quote(package_swift),
+                shell_quote(&format!(
+                    "error: committed `{package_swift}` drifted from regeneration; rerun the native pack locally and commit the result"
+                )),
+            ));
+        }
+        commands
     }
 }
 
@@ -1969,6 +2088,7 @@ fn boltffi_producer_from_manifest(
         bindings_file: bindings.file,
         deployment_target: bindings.deployment_target,
         framework,
+        package_swift: bindings.package_swift,
         recipe,
         unit: None,
         inputs,
@@ -2358,6 +2478,63 @@ mod tests {
         let disabled =
             parse_boltffi_manifest("[package]\nname = \"x\"\n\n[targets.apple]\nenabled = false\n");
         assert!(!disabled.enabled);
+    }
+
+    #[test]
+    fn boltffi_manifest_parses_spm_output_and_skip() {
+        use super::{boltffi_binding_facts, parse_boltffi_manifest};
+        let parsed = parse_boltffi_manifest("[package]\nname = \"x\"\n");
+        assert_eq!(parsed.spm_output, None);
+        assert!(!parsed.skip_package_swift);
+        // Default: generated at `<apple output>/Package.swift`.
+        let facts = must(
+            boltffi_binding_facts(&parsed, "libs/bridge-ffi", "bridge-core-ffi", "BridgeCore"),
+            "default package facts",
+        );
+        assert_eq!(
+            facts.package_swift.as_deref(),
+            Some("libs/bridge-ffi/dist/apple/Package.swift")
+        );
+        let explicit = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple.spm]\noutput = \"../pkg\"\nskip_package_swift = true\n",
+        );
+        assert_eq!(explicit.spm_output.as_deref(), Some("../pkg"));
+        assert!(explicit.skip_package_swift);
+        let skipped = must(
+            boltffi_binding_facts(
+                &explicit,
+                "libs/bridge-ffi",
+                "bridge-core-ffi",
+                "BridgeCore",
+            ),
+            "skipped package facts",
+        );
+        assert_eq!(skipped.package_swift, None);
+        // Skip off but output explicit: the manifest path wins.
+        let emitted = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple.spm]\noutput = \"../pkg\"\n",
+        );
+        let kept = must(
+            boltffi_binding_facts(&emitted, "libs/bridge-ffi", "bridge-core-ffi", "BridgeCore"),
+            "explicit package facts",
+        );
+        assert_eq!(
+            kept.package_swift.as_deref(),
+            Some("libs/pkg/Package.swift")
+        );
+        let escaping = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple.spm]\noutput = \"../../../elsewhere\"\n",
+        );
+        let error = must_err(
+            boltffi_binding_facts(
+                &escaping,
+                "libs/bridge-ffi",
+                "bridge-core-ffi",
+                "BridgeCore",
+            ),
+            "escaping spm output must fail",
+        );
+        assert!(error.contains("escapes the repository"), "{error}");
     }
 
     #[test]
@@ -2991,36 +3168,163 @@ mod tests {
         assert_ne!(quiet.digest_identity(), locked.digest_identity());
     }
 
+    fn drift_recipe() -> (super::BoltffiRecipe, super::BoltffiDriftSurface<'static>) {
+        (
+            super::BoltffiRecipe {
+                profile: None,
+                locked: false,
+                verbose: true,
+            },
+            super::BoltffiDriftSurface {
+                bindings_dir: "native/Sources/BridgeCore/BoltFFI",
+                package_swift: Some("dist/apple/Package.swift"),
+                framework: "BridgeCore",
+            },
+        )
+    }
+
     #[test]
-    fn boltffi_recipe_renders_wipe_before_pack() {
-        use super::BoltffiRecipe;
-        let recipe = BoltffiRecipe {
-            profile: None,
-            locked: false,
-            verbose: true,
-        };
-        assert_eq!(
-            recipe.commands(
-                "libs/bridge-ffi",
-                "target/xcframework/BridgeCore.xcframework"
-            ),
-            vec![
-                "rm -rf 'target/xcframework/BridgeCore.xcframework'".to_owned(),
-                "cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned(),
-            ]
+    fn boltffi_recipe_renders_snapshot_pack_diff() {
+        let (recipe, surface) = drift_recipe();
+        let commands = recipe.commands(
+            "libs/bridge-ffi",
+            "target/xcframework/BridgeCore.xcframework",
+            &surface,
         );
-        let shipping = BoltffiRecipe {
+        assert_eq!(commands.len(), 6, "{commands:?}");
+        assert_eq!(
+            commands[0],
+            "rm -rf 'target/xcframework/BridgeCore.xcframework'"
+        );
+        assert!(
+            commands[1].contains("test -d 'native/Sources/BridgeCore/BoltFFI'")
+                && commands[1]
+                    .contains("rm -rf 'libs/bridge-ffi/target/velnor-boltffi-staging/BridgeCore'")
+                && commands[1].contains("cp -R 'native/Sources/BridgeCore/BoltFFI'"),
+            "bindings snapshot: {}",
+            commands[1]
+        );
+        assert!(
+            commands[2].contains("test -f 'dist/apple/Package.swift'")
+                && commands[2].contains("cp 'dist/apple/Package.swift'"),
+            "package snapshot: {}",
+            commands[2]
+        );
+        assert_eq!(
+            commands[3],
+            "cd -- 'libs/bridge-ffi' && boltffi -v pack apple"
+        );
+        assert!(
+            commands[4].starts_with("diff -r ")
+                && commands[4].contains("'native/Sources/BridgeCore/BoltFFI'"),
+            "bindings drift check: {}",
+            commands[4]
+        );
+        assert!(
+            commands[5].starts_with("diff ") && commands[5].contains("'dist/apple/Package.swift'"),
+            "package drift check: {}",
+            commands[5]
+        );
+    }
+
+    #[test]
+    fn boltffi_recipe_omits_package_swift_when_skipped() {
+        let recipe = super::BoltffiRecipe {
             profile: Some("desktop-release".to_owned()),
             locked: true,
             verbose: false,
         };
-        assert_eq!(
-            shipping.commands(".", "dist/apple/BridgeCore.xcframework"),
-            vec![
-                "rm -rf 'dist/apple/BridgeCore.xcframework'".to_owned(),
-                "boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='desktop-release' pack apple"
-                    .to_owned(),
-            ]
+        let surface = super::BoltffiDriftSurface {
+            bindings_dir: "Sources/BoltFFI",
+            package_swift: None,
+            framework: "BridgeCore",
+        };
+        let commands = recipe.commands(".", "dist/apple/BridgeCore.xcframework", &surface);
+        assert_eq!(commands.len(), 4, "{commands:?}");
+        assert!(
+            commands
+                .iter()
+                .all(|command| !command.contains("Package.swift")),
+            "{commands:?}"
         );
+        assert!(
+            commands[1].contains("rm -rf 'target/velnor-boltffi-staging/BridgeCore'"),
+            "staging stays repo-relative at the root: {}",
+            commands[1]
+        );
+        assert_eq!(
+            commands[2],
+            "boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='desktop-release' pack apple"
+        );
+    }
+
+    /// Execute the rendered snapshot/diff pair against a fixture tree,
+    /// simulating the pack by rewriting the file in between: the check
+    /// must pass on an untouched tree and fail on a rewrite, an
+    /// addition, or a missing checkout member.
+    #[test]
+    fn boltffi_drift_shell_detects_rewrite() {
+        use std::process::Command;
+        let (recipe, surface) = drift_recipe();
+        let commands = recipe.commands(
+            "libs/bridge-ffi",
+            "target/xcframework/BridgeCore.xcframework",
+            &surface,
+        );
+        let root = scratch("boltffi-drift");
+        let live = root.join("native/Sources/BridgeCore/BoltFFI");
+        must(
+            std::fs::create_dir_all(&live),
+            "create live bindings fixture",
+        );
+        must(
+            std::fs::write(live.join("BridgeCoreBoltFFI.swift"), "committed\n"),
+            "write live bindings fixture",
+        );
+        must(
+            std::fs::create_dir_all(root.join("dist/apple")),
+            "create spm fixture",
+        );
+        must(
+            std::fs::write(root.join("dist/apple/Package.swift"), "committed\n"),
+            "write package fixture",
+        );
+        let run = |command: &str| {
+            must(
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(&root)
+                    .output(),
+                "run drift shell",
+            )
+        };
+        assert!(run(&commands[1]).status.success());
+        assert!(run(&commands[2]).status.success());
+        assert!(run(&commands[4]).status.success());
+        assert!(run(&commands[5]).status.success());
+        must(
+            std::fs::write(live.join("BridgeCoreBoltFFI.swift"), "rewritten\n"),
+            "simulate pack rewrite",
+        );
+        let drifted = run(&commands[4]);
+        assert!(!drifted.status.success());
+        let stderr = String::from_utf8_lossy(&drifted.stderr);
+        assert!(stderr.contains("drifted from regeneration"), "{stderr}");
+        must(
+            std::fs::write(live.join("BridgeCoreBoltFFI.swift"), "committed\n"),
+            "restore live bindings fixture",
+        );
+        must(
+            std::fs::write(live.join("Extra.swift"), "added\n"),
+            "simulate pack addition",
+        );
+        assert!(!run(&commands[4]).status.success());
+        let _ = std::fs::remove_dir_all(&live);
+        let missing = run(&commands[1]);
+        assert!(!missing.status.success());
+        let stderr = String::from_utf8_lossy(&missing.stderr);
+        assert!(stderr.contains("missing from the checkout"), "{stderr}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

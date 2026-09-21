@@ -1684,14 +1684,32 @@ mod tests {
         // requirement instead of staying a portable Linux unit.
         assert_eq!(producer.platform, crate::s2::provider::Platform::MacosArm64);
         assert!(producer.capabilities.native_macos_arm64);
-        // The typed recipe lands after the unit's own checks, in both lanes.
-        let pack = [
-            "rm -rf 'target/xcframework/BridgeCore.xcframework'".to_owned(),
-            "cd -- 'libs/bridge-ffi' && boltffi -v pack apple".to_owned(),
-        ];
+        // The typed recipe lands after the unit's own checks, in both lanes:
+        // wipe, two snapshots, pack, two drift diffs (the fixture keeps
+        // the default generated `Package.swift`).
         for commands in [&producer.pr_commands, &producer.full_commands] {
-            assert!(commands.len() > pack.len(), "{commands:?}");
-            assert_eq!(&commands[commands.len() - pack.len()..], &pack);
+            assert!(commands.len() > 6, "{commands:?}");
+            let tail = &commands[commands.len() - 6..];
+            assert_eq!(
+                tail[0],
+                "rm -rf 'target/xcframework/BridgeCore.xcframework'"
+            );
+            assert!(
+                tail[1].contains("cp -R ") && tail[1].contains("velnor-boltffi-staging"),
+                "bindings snapshot: {}",
+                tail[1]
+            );
+            assert!(
+                tail[2].contains("Package.swift") && tail[2].contains("cp "),
+                "package snapshot: {}",
+                tail[2]
+            );
+            assert_eq!(tail[3], "cd -- 'libs/bridge-ffi' && boltffi -v pack apple");
+            assert!(
+                tail[4].starts_with("diff -r ") && tail[5].starts_with("diff "),
+                "drift diffs: {:?}",
+                &tail[4..]
+            );
         }
         assert!(
             producer

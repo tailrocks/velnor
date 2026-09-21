@@ -213,7 +213,14 @@ fn wire_native_edge(
         let unit = &mut shape.units[producer_index];
         unit.platform = crate::s2::provider::Platform::MacosArm64;
         unit.capabilities.native_macos_arm64 = true;
-        let recipe_commands = producer.recipe.commands(&producer.root, &producer.output);
+        let surface = rust::BoltffiDriftSurface {
+            bindings_dir: &producer.bindings_dir,
+            package_swift: producer.package_swift.as_deref(),
+            framework: &producer.framework,
+        };
+        let recipe_commands = producer
+            .recipe
+            .commands(&producer.root, &producer.output, &surface);
         unit.pr_commands.extend(recipe_commands.clone());
         unit.full_commands.extend(recipe_commands);
     }
