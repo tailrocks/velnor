@@ -2154,6 +2154,34 @@ mod tests {
     }
 
     #[test]
+    fn plan_job_scopes_expected_work_providers_to_scheduled_universe() {
+        // The plan scope must equal the scheduled provider scope: a narrowed
+        // universe that plans unfiltered writes phantom entries for
+        // unscheduled providers, and the aggregate fails closed on records
+        // no job can report. The dispatch `providers` input narrows the
+        // scope at runtime; automatic events fall back to the configured
+        // automatic set.
+        let mut ir = owner_test_ir(
+            "example/s4-plan-providers",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        ir.providers = ProviderSet::from([ProviderId::GithubHosted]);
+        ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        assert!(
+            plan.contains(
+                "VELNOR_PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || 'github-hosted' }}"
+            ),
+            "a single-provider universe plans only its provider: {plan}"
+        );
+        assert!(
+            !plan.contains("|| 'github-hosted,"),
+            "the fallback names no unscheduled provider: {plan}"
+        );
+    }
+
+    #[test]
     fn plan_step_creates_expected_work_dir_before_invoking_plan() {
         // The pinned product predates the runtime's own parent creation, so
         // the branch-controlled render prepares the dir for the old binary.

@@ -1855,9 +1855,10 @@ fn scope_name(scope: Scope) -> &'static str {
 }
 
 /// The lanes admitted for this plan, from the `VELNOR_LANES` environment the
-/// Both-mode plan step sets to `needs.lane-admission.outputs.lanes`.
-/// Absent or empty means `both`: single-lane aggregates and local runs plan
-/// without lane filtering, exactly as before.
+/// plan step sets to the dispatch `runner` input (or the configured lanes
+/// on automatic events). Absent or empty means `both`: local runs and
+/// renders that predate lane scoping plan without lane filtering, exactly
+/// as before.
 fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
     match value.trim() {
         "" | "both" => Ok(RunnerMode::Both),
@@ -8819,6 +8820,51 @@ workspace_check = true
         Ok((root, expected, results))
     }
 
+    /// Plan one lane-scoped diff end to end through `plan_with`: the
+    /// `VELNOR_LANES` value the render emits for `lanes` (a configured
+    /// single lane or a dispatch-narrowed selection), over the
+    /// `S4_PLAN_CONFIG_TOML` estate with `changed` as the diff. Returns the
+    /// fixture root, the scratch dir, the written expected-work JSON, and
+    /// the `GITHUB_OUTPUT` text.
+    fn s4_lanes_plan(
+        name: &str,
+        lanes: &str,
+        changed: &str,
+    ) -> Result<(std::path::PathBuf, std::path::PathBuf, String, String), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture(name, changed)?;
+        let dir = s4_dir(name);
+        let config_path = dir.join("project.toml");
+        must(
+            std::fs::write(&config_path, S4_PLAN_CONFIG_TOML),
+            "write s4 plan config",
+        );
+        let expected_path = dir.join("expected.json");
+        let output_path = dir.join("github-output");
+        must(
+            plan_with(
+                &config_path,
+                &PlanInputs {
+                    root: root.clone(),
+                    event: "pull_request".to_owned(),
+                    scope_override: None,
+                    base,
+                    head,
+                    lanes: lanes.to_owned(),
+                    selection_file: None,
+                    expected_file: Some(expected_path.clone()),
+                    github_output: Some(output_path.clone()),
+                },
+            ),
+            "plan the lane-scoped diff",
+        );
+        let expected = must(
+            std::fs::read_to_string(&expected_path),
+            "read expected work",
+        );
+        let outputs = must(std::fs::read_to_string(&output_path), "read github output");
+        Ok((root, dir, expected, outputs))
+    }
+
     const S4_RUN_CONFIG_TOML: &str = r#"schema = 2
 repository = "example/s4"
 profile = "s4-no-work"
@@ -9234,6 +9280,89 @@ velnor_full_commands = ["true"]
             verdict.failures,
         );
         assert!(exit.is_err(), "a missing result must fail the aggregate");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn lane_scoped_expected_work_passes_with_matching_lane_only_results(
+    ) -> Result<(), Box<dyn Error>> {
+        // A single-lane workflow plans only its lane and runs only its
+        // lane: lane-scoped expected work plus the matching lane-only
+        // results passes, with no phantom entries for the unscheduled lane.
+        let (root, base, head) = selection_git_fixture("s4-lane-scope", "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(
+            !selection.units.is_empty(),
+            "the fixture diff must select real work"
+        );
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Github);
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        let units = must_some(
+            document.get("units").and_then(serde_json::Value::as_array),
+            "expected units array",
+        );
+        assert!(!units.is_empty(), "a real-work plan expects units");
+        for unit in units {
+            assert_eq!(
+                unit.get("lanes"),
+                Some(&serde_json::json!(["github"])),
+                "a github-scoped plan names no velnor lane: {expected}"
+            );
+        }
+        let results = s4_success_results_for(&expected);
+        let dir = s4_dir("lane-scope");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(verdict.passed, "failures: {:?}", verdict.failures);
+        assert!(exit.is_ok(), "matching lane-only results pass: {exit:?}");
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn both_scoped_expected_work_fails_closed_with_lane_only_results() -> Result<(), Box<dyn Error>>
+    {
+        // The single-lane phantom failure, pinned at the aggregate: a
+        // both-scoped plan scored against lane-only results fails on every
+        // missing unscheduled-lane record, never silently.
+        let (root, base, head) = selection_git_fixture("s4-lane-phantom", "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = s4_expected_for_selection(&selection, RunnerMode::Both);
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        let ids: Vec<String> = document
+            .get("units")
+            .and_then(serde_json::Value::as_array)
+            .map(|units| {
+                units
+                    .iter()
+                    .filter_map(|unit| unit.get("id").and_then(serde_json::Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(!ids.is_empty(), "a real-work plan expects units");
+        let mut results = s4_success_results_for(&expected);
+        for id in &ids {
+            results = s4_drop_result(&results, id, "velnor");
+        }
+        let dir = s4_dir("lane-phantom");
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
+        assert!(!verdict.passed);
+        for id in &ids {
+            assert!(
+                verdict
+                    .failures
+                    .iter()
+                    .any(|failure| failure.contains(&format!("missing result for {id} velnor"))),
+                "failures: {:?}",
+                verdict.failures,
+            );
+        }
+        assert!(exit.is_err(), "phantom lanes must fail the aggregate");
         std::fs::remove_dir_all(dir)?;
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -9801,6 +9930,77 @@ velnor_full_commands = ["true"]
         assert!(
             outputs.contains("no_work_reason=no changed path selected a workload unit"),
             "{outputs}",
+        );
+        std::fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn lane_scoped_plan_writes_only_scheduled_lanes() -> Result<(), Box<dyn Error>> {
+        // The planner honors the `VELNOR_LANES` value the render emits —
+        // the configured single lane, or the dispatch-narrowed selection:
+        // real work plans exactly the scheduled lanes, never the other.
+        for (lanes, other) in [("github", "velnor"), ("velnor", "github")] {
+            let (root, dir, expected, outputs) =
+                s4_lanes_plan("s4-lanes-plan", lanes, "crates/alpha/src/lib.rs")?;
+            assert!(
+                !outputs.contains("planned_no_work"),
+                "{lanes}: real work carries no no-work marker: {outputs}"
+            );
+            let document: serde_json::Value = serde_json::from_str(&expected)?;
+            assert_eq!(
+                document
+                    .get("planned_no_work")
+                    .and_then(serde_json::Value::as_bool),
+                Some(false),
+                "{lanes}: the fixture diff is real work"
+            );
+            let units = must_some(
+                document.get("units").and_then(serde_json::Value::as_array),
+                "expected units array",
+            );
+            assert_eq!(units.len(), 1, "{lanes}: one unit selected: {expected}");
+            assert_eq!(
+                units[0].get("lanes"),
+                Some(&serde_json::json!([lanes])),
+                "{lanes}: a lane-scoped plan names only its lane: {expected}"
+            );
+            assert!(
+                !expected.contains(&format!("\"{other}\"")),
+                "{lanes}: the unscheduled lane appears nowhere: {expected}"
+            );
+            std::fs::remove_dir_all(dir)?;
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn velnor_narrowed_plan_drops_swift_as_proven_no_work() -> Result<(), Box<dyn Error>> {
+        // Dispatch narrowing to a lane that cannot run the selected units
+        // is proven no-work with its own reason — not a phantom velnor
+        // entry for a Swift unit no velnor job can report.
+        let (root, dir, expected, outputs) =
+            s4_lanes_plan("s4-lanes-swift", "velnor", "native/app.swift")?;
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        assert_eq!(
+            document
+                .get("planned_no_work")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+        );
+        assert_eq!(
+            document
+                .get("units")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+        );
+        assert!(outputs.contains("planned_no_work=true"), "{outputs}");
+        assert!(
+            outputs.contains("no_work_reason=no selected workload unit runs on the admitted lanes"),
+            "{outputs}"
         );
         std::fs::remove_dir_all(dir)?;
         std::fs::remove_dir_all(root)?;
