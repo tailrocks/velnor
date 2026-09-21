@@ -3876,6 +3876,37 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
         let dest = cargo_package_manifest_dir(package)?.join("release/microvm");
         copy_dir_files(guest, &dest)?;
     }
+    if let Some(target) = options.get("target")
+        && !valid_target(target)
+    {
+        return Err(GeneratorError::usage("invalid package target"));
+    }
+    let status = cargo_deb_command(
+        package,
+        version,
+        skip_build,
+        options.get("target").map(String::as_str),
+    )
+    .status()
+    .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("cargo deb failed"));
+    }
+    collect_debian_packages(
+        options.get("target").map(String::as_str),
+        options.get("asset-name").map(String::as_str),
+    )
+}
+
+/// The `cargo deb` invocation: `--output` pins the canonical dir cargo-deb
+/// already defaults to, which disables the back-compat hard-link twin it
+/// otherwise drops under `target/<triple>/debian/` for a single `--target`.
+fn cargo_deb_command(
+    package: &str,
+    version: &str,
+    skip_build: bool,
+    target: Option<&str>,
+) -> Command {
     let mut command = Command::new("cargo");
     command.args([
         "deb",
@@ -3888,22 +3919,11 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
     if skip_build {
         command.arg("--no-build");
     }
-    if let Some(target) = options.get("target") {
-        if !valid_target(target) {
-            return Err(GeneratorError::usage("invalid package target"));
-        }
+    if let Some(target) = target {
         command.args(["--target", target]);
     }
-    let status = command
-        .status()
-        .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
-    if !status.success() {
-        return Err(GeneratorError::usage("cargo deb failed"));
-    }
-    collect_debian_packages(
-        options.get("target").map(String::as_str),
-        options.get("asset-name").map(String::as_str),
-    )
+    command.args(["--output", "target/debian"]);
+    command
 }
 
 fn cargo_package_manifest_dir(package: &str) -> Result<PathBuf, GeneratorError> {
@@ -3959,21 +3979,28 @@ fn collect_debian_packages(
     target: Option<&str>,
     asset_name: Option<&str>,
 ) -> Result<(), GeneratorError> {
-    let dist = Path::new("dist");
-    fs::create_dir_all(dist)
-        .map_err(|error| GeneratorError::io("create release directory", dist, &error))?;
     let mut sources = vec![PathBuf::from("target/debian")];
     if let Some(target) = target {
         sources.push(PathBuf::from("target").join(target).join("debian"));
     }
+    collect_debian_packages_from(&sources, Path::new("dist"), asset_name)
+}
+
+fn collect_debian_packages_from(
+    sources: &[PathBuf],
+    dist: &Path,
+    asset_name: Option<&str>,
+) -> Result<(), GeneratorError> {
+    fs::create_dir_all(dist)
+        .map_err(|error| GeneratorError::io("create release directory", dist, &error))?;
     let mut found = Vec::new();
     for source in sources {
-        let Ok(entries) = fs::read_dir(&source) else {
+        let Ok(entries) = fs::read_dir(source) else {
             continue;
         };
         for entry in entries {
             let entry =
-                entry.map_err(|error| GeneratorError::io("read debian output", &source, &error))?;
+                entry.map_err(|error| GeneratorError::io("read debian output", source, &error))?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("deb") {
                 continue;
@@ -3984,6 +4011,8 @@ fn collect_debian_packages(
             found.push(path);
         }
     }
+    let mut found = dedup_debian_packages(found);
+    found.sort();
     if found.is_empty() {
         return Err(GeneratorError::usage(
             "cargo deb produced no .deb under target/debian",
@@ -3994,8 +4023,13 @@ fn collect_debian_packages(
     // publishing an ambiguous pick.
     if let Some(asset_name) = asset_name {
         if found.len() != 1 {
+            let listed = found
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(GeneratorError::usage(format!(
-                "expected exactly one .deb to rename, found {}",
+                "expected exactly one .deb to rename, found {}: {listed}",
                 found.len()
             )));
         }
@@ -4017,6 +4051,20 @@ fn collect_debian_packages(
         println!("{}", destination.display());
     }
     Ok(())
+}
+
+/// Collapse scan hits by file name, keeping the first root's copy: a
+/// back-compat twin is the same package seen in both scan roots, not a
+/// second package. Distinct file names still fail closed downstream.
+fn dedup_debian_packages(found: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    found
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| seen.insert(name.to_owned()))
+        })
+        .collect()
 }
 
 /// The bare-digest sidecar a consumer lane cross-checks against its own
@@ -5143,6 +5191,131 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("guest payload directory is missing"),
             "unexpected error: {error}"
+        );
+    }
+
+    /// A throwaway cargo-deb output tree: the canonical dir plus the
+    /// per-target dir cargo-deb drops its back-compat twin into.
+    fn debian_output_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-debian-{name}-{}",
+            crate::unique_suffix()
+        ));
+        let canonical = root.join("target/debian");
+        let twin = root.join("target/x86_64-unknown-linux-gnu/debian");
+        for dir in [&canonical, &twin] {
+            must(std::fs::create_dir_all(dir), "create debian fixture dir");
+        }
+        (root, canonical, twin)
+    }
+
+    #[test]
+    fn debian_collect_dedups_the_cargo_deb_back_compat_twin() {
+        // cargo-deb hard-links the same file name into both scan roots;
+        // the collector must see one package and rename it, not fail.
+        let (root, canonical, twin) = debian_output_fixture("twin");
+        let dist = root.join("dist");
+        let body = b"fake deb bytes";
+        must(
+            std::fs::write(canonical.join("widget_1.2.3_amd64.deb"), body),
+            "write canonical deb",
+        );
+        must(
+            std::fs::hard_link(
+                canonical.join("widget_1.2.3_amd64.deb"),
+                twin.join("widget_1.2.3_amd64.deb"),
+            ),
+            "link back-compat twin",
+        );
+        must(
+            collect_debian_packages_from(&[canonical, twin], &dist, Some("widget-1.2.3-amd64.deb")),
+            "a back-compat twin must collect as one package",
+        );
+        let renamed = dist.join("widget-1.2.3-amd64.deb");
+        assert_eq!(
+            must(std::fs::read(&renamed), "read renamed deb"),
+            body.to_vec(),
+            "renamed deb must carry the built bytes"
+        );
+        assert!(
+            dist.join("widget-1.2.3-amd64.deb.sha256").is_file(),
+            "renamed deb must carry its digest sidecar"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn debian_collect_rejects_two_distinct_debs_with_their_paths() {
+        // Two genuinely different file names are still an ambiguous pick:
+        // fail closed, and name both paths so the log diagnoses itself.
+        let (root, canonical, twin) = debian_output_fixture("distinct");
+        let dist = root.join("dist");
+        must(
+            std::fs::write(canonical.join("widget_1.2.3_amd64.deb"), b"one"),
+            "write first deb",
+        );
+        must(
+            std::fs::write(twin.join("widget_1.2.4_amd64.deb"), b"two"),
+            "write second deb",
+        );
+        let error = must_fail(
+            collect_debian_packages_from(&[canonical, twin], &dist, Some("widget-1.2.3-amd64.deb")),
+            "two distinct debs must fail closed",
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("expected exactly one .deb to rename, found 2"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("widget_1.2.3_amd64.deb")
+                && message.contains("widget_1.2.4_amd64.deb"),
+            "error must list both paths: {message}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cargo_deb_command_pins_the_canonical_output_dir() {
+        // An explicit `--output` keeps cargo-deb's default location while
+        // disabling the back-compat twin it emits for a single `--target`.
+        let command = cargo_deb_command("widget", "1.2.3", true, Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(command.get_program(), "cargo");
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            [
+                "deb",
+                "--no-strip",
+                "--package",
+                "widget",
+                "--deb-version",
+                "1.2.3",
+                "--no-build",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--output",
+                "target/debian",
+            ]
+        );
+        let bare = cargo_deb_command("widget", "1.2.3", false, None);
+        let argv: Vec<String> = bare
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "--target" || arg == "--no-build"),
+            "optional flags must stay conditional: {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--output", "target/debian"]),
+            "the output pin must be unconditional: {argv:?}"
         );
     }
 
