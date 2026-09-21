@@ -533,24 +533,24 @@ jobs:
           CARGO_BIN_TOOLS: cargo-deny
         run: |
           set -euo pipefail
-          missing=0
+          missing=false
           IFS=',' read -ra tools <<< "$CARGO_BIN_TOOLS"
           for tool in "${tools[@]}"; do
             tool="${tool#"${tool%%[![:space:]]*}"}"
             tool="${tool%"${tool##*[![:space:]]}"}"
             [[ -z "$tool" ]] && continue
             if ! command -v "$tool" >/dev/null; then
-              missing=1
+              missing=true
               break
             fi
             if ! "$tool" --version >/dev/null 2>&1; then
-              missing=1
+              missing=true
               break
             fi
             if [[ "$tool" == cargo-* ]]; then
               subcommand="${tool#cargo-}"
               if ! cargo "$subcommand" --version >/dev/null 2>&1; then
-                missing=1
+                missing=true
                 break
               fi
             fi
