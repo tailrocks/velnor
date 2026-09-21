@@ -260,9 +260,9 @@ impl ActionPin {
             Self::Bun => "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0",
             // actions/setup-node v7.0.0
             Self::Node => "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0",
-            // taiki-e/install-action v2.87.3
+            // taiki-e/install-action v2.87.16
             Self::RustTool => {
-                "taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3"
+                "taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16"
             }
             // jdx/mise-action v4.3.0
             Self::Mise => "jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0",
@@ -293,17 +293,17 @@ impl ActionPin {
             Self::DockerLogin => {
                 "docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0"
             }
-            // docker/setup-buildx-action v4
+            // docker/setup-buildx-action v4.4.1
             Self::DockerBuildx => {
-                "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0"
+                "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1"
             }
-            // docker/setup-qemu-action v4.3.0
+            // docker/setup-qemu-action v4.4.0
             Self::DockerQemu => {
-                "docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0"
+                "docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0"
             }
-            // docker/build-push-action v7
+            // docker/build-push-action v7.4.0
             Self::DockerBuild => {
-                "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0"
+                "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0"
             }
             // sigstore/cosign-installer v4.1.2
             Self::Cosign => {
@@ -20910,9 +20910,19 @@ lockfile = true
         )
         .1;
         let save = must_some(kind.find("name: Save unit cache"), "cargo save step");
-        let save_body = &kind[save..];
-        assert!(save_body.contains("if: always() &&"));
-        assert!(save_body.contains("steps.cache.outputs.cache-hit != 'true'"));
+        let save_if = must_some(
+            kind[save..]
+                .lines()
+                .nth(1)
+                .map(str::trim)
+                .filter(|line| line.starts_with("if: ")),
+            "unit cache save condition directly follows its step name",
+        );
+        assert_eq!(
+            save_if,
+            "if: ${{ inputs.cache_key_files != '' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}",
+            "cache save must require non-empty caller inputs, preserve post-failure cleanup, accept only trusted main/schedule/dispatch events, and skip exact hits"
+        );
     }
 
     #[test]
