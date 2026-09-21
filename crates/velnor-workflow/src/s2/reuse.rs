@@ -17,7 +17,11 @@
 //!   watch matches is classified: owned paths (watch, declared reads, or a
 //!   command read-glob) select their owners, provably-unowned paths select
 //!   nothing, and unprovable paths fall back to the full set with the
-//!   consulted sources in the reason.
+//!   consulted sources in the reason. Changed units and their dependents
+//!   form the verify set; prerequisites of the verify set are recorded as
+//!   build inputs (compiled, restored, and consumed in-job) instead of
+//!   earning their own verification. An opaque unit whose closed-world read
+//!   contract provably excludes a path is not selected by it.
 //! * [`canonical_fingerprint`] digests everything that can change a unit's
 //!   verdict: source blobs, config, the effective recipe (generator revision
 //!   plus check implementation plus lane commands), reviewed action pins and
@@ -207,11 +211,12 @@ pub(crate) fn parse_name_status_line(line: &str) -> Option<ChangedPath> {
 }
 
 /// The `(id, watch, depends_on)` view selection needs, plus the ownership
-/// inputs classification reads: the unit kind and the lane commands. The
-/// runtime projects it from its own unit table (tests construct it
-/// directly); selection itself never sees the config type. Declared reads
-/// arrive inside `watch` (generation unions them there), so classification
-/// consumes one seam: the final watch vec plus the commands.
+/// inputs classification reads: the unit kind, the lane commands, and the
+/// closed-world read flag. The runtime projects it from its own unit table
+/// (tests construct it directly); selection itself never sees the config
+/// type. Declared reads arrive inside `watch` (generation unions them
+/// there), so classification consumes one seam: the final watch vec plus
+/// the commands, narrowed by the closed flag.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WatchedUnit {
     pub(crate) id: String,
@@ -225,22 +230,33 @@ pub(crate) struct WatchedUnit {
     /// scans them for literal glob argv; runner and code-execution detection
     /// may mark the unit opaque. Empty when the projector carries none.
     pub(crate) commands: Vec<String>,
+    /// Whether the unit's owner asserted a closed world: the declared reads
+    /// plus the scan watch are the unit's complete read set, so an opaque
+    /// unit with the flag provably excludes paths nothing owns. A trusted
+    /// config assertion — generation validates its shape, not its truth —
+    /// and false for every unit that declares no complete contract.
+    pub(crate) reads_closed: bool,
 }
 
-/// The affected-selection verdict: `required` must run (changed units, their
-/// dependents, and every prerequisite), `full_units` is the changed-plus-
-/// dependents subset that runs full scope, and `explanations` names the
-/// reason per selected unit. `fallback_full` marks a full set chosen by
-/// fallback rather than by matching: an empty diff selects nothing with the
-/// flag clear, and the planner records that as explicit no-work.
-/// `fallback_reason` carries the fallback's auditable reason (the consulted
-/// sources for an unprovable path); it is `None` for proven-narrow and empty
-/// selections, `Some` for full fallbacks and for opaque-narrowed selections,
-/// and serializes only when present.
+/// The affected-selection verdict: `required` must run verification (the
+/// changed units and their dependents), `full_units` is the same verify
+/// set (every scheduled unit runs full scope; the field stays for contract
+/// stability), and `prereq_inputs` records the transitive prerequisites of
+/// the verify set outside it — build inputs the verify jobs compile,
+/// restore, and consume in-job, which earn no verification of their own.
+/// `explanations` names the reason per selected unit and per recorded
+/// input. `fallback_full` marks a full set chosen by fallback rather than
+/// by matching: an empty diff selects nothing with the flag clear, and the
+/// planner records that as explicit no-work. `fallback_reason` carries the
+/// fallback's auditable reason (the consulted sources for an unprovable
+/// path); it is `None` for proven-narrow and empty selections, `Some` for
+/// full fallbacks and for opaque-narrowed selections, and serializes only
+/// when present.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct AffectedSelection {
     pub(crate) required: BTreeSet<String>,
     pub(crate) full_units: BTreeSet<String>,
+    pub(crate) prereq_inputs: BTreeSet<String>,
     pub(crate) fallback_full: bool,
     pub(crate) explanations: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,16 +268,19 @@ pub(crate) struct AffectedSelection {
 /// A unit is directly selected when any effective match path hits its watch
 /// globs (which include generation-time declared reads) or its extracted
 /// command read-globs, or when a changed kind reusable names its kind.
-/// Dependents of selected units join the full set (a prerequisite change can
-/// break them), and prerequisites of selected units join the required set
-/// (their outputs must exist before the run). Edges are followed across unit
-/// kinds: a cross-language dependency invalidates exactly like a
-/// same-language one. A path no unit owns selects only the opaque units
-/// (whose unprovable commands may read it), or nothing when every unit is
-/// transparent; a global-prefix path, an unmatchable path, a
-/// CI-contract-unknown path, or a duplicate unit id falls back to the full
-/// set — or fails, for the duplicate id — so an input the model cannot prove
-/// narrow never silently skips verification.
+/// Dependents of selected units join the verify set (a prerequisite change
+/// can break them). Prerequisites of the verify set are recorded as build
+/// inputs instead of joining it: their outputs must exist before the run,
+/// and the verify jobs compile, restore, and consume them in-job, so an
+/// unchanged prerequisite earns no verification of its own. Edges are
+/// followed across unit kinds: a cross-language dependency invalidates
+/// exactly like a same-language one. A path no unit owns selects only the
+/// opaque units without a closed-world contract (whose unprovable commands
+/// may read it), or nothing when every unit is transparent or closed; a
+/// global-prefix path, an unmatchable path, a CI-contract-unknown path, or
+/// a duplicate unit id falls back to the full set — or fails, for the
+/// duplicate id — so an input the model cannot prove narrow never silently
+/// skips verification.
 ///
 /// # Errors
 ///
@@ -285,6 +304,7 @@ pub(crate) fn select_affected(
         return Ok(AffectedSelection {
             required: BTreeSet::new(),
             full_units: BTreeSet::new(),
+            prereq_inputs: BTreeSet::new(),
             fallback_full: false,
             explanations: BTreeMap::new(),
             fallback_reason: None,
@@ -391,8 +411,10 @@ pub(crate) fn join_opaque_reasons(mut opaque_reasons: Vec<String>) -> Option<Str
 }
 
 /// Expand direct path hits across `depends_on` edges and explain every
-/// selected unit: direct matches name their paths, kind-narrowed matches
-/// name the reusable, and closure members name the edge that pulled them in.
+/// selected unit and recorded input: direct matches name their paths,
+/// kind-narrowed matches name the reusable, dependents name the edge that
+/// pulled them into the verify set, and prerequisite inputs name their
+/// consumer. The verify set runs full scope, so `full_units` equals it.
 fn finish_selection(
     units: &[WatchedUnit],
     hits: &BTreeMap<&str, Vec<String>>,
@@ -444,8 +466,9 @@ fn finish_selection(
         );
     }
     AffectedSelection {
-        required: closure.required,
-        full_units: closure.full_units,
+        required: closure.required.clone(),
+        full_units: closure.required,
+        prereq_inputs: closure.prereq_inputs,
         fallback_full: false,
         explanations,
         fallback_reason: None,
@@ -546,7 +569,8 @@ impl CommandReads {
 }
 
 /// One unit's compiled ownership inputs: its watch globs, its extracted
-/// read/ignore globs, and whether its commands resisted proof.
+/// read/ignore globs, whether its commands resisted proof, and whether its
+/// owner asserted a closed world over the declared reads plus the watch.
 pub(crate) struct CompiledUnit<'a> {
     unit: &'a WatchedUnit,
     watch: GlobSet,
@@ -554,6 +578,7 @@ pub(crate) struct CompiledUnit<'a> {
     negatives: GlobSet,
     opaque: bool,
     opaque_reason: Option<String>,
+    reads_closed: bool,
 }
 
 /// Compile every unit's watch globs plus its command read-globs.
@@ -619,14 +644,16 @@ pub(crate) fn compile_ownership(
             negatives,
             opaque: reads.opaque,
             opaque_reason: reads.opaque_reason,
+            reads_closed: unit.reads_closed,
         });
     }
     Ok(compiled)
 }
 
-/// The ownership verdict for one changed path: its owners, the opaque units
-/// an unmatched path conservatively selects, unprovability with the consulted
-/// sources in the reason, or proven irrelevance.
+/// The ownership verdict for one changed path: its owners, the openly
+/// opaque units an unmatched path conservatively selects (closed-world
+/// units provably exclude it), unprovability with the consulted sources in
+/// the reason, or proven irrelevance.
 pub(crate) enum PathVerdict {
     Owned {
         units: BTreeSet<String>,
@@ -643,10 +670,13 @@ pub(crate) enum PathVerdict {
 
 /// Classify one changed path against the compiled units: owned when any
 /// unit's watch or read-globs match, opaque when no unit owns it but some
-/// (not every) unit is opaque, unknown when the path itself resists matching
-/// or every unit is opaque (narrowing is impossible), irrelevant otherwise.
-/// Owned wins over opaque: a proven owner selects its units even when
-/// another unit's commands resist proof.
+/// (not every) unit is openly opaque, unknown when the path itself resists
+/// matching or every unit is openly opaque (narrowing is impossible),
+/// irrelevant otherwise. A closed-world unit never joins the opaque set:
+/// its owner's contract asserts the watch plus the declared reads are its
+/// complete read set, so a path nothing owns provably excludes it. Owned
+/// wins over opaque: a proven owner selects its units even when another
+/// unit's commands resist proof.
 pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVerdict {
     if path.is_empty() {
         return PathVerdict::Unknown {
@@ -670,7 +700,7 @@ pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVe
     for unit in compiled {
         if unit.watch.is_match(path) || extraction_owns(unit, path) {
             owners.insert(unit.unit.id.clone());
-        } else if unit.opaque {
+        } else if unit.opaque && !unit.reads_closed {
             opaque.insert(unit.unit.id.clone());
             if let Some(cause) = unit.opaque_reason.as_deref() {
                 causes.push(cause);
@@ -1077,22 +1107,30 @@ pub(crate) fn github_verdict(path: &str) -> Option<GithubVerdict> {
     })
 }
 
-/// The dependency closure of the directly changed units: `required` must run
-/// (changed units, their dependents, and every prerequisite), `full_units` is
-/// the changed-plus-dependents subset that runs full scope, and the two maps
-/// record why each indirect unit joined.
-struct SelectionClosure {
-    required: BTreeSet<String>,
-    full_units: BTreeSet<String>,
-    affected_by: BTreeMap<String, BTreeSet<String>>,
-    required_by: BTreeMap<String, BTreeSet<String>>,
+/// The dependency closure of the directly changed units: `required` is the
+/// verify set that must run (changed units and their dependents),
+/// `prereq_inputs` records the transitive prerequisites of the verify set
+/// outside it (build inputs the verify jobs provide in-job, earning no
+/// verification of their own), and the two maps record why each indirect
+/// unit joined the verify set or the input record.
+pub(crate) struct SelectionClosure {
+    pub(crate) required: BTreeSet<String>,
+    pub(crate) prereq_inputs: BTreeSet<String>,
+    pub(crate) affected_by: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) required_by: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// Expand the directly changed units across `depends_on` edges. Dependents of
-/// a changed unit join the affected set — the changed inputs flow downstream,
-/// so downstream verdicts need re-proving — and prerequisites join the
-/// required set afterwards without pulling their own dependents.
-fn expand_selection_closure(units: &[WatchedUnit], changed: &BTreeSet<String>) -> SelectionClosure {
+/// Expand the directly changed units across `depends_on` edges: the single
+/// closure implementation behind both the [`select_affected`] oracle and the
+/// planner's runtime selection. Dependents of a changed unit join the
+/// verify set — the changed inputs flow downstream, so downstream verdicts
+/// need re-proving — and prerequisites of the verify set are recorded as
+/// build inputs afterwards without pulling their own dependents and without
+/// joining the verify set.
+pub(crate) fn expand_selection_closure(
+    units: &[WatchedUnit],
+    changed: &BTreeSet<String>,
+) -> SelectionClosure {
     let mut affected = changed.clone();
     let mut affected_by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut pending: Vec<String> = changed.iter().cloned().collect();
@@ -1109,16 +1147,44 @@ fn expand_selection_closure(units: &[WatchedUnit], changed: &BTreeSet<String>) -
             }
         }
     }
-    let full_units = affected.clone();
-    let mut required = affected;
+    let (prereq_inputs, required_by) = walk_prerequisite_inputs(units, &affected);
+    SelectionClosure {
+        required: affected,
+        prereq_inputs,
+        affected_by,
+        required_by,
+    }
+}
+
+/// The transitive prerequisite inputs of `roots` outside `roots` itself,
+/// with the consumers that pulled each input in. [`expand_selection_closure`]
+/// and the planner's input log share this walk so the recorded inputs can
+/// never diverge from the closure's.
+pub(crate) fn prerequisite_inputs(
+    units: &[WatchedUnit],
+    roots: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    walk_prerequisite_inputs(units, roots).0
+}
+
+/// Walk `depends_on` edges from `roots`, collecting every prerequisite
+/// outside `roots` with its consumers. Unknown ids contribute nothing: a
+/// root without a unit has no edges to follow.
+fn walk_prerequisite_inputs(
+    units: &[WatchedUnit],
+    roots: &BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>) {
+    let mut seen: BTreeSet<String> = roots.clone();
+    let mut inputs = BTreeSet::new();
     let mut required_by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut pending: Vec<String> = required.iter().cloned().collect();
+    let mut pending: Vec<String> = roots.iter().cloned().collect();
     while let Some(id) = pending.pop() {
         let Some(unit) = units.iter().find(|unit| unit.id == id) else {
             continue;
         };
         for dependency in &unit.depends_on {
-            if required.insert(dependency.clone()) {
+            if seen.insert(dependency.clone()) {
+                inputs.insert(dependency.clone());
                 required_by
                     .entry(dependency.clone())
                     .or_default()
@@ -1127,24 +1193,22 @@ fn expand_selection_closure(units: &[WatchedUnit], changed: &BTreeSet<String>) -
             }
         }
     }
-    SelectionClosure {
-        required,
-        full_units,
-        affected_by,
-        required_by,
-    }
+    (inputs, required_by)
 }
 
 /// The full set with one shared fallback reason per unit: the planner could
-/// not prove a narrow selection, so every unit runs. Callers use it when the
-/// change list itself is unusable (no base, git unavailable, unparseable
-/// entries) so every fallback carries its reason, and the same reason is
-/// surfaced additively as [`AffectedSelection::fallback_reason`].
+/// not prove a narrow selection, so every unit runs. No unit is a mere
+/// input when everything verifies, so the input record stays empty. Callers
+/// use it when the change list itself is unusable (no base, git
+/// unavailable, unparseable entries) so every fallback carries its reason,
+/// and the same reason is surfaced additively as
+/// [`AffectedSelection::fallback_reason`].
 #[must_use]
 pub(crate) fn fallback_selection(units: &[WatchedUnit], reason: &str) -> AffectedSelection {
     AffectedSelection {
         required: units.iter().map(|unit| unit.id.clone()).collect(),
         full_units: units.iter().map(|unit| unit.id.clone()).collect(),
+        prereq_inputs: BTreeSet::new(),
         fallback_full: true,
         explanations: units
             .iter()
@@ -1748,6 +1812,7 @@ pub(crate) enum Disposition {
     Cancelled,
     UnexpectedSkip,
     BlockedByPrerequisite,
+    BuildInput,
     Extra,
 }
 
@@ -1764,14 +1829,15 @@ impl Disposition {
             Self::Cancelled => "cancelled",
             Self::UnexpectedSkip => "unexpected skip",
             Self::BlockedByPrerequisite => "blocked",
+            Self::BuildInput => "build input",
             Self::Extra => "extra",
         }
     }
 }
 
 /// One explained work item: the expected unit, lane, and matrix entry, what
-/// happened to it, and the detail. Unit-level notes (blocked prerequisites)
-/// leave `lane` empty.
+/// happened to it, and the detail. Unit-level notes (blocked prerequisites,
+/// build inputs) leave `lane` empty.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkExplanation {
     pub(crate) unit_id: String,
@@ -1798,12 +1864,14 @@ pub(crate) struct AggregateVerdict {
 /// Every expected `(unit, lane, matrix entry)` must conclude success —
 /// executed or backed by producing evidence — or carry the planner's recorded
 /// skip reason. The aggregate rejects missing results, unexpected skips,
-/// cancelled work, incomplete matrices (matrix entries with no report), a
-/// prerequisite closure that did not itself pass, duplicate reports, and a
-/// contradictory plan (the no-work marker beside listed units, or a
-/// prerequisite outside the plan). Reports outside the plan are noted as
-/// extra and ignored: unplanned work never greens planned work, and never
-/// reds it either. `prerequisites` maps each unit to its direct dependencies.
+/// cancelled work, incomplete matrices (matrix entries with no report), an
+/// in-plan prerequisite closure that did not itself pass, duplicate reports,
+/// and a contradictory plan (the no-work marker beside listed units).
+/// Prerequisites outside the plan are build inputs the verify jobs provided
+/// in-job, noted as such: they need no verdict and never fail the run.
+/// Reports outside the plan are noted as extra and ignored: unplanned work
+/// never greens planned work, and never reds it either. `prerequisites`
+/// maps each unit to its direct dependencies.
 #[must_use]
 pub(crate) fn aggregate(
     expected: &ExpectedWork,
@@ -2030,10 +2098,12 @@ fn describe_item(unit_id: &str, lane: &str, entry: Option<&str>) -> String {
     }
 }
 
-/// Reject expected units whose transitive prerequisites did not themselves
-/// pass: a success behind a failed prerequisite proves nothing, so the
-/// dependent fails closed even when it reported success. A prerequisite
-/// outside the plan, or a dependency cycle, fails the whole aggregate.
+/// Reject expected units whose transitive in-plan prerequisites did not
+/// themselves pass: a success behind a failed prerequisite proves nothing,
+/// so the dependent fails closed even when it reported success. A
+/// prerequisite outside the plan is a build input the verify job provided
+/// in-job, noted as such — never a failure. A dependency cycle fails the
+/// whole aggregate.
 fn check_prerequisites(
     expected: &ExpectedWork,
     prerequisites: &BTreeMap<String, Vec<String>>,
@@ -2051,9 +2121,15 @@ fn check_prerequisites(
         };
         for dependency in &transitive {
             if !expected.units.contains_key(dependency) {
-                failures.push(format!(
-                    "prerequisite `{dependency}` of `{unit_id}` is outside the planned work"
-                ));
+                explanations.push(WorkExplanation {
+                    unit_id: unit_id.clone(),
+                    lane: String::new(),
+                    matrix_entry: None,
+                    disposition: Disposition::BuildInput,
+                    detail: format!(
+                        "prerequisite `{dependency}` is an out-of-plan build input provided in-job; no verdict expected"
+                    ),
+                });
             } else if failed_units.contains(dependency) {
                 failures.push(format!(
                     "prerequisite `{dependency}` of `{unit_id}` did not pass"
@@ -2399,6 +2475,7 @@ mod tests {
             depends_on: depends_on.iter().map(ToString::to_string).collect(),
             kind: String::new(),
             commands: Vec::new(),
+            reads_closed: false,
         }
     }
 
@@ -2415,6 +2492,24 @@ mod tests {
             depends_on: depends_on.iter().map(ToString::to_string).collect(),
             kind: kind.to_owned(),
             commands: commands.iter().map(ToString::to_string).collect(),
+            reads_closed: false,
+        }
+    }
+
+    fn watched_closed(
+        id: &str,
+        watch: &[&str],
+        depends_on: &[&str],
+        kind: &str,
+        commands: &[&str],
+    ) -> WatchedUnit {
+        WatchedUnit {
+            id: id.to_owned(),
+            watch: watch.iter().map(ToString::to_string).collect(),
+            depends_on: depends_on.iter().map(ToString::to_string).collect(),
+            kind: kind.to_owned(),
+            commands: commands.iter().map(ToString::to_string).collect(),
+            reads_closed: true,
         }
     }
 
@@ -2668,18 +2763,25 @@ mod tests {
                 "bun-web".to_owned(),
                 "node-api".to_owned(),
                 "rust-app".to_owned(),
-                "rust-base".to_owned(),
             ]),
-            "both opaque units plus the prerequisite and the dependent"
+            "both opaque units plus the dependent verify; the prerequisite does not"
         );
         assert_eq!(
-            selection.full_units,
-            BTreeSet::from([
-                "bun-web".to_owned(),
-                "node-api".to_owned(),
-                "rust-app".to_owned(),
-            ]),
-            "prerequisites join required, not full"
+            selection.full_units, selection.required,
+            "the verify set runs full scope"
+        );
+        assert_eq!(
+            selection.prereq_inputs,
+            BTreeSet::from(["rust-base".to_owned()]),
+            "the prerequisite is recorded as a build input, not scheduled"
+        );
+        assert!(
+            selection
+                .explanations
+                .get("rust-base")
+                .is_some_and(|explanation| explanation.contains("prerequisite of")),
+            "the input names its consumer: {:?}",
+            selection.explanations
         );
         assert!(
             !selection.required.contains("rust-alpha"),
@@ -2730,8 +2832,171 @@ mod tests {
         )?;
         assert!(selection.required.is_empty());
         assert!(selection.full_units.is_empty());
+        assert!(selection.fallback_reason.is_none());
+        Ok(())
+    }
+
+    /// A closed-world contract excludes its unit from the opaque fallback:
+    /// an unmatched path no closed unit owns selects nothing, with no
+    /// fallback flag and no reason — the contract provably closes the unit.
+    #[test]
+    fn unmatched_with_only_closed_opaque_is_irrelevant() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_closed("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+            watched_closed("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let compiled = compile_ownership(&units)?;
+        assert!(
+            matches!(
+                classify_path(&compiled, "AGENTS.md"),
+                PathVerdict::Irrelevant
+            ),
+            "closed opaque units provably exclude an unmatched path"
+        );
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.required.is_empty());
+        assert!(selection.prereq_inputs.is_empty());
         assert!(!selection.fallback_full);
         assert!(selection.fallback_reason.is_none());
+        Ok(())
+    }
+
+    /// Closure narrows only the fallback: a closed unit still owns the
+    /// paths its watch and read-globs match, selecting exactly its unit.
+    #[test]
+    fn closed_unit_still_owns_its_covered_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_closed(
+                "bun-web",
+                &["web/**", "docs/**"],
+                &[],
+                "bun",
+                &["bun run build"],
+            ),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("docs/guide.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["bun-web".to_owned()]),
+            "the closed owner alone, not the open opaque unit"
+        );
+        assert!(selection.fallback_reason.is_none());
+        Ok(())
+    }
+
+    /// A mixed estate narrows to the openly opaque: closed units stay out
+    /// of the opaque set, and the missing-contract hint names only the
+    /// units whose contracts would narrow the path.
+    #[test]
+    fn unmatched_with_mixed_opaque_selects_only_open_units(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_closed("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["node-api".to_owned()]),
+            "the open opaque unit alone; the closed unit is excluded"
+        );
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("selects only opaque units") && reason.contains("node-api"),
+            "the reason names the open opaque unit: {reason:?}"
+        );
+        assert!(
+            !reason.contains("bun-web"),
+            "the closed unit needs no contract for an excluded path: {reason:?}"
+        );
+        Ok(())
+    }
+
+    /// Prerequisite inputs are transitive and stay out of the verify set:
+    /// a chain behind a selected unit is recorded in full, with each
+    /// input naming its consumer, while the verify set holds the
+    /// selection and its dependents only.
+    #[test]
+    fn prerequisite_inputs_are_transitive_and_verify_free() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let units = vec![
+            watched("rust-base", &["crates/base/**"], &[]),
+            watched("rust-mid", &["crates/mid/**"], &["rust-base"]),
+            watched("rust-top", &["crates/top/**"], &["rust-mid"]),
+            watched("rust-down", &["crates/down/**"], &["rust-top"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("crates/top/lib.rs", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-down".to_owned(), "rust-top".to_owned()]),
+            "the changed unit and its dependent verify"
+        );
+        assert_eq!(
+            selection.prereq_inputs,
+            BTreeSet::from(["rust-base".to_owned(), "rust-mid".to_owned()]),
+            "the transitive chain is recorded as build inputs"
+        );
+        assert!(
+            selection
+                .explanations
+                .get("rust-mid")
+                .is_some_and(|explanation| explanation.contains("prerequisite of rust-top")),
+            "each input names its consumer: {:?}",
+            selection.explanations
+        );
+        assert_eq!(
+            prerequisite_inputs(
+                &units,
+                &BTreeSet::from(["rust-down".to_owned(), "rust-top".to_owned()])
+            ),
+            selection.prereq_inputs,
+            "the shared walk agrees with the closure"
+        );
+        Ok(())
+    }
+
+    /// A changed prerequisite verifies: direct selection beats the input
+    /// record, so a unit that both changed and feeds another unit runs.
+    #[test]
+    fn changed_prerequisite_stays_in_the_verify_set() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched("rust-base", &["crates/base/**"], &[]),
+            watched("rust-top", &["crates/top/**"], &["rust-base"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("crates/base/lib.rs", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-base".to_owned(), "rust-top".to_owned()]),
+            "the changed prerequisite and its dependent both verify"
+        );
+        assert!(
+            selection.prereq_inputs.is_empty(),
+            "nothing is a mere input when the chain verifies: {:?}",
+            selection.prereq_inputs
+        );
         Ok(())
     }
 
@@ -3762,13 +4027,13 @@ mod tests {
             "the changed unit and its downstream dependent run full scope"
         );
         assert_eq!(
-            selection.required,
-            BTreeSet::from([
-                "rust-base".to_owned(),
-                "rust-lib".to_owned(),
-                "node-app".to_owned()
-            ]),
-            "the prerequisite joins the required set without pulling its own dependents"
+            selection.required, selection.full_units,
+            "the verify set is the changed unit plus its dependents"
+        );
+        assert_eq!(
+            selection.prereq_inputs,
+            BTreeSet::from(["rust-base".to_owned()]),
+            "the prerequisite is a recorded build input without pulling its own dependents"
         );
         assert!(
             !selection.required.contains("node-sibling"),
@@ -4308,14 +4573,19 @@ mod tests {
             ],
             &outside,
         );
-        assert!(!verdict.passed);
         assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| failure.contains("outside the planned work")),
-            "failures: {:?}",
+            verdict.passed,
+            "an out-of-plan prerequisite is a build input, not a failure: {:?}",
             verdict.failures
+        );
+        assert!(
+            verdict.explanations.iter().any(|explanation| {
+                explanation.disposition == Disposition::BuildInput
+                    && explanation.unit_id == "node-app"
+                    && explanation.detail.contains("rust-ghost")
+            }),
+            "the build input is noted with its consumer: {:?}",
+            verdict.explanations
         );
     }
 
