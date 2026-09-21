@@ -687,3 +687,127 @@ fn s2_run_executes_only_the_verify_unit() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+#[test]
+fn s1_closed_exclusion_is_visible_in_plan_log_and_select() -> Result<(), Box<dyn Error>> {
+    let closed = CONFIG_S1.replacen(
+        "watch = [\"site/**\"]",
+        "watch = [\"site/**\"]\nreads_closed = true",
+        1,
+    );
+    let fixture = Fixture::with_config(false, &closed, "AGENTS.md", "docs v2\n")?;
+    let plan = fixture.plan()?;
+    assert_eq!(
+        plan.fields
+            .get("planned_no_work")
+            .cloned()
+            .unwrap_or_default(),
+        "true",
+        "a closed contract excluding the path is zero work: {:?}",
+        plan.fields
+    );
+    assert_eq!(
+        plan.fields
+            .get("no_work_reason")
+            .cloned()
+            .unwrap_or_default(),
+        "no changed path selected a workload unit",
+        "the no-work reason is unchanged: {:?}",
+        plan.fields
+    );
+    assert!(
+        scheduled_ids(&plan).is_empty(),
+        "nothing schedules: {:?}",
+        plan.fields
+    );
+    assert!(
+        plan.stdout.contains("closed_excluded=site"),
+        "the log names the excluded closed unit: {}",
+        plan.stdout
+    );
+    assert!(
+        !plan.fields.contains_key("closed_excluded"),
+        "the record is log-only, like prereq_inputs: {:?}",
+        plan.fields
+    );
+
+    let selection = fixture.select_json()?;
+    assert_eq!(
+        selection.get("required"),
+        Some(&serde_json::json!([])),
+        "the oracle still selects nothing: {selection}"
+    );
+    assert_eq!(
+        selection.get("closed_excluded"),
+        Some(&serde_json::json!(["site"])),
+        "the oracle names the excluded closed unit: {selection}"
+    );
+    assert_eq!(
+        selection.get("fallback_reason"),
+        None,
+        "no fallback fired: {selection}"
+    );
+    Ok(())
+}
+
+#[test]
+fn s2_closed_exclusion_is_visible_in_plan_log_and_select() -> Result<(), Box<dyn Error>> {
+    let closed = CONFIG_S2.replacen(
+        "watch = [\"site/**\"]",
+        "watch = [\"site/**\"]\nreads_closed = true",
+        1,
+    );
+    let fixture = Fixture::with_config(true, &closed, "AGENTS.md", "docs v2\n")?;
+    let plan = fixture.plan()?;
+    assert_eq!(
+        plan.fields
+            .get("planned_no_work")
+            .cloned()
+            .unwrap_or_default(),
+        "true",
+        "a closed contract excluding the path is zero work: {:?}",
+        plan.fields
+    );
+    assert_eq!(
+        plan.fields
+            .get("no_work_reason")
+            .cloned()
+            .unwrap_or_default(),
+        "no changed path selected a workload unit",
+        "the no-work reason is unchanged: {:?}",
+        plan.fields
+    );
+    assert!(
+        scheduled_ids(&plan).is_empty(),
+        "nothing schedules: {:?}",
+        plan.fields
+    );
+    assert!(
+        plan.stdout.contains("closed_excluded=site"),
+        "the log names the excluded closed unit: {}",
+        plan.stdout
+    );
+    assert!(
+        !plan.fields.contains_key("closed_excluded"),
+        "the record is log-only, like prereq_inputs: {:?}",
+        plan.fields
+    );
+
+    let selection = fixture.select_json()?;
+    assert_eq!(
+        selection.get("required"),
+        Some(&serde_json::json!([])),
+        "the oracle still selects nothing: {selection}"
+    );
+    assert_eq!(
+        selection.get("closed_excluded"),
+        Some(&serde_json::json!(["site"])),
+        "the oracle names the excluded closed unit: {selection}"
+    );
+    assert_eq!(
+        selection.get("fallback_reason"),
+        None,
+        "no fallback fired: {selection}"
+    );
+    Ok(())
+}
