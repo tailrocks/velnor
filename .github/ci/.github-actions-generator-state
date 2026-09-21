@@ -21,7 +21,7 @@ generator	70
 .github/workflows/ci-unit-docs.yml	3ce75eb8d5cf63dd
 .github/workflows/ci-unit-opentofu.yml	546e793ea6a21147
 .github/workflows/ci-unit-rust.yml	aee86c0c583da845
-.github/workflows/maintenance.yml	16d0cc291e92ad49
+.github/workflows/maintenance.yml	c79b5e1698660e63
 .github/workflows/nightly.yml	cde4c359bcb710cc
 .github/workflows/preview.yml	f6d6053feeac0133
 .github/workflows/release.yml	5307c9448d343233
