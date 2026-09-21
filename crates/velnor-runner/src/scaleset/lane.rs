@@ -1510,15 +1510,21 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_started(&mut self, started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
-        let Some(intent) = self
-            .intents
-            .get_by_request(self.config.scale_set_id, request_id)
-            .map_err(|error| LaneError::new("find provision intent", error))?
-        else {
-            return Ok(());
+        let key = if !started.runner_name.is_empty() {
+            OwnershipId::bind(self.config.scale_set_id, &started.runner_name)
+                .as_str()
+                .to_string()
+        } else {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
+            let Some(intent) = self
+                .intents
+                .get_by_request(self.config.scale_set_id, request_id)
+                .map_err(|error| LaneError::new("find provision intent", error))?
+            else {
+                return Ok(());
+            };
+            Self::ownership_key(&intent)
         };
-        let key = Self::ownership_key(&intent);
         let known = self
             .registry
             .get(&key)
@@ -1556,15 +1562,27 @@ impl WorkerLane for DaemonWorkerLane {
             self.transition_worker(&key, *edge)
                 .map_err(|error| LaneError::new("record job started", error))?;
         }
-        let holder = permit_holder(self.config.scale_set_id, request_id);
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
+        let holder = holder_for_key(self.config.scale_set_id, &key)
+            .unwrap_or_else(|| permit_holder(self.config.scale_set_id, request_id));
         self.fenced_transition(&holder, LedgerPermitState::Running)
             .map_err(|error| LaneError::new("mark permit running", error))?;
         Ok(())
     }
 
     fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
-        self.note_terminal_request(request_id)
+        self.refresh_generation()?;
+        self.opportunistic_sweep();
+        let key = if !completed.runner_name.is_empty() {
+            OwnershipId::bind(self.config.scale_set_id, &completed.runner_name)
+                .as_str()
+                .to_string()
+        } else {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
+            self.terminal_key(request_id)?
+        };
+        self.drive_terminal(&key)
+            .map_err(|error| LaneError::new("drive worker terminal", error))
     }
 
     fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {

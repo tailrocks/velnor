@@ -536,6 +536,15 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         if row.state == DemandState::Terminal || row.state == DemandState::Declined {
             return Ok(true);
         }
+        let holder = if !started.runner_name.is_empty() {
+            if let Some((_set, req)) = crate::scaleset::intents::parse_runner_name(&started.runner_name) {
+                permit_holder(self.config.scale_set_id, req)
+            } else {
+                permit_holder(self.config.scale_set_id, request_id)
+            }
+        } else {
+            permit_holder(self.config.scale_set_id, request_id)
+        };
         if row.state == DemandState::CanceledPending {
             let generation = self.generation()?;
             self.demand
@@ -543,7 +552,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 .map_err(ScaleError::Store)?;
             transition_or_adopt(
                 &mut self.ledger,
-                &permit_holder(self.config.scale_set_id, request_id),
+                &holder,
                 LedgerPermitState::Acquiring,
                 generation,
             )
@@ -569,7 +578,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         }
         transition_or_adopt(
             &mut self.ledger,
-            &permit_holder(self.config.scale_set_id, request_id),
+            &holder,
             LedgerPermitState::Acquiring,
             generation,
         )
@@ -591,7 +600,15 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
             return Ok(false);
         };
-        let holder = permit_holder(self.config.scale_set_id, request_id);
+        let holder = if !completed.runner_name.is_empty() {
+            if let Some((_set, req)) = crate::scaleset::intents::parse_runner_name(&completed.runner_name) {
+                permit_holder(self.config.scale_set_id, req)
+            } else {
+                permit_holder(self.config.scale_set_id, request_id)
+            }
+        } else {
+            permit_holder(self.config.scale_set_id, request_id)
+        };
         let held = self
             .ledger
             .holder_state(&holder)
