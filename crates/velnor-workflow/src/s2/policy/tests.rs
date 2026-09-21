@@ -100,22 +100,6 @@ fn lookup(
         search_path,
         install_root,
         build_forbidden: true,
-        candidate_manifest: None,
-    }
-}
-
-fn lookup_with_manifest(
-    pinned_binary: Option<PathBuf>,
-    search_path: Option<std::ffi::OsString>,
-    install_root: PathBuf,
-    candidate_manifest: PathBuf,
-) -> PinnedBinaryLookup {
-    PinnedBinaryLookup {
-        pinned_binary,
-        search_path,
-        install_root,
-        build_forbidden: true,
-        candidate_manifest: Some(candidate_manifest),
     }
 }
 
@@ -563,7 +547,7 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
     assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
     assert!(
-        entrypoint.contains("with no secret references"),
+        entrypoint.contains("references no secrets"),
         "the trust invariant states the absence honestly: {entrypoint}"
     );
     assert!(!entrypoint.contains("secrets."), "{entrypoint}");
@@ -590,8 +574,7 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// The owner policy job acquires products (no `--rev <sha>` install) and its
-/// candidate step passes shell variables to `closure --rev=`: those variable
+/// The owner policy job acquires products (no `--rev <sha>` install); variable
 /// references are not pin literals, so the pin rule still passes on the
 /// exported revision and still names it on drift.
 #[test]
@@ -606,16 +589,10 @@ fn owner_entrypoint_pin_ignores_variable_references() {
         default_branch: "main",
         declared_ruleset_contexts: "ci-required,Policy",
     });
-    assert!(job.contains("--rev=\"$pin\""), "{job}");
+    assert!(job.contains("Set up declared generator product"), "{job}");
     assert!(
         !job.contains("--rev "),
         "rendered templates never use the space form a pre-product base validator scans for: {job}"
-    );
-    assert!(
-        job.contains(&format!(
-            "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
-        )),
-        "the Enforce step binds the candidate manifest through the unset-safe fallback: {job}"
     );
     let root = entrypoint_tree("entrypoint-owner-pin", &job);
     let pin = entrypoint_pin(&root, PIN_A);
@@ -777,7 +754,6 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
         base_revision: PIN_A.to_owned(),
         ruleset_contexts: Some(vec!["ci-required".to_owned(), "DCO".to_owned()]),
         build_pin: false,
-        candidate_manifest: None,
     };
     let report = must(evaluate(&options), "evaluate ungated tree");
     let runners = must_some(report.rule("trusted-runners"), "trusted-runners rule");
@@ -1026,376 +1002,19 @@ fn cli_requires_the_base_validator_revision() {
     )
     .to_string();
     assert!(unknown.contains("--approved-policy-revision"), "{unknown}");
-    let duplicate = must_fail(
-        run_cli(&[
-            std::ffi::OsString::from("--candidate-manifest"),
-            std::ffi::OsString::from("/first.json"),
-            std::ffi::OsString::from("--candidate-manifest"),
-            std::ffi::OsString::from("/second.json"),
-        ]),
-        "candidate manifest given twice",
-    )
-    .to_string();
-    assert!(duplicate.contains("--candidate-manifest"), "{duplicate}");
-    assert!(duplicate.contains("given twice"), "{duplicate}");
     let _ = fs::remove_dir_all(root);
-}
-
-// ---------------------------------------------------------------------------
-// Candidate render exception
-// ---------------------------------------------------------------------------
-
-#[cfg(unix)]
-fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
-    let binary = directory.join("candidate");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
-            ),
-        ),
-        "write fake candidate renderer",
-    );
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake candidate renderer executable",
-        );
-    }
-    binary
-}
-
-#[cfg(unix)]
-fn closure_fixture(name: &str) -> (PathBuf, String) {
-    let root = temporary_directory(name);
-    git_ok(&root, &["init", "-q", "-b", "main"]);
-    write(
-        &root.join("crates/velnor-workflow/src/lib.rs"),
-        "pub fn f() {}\n",
-    );
-    write(&root.join("Cargo.toml"), "[workspace]\n");
-    write(&root.join("Cargo.lock"), "# lock\n");
-    write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
-    let head = commit(&root, "fixture");
-    (root, head)
-}
-
-// NOTE: `candidate_render_is_accepted_only_from_a_head_authentic_binary` was
-// deleted here. It asserted that an env-slot binary is accepted when its
-// `--closure` stdout echoes the wanted closure — but that expectation WAS
-// the vulnerability itself: a `--closure` echo is a self-report by
-// untrusted bytes, and treating it as authenticity let any binary that
-// prints the right string execute as the candidate. Acceptance now
-// requires the manifest binding (closure equality plus digest match before
-// any execution); the tests below pin each clause of that rule.
-
-/// A candidate manifest binding `binary` to `closure`: the digest is the
-/// real SHA-256 of the binary bytes, so only a byte-identical binary
-/// satisfies the binding.
-#[cfg(unix)]
-fn candidate_manifest_for(
-    directory: &Path,
-    name: &str,
-    binary: &Path,
-    closure: &str,
-    revision: &str,
-) -> PathBuf {
-    use sha2::Digest as _;
-    let bytes = must(fs::read(binary), "read fake binary bytes");
-    let mut digest = String::with_capacity(64);
-    for byte in sha2::Sha256::digest(&bytes) {
-        let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
-    }
-    let manifest = directory.join(name);
-    must(
-        fs::write(
-            &manifest,
-            serde_json::json!({
-                "profile": "debug",
-                "platform": "Linux-X64",
-                "repository": crate::s2::workflow_setup_action_repository(),
-                "run_id": "123",
-                "revision": revision,
-                "closure": closure,
-                "binary_sha256": digest,
-            })
-            .to_string(),
-        ),
-        "write candidate manifest",
-    );
-    manifest
-}
-
-/// A fake candidate renderer that records every `--closure` probe in
-/// `sentinel`, so tests can prove the binary was never executed at all.
-#[cfg(unix)]
-fn fake_probed_candidate_renderer(directory: &Path, closure: &str, sentinel: &Path) -> PathBuf {
-    let binary = directory.join("candidate");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then touch \"{}\"; echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n",
-                sentinel.display()
-            ),
-        ),
-        "write fake probed candidate renderer",
-    );
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake probed candidate renderer executable",
-        );
-    }
-    binary
-}
-
-#[cfg(unix)]
-#[test]
-fn bound_candidate_matching_head_tree_is_accepted() {
-    let (root, head) = closure_fixture("candidate-bound");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-bound-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "bound candidate reproduces the tree",
-        )
-        .as_deref(),
-        Some(wanted.as_str())
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
-    let (root, head) = closure_fixture("candidate-lying");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-lying-scratch");
-    let sentinel = root.join("closure-probed");
-    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    // Bind the manifest to *other* bytes, so the binary echoes the wanted
-    // closure but its digest misses.
-    let other = root.join("other-bytes");
-    must(fs::write(&other, "different bytes"), "write decoy bytes");
-    let manifest = candidate_manifest_for(&root, "candidate-manifest.json", &other, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "digest mismatch never errors, it simply does not prove",
-        )
-        .is_none(),
-        "a binary whose digest misses the manifest is not the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "the digest gate fires before any execution, not even `--closure`"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_manifest_for_another_tree_is_rejected() {
-    let (root, head) = closure_fixture("candidate-other-tree");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-other-tree-scratch");
-    // Self-consistent but for another tree: the binary echoes CLOSURE_A and
-    // the manifest binds CLOSURE_A with a matching digest.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    let error = must_fail(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-        "manifest for another tree",
-    )
-    .to_string();
-    assert!(error.contains("names closure"), "{error}");
-    assert!(error.contains(CLOSURE_A), "{error}");
-    assert!(error.contains(&wanted), "{error}");
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn unbound_env_candidate_is_rejected_without_manifest() {
-    let (root, head) = closure_fixture("candidate-unbound");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-unbound-scratch");
-    let sentinel = root.join("closure-probed");
-    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    let lookup = lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "missing manifest never errors, it disables the env slot",
-        )
-        .is_none(),
-        "an env-slot binary without a manifest is never the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "an unbound env-slot binary is skipped, never executed"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn malformed_candidate_manifest_is_rejected() {
-    let (root, head) = closure_fixture("candidate-malformed");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-malformed-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
-    let digest = {
-        use sha2::Digest as _;
-        let bytes = must(fs::read(&binary), "read fake binary bytes");
-        let mut digest = String::with_capacity(64);
-        for byte in sha2::Sha256::digest(&bytes) {
-            let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
-        }
-        digest
-    };
-    let cases = [
-        ("truncated".to_owned(), "{not json".to_owned()),
-        (
-            "short-revision".to_owned(),
-            serde_json::json!({"revision": "abc", "closure": wanted, "binary_sha256": digest})
-                .to_string(),
-        ),
-        (
-            "short-closure".to_owned(),
-            serde_json::json!({"revision": head, "closure": "abc", "binary_sha256": digest})
-                .to_string(),
-        ),
-        (
-            "short-digest".to_owned(),
-            serde_json::json!({"revision": head, "closure": wanted, "binary_sha256": "abc"})
-                .to_string(),
-        ),
-    ];
-    for (name, body) in &cases {
-        let manifest = root.join(format!("candidate-manifest-{name}.json"));
-        must(fs::write(&manifest, body), "write malformed manifest");
-        let lookup =
-            lookup_with_manifest(Some(binary.clone()), None, root.join("install"), manifest);
-        let excludes = std::collections::BTreeSet::new();
-        let error = must_fail(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            &format!("malformed manifest {name}"),
-        )
-        .to_string();
-        assert!(
-            error.contains(&format!("candidate-manifest-{name}.json")),
-            "{name}: the error names the manifest: {error}"
-        );
-    }
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[test]
-fn candidate_manifest_source_prefers_flag_over_env() {
-    // The flag wins over the environment, so generated CI stays auditable.
-    // (In-process: setting process env needs `unsafe`, which this crate
-    // forbids, so the flag directions — which hold in every environment —
-    // are pinned here, and the environment-fallback direction is pinned by
-    // the `policy` CLI subprocess test in `velnor_first_ci.rs`, which owns
-    // the child's environment.)
-    assert_eq!(
-        candidate_manifest_source_with_env(Some("/flag/manifest.json"), &|name| env::var_os(name)),
-        Some(PathBuf::from("/flag/manifest.json"))
-    );
-    // An explicit empty flag disables the binding.
-    assert_eq!(
-        candidate_manifest_source_with_env(Some(""), &|name| env::var_os(name)),
-        None
-    );
-    // Without either source the env-slot candidate is disabled. Hermetic:
-    // the empty lookup observes no ambient environment.
-    assert_eq!(candidate_manifest_source_with_env(None, &|_| None), None);
 }
 
 #[test]
 fn from_env_consent_mapping_is_fail_closed() {
     // Hermetic: fixed lookups observe no ambient environment.
     // Without `--pin-build` the pin is never built, in every environment.
-    assert!(PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).build_forbidden);
-    assert!(
-        PinnedBinaryLookup::from_env_with(
-            PIN_A,
-            false,
-            Some(PathBuf::from("/manifest.json")),
-            &|_| None
-        )
-        .build_forbidden
-    );
-    // The explicit manifest survives; without one the environment fallback
-    // applies (`None` under the empty lookup).
-    assert_eq!(
-        PinnedBinaryLookup::from_env_with(
-            PIN_A,
-            false,
-            Some(PathBuf::from("/manifest.json")),
-            &|_| None
-        )
-        .candidate_manifest,
-        Some(PathBuf::from("/manifest.json"))
-    );
-    assert_eq!(
-        PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).candidate_manifest,
-        None
-    );
-    // The environment fallback direction: a manifest in the environment
-    // binds the env-slot candidate.
-    let manifest_env = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| {
-        if name == VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV {
-            Some(std::ffi::OsString::from("/env/manifest.json"))
-        } else {
-            None
-        }
-    });
-    assert_eq!(
-        manifest_env.candidate_manifest,
-        Some(PathBuf::from("/env/manifest.json"))
-    );
+    assert!(PinnedBinaryLookup::from_env_with(PIN_A, false, &|_| None).build_forbidden);
+    assert!(!PinnedBinaryLookup::from_env_with(PIN_A, true, &|_| None).build_forbidden);
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
     // (also pinned end to end by the `--check` CLI subprocess test in
     // `velnor_first_ci.rs`, which owns the child's environment).
-    let offline = PinnedBinaryLookup::from_env_with(PIN_A, true, None, &|name| {
+    let offline = PinnedBinaryLookup::from_env_with(PIN_A, true, &|name| {
         if name == "CARGO_NET_OFFLINE" {
             Some(std::ffi::OsString::from("true"))
         } else {
@@ -1405,79 +1024,14 @@ fn from_env_consent_mapping_is_fail_closed() {
     assert!(offline.build_forbidden);
 }
 
-#[cfg(unix)]
 #[test]
-fn candidate_render_rejects_a_binary_claiming_another_closure() {
-    let (root, head) = closure_fixture("candidate-foreign");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-foreign-scratch");
-    // Valid binding for the audited tree (manifest closure plus the real
-    // digest of the binary bytes), but the binary echoes CLOSURE_A: the
-    // `--closure` self-report stays as the final tripwire.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "foreign closure never errors, it simply does not prove",
-        )
-        .is_none(),
-        "a binary reporting another closure is not the tree's candidate"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[test]
-fn candidate_render_is_unavailable_without_git_history() {
-    let root = temporary_directory("candidate-nogit");
-    let scratch = temporary_directory("candidate-nogit-scratch");
-    let binary = root.join("missing");
-    let lookup = lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
-    assert!(must(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-        "no checkout, no candidate",
-    )
-    .is_none());
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[test]
-fn generated_tree_report_distinguishes_pin_candidate_and_stale_main() {
-    let pin = generated_tree_report(PIN_A, Ok(TreeComparison::Pin), false);
+fn generated_tree_report_rejects_drift() {
+    let pin = generated_tree_report(PIN_A, Ok(TreeComparison::Pin));
     assert!(pin.passed);
     assert!(pin.reason.contains(PIN_A), "{}", pin.reason);
-    let flight = generated_tree_report(
-        PIN_A,
-        Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
-        false,
-    );
-    assert!(flight.passed, "{:?}", flight.details);
-    assert!(flight.reason.contains("in flight"), "{}", flight.reason);
-    assert!(flight.reason.contains("after merge"), "{}", flight.reason);
-    let stale = generated_tree_report(
-        PIN_A,
-        Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
-        true,
-    );
-    assert!(!stale.passed);
-    assert!(
-        stale.reason.contains("stale on mainline"),
-        "{}",
-        stale.reason
-    );
     let drift = generated_tree_report(
         PIN_A,
         Ok(TreeComparison::Differences(vec!["ci-pr.yml".to_owned()])),
-        false,
     );
     assert!(!drift.passed);
     assert_eq!(drift.details, vec!["ci-pr.yml".to_owned()]);
