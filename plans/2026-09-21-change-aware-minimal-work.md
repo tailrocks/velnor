@@ -107,6 +107,35 @@ blanket until S2 audit, `version_bump_matches` before irrelevant-skip.
 Adjacent open PRs (avoid conflicts): PR #990 (generator-owned
 AGENTS.md), #979/#980 (validation contract), #985, #978.
 
+## Rollout split (decided 2026-09-21 from live CI evidence)
+
+Single-PR landing hit the designed bootstrap wall: run `35569244759`
+(Planning) fails loud — the pinned `fff18da8` product predates the S4
+runtime, so no expected-work file exists and `if-no-files-found: error`
+fires; Policy then fails with `no same-repository PR run published
+candidate ...` because Planning gates the packaging job. The runtime
+product publishes only from main, so render cannot land before runtime.
+Split (small PRs, merged in order):
+
+1. PR-A `rollout/change-aware-runtime` → PR #1001: S0+S1/S2+S3+S4
+   runtime only, zero `.github/` delta, 2155/2155 green. Goes green
+   with the old product (runtime writes expected-work only when the
+   env is set; old YAML never sets it).
+2. Runtime product publishes from main; D19 pin advances (repo pin
+   flow, cf. #997/#999).
+3. PR-B: this branch rebased = S4 render + S5 docs + regen + pin bump
+   (+ pad recalibration per #995 precedent). Proves the full
+   plan/run/aggregate loop live. MUST message-rebase `e53b4eee`
+   (S0 carries a non-compliant `donbeave` signoff; PR-A already
+   fixed its copy) before merge.
+4. Jackin: pin advance + regen; AGENTS.md-only live proof + Rust
+   selection proof; merge.
+
+Transition window (new runtime + old YAML, between PR-A and PR-B):
+traced safe — normal PRs run real work green, main pushes force full
+scope, proven-empty selections pass green-vacuous (old verdict has no
+explicit marker yet) and unproven-empty errors the plan job itself.
+
 ## Follow-ups (accepted, not in this branch)
 
 - S4-O2: transient expected-work download failure newly reds the check
