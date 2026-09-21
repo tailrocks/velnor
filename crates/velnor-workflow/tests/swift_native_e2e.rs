@@ -1,5 +1,5 @@
-//! Schema-2 native Apple graph: a Rust BoltFFI producer, its SwiftPM
-//! consumer, and an XcodeGen app discovered from one fixture, with the
+//! Schema-2 native Apple graph: a Rust `BoltFFI` producer, its `SwiftPM`
+//! consumer, and an `XcodeGen` app discovered from one fixture, with the
 //! product edge, macOS placement, and Xcode probe rendered end to end.
 
 use std::env;
@@ -85,8 +85,7 @@ fn unit_block(project: &str, id: &str) -> Result<String, Box<dyn Error>> {
     let rest = &project[start..];
     let end = rest
         .find("\n[[unit]]")
-        .map(|offset| start + offset)
-        .unwrap_or(project.len());
+        .map_or(project.len(), |offset| start + offset);
     Ok(project[start..end].to_owned())
 }
 
@@ -264,7 +263,9 @@ fn ffi_source_change_selects_producer_and_swift_consumer() -> Result<(), Box<dyn
     Ok(())
 }
 
-fn snapshot_files(out: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>, Box<dyn Error>> {
+type SnapshotFiles = Vec<(PathBuf, Vec<u8>)>;
+
+fn snapshot_files(out: &Path) -> Result<SnapshotFiles, Box<dyn Error>> {
     let mut files = Vec::new();
     let mut stack = vec![out.to_path_buf()];
     while let Some(dir) = stack.pop() {
