@@ -540,6 +540,7 @@ impl From<RepositoryShape> for ProjectConfig {
             github_cache: crate::s2::config::CacheGithubSection::default(),
             velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
             check_profiles: Vec::new(),
+            rust_pin: None,
         }
     }
 }

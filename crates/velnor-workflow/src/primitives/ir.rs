@@ -5528,6 +5528,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             saves.into_iter().next().unwrap_or(false)
         };
+        // Schema-1 is exempt from the toolchain matrix: schema 1 is frozen
+        // (no new `both`-pipeline surfaces), so per-unit channels stay a
+        // schema-2 feature and this unanimity check stays fail-closed. A v1
+        // kind whose members disagree on the pin keeps refusing here instead
+        // of rendering legs.
         let toolchain = {
             let pins = members
                 .iter()

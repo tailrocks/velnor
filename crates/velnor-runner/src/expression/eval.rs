@@ -493,7 +493,7 @@ fn evaluate_join(args: &[Node], context: &dyn EvaluationContext) -> Result<Value
     if let Value::Array(array) = &items
         && !array.is_empty()
     {
-        let separator = if args.len() > 1 {
+        let separator = if args.len() > 1 && array.len() > 1 {
             let separator = evaluate_node(&args[1], context)?;
             if separator.is_primitive() {
                 separator.convert_to_string()

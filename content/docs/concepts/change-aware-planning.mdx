@@ -51,20 +51,22 @@ runtime mirrors the same pipeline
 ## Owned, Opaque, Unknown, Irrelevant
 
 `CURRENT`: each changed path gets exactly one verdict from `classify_path`
-(`crates/velnor-workflow/src/reuse.rs:650-706`):
+(`crates/velnor-workflow/src/reuse.rs:650-707`):
 
 - `OWNED` — some unit's watch globs or extracted command read-globs match the
   path. The owners are selected.
 - `OPAQUE` — no unit owns the path but some (not every) unit is opaque (its
   commands resist proof). Only the opaque units are selected, plus the
   ordinary dependency closure, with an explicit reason naming the consulted
-  sources and every opaque unit.
+  sources, every opaque unit, and the missing narrowing contract.
 - `IRRELEVANT` — no unit watches or reads the path and no unit is opaque.
   The path selects nothing.
 - `UNKNOWN` — the path itself cannot be matched safely, or every unit is
   opaque so narrowing is impossible. The plan falls back to the full set with
   an explicit reason naming the consulted sources: declared reads, watch
-  globs, and command read-globs.
+  globs, and command read-globs. An unmatched path also names the missing
+  contract; an unmatchable path (empty, quoted) carries no contract hint
+  because no contract can cover a path the matcher cannot spell.
 
 Owned wins over opaque (`crates/velnor-workflow/src/reuse.rs:680-682`): a
 proven owner selects its units even when another unit's commands resist proof.
@@ -82,7 +84,7 @@ the contract table below instead.
 ## Dependency semantics
 
 `CURRENT`: direct path hits expand across `depends_on` edges in one direction
-(`crates/velnor-workflow/src/reuse.rs:1076-1080`):
+(`crates/velnor-workflow/src/reuse.rs:1095-1099`):
 
 - Dependents of a changed unit join the affected set — changed inputs flow
   downstream, so downstream verdicts need re-proving.
@@ -132,7 +134,7 @@ verdict, next section), and the event table above admits no release event.
 
 `CURRENT`: CI-contract paths under `.github/` classify through
 `github_verdict`, not a blanket rule
-(`crates/velnor-workflow/src/reuse.rs:1009-1059`):
+(`crates/velnor-workflow/src/reuse.rs:1028-1078`):
 
 - Four global classes stay full with a reason: the scheduling aggregates
   (`workflows/ci-pr.yml`, `workflows/ci-main.yml`, `workflows/nightly.yml`,
@@ -151,26 +153,37 @@ verdict, next section), and the event table above admits no release event.
 - Every other `.github/` path — the reporting action, contract docs,
   unlisted files — stays unknown and fails closed to full with its reason.
 
-## Declared reads
+## Declared read contracts
 
 `CURRENT`: relationships the scan cannot discover (opaque task runners,
 helper scripts, dynamic includes) are declared in a typed generation-time
-`reads` table mapping unit ids to `{ paths, reason }` entries
-(`crates/velnor-workflow/src/primitives/mod.rs:599-708`):
+`reads` table mapping unit ids to contract entries
+(`crates/velnor-workflow/src/primitives/mod.rs:599-836`):
 
-- Every entry must spell exactly `paths` (an array of valid watch globs) and
-  `reason` (a non-empty string auditing the claim). A typo'd key, a missing
-  field, an invalid glob, or an empty reason fails generation closed.
+- Every entry spells `paths` (an array of valid watch globs, possibly
+  empty), `reason` (a non-empty string auditing the claim), and `type`
+  (one of `"paths"`, `"script"`, or `"unresolved"`; absent means
+  `"paths"`). A `"script"` contract adds `script` (the repo-relative
+  opaque script path, treated as data — never executed or
+  existence-checked); an `"unresolved"` contract adds `limitation` (a
+  non-empty record of the unprovable mechanism). An unknown type, a
+  misplaced key, an escaping script, an invalid glob, or an empty reason
+  fails generation closed.
 - Named units must exist in the scan; a declaration for a unit the scan did
   not produce is a usage error listing the available units.
-- The `watch-graph` primitive unions the paths into the unit's watch set, so
-  the runtime contract is unchanged: no schema bump, and selection sees owned
-  paths through the ordinary watch matcher
-  (`crates/velnor-workflow/src/primitives/watch.rs:124-128`).
+- The `watch-graph` primitive unions the paths (plus the bound script)
+  into the unit's watch set, so the runtime contract is unchanged: no
+  schema bump, and selection sees owned paths through the ordinary watch
+  matcher (`crates/velnor-workflow/src/primitives/watch.rs:124-131`).
 
 Declared coverage composes with opacity: a declared path still narrows to its
 owners even when other units stay opaque
-(`crates/velnor-workflow/src/reuse.rs:745-748`).
+(`crates/velnor-workflow/src/reuse.rs:764-767`), so a changed script under a
+`script` contract selects exactly its unit instead of every opaque unit. No
+contract type narrows beyond the paths it covers: uncovered paths keep the
+conservative fallback, and the fallback reason names the missing contract,
+so unknown impact reports the exact `reads` keys that would narrow it
+(`crates/velnor-workflow/src/reuse.rs:709-725`).
 
 ## Plan outputs and how to inspect a plan
 
@@ -321,6 +334,8 @@ against the plan's `units`, not against the verdict.
    unit is opaque, a global or unknown `.github/` path, an empty base, an
    unavailable diff, or an unparseable change entry. An opaque-narrowed run
    carries a `fallback_reason` too, naming the opaque units it selected.
+   Unmatched-path reasons also name the missing contract: the `reads` keys
+   whose entries would narrow the path.
 4. A skipped unit under a no-work plan is proven irrelevant: re-run `select`
    on the same base/head and confirm the path classifies `Irrelevant` — no
    watcher, no consumer, no opaque unit.
@@ -332,7 +347,7 @@ against the plan's `units`, not against the verdict.
    outside the audited vocabulary (`fmt`, `clippy`, `test`, `nextest`,
    `check`, `deny`, `audit`); a bare repo-relative script path; a root
    escape (`..`); an unquoted or unbalanced glob token
-   (`crates/velnor-workflow/src/reuse.rs:749-842`).
+   (`crates/velnor-workflow/src/reuse.rs:768-861`).
 
 ## Contributor review criteria and regression expectations
 
@@ -344,10 +359,10 @@ for unknown impact, tests plus updated product docs for every change):
 - Prove the fix on the live `plan` path (`selection_for_diff`), not only on
   `select`: unmatched-no-consumer changes must select zero workload units
   (regression shape:
-  `crates/velnor-workflow/src/runtime.rs:6659-6672`).
+  `crates/velnor-workflow/src/runtime.rs:6526-6539`).
 - Keep the command-vocabulary conformance table green: every emitted command
   shape must classify transparent or opaque with its documented cause
-  (`crates/velnor-workflow/src/reuse.rs:3300-3360`).
+  (`crates/velnor-workflow/src/reuse.rs:3465-3525`).
 - Update behavior-pinning tests in the same change; never leave a test
   asserting the old fallback. Keep output byte-stable for identical inputs.
 - No repository-specific knowledge in the generator: no hardcoded paths,
@@ -362,7 +377,8 @@ for unknown impact, tests plus updated product docs for every change):
 ## Supported capabilities and remaining limits
 
 `CURRENT` on this branch: the Owned/Opaque/Unknown/Irrelevant classifier over watch
-globs, command read-globs, and declared reads; the `.github/` contract table;
+globs, command read-globs, and typed declared reads with missing-contract
+reporting; the `.github/` contract table;
 the `fallback_reason` / `planned_no_work` / `no_work_reason` channels; the
 expected-work file with SHA identity binding; the fail-closed aggregate; the
 fingerprint and reuse-decision cores; NUL-delimited rename-aware plan diffs;
@@ -373,7 +389,7 @@ and the trusted-event guards at plan and run time.
 - `node`/`bun` units stay opaque (paths they do not own conservatively select the opaque units)
   until the scan proves whole-root ownership for those units
   (`crates/velnor-workflow/src/reuse.rs:455-462`); urgent gaps go through
-  declared `reads` meanwhile.
+  typed `reads` contracts meanwhile.
 - The `select` CLI still parses a non-NUL `git diff --name-status` stream
   (`crates/velnor-workflow/src/runtime.rs:1296-1318`); `-z` parity with the
   plan path (`crates/velnor-workflow/src/runtime.rs:2976-2992`) is a

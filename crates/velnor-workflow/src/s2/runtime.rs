@@ -3321,7 +3321,7 @@ fn collect_manifests(
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release apt-resolve-commit | release apt-fetch | release apt-verify | release apt-publish | release apt-previous-pointer | release apt-channel-update | release apt-deploy-guard | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
         ));
     };
     match command {
@@ -3331,6 +3331,13 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
         "package-guest" => package_guest(&arguments[1..]),
         "verify-feed" => verify_feed(&arguments[1..]),
         "update-feed" => update_feed(&arguments[1..]),
+        "apt-resolve-commit" => apt_resolve_commit(&arguments[1..]),
+        "apt-fetch" => apt_fetch(&arguments[1..]),
+        "apt-verify" => apt_verify(&arguments[1..]),
+        "apt-publish" => apt_publish(&arguments[1..]),
+        "apt-previous-pointer" => apt_previous_pointer(&arguments[1..]),
+        "apt-channel-update" => apt_channel_update(&arguments[1..]),
+        "apt-deploy-guard" => apt_deploy_guard(&arguments[1..]),
         "verify-digests" => verify_digests(&arguments[1..]),
         "resolve-mode" => resolve_mode(&arguments[1..]),
         "resolve-source" => resolve_source(&arguments[1..]),
@@ -3340,6 +3347,287 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "unsupported release command: {command}"
         ))),
     }
+}
+
+/// Map a shared APT-layer failure across the pipeline boundary: both error
+/// types carry a single message string, so the mapping loses no context.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err hands over ownership; borrowing would push a closure onto every call site"
+)]
+fn apt_error(error: crate::GeneratorError) -> GeneratorError {
+    GeneratorError::usage(error.to_string())
+}
+
+/// Parse an explicit boolean flag value (`true`/`false`), failing closed on
+/// anything else. Flag-only booleans do not exist: every option takes a
+/// value, so `true` is always spelled out.
+fn flag_bool(options: &BTreeMap<String, String>, name: &str) -> Result<bool, GeneratorError> {
+    match options.get(name).map(String::as_str) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(value) => Err(GeneratorError::usage(format!(
+            "--{name} must be `true` or `false`, found `{value}`"
+        ))),
+    }
+}
+
+fn apt_resolve_commit(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["source-repo", "version"])?;
+    let source = required_option(&options, "source-repo")?;
+    let version = required_option(&options, "version")?;
+    let commit = crate::apt::run_resolve_commit(source, version, None).map_err(apt_error)?;
+    println!("{commit}");
+    Ok(())
+}
+
+fn apt_fetch(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &["suite", "source-repo", "package", "version", "dir"],
+    )?;
+    let suite = crate::apt::Suite::parse(required_option(&options, "suite")?).map_err(apt_error)?;
+    let source = required_option(&options, "source-repo")?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    let dir = required_option(&options, "dir")?;
+    crate::apt::run_fetch(suite, source, package, version, Path::new(dir), None)
+        .map_err(apt_error)?;
+    println!("fetched {} coherence inputs for {version}", suite.as_str());
+    Ok(())
+}
+
+fn apt_verify(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "identity-dir",
+            "manifest-schema",
+            "version",
+            "incoming",
+            "commit",
+            "signer",
+            "expect-signer",
+            "verify-oci",
+        ],
+    )?;
+    let inputs = crate::apt::VerifyInputs {
+        suite: crate::apt::Suite::parse(required_option(&options, "suite")?).map_err(apt_error)?,
+        source_repo: required_option(&options, "source-repo")?.to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        binary: required_option(&options, "binary")?.to_owned(),
+        manifest_schema: required_option(&options, "manifest-schema")?.to_owned(),
+        identity_dir: required_option(&options, "identity-dir")?.to_owned(),
+        version: required_option(&options, "version")?.to_owned(),
+        commit: options.get("commit").cloned(),
+        incoming: Path::new(required_option(&options, "incoming")?),
+        signer_live: required_option(&options, "signer")?.to_owned(),
+        signer_pinned: required_option(&options, "expect-signer")?.to_owned(),
+        verify_oci: flag_bool(&options, "verify-oci")?,
+        backend: crate::apt::DebBackend::Auto,
+        path_overlay: None,
+    };
+    crate::apt::verify_suite(&inputs).map_err(apt_error)?;
+    println!("{} feed inputs are coherent", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "consumer-repo",
+            "manifest-schema",
+            "signer",
+            "passphrase-env",
+            "key-env",
+            "keyring",
+            "origin",
+            "identity-dir",
+            "feed-url",
+            "description",
+            "version",
+            "incoming",
+            "prev-dir",
+            "previous-pointer",
+            "staging",
+            "bootstrap",
+        ],
+    )?;
+    // The publish boundary validates the whole contract — including fields
+    // this step does not consume — so a misrendered feed fails closed.
+    let spec = crate::ReleaseSpec {
+        kind: "apt".to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        packages: Vec::new(),
+        binary: required_option(&options, "binary")?.to_owned(),
+        targets: Vec::new(),
+        image: String::new(),
+        image_package: String::new(),
+        source_repository: required_option(&options, "source-repo")?.to_owned(),
+        consumer_repository: required_option(&options, "consumer-repo")?.to_owned(),
+        artifact_path: String::new(),
+        description: required_option(&options, "description")?.to_owned(),
+        manifest_schema: required_option(&options, "manifest-schema")?.to_owned(),
+        apt_arches: Vec::new(),
+        signer_fingerprint: required_option(&options, "signer")?.to_owned(),
+        passphrase_secret: required_option(&options, "passphrase-env")?.to_owned(),
+        signing_key_secret: required_option(&options, "key-env")?.to_owned(),
+        keyring_path: required_option(&options, "keyring")?.to_owned(),
+        apt_origin: required_option(&options, "origin")?.to_owned(),
+        apt_identity_dir: required_option(&options, "identity-dir")?.to_owned(),
+        apt_feed_url: required_option(&options, "feed-url")?.to_owned(),
+        retention: 0,
+        dockerfile: String::new(),
+        context: String::new(),
+        platforms: Vec::new(),
+        producer_workflow: String::new(),
+        producer_conclusion: String::new(),
+        modes: Vec::new(),
+        archive_members: Vec::new(),
+        archive_checksum: String::new(),
+        archive_retention_days: 0,
+        credentials: Vec::new(),
+        tag_pattern: String::new(),
+        registry: String::new(),
+        registry_username_secret: String::new(),
+        registry_password_secret: String::new(),
+        jobs: Vec::new(),
+    };
+    let contract = crate::apt::AptContract::resolve(&spec).map_err(apt_error)?;
+    let passphrase_env = required_option(&options, "passphrase-env")?.to_owned();
+    let passphrase = std::env::var(&passphrase_env).ok();
+    let key_env = required_option(&options, "key-env")?.to_owned();
+    let key_material = std::env::var(&key_env).ok();
+    let empty_prev;
+    let prev_dir = match options.get("prev-dir") {
+        Some(dir) if !dir.is_empty() => {
+            empty_prev = PathBuf::from(dir);
+            Some(empty_prev.as_path())
+        }
+        _ => None,
+    };
+    let inputs = crate::apt::PublishInputs {
+        suite: crate::apt::Suite::parse(required_option(&options, "suite")?).map_err(apt_error)?,
+        contract,
+        version: required_option(&options, "version")?.to_owned(),
+        incoming: Path::new(required_option(&options, "incoming")?),
+        prev_dir,
+        previous_pointer: Path::new(required_option(&options, "previous-pointer")?),
+        staging: Path::new(required_option(&options, "staging")?),
+        bootstrap: flag_bool(&options, "bootstrap")?,
+        passphrase_env,
+        passphrase,
+        key_env,
+        key_material,
+        backend: crate::apt::DebBackend::Auto,
+        path_overlay: None,
+    };
+    crate::apt::publish_suite(&inputs).map_err(apt_error)?;
+    println!("{} suite staged", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "published",
+            "prior",
+            "candidate",
+            "candidate-sha",
+            "bootstrap",
+        ],
+    )?;
+    let suite = crate::apt::Suite::parse(required_option(&options, "suite")?).map_err(apt_error)?;
+    let bootstrap = flag_bool(&options, "bootstrap")?;
+    let pointer = match suite {
+        crate::apt::Suite::Stable => {
+            if bootstrap {
+                return Err(GeneratorError::usage(
+                    "previous pointer: --bootstrap applies only to --suite preview",
+                ));
+            }
+            let published = required_option(&options, "published")?;
+            let bytes = fs::read(published)
+                .map_err(|error| GeneratorError::io("read", Path::new(published), &error))?;
+            let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+                GeneratorError::usage(format!("published record is not valid JSON: {error}"))
+            })?;
+            crate::apt::derive_previous_pointer(
+                &document,
+                required_option(&options, "prior")?,
+                required_option(&options, "candidate")?,
+                required_option(&options, "candidate-sha")?,
+            )
+            .map_err(apt_error)?
+        }
+        crate::apt::Suite::Preview => {
+            if bootstrap {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(crate::apt::PREVIEW_TAG.to_owned())
+            }
+        }
+    };
+    println!("{pointer}");
+    Ok(())
+}
+
+fn apt_channel_update(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "source-ref",
+            "commit",
+            "version",
+            "package",
+            "manifest",
+            "staging",
+        ],
+    )?;
+    let inputs = crate::apt::ChannelUpdateInputs {
+        suite: crate::apt::Suite::parse(required_option(&options, "suite")?).map_err(apt_error)?,
+        source_repo: required_option(&options, "source-repo")?.to_owned(),
+        source_ref: required_option(&options, "source-ref")?.to_owned(),
+        commit: required_option(&options, "commit")?.to_owned(),
+        version: required_option(&options, "version")?.to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        manifest: Path::new(required_option(&options, "manifest")?),
+        staging: Path::new(required_option(&options, "staging")?),
+    };
+    crate::apt::run_channel_update(&inputs).map_err(apt_error)?;
+    println!("{} channel state updated", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_deploy_guard(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["suite", "staged", "live-version"])?;
+    let suite = crate::apt::Suite::parse(required_option(&options, "suite")?).map_err(apt_error)?;
+    let staged = required_option(&options, "staged")?;
+    let staged_text = fs::read_to_string(Path::new(staged).join(suite.last_publish_file()))
+        .map_err(|error| {
+            GeneratorError::io("read the staged last-publish", Path::new(staged), &error)
+        })?;
+    let live = required_option(&options, "live-version")?;
+    let live = match live.trim() {
+        "" | "unknown" => None,
+        version => Some(version),
+    };
+    crate::apt::check_deploy_guard(suite, &staged_text, live).map_err(apt_error)?;
+    println!("{} deploy guard passed", suite.as_str());
+    Ok(())
 }
 
 fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
@@ -4769,6 +5057,297 @@ pub(crate) mod tests {
             std::fs::write(dir.join(format!("image-{arch}.digest")), digest),
             "write platform digest",
         );
+    }
+
+    #[test]
+    fn release_dispatch_routes_apt_commands() {
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        // The schema-2 runtime serves the typed apt entries the s2 feed
+        // renderer emits: a routed command runs, an unknown one names
+        // itself, and the usage names every apt entry.
+        must(
+            release(&args(&["apt-previous-pointer", "--suite", "preview"])),
+            "the s2 runtime must route apt-previous-pointer",
+        );
+        let error = must_fail(
+            release(&args(&["apt-fetch", "--suite", "testing"])),
+            "a routed apt failure must surface the shared diagnostic",
+        );
+        assert!(error.to_string().contains("suite must be"), "{error}");
+        let error = must_fail(release(&[]), "release without a command");
+        for command in [
+            "apt-resolve-commit",
+            "apt-fetch",
+            "apt-verify",
+            "apt-publish",
+            "apt-previous-pointer",
+            "apt-channel-update",
+            "apt-deploy-guard",
+        ] {
+            assert!(error.to_string().contains(command), "{error}");
+        }
+        let error = must_fail(release(&args(&["apt-nope"])), "an unknown release command");
+        assert!(
+            error.to_string().contains("unsupported release command"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn apt_fetch_and_resolve_reject_bad_inputs_before_any_effect() {
+        // Every case below fails on option validation, before any fetch
+        // or network: no gh, no git, no filesystem writes.
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            apt_fetch(&args(&["--suite", "testing"])),
+            "apt-fetch with an unknown suite",
+        );
+        assert!(error.to_string().contains("suite must be"), "{}", error);
+        let error = must_fail(
+            apt_fetch(&args(&[
+                "--suite",
+                "stable",
+                "--source-repo",
+                "not-a-slug",
+                "--package",
+                "example",
+                "--version",
+                "v1.2.3",
+                "--dir",
+                "incoming",
+            ])),
+            "apt-fetch with a bad slug",
+        );
+        assert!(error.to_string().contains("owner/name"), "{}", error);
+        let error = must_fail(
+            apt_fetch(&args(&[
+                "--suite",
+                "stable",
+                "--source-repo",
+                "example/app",
+                "--package",
+                "example",
+                "--version",
+                "1.2.3",
+            ])),
+            "apt-fetch without --dir",
+        );
+        assert!(
+            error.to_string().contains("--dir needs a value"),
+            "{}",
+            error
+        );
+        let error = must_fail(
+            apt_resolve_commit(&args(&[
+                "--source-repo",
+                "example/app",
+                "--version",
+                "1.2.3",
+            ])),
+            "apt-resolve-commit with an untagged version",
+        );
+        assert!(error.to_string().contains("vX.Y.Z"), "{}", error);
+    }
+
+    #[test]
+    fn apt_verify_rejects_bad_inputs_before_any_effect() {
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            apt_verify(&args(&["--suite", "stable"])),
+            "apt-verify without --source-repo",
+        );
+        assert!(
+            error.to_string().contains("--source-repo needs a value"),
+            "{}",
+            error
+        );
+        let error = must_fail(
+            apt_verify(&args(&[
+                "--suite",
+                "preview",
+                "--source-repo",
+                "example/app",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--identity-dir",
+                "app",
+                "--manifest-schema",
+                "example.test/apt-manifest-v1",
+                "--version",
+                "1.2.3~preview.41+0123456",
+                "--incoming",
+                "incoming",
+                "--signer",
+                "0123456789ABCDEF0123456789ABCDEF01234567",
+                "--expect-signer",
+                "0123456789ABCDEF0123456789ABCDEF01234567",
+            ])),
+            "apt-verify preview without --commit",
+        );
+        assert!(
+            error.to_string().contains("--commit is required"),
+            "{}",
+            error
+        );
+        let error = must_fail(
+            apt_verify(&args(&[
+                "--suite",
+                "preview",
+                "--source-repo",
+                "example/app",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--identity-dir",
+                "app",
+                "--manifest-schema",
+                "example.test/apt-manifest-v1",
+                "--version",
+                "1.2.3~preview.41+0123456",
+                "--incoming",
+                "incoming",
+                "--commit",
+                "short",
+                "--signer",
+                "0123456789ABCDEF0123456789ABCDEF01234567",
+                "--expect-signer",
+                "0123456789ABCDEF0123456789ABCDEF01234567",
+            ])),
+            "apt-verify preview with a malformed commit",
+        );
+        assert!(error.to_string().contains("40 lowercase hex"), "{}", error);
+        let error = must_fail(
+            apt_verify(&args(&[
+                "--suite",
+                "stable",
+                "--source-repo",
+                "example/app",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--identity-dir",
+                "app",
+                "--manifest-schema",
+                "example.test/apt-manifest-v1",
+                "--version",
+                "v1.2.3",
+                "--incoming",
+                "incoming",
+                "--commit",
+                "0123456789abcdef0123456789abcdef01234567",
+                "--signer",
+                "short",
+                "--expect-signer",
+                "0123456789ABCDEF0123456789ABCDEF01234567",
+            ])),
+            "apt-verify with a short signer",
+        );
+        assert!(error.to_string().contains("40-hex"), "{}", error);
+    }
+
+    #[test]
+    fn apt_publish_pointer_channel_and_guard_reject_bad_inputs() {
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            apt_publish(&args(&["--suite", "stable"])),
+            "apt-publish without --package",
+        );
+        assert!(
+            error.to_string().contains("--package needs a value"),
+            "{}",
+            error
+        );
+        let error = must_fail(
+            apt_previous_pointer(&args(&["--suite", "stable", "--bootstrap", "true"])),
+            "stable previous pointer with --bootstrap",
+        );
+        assert!(
+            error.to_string().contains("only to --suite preview"),
+            "{}",
+            error
+        );
+        let error = must_fail(
+            apt_channel_update(&args(&["--suite", "testing"])),
+            "apt-channel-update with an unknown suite",
+        );
+        assert!(error.to_string().contains("suite must be"), "{}", error);
+        let error = must_fail(
+            apt_deploy_guard(&args(&[
+                "--suite",
+                "testing",
+                "--staged",
+                "public",
+                "--live-version",
+                "unknown",
+            ])),
+            "apt-deploy-guard with an unknown suite",
+        );
+        assert!(error.to_string().contains("suite must be"), "{}", error);
+        let error = must_fail(
+            apt_deploy_guard(&args(&[
+                "--suite",
+                "stable",
+                "--staged",
+                "/nonexistent-velnor-staging",
+                "--live-version",
+                "unknown",
+            ])),
+            "apt-deploy-guard with a missing staged tree",
+        );
+        assert!(error.to_string().contains("last-publish"), "{}", error);
+    }
+
+    #[test]
+    fn apt_publish_refuses_without_the_sentinel() {
+        // A missing incoming directory carries no sentinel, so publication
+        // refuses before tool checks, secrets, or any write.
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            apt_publish(&args(&[
+                "--suite",
+                "stable",
+                "--source-repo",
+                "example/app",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--consumer-repo",
+                "example/apt",
+                "--manifest-schema",
+                "example.test/apt-manifest-v1",
+                "--signer",
+                "0123456789ABCDEF0123456789ABCDEF01234567",
+                "--passphrase-env",
+                "APT_PASSPHRASE",
+                "--key-env",
+                "APT_SIGNING_KEY",
+                "--keyring",
+                "example.gpg",
+                "--origin",
+                "Example",
+                "--identity-dir",
+                "app",
+                "--feed-url",
+                "https://feed.example.test",
+                "--description",
+                "apt repository for example",
+                "--version",
+                "v1.2.3",
+                "--incoming",
+                "/nonexistent-velnor-incoming",
+                "--previous-pointer",
+                "previous-pointer.json",
+                "--staging",
+                "public",
+            ])),
+            "apt-publish without the sentinel",
+        );
+        assert!(error.to_string().contains("sentinel"), "{}", error);
     }
 
     #[test]
@@ -6376,8 +6955,11 @@ workspace_check = true
                 .as_deref()
                 .is_some_and(|reason| reason.contains("command read-globs")
                     && reason.contains("selects only opaque units")
-                    && reason.contains("bun-web")),
-            "the fallback reason names the consulted sources and the opaque unit: {:?}",
+                    && reason.contains("bun-web")
+                    && reason.contains("missing contract")
+                    && reason.contains("for unit `bun-web`")
+                    && reason.contains("covering `AGENTS.md`")),
+            "the fallback reason names the consulted sources, the opaque unit, and the missing contract: {:?}",
             selection.fallback_reason
         );
         std::fs::remove_dir_all(root)?;
