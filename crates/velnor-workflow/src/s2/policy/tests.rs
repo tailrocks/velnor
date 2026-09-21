@@ -983,11 +983,17 @@ fn must_some<T>(value: Option<T>, context: &str) -> T {
 #[test]
 fn cli_requires_the_base_validator_revision() {
     let root = temporary_directory("cli-no-base");
+    // Hermetic: the empty lookup observes no ambient environment, so the
+    // missing-option error fires even when the job exports
+    // `VELNOR_WORKFLOW_POLICY_REVISION` (Preview exports it job-wide).
     let error = must_fail(
-        run_cli(&[
-            std::ffi::OsString::from("--workflow-root"),
-            root.as_os_str().to_owned(),
-        ]),
+        run_cli_with_env(
+            &[
+                std::ffi::OsString::from("--workflow-root"),
+                root.as_os_str().to_owned(),
+            ],
+            &|_| None,
+        ),
         "policy without a base revision",
     )
     .to_string();
@@ -1309,40 +1315,73 @@ fn candidate_manifest_source_prefers_flag_over_env() {
     // the `policy` CLI subprocess test in `velnor_first_ci.rs`, which owns
     // the child's environment.)
     assert_eq!(
-        candidate_manifest_source(Some("/flag/manifest.json")),
+        candidate_manifest_source_with_env(Some("/flag/manifest.json"), &|name| env::var_os(name)),
         Some(PathBuf::from("/flag/manifest.json"))
     );
     // An explicit empty flag disables the binding.
-    assert_eq!(candidate_manifest_source(Some("")), None);
-    // Without either source the env-slot candidate is disabled. Like
-    // `cli_requires_the_base_validator_revision`, this relies on the ambient
-    // test environment not exporting the variable.
-    assert_eq!(candidate_manifest_source(None), None);
+    assert_eq!(
+        candidate_manifest_source_with_env(Some(""), &|name| env::var_os(name)),
+        None
+    );
+    // Without either source the env-slot candidate is disabled. Hermetic:
+    // the empty lookup observes no ambient environment.
+    assert_eq!(candidate_manifest_source_with_env(None, &|_| None), None);
 }
 
 #[test]
 fn from_env_consent_mapping_is_fail_closed() {
+    // Hermetic: fixed lookups observe no ambient environment.
     // Without `--pin-build` the pin is never built, in every environment.
-    assert!(PinnedBinaryLookup::from_env(PIN_A, false, None).build_forbidden);
+    assert!(PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).build_forbidden);
     assert!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .build_forbidden
+        PinnedBinaryLookup::from_env_with(
+            PIN_A,
+            false,
+            Some(PathBuf::from("/manifest.json")),
+            &|_| None
+        )
+        .build_forbidden
     );
     // The explicit manifest survives; without one the environment fallback
-    // applies (unset in the ambient test environment, so `None` here).
+    // applies (`None` under the empty lookup).
     assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .candidate_manifest,
+        PinnedBinaryLookup::from_env_with(
+            PIN_A,
+            false,
+            Some(PathBuf::from("/manifest.json")),
+            &|_| None
+        )
+        .candidate_manifest,
         Some(PathBuf::from("/manifest.json"))
     );
     assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, None).candidate_manifest,
+        PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|_| None).candidate_manifest,
         None
     );
-    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`;
-    // setting process env needs `unsafe`, which this crate forbids, so that
-    // direction is pinned by the `--check` CLI subprocess test in
-    // `velnor_first_ci.rs`, which owns the child's environment.
+    // The environment fallback direction: a manifest in the environment
+    // binds the env-slot candidate.
+    let manifest_env = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| {
+        if name == VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV {
+            Some(std::ffi::OsString::from("/env/manifest.json"))
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        manifest_env.candidate_manifest,
+        Some(PathBuf::from("/env/manifest.json"))
+    );
+    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
+    // (also pinned end to end by the `--check` CLI subprocess test in
+    // `velnor_first_ci.rs`, which owns the child's environment).
+    let offline = PinnedBinaryLookup::from_env_with(PIN_A, true, None, &|name| {
+        if name == "CARGO_NET_OFFLINE" {
+            Some(std::ffi::OsString::from("true"))
+        } else {
+            None
+        }
+    });
+    assert!(offline.build_forbidden);
 }
 
 #[cfg(unix)]
