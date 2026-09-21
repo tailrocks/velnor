@@ -1,0 +1,7 @@
+[package]
+name = "bridge-core"
+crate = "bridge-core-ffi"
+
+[targets.apple.xcframework]
+name = "BridgeCore"
+output = "../../target/xcframework"

@@ -147,6 +147,20 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   regen diff verified digest-only, no probe in own
   workflows), 7 new tests; lib 2022 + full_tree_replacement
   35 + runner 2386 green, clippy/fmt clean.
+- Increment 5b landed: `tests/fixtures-s2/swift-native`
+  (SwiftPM consumer + XcodeGen app + BoltFFI producer,
+  renamed, no Jackin literals) generates 3 macOS units
+  with product edge, guarded rebuild before
+  `swift build`, and Xcode probe; `swift_native_e2e`
+  (graph/ordering/ABI/placement, FFI-edit selection of
+  producer + consumer, byte-identical regen). Structural
+  fix: `toml_escape` in `s2/mod.rs` — the project.toml
+  writer emitted raw newlines from multi-line commands,
+  producing TOML `plan` cannot parse; self-regen diff
+  verified empty. Lib 2022 + full_tree_replacement 35 +
+  swift_native_e2e 3 green, workflow fmt clean; workspace
+  clippy red only on branch scaleset dirt in
+  `runner/scaleset/client.rs` (peer scope, untouched).
 - Increments 5-8 per goal: hosted macOS, Jackin migration (#1013
   incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
@@ -154,9 +168,8 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: 5b s2 native e2e fixture + generation
-   test (SwiftPM + XcodeGen + BoltFFI producer ordering,
-   ABI, artifact needs), then 5c real hosted runs.
+2. Next edit surface: 5c real hosted clean/warm runs with
+   evidence and gate correctness.
    Verified layout facts
    (BoltFFI 0.30.1 @ `2e6320a`): slice dirs
    `macos/ios-{archs_joined}[-simulator]`, structural files

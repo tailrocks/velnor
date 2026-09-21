@@ -1414,15 +1414,33 @@ impl ProjectConfig {
     }
 }
 
+fn toml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for char in value.chars() {
+        match char {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other if other.is_control() => {
+                let _ = write!(escaped, "\\u{:04X}", other as u32);
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 fn write_toml_string(output: &mut String, name: &str, value: &str) {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = toml_escape(value);
     let _ = writeln!(output, "{name} = \"{escaped}\"");
 }
 
 fn write_toml_array(output: &mut String, name: &str, values: &[String]) {
     let values = values
         .iter()
-        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
+        .map(|value| format!("\"{}\"", toml_escape(value)))
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(output, "{name} = [{values}]");
