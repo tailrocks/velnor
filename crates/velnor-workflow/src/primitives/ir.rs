@@ -257,12 +257,12 @@ mod tests {
         );
         let expression = ir.trusted_event_expression();
         assert!(
-            expression.contains("github.event_name == 'merge_group'"),
+            expression.contains("github.event_name=='merge_group'"),
             "trusted Velnor admission must accept merge-queue evidence: {expression}"
         );
         assert!(
             ir.trusted_runner_gate(RunnerMode::Velnor, true)
-                .contains("github.event_name == 'merge_group'"),
+                .contains("github.event_name=='merge_group'"),
             "the rendered trusted gate must carry merge_group admission"
         );
 
@@ -271,9 +271,33 @@ mod tests {
         assert!(
             automatic
                 .velnor_automatic_event_expression()
-                .contains("github.event_name == 'merge_group'"),
+                .contains("github.event_name=='merge_group'"),
             "automatic Velnor admission must accept merge-queue evidence"
         );
+    }
+
+    #[test]
+    fn rendered_github_and_velnor_lanes_admit_merge_group() {
+        for pull_request_on_velnor in [VelnorPullRequest::TrustedOnly, VelnorPullRequest::Automatic]
+        {
+            let mut ir = owner_test_ir(
+                "example/rendered-merge-group",
+                vec![rust_unit("rust", "crates/rust")],
+            );
+            ir.pull_request_on_velnor = pull_request_on_velnor;
+            let rendered = ir.render(WorkflowKind::PullRequest);
+            for admission in [LaneAdmission::Github, LaneAdmission::Velnor] {
+                let expression = ir.lane_admission_expression(admission);
+                assert!(
+                    expression.contains("github.event_name=='merge_group'"),
+                    "{admission:?} admission omits merge_group for {pull_request_on_velnor:?}: {expression}"
+                );
+                assert!(
+                    rendered.contains(&expression),
+                    "rendered {admission:?} lane omits its merge_group admission for {pull_request_on_velnor:?}: {rendered}"
+                );
+            }
+        }
     }
 
     /// One hand-built Rust unit: the id is fixture-local, the root decides
@@ -6523,7 +6547,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
     fn trusted_event_expression(&self) -> String {
         format!(
-            "(github.event_name == 'merge_group' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))) || ({})",
+            "(github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule')))||({})",
             self.default_branch,
             Self::velnor_dispatch_selection_expression()
         )
@@ -6567,8 +6591,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.pull_request_on_velnor,
         ));
         format!(
-            "{} || github.event_name == 'merge_group' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
-            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository",
+            "{}||github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule'))",
+            "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository",
             self.default_branch
         )
     }
@@ -6600,7 +6624,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.pull_request_on_velnor,
         ));
         format!(
-            "github.event_name == 'pull_request' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+            "github.event_name=='pull_request'||github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule'))",
             self.default_branch
         )
     }
@@ -6679,7 +6703,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             )
         } else {
             format!(
-                "(github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule')) || ({dispatch})",
+                "(github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule')))||({dispatch})",
                 self.default_branch
             )
         }

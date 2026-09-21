@@ -12282,7 +12282,7 @@ mod tests {
             );
             let automatic_velnor = matches!(automatic, RunnerMode::Velnor | RunnerMode::Both);
             assert_eq!(
-                velnor.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')"),
+                velnor.contains("github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule')"),
                 automatic_velnor,
                 "{runners:?}/{automatic:?}/opt-in {opt_in}: an automatic Velnor lane runs push and schedule on the default branch only, a manual one runs dispatch alone: {velnor}"
             );
@@ -18187,7 +18187,7 @@ channel = "stable"
     }
 
     #[test]
-    fn generated_pr_workflow_omits_merge_group() {
+    fn generated_pr_workflow_omits_merge_group_trigger_but_admits_lanes() {
         for runners in [RunnerMode::Github, RunnerMode::Both] {
             let config = scanned_fixture(runners);
             let generator = WorkflowIr::from_config(&config);
@@ -18219,8 +18219,8 @@ channel = "stable"
             let surface =
                 generator.render_nested_unit(&config.units[index], WorkflowKind::PullRequest);
             assert!(
-                !surface.contains("github.event_name == 'merge_group'"),
-                "lane gates must not admit merge_group: {surface}"
+                surface.contains("github.event_name=='merge_group'"),
+                "lane gates must admit merge_group even when the PR workflow has no trigger: {surface}"
             );
             for surface in [pr.as_str(), nested.as_str()] {
                 assert!(
@@ -18257,8 +18257,8 @@ channel = "stable"
         );
         let surface = generator.render_nested_unit(&config.units[index], WorkflowKind::PullRequest);
         assert!(
-            !surface.contains("github.event_name == 'merge_group'"),
-            "a velnor-only surface admits merge_group nowhere: {surface}"
+            surface.contains("github.event_name=='merge_group'"),
+            "a velnor-only lane gate must admit merge_group even when the PR workflow has no trigger: {surface}"
         );
         assert_eq!(
             must(
@@ -18308,7 +18308,7 @@ channel = "stable"
         assert!(!velnor.contains("runs-on: ubuntu-24.04"));
         assert!(velnor.contains(&fixture_lane_selector()));
         assert!(velnor.contains(
-            "(github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
+            "(github.event_name=='merge_group'||(github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule')))||(github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
         ));
         assert!(velnor.contains("default: velnor"));
         assert!(!velnor.contains("default: github"));
@@ -18320,7 +18320,7 @@ channel = "stable"
             !velnor_pr.contains("merge_group:"),
             "a velnor-only surface has no github lane to validate the merge queue: {velnor_pr}"
         );
-        assert!(velnor_pr.contains("github.ref == 'refs/heads/main'"));
+        assert!(velnor_pr.contains("github.ref=='refs/heads/main'"));
         assert!(velnor_pr.contains("github.event.inputs.runner == 'velnor'"));
         assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));
@@ -18425,7 +18425,7 @@ channel = "stable"
         assert!(main.contains("  velnor-"), "{main}");
         assert!(
             main.contains(
-                "(github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
+                "(github.event_name=='merge_group'||(github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule')))||(github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
             ),
             "automatic=both runs Velnor on trusted push so lanes can be compared: {main}"
         );
