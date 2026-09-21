@@ -18,14 +18,17 @@ behavior and proof limits.
 | Control plane | Node-local services and durable lifecycle/event state plus bounded projections used to inspect resources, logs, telemetry, and lifecycle intent. Query, log, and storage projections are currently not repopulated after service reopen. |
 | Generation | A fencing number attached to a slot, job, lease, or isolation identity. Older generations cannot claim current ownership. |
 | Guest agent | The Velnor process inside a Firecracker guest. It receives a validated plan over vsock and executes it using guest-local Docker. |
+| Irrelevant | A changed path no unit watches or reads while no unit is opaque: change-aware planning selects nothing for it. See [change-aware planning](/concepts/change-aware-planning). |
 | JIT runner | A GitHub runner configuration created just before use. Velnor treats registration as ephemeral and renews/recycles it explicitly. |
 | Lease | A time-bounded ownership token for remote job work, action production, cache publication, or storage reservation. |
-| Plan | The normalized, backend-neutral representation of a job after GitHub payload parsing and admission. |
+| Owned | A changed path some unit's watch or read globs match: change-aware planning selects the owners. See [change-aware planning](/concepts/change-aware-planning). |
+| Plan | The normalized, backend-neutral representation of a job after GitHub payload parsing and admission. This is a job plan; the CI-selection plan that chooses affected units is a different concept — see [change-aware planning](/concepts/change-aware-planning). |
 | Reconciliation | A bounded comparison of desired state, local state, child processes, heartbeats, registrations, and durable outboxes, followed by exact owned actions. |
 | Runner V2 | The upstream GitHub Actions runner protocol family used by Velnor for broker, run-service, timeline, credentials, and completion behavior. |
 | Run service | The GitHub endpoint used to acquire a delivered job, renew its lease, and publish completion. |
 | Slot | One ready runner worker. Each slot is an independently supervised OS process with a generation-bound heartbeat. |
 | Trust scope | The operator-selected boundary controlling whether a job may use shared Docker, secrets, caches, and other capabilities. |
+| Unknown | A changed path whose impact is undecidable from declared contracts (no owner, but some unit is opaque or the path resists matching): change-aware planning keeps the smallest sound scope with an explicit reason. See [change-aware planning](/concepts/change-aware-planning). |
 | Outbox | Durable completion intent awaiting remote send/acknowledgement. It makes a crash after local commit recoverable without guessing whether the remote call happened. |
 | vsock | Host/guest transport used by the Firecracker execution path for readiness, plan delivery, stdio, results, and completion acknowledgements. |
 | `CURRENT` | Implemented and supported by relevant source/tests, or backed by clearly identified current evidence. |

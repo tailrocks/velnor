@@ -82,12 +82,17 @@ diff (fetch-depth 0, no truncation).
   independent review INTEGRATE, select-path -z accepted as follow-up]
 - S4 live no-work proof: runtime aggregate binds expected work to the
   plan (expected-work file + no-work marker + fail-closed verdicts);
-  render must then thread the artifact, invoke `aggregate` in
-  ci-required, map plan outputs, and emit per-unit result records.
-  [runtime done + adversarial review INTEGRATE + M1 identity binding
-  and M2 empty-without-reason error; render pending]
+  render threads the artifact, invokes `aggregate` in ci-required
+  before the kept shell verdict (conjunction), maps plan outputs, and
+  emits per-unit result records. [done: runtime + adversarial review
+  INTEGRATE + M1/M2; render + independent review INTEGRATE as-is;
+  2111/2111 green, clippy/fmt/check green, regen fixed-point,
+  rendered scripts probed]
 - S5 `crates/velnor-workflow/AGENTS.md` lean rule + `content/docs`
-  contract docs. [pending]
+  contract docs. [done: one rule bullet; new
+  `concepts/change-aware-planning.mdx` + 6 touch-ups; review
+  INTEGRATE-WITH-FIXES, all 7 fixes applied code-verified;
+  typecheck/build green, markdownlint 0 errors]
 - S6 regenerate velnor + jackin consumers; real-CI before/after proof;
   small PRs, merge where authorized. Order after #980 (generated-YAML
   churn); S2 coordinated with #978 (WatchGraph overlap). [pending]
@@ -101,6 +106,23 @@ blanket until S2 audit, `version_bump_matches` before irrelevant-skip.
 
 Adjacent open PRs (avoid conflicts): PR #990 (generator-owned
 AGENTS.md), #979/#980 (validation contract), #985, #978.
+
+## Follow-ups (accepted, not in this branch)
+
+- S4-O2: transient expected-work download failure newly reds the check
+  (fail-closed, no retry) — consider a bounded retry.
+- S4-O3 + 7(c): gate any future s1 Velnor-plane regen on fleet
+  `aggregate` availability (ambient image binary drift has no alarm).
+- S4-7(a)(b): s1 Both+trusted conjunction narrowing + offline
+  degraded-green need runtime writer changes (`planned_skip`); no
+  deployed consumer affected (jackin s1 github-only, velnor s2).
+- select-path `-z` parity; node/bun opaque paths stay Unknown until
+  #978 WatchGraph lands.
+- Docs `.mdx` bypass markdownlint (unit glob is `**/*.md` only) —
+  pre-existing gap, reported not fixed here.
+- CI trigger finding (2026-09-21): PR #996 pushes created Policy
+  (`pull_request_target`) runs but zero CI/PR (`pull_request`) runs
+  while conflicting; merge-then-push to restore CI signal.
 
 ## Decisions
 
