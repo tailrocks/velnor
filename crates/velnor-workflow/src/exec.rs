@@ -4,9 +4,8 @@
 //!
 //! - `stall_warn`: no stdout/stderr byte for this long emits a diagnostic
 //!   warning and resets. Silence is evidence of nothing: buffered compilers
-//!   (`BoltFFI` metadata extraction runs `cargo rustc` through a captured
-//!   pipe) stay quiet for many minutes while healthy, so silence must never
-//!   fail a command by itself.
+//!   whose captured subprocesses hold output in pipes stay quiet for many
+//!   minutes while healthy, so silence must never fail a command by itself.
 //! - `wall`: an absolute deadline from spawn. A chatty hang, a live child
 //!   with closed streams, or any descendant that outlives its parent is
 //!   terminated as one process group (SIGTERM, bounded grace, SIGKILL) and
@@ -154,27 +153,34 @@ fn poll_exit(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
     }
 }
 
-/// Signal the child's process group after validating it is really the
-/// child's own group and not ours; fall back to the direct child when
-/// validation or signaling fails. Returns nothing: the reap poll decides.
+/// Resolve the child's process group after validating it is really the
+/// child's own group and not ours; `None` means signal the direct child.
 #[cfg(unix)]
-fn signal_tree(child: &mut Child, signal: rustix::process::Signal) {
-    let group = (|| {
-        let child_pid = rustix::process::Pid::from_child(child);
-        if child_pid.is_init() {
-            return None;
-        }
-        let group = rustix::process::getpgid(Some(child_pid)).ok()?;
-        // The child was spawned as a group leader, so its group must equal
-        // its PID; anything else (or our own group) is not safe to signal.
-        if group != child_pid {
-            return None;
-        }
-        if group == rustix::process::getpgid(None).ok()? {
-            return None;
-        }
-        Some(group)
-    })();
+fn process_group_of(child: &mut Child) -> Option<rustix::process::Pid> {
+    let child_pid = rustix::process::Pid::from_child(child);
+    if child_pid.is_init() {
+        return None;
+    }
+    let group = rustix::process::getpgid(Some(child_pid)).ok()?;
+    // The child was spawned as a group leader, so its group must equal
+    // its PID; anything else (or our own group) is not safe to signal.
+    if group != child_pid {
+        return None;
+    }
+    if group == rustix::process::getpgid(None).ok()? {
+        return None;
+    }
+    Some(group)
+}
+
+/// Signal a previously resolved group, falling back to the direct child
+/// when there is no group or the group signal fails.
+#[cfg(unix)]
+fn signal_group(
+    child: &mut Child,
+    group: Option<rustix::process::Pid>,
+    signal: rustix::process::Signal,
+) {
     match group {
         Some(group) => {
             if rustix::process::kill_process_group(group, signal).is_err() {
@@ -198,11 +204,21 @@ fn signal_tree(child: &mut Child, _signal: ()) {
 #[cfg(unix)]
 fn terminate_tree(child: &mut Child) -> String {
     use rustix::process::Signal;
-    signal_tree(child, Signal::TERM);
+    // Preserve the group before signaling: once the leader exits and is
+    // reaped, its PID no longer resolves via getpgid, but TERM-ignoring
+    // descendants still live in that group and need SIGKILL.
+    let group = process_group_of(child);
+    signal_group(child, group, Signal::TERM);
     if let Some(status) = poll_exit(child, SIGNAL_GRACE) {
+        // Leader exited, but descendants that trapped SIGTERM survive:
+        // SIGKILL the preserved group so no survivor outlives the wall
+        // failure. ESRCH (group already empty) is a harmless no-op.
+        if let Some(group) = group {
+            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+        }
         return format!("reaped with {status}");
     }
-    signal_tree(child, Signal::KILL);
+    signal_group(child, group, Signal::KILL);
     match poll_exit(child, SIGNAL_GRACE) {
         Some(status) => format!("reaped with {status}"),
         None => String::from("still alive after SIGKILL grace; abandoned"),
@@ -583,5 +599,60 @@ mod tests {
         };
         let _ = std::fs::remove_file(&pid_file);
         assert!(gone, "grandchild {pid} must die with its process group");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn term_ignoring_descendant_killed_with_group() {
+        // A grandchild that traps SIGTERM must still die at the wall: the
+        // leader exits on SIGTERM, but the preserved group must still get
+        // SIGKILL so no survivor outlives the wall failure.
+        let pid_file = std::env::temp_dir().join(format!(
+            "velnor-exec-term-ignore-{}.pid",
+            crate::unique_suffix()
+        ));
+        let script = format!(
+            "(trap '' TERM; exec sleep 30) & echo $! > '{}'; exec sleep 30",
+            pid_file.display()
+        );
+        let message = failed_message(run_command(
+            &std::env::temp_dir(),
+            "test-unit",
+            &script,
+            &limits(Duration::from_secs(60), Duration::from_secs(1)),
+        ));
+        assert!(
+            message.contains("wall deadline"),
+            "TERM-ignoring sleeper must fail at the wall, got: {message}"
+        );
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        assert!(!pid.is_empty(), "fixture must record the grandchild PID");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let gone = loop {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .output()
+                .is_ok_and(|output| output.status.success());
+            if !alive {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        if !gone {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid])
+                .output();
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(
+            gone,
+            "TERM-ignoring grandchild {pid} must die with its process group"
+        );
     }
 }
