@@ -259,6 +259,18 @@ mod tests {
     }
 
     #[test]
+    fn closure_equivalent_activation_preserves_product_provenance() {
+        let manifest = valid_manifest();
+        assert_ne!(
+            manifest.activation_revision, manifest.product_revision,
+            "the fixture models a reusable product built from another closure-equivalent commit"
+        );
+        assert!(manifest
+            .validate_for_activation(&CLOSURE.repeat(64), &REVISION.repeat(40), 100)
+            .is_ok());
+    }
+
+    #[test]
     fn malformed_identity_and_digest_fail_closed() {
         let mut manifest = valid_manifest();
         manifest.closure = "C".repeat(64);
@@ -286,7 +298,7 @@ mod tests {
         assert!(error.to_string().contains("does not match"));
 
         let error = manifest
-            .validate_for_activation(&CLOSURE.repeat(64), &"s".repeat(40), 100)
+            .validate_for_activation(&CLOSURE.repeat(64), &"e".repeat(40), 100)
             .expect_err("a different revision cannot activate");
         assert!(error.to_string().contains("does not match"));
     }
