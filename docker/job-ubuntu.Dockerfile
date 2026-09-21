@@ -36,7 +36,8 @@ FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea264
 # through. This set is near-frozen; the volatile job-runtime package set is a
 # separate layer *after* the toolchain, so editing it no longer invalidates the
 # ~2.9 GB of installed toolchain the way one combined apt layer did.
-RUN apt-get update \
+RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|http://mirror.sg.gs/ubuntu-ports/|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -89,7 +90,7 @@ ENV HOME=/root \
 # read-only /opt/mise/bin bootstrap; runtime never rewrites it. Its own layer,
 # so it is keyed on MISE_VERSION alone.
 RUN mkdir -p /opt/mise/bin \
-    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.9" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
+    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.12" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise --version
 
 # Plan 008: the whole job toolchain is a committed, locked mise config
@@ -249,6 +250,7 @@ RUN apt-get update \
     && test -n "$conf" \
     && ln -sf "$conf" /usr/local/bin/llvm-config \
     && test -e "$(llvm-config --libdir)/libclang.so" \
+    && sed -i 's|http://mirror.sg.gs/ubuntu-ports/|http://ports.ubuntu.com/ubuntu-ports/|g' /etc/apt/sources.list.d/ubuntu.sources \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker client only. `docker version` and `docker buildx version` are what
