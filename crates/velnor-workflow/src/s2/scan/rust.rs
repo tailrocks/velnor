@@ -1185,8 +1185,10 @@ pub(crate) struct BoltffiProducer {
     /// The expected generated binding file under `bindings_dir`:
     /// `{PascalCase(crate)}BoltFFI.swift`.
     pub(crate) bindings_file: String,
-    /// The Apple deployment target that shapes generated manifests.
-    pub(crate) deployment_target: String,
+    /// The manifest's declared/default deployment target. The effective
+    /// target used by the pack recipe is `recipe.deployment` and may be
+    /// overridden by `[native.apple] deployment_floor`.
+    pub(crate) manifest_deployment_target: String,
     /// The generated `Package.swift` the drift check snapshots, if the
     /// manifest does not skip it. Render-local: the recipe consumes it at
     /// join time, so it stays off the product until transport needs it.
@@ -1207,6 +1209,15 @@ pub(crate) struct BoltffiProducer {
     /// when `inputs_unknown` is nonempty: exact reuse without a complete
     /// contract would be a false identity.
     pub(crate) inputs_digest: Option<String>,
+}
+
+impl BoltffiProducer {
+    /// Return the deployment target that shapes the built product. All
+    /// product contracts must use this resolved recipe value, never the
+    /// manifest fallback kept for scan evidence.
+    pub(crate) fn effective_deployment_target(&self) -> &str {
+        self.recipe.deployment.as_str()
+    }
 }
 
 /// The `boltffi.toml` fields the producer join reads. SPM layout and debug
@@ -1770,8 +1781,8 @@ pub(crate) fn valid_cargo_profile(profile: &str) -> bool {
 pub(crate) const MACOSX_DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
 
 /// An Apple deployment floor: `major.minor[.patch]`, all numeric. The
-/// recipe exports exactly this value; the manifest scan fact stays the
-/// raw `targets.apple.deployment_target` string on the producer.
+/// recipe exports exactly this value; the manifest scan fact stays separate
+/// from the effective target on the producer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeploymentFloor(pub(crate) String);
 
@@ -2183,7 +2194,7 @@ fn boltffi_producer_from_manifest(
         output_files,
         bindings_dir: bindings.dir,
         bindings_file: bindings.file,
-        deployment_target: bindings.deployment_target,
+        manifest_deployment_target: bindings.deployment_target,
         framework,
         package_swift: bindings.package_swift,
         recipe,
@@ -3442,7 +3453,7 @@ mod tests {
             producer.bindings_file,
             "app/Sources/BridgeBindings/BoltFFI/BridgeCoreFfiBoltFFI.swift"
         );
-        assert_eq!(producer.deployment_target, "15.0");
+        assert_eq!(producer.manifest_deployment_target, "15.0");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3515,7 +3526,7 @@ mod tests {
             producer.bindings_file,
             "crates/plain/dist/apple/Sources/BoltFFI/PlainCoreBoltFFI.swift"
         );
-        assert_eq!(producer.deployment_target, "16.0");
+        assert_eq!(producer.manifest_deployment_target, "16.0");
         assert!(
             producer
                 .inputs
@@ -4092,7 +4103,7 @@ mod tests {
             (
                 "libs/bridge-ffi/boltffi.toml",
                 "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
-                 [targets.apple]\ndeployment_target = \"15.0\"\n\n\
+                 [targets.apple]\ndeployment_target = \"16.0\"\n\n\
                  [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
             ),
             (
@@ -4112,22 +4123,22 @@ mod tests {
             assert_eq!(producers.len(), 1);
             (
                 producers[0].recipe.deployment.as_str().to_owned(),
-                producers[0].deployment_target.clone(),
+                producers[0].manifest_deployment_target.clone(),
             )
         };
         let default = AppleNativePolicy::default();
         assert_eq!(
             floor_for(&default),
-            ("15.0".to_owned(), "15.0".to_owned()),
+            ("16.0".to_owned(), "16.0".to_owned()),
             "absent policy keeps the manifest target"
         );
         let declared = must(
-            AppleNativePolicy::from_declared(None, Some("13.0")),
+            AppleNativePolicy::from_declared(None, Some("26.0")),
             "parse declared floor",
         );
         assert_eq!(
             floor_for(&declared),
-            ("13.0".to_owned(), "15.0".to_owned()),
+            ("26.0".to_owned(), "16.0".to_owned()),
             "the declared floor wins while the scan fact stays the manifest value"
         );
         let _ = fs::remove_dir_all(root);
