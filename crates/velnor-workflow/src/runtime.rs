@@ -212,6 +212,9 @@ impl CiUnit {
                 )));
             }
             if self.check_commands.is_empty() {
+                if self.kind == "swift" {
+                    return Ok(Vec::new());
+                }
                 return Err(GeneratorError::usage(format!(
                     "CI unit `{}` carries validation phases without prerequisite check commands",
                     self.id
@@ -556,7 +559,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, swift-build, swift-test, or check"
                         ))
                     })
                 })
@@ -6430,6 +6433,49 @@ workspace_check = true
                 .contains("without prerequisite check commands"),
             "a phased unit without a check fails closed: {error}"
         );
+
+        let mut swift = unit;
+        swift.id = "swift-package-app".to_owned();
+        swift.kind = "swift".to_owned();
+        swift.github_pr_commands = vec![
+            "cd native && swift build".to_owned(),
+            "cd native && swift test --parallel".to_owned(),
+        ];
+        swift.github_full_commands = swift.github_pr_commands.clone();
+        swift.velnor_pr_commands = swift.github_pr_commands.clone();
+        swift.velnor_full_commands = swift.github_pr_commands.clone();
+        swift.phases = vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest];
+        swift.check_commands.clear();
+        assert_eq!(
+            must(
+                swift.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftBuild,
+                ),
+                "Swift build selection",
+            ),
+            vec!["cd native && swift build".to_owned()]
+        );
+        assert_eq!(
+            must(
+                swift.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftTest,
+                ),
+                "Swift test selection",
+            ),
+            vec!["cd native && swift test --parallel".to_owned()]
+        );
+        assert!(
+            must(
+                prerequisite_commands(&swift, RunnerLane::Github, Scope::Affected, None),
+                "Swift prerequisite",
+            )
+            .is_empty(),
+            "SwiftPM phases have no Rust-style prerequisite"
+        );
     }
 
     #[test]
@@ -6442,7 +6488,7 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, or check"),
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, swift-build, swift-test, or check"),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,

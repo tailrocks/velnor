@@ -602,7 +602,8 @@ impl UnitKind {
 }
 
 /// One typed validation phase of a unit's commands. The scan tags each
-/// command it structures (Rust fmt/clippy/test/doctest); generated jobs run
+/// command it structures (Rust fmt/clippy/test/doctest and SwiftPM
+/// build/test); generated jobs run
 /// one step per runnable phase behind `--phase`, and the prerequisite tier
 /// selects the check phase. Phase membership is positional data, never
 /// substring detection on command text.
@@ -613,14 +614,25 @@ pub enum ValidationPhase {
     Clippy,
     Test,
     Doctest,
+    #[serde(rename = "swift-build")]
+    SwiftBuild,
+    #[serde(rename = "swift-test")]
+    SwiftTest,
     Check,
 }
 
 impl ValidationPhase {
     /// The runnable phases in step order: formatting first, then lints, then
-    /// tests, then doctests. `Check` is prerequisite-only and never renders
-    /// a validation step.
-    pub(crate) const RUNNABLE: [Self; 4] = [Self::Fmt, Self::Clippy, Self::Test, Self::Doctest];
+    /// tests, then doctests, then SwiftPM build and tests. `Check` is
+    /// prerequisite-only and never renders a validation step.
+    pub(crate) const RUNNABLE: [Self; 6] = [
+        Self::Fmt,
+        Self::Clippy,
+        Self::Test,
+        Self::Doctest,
+        Self::SwiftBuild,
+        Self::SwiftTest,
+    ];
 
     /// The phase a `--phase` selector or `phases` TOML entry names.
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -629,6 +641,8 @@ impl ValidationPhase {
             "clippy" => Self::Clippy,
             "test" => Self::Test,
             "doctest" => Self::Doctest,
+            "swift-build" => Self::SwiftBuild,
+            "swift-test" => Self::SwiftTest,
             "check" => Self::Check,
             _ => return None,
         })
@@ -642,6 +656,8 @@ impl ValidationPhase {
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doctest => "doctest",
+            Self::SwiftBuild => "swift-build",
+            Self::SwiftTest => "swift-test",
             Self::Check => "check",
         }
     }
@@ -653,6 +669,8 @@ impl ValidationPhase {
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
             Self::Doctest => "Doctests",
+            Self::SwiftBuild => "Swift build",
+            Self::SwiftTest => "Swift tests",
             Self::Check => "Prerequisite check",
         }
     }
@@ -3694,7 +3712,7 @@ pub(crate) fn validate_unit_phases(config: &ProjectConfig) -> Result<(), Generat
                 unit.full_commands.len()
             )));
         }
-        if unit.check_commands.is_empty() {
+        if unit.check_commands.is_empty() && unit.kind != UnitKind::Swift {
             return Err(GeneratorError::usage(format!(
                 "unit `{}` carries validation phases without prerequisite check commands",
                 unit.id
@@ -14757,6 +14775,28 @@ channel = "stable"
         assert!(
             error.to_string().contains("without validation phases"),
             "a stored check without phases fails closed: {error}"
+        );
+    }
+
+    #[test]
+    fn swift_validation_phases_use_hyphenated_wire_ids() {
+        assert_eq!(
+            ValidationPhase::parse("swift-build"),
+            Some(ValidationPhase::SwiftBuild)
+        );
+        assert_eq!(
+            ValidationPhase::parse("swift-test"),
+            Some(ValidationPhase::SwiftTest)
+        );
+        assert_eq!(ValidationPhase::SwiftBuild.as_str(), "swift-build");
+        assert_eq!(ValidationPhase::SwiftTest.as_str(), "swift-test");
+        assert_eq!(
+            serde_json::to_string(&ValidationPhase::SwiftBuild).expect("serialize swift build"),
+            "\"swift-build\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ValidationPhase::SwiftTest).expect("serialize swift test"),
+            "\"swift-test\""
         );
     }
 
