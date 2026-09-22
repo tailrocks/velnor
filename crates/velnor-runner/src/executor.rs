@@ -654,6 +654,69 @@ fn own_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
+/// Capture the child-owned process group before the child can exit.
+///
+/// The timeout watchdog may run while the leader is already gone but a
+/// descendant still owns one of the child's pipes. Re-resolving the group at
+/// that point is too late: the leader's pid no longer identifies the group.
+/// `own_process_group` makes the child the group leader; the checks below keep
+/// a failed spawn setup from ever turning into a signal for this runner's own
+/// group.
+#[cfg(unix)]
+fn process_group_of(child: &Child) -> Option<libc::pid_t> {
+    let child_pid = libc::pid_t::try_from(child.id()).ok()?;
+    // SAFETY: getpgid only observes the process relationship for the child we
+    // just spawned; the pid is checked before it is used as a group target.
+    let group = unsafe { libc::getpgid(child_pid) };
+    if group <= 0 || group != child_pid {
+        return None;
+    }
+    // SAFETY: pid 0 asks for this runner's own process group.
+    let own_group = unsafe { libc::getpgid(0) };
+    (group != own_group).then_some(group)
+}
+
+/// Kill a captured child group, treating an already-empty group as success.
+///
+/// The group id was validated before the leader could exit and remains held by
+/// the unreaped `Child` while pipe readers drain, so this is the structural
+/// cleanup seam for post-exit descendants. A failed group signal lets the
+/// caller fall back to the direct child.
+#[cfg(unix)]
+fn kill_process_group(group: libc::pid_t) -> bool {
+    if group <= 0 {
+        return false;
+    }
+    // SAFETY: `-group` addresses only the validated child-owned process group;
+    // it can never be the runner's group because process_group_of rejects it.
+    let result = unsafe { libc::kill(-group, libc::SIGKILL) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn kill_process_tree(group: Option<libc::pid_t>, child_pid: u32) {
+    if group.is_some_and(kill_process_group) {
+        return;
+    }
+    let Ok(pid) = libc::pid_t::try_from(child_pid) else {
+        return;
+    };
+    // SAFETY: this is the direct child fallback for a group that could not be
+    // validated or signalled; it never targets an arbitrary recycled pid
+    // because the child handle is still owned by the caller.
+    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+}
+
+#[cfg(not(unix))]
+fn kill_process_tree(_group: Option<()>, child_pid: u32) {
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &child_pid.to_string()])
+        .status();
+}
+
 /// Register a spawned child's process group with the running job's
 /// cancellation, for as long as the returned guard lives.
 ///
@@ -849,9 +912,13 @@ impl CommandRunner for ProcessCommandRunner {
         let child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        #[cfg(unix)]
+        let group = process_group_of(&child);
+        #[cfg(not(unix))]
+        let group = None;
         let _group = register_process_group(child.id(), program);
         let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
+            spawn_docker_timeout_watchdog(program, args, child.id(), group, timeout);
         let output = child
             .wait_with_output()
             .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
@@ -916,6 +983,10 @@ impl CommandRunner for ProcessCommandRunner {
         let mut child = command
             .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        #[cfg(unix)]
+        let group = process_group_of(&child);
+        #[cfg(not(unix))]
+        let group = None;
         let _group = register_process_group(child.id(), program);
         let stdout = child
             .stdout
@@ -930,7 +1001,7 @@ impl CommandRunner for ProcessCommandRunner {
         thread::spawn(move || stream_reader(stdout, CommandStream::Stdout, stdout_sender));
         thread::spawn(move || stream_reader(stderr, CommandStream::Stderr, sender));
         let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
+            spawn_docker_timeout_watchdog(program, args, child.id(), group, timeout);
 
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -1051,9 +1122,13 @@ impl CommandRunner for ProcessCommandRunner {
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        #[cfg(unix)]
+        let group = process_group_of(&child);
+        #[cfg(not(unix))]
+        let group = None;
         let _group = register_process_group(child.id(), program);
         let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
+            spawn_docker_timeout_watchdog(program, args, child.id(), group, timeout);
         if let Some(mut child_stdin) = child.stdin.take() {
             child_stdin
                 .write_all(stdin.as_bytes())
@@ -13925,6 +14000,8 @@ fn spawn_docker_timeout_watchdog(
     program: &str,
     args: &[String],
     child_pid: u32,
+    #[cfg(unix)] group: Option<libc::pid_t>,
+    #[cfg(not(unix))] group: Option<()>,
     timeout: Duration,
 ) -> (
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -13941,9 +14018,7 @@ fn spawn_docker_timeout_watchdog(
             if let Some(container_name) = container_name {
                 kill_container_best_effort(&container_name);
             }
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &child_pid.to_string()])
-                .status();
+            kill_process_tree(group, child_pid);
         }
     }));
     (timed_out, watchdog_cancel, watchdog)
@@ -14191,6 +14266,31 @@ mod tests {
         }
     }
 
+    /// A descendant is not owned by this test process, so it may briefly be a
+    /// zombie after the process-group kill while the system reaps it. Treat a
+    /// `Z` state as no longer surviving; a non-zombie state is still a live
+    /// descendant and must fail the regression test.
+    #[cfg(unix)]
+    fn wait_for_process_tree_member_to_stop(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps must run for the descendant-lifecycle poll");
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            if state.is_empty() || state.starts_with('Z') {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "descendant {pid} survived the process-group timeout (state {state:?})"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Assert `pid` is reaped (no zombie left): `kill(pid, 0)` still
     /// succeeds for a zombie, so ESRCH proves reap, not mere death.
     #[cfg(unix)]
@@ -14364,6 +14464,75 @@ mod tests {
             )
             .unwrap();
         assert_eq!(with_stdin.stdout, "line-one\nline-two|payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_descendant_that_keeps_wait_with_output_pipe_open() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("descendant.pid");
+        let command = format!("sleep 30 & echo $! > '{}'; exit 0", pid_file.display());
+        let args = ["-c".to_string(), command];
+        let mut runner = ProcessCommandRunner;
+        let started = Instant::now();
+
+        let result = runner
+            .run_timeout_with_env("sh", &args, &[], Duration::from_millis(300))
+            .unwrap();
+        assert_eq!(result.code, 124, "timeout must include pipe-drain time");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "wait_with_output cleanup exceeded its wall bound"
+        );
+
+        let pid = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        wait_for_process_tree_member_to_stop(pid);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_timeout_kills_descendant_that_keeps_pipe_open_after_leader_exit() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("descendant.pid");
+        let command = format!("sleep 30 & echo $! > '{}'; exit 0", pid_file.display());
+        let args = ["-c".to_string(), command];
+        let mut runner = ProcessCommandRunner;
+        let mut output = Vec::new();
+        let started = Instant::now();
+
+        let result = runner
+            .run_streaming_timeout_with_env(
+                "sh",
+                &args,
+                &[],
+                Duration::from_millis(300),
+                &mut |stream, line| output.push((stream, line.to_owned())),
+            )
+            .unwrap();
+        assert_eq!(
+            result.code, 124,
+            "post-exit drain must honor the wall bound"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "streaming pipe drain cleanup exceeded its wall bound"
+        );
+        assert!(output.is_empty(), "fixture should not emit output");
+
+        let pid = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        wait_for_process_tree_member_to_stop(pid);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
