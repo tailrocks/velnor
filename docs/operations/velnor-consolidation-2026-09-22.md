@@ -1,114 +1,176 @@
 # Velnor consolidation ledger — 2026-09-22
 
-Status: active; integration PR #1069 is green; post-merge verification and
-audited cleanup remain.
+Status: final-ledger candidate. The consolidation is landed on remote `main`;
+this sanitized record is the last project-facing change before task-created
+integration environments are removed.
 
-This ledger records the evidence and dispositions for consolidating discoverable
-Velnor work into authoritative `main`, followed by audited cleanup. Machine-
-specific recovery details are kept in the private recovery record identified as
-`velnor-consolidation-recovery-20260922`; this document intentionally contains
-no credentials or host-private paths.
+This ledger records source identities, decisions, landing evidence, cleanup
+exceptions, and restoration instructions. Host-private paths, credentials,
+tokens, and raw recovery data are intentionally excluded. The corresponding
+private recovery record is identified as `velnor-consolidation-recovery-20260922`.
 
-## Authority and initial snapshot
+## Authority and governance
 
 | Item | Evidence |
 | --- | --- |
-| Repository | `tailrocks/velnor` via the configured `origin` identity |
-| Initial authoritative remote `main` | `45ef1ebef769c78f45315e11a798fdaafaef4c4e` |
-| Initial primary checkout HEAD | `ea2e764113cfa23cb17263eabcd2d0d246e81bbd` |
-| Initial primary checkout branch | `fix/renovate-chown-unconditional` (upstream gone) |
-| Initial primary checkout state | Untracked `.firecrawl/`, `goal-finish-and-merge-ci-runtime-products.md`, and `velnor-bastion-final-plan.md`; no tracked staged/unstaged diff |
-| Git state | Shallow repository; existing refs preserved before discovery fetch |
-| Discovery fetch | Explicit non-colliding `refs/discovery/origin/...` namespaces; no prune |
-| Recovery | Complete bundle, dirty patches, untracked/ignored archives, index/config snapshots, and checksums verified before integration |
+| Repository | `tailrocks/velnor`, verified from the SSH remote identity and GitHub API |
+| Authoritative branch | `main` |
+| Main before final scanner/lane fixes | `37e7814995995c107fc704e62096fb86c4709bea` |
+| Main after final scanner/lane fixes | `816046893ef55359ee2f41903d1f1f893d59303e` |
+| Initial main | `45ef1ebef769c78f45315e11a798fdaafaef4c4e` |
+| Contribution workflow | Protected default branch; squash-only merge; linear history; required `DCO`, `Policy`, and `ci-required` checks; review-thread resolution required |
+| Landing PRs | #1069 `37e7814995995c107fc704e62096fb86c4709bea`; #1070 `b509009a33c0492f535676e4657f474b239c563c`; #1071 `816046893ef55359ee2f41903d1f1f893d59303e` |
 
-## Coverage record
+## Discovery coverage
 
-| Surface | Evidence | State |
+Discovery covered accessible Velnor remotes and forks returned by the GitHub
+API, all paginated open/closed PR records needed for reconciliation, explicit
+remote branch refs, the primary Git common directory and registered worktrees,
+independent Velnor clones under the development and temporary roots, detached
+heads, reflogs, stashes, operation markers, dirty indexes/worktrees, and
+recoverable unreachable objects. Repository identity was checked from remotes,
+Git metadata, and history; directory names alone were not used.
+
+Initial coverage facts:
+
+- Initial remote census: `main` plus 29 non-main branches; 20 open PRs were
+  reviewed. No accessible Velnor fork supplied additional actionable work.
+- The primary and secondary Git common directories exposed 89 and 369
+  registered worktree records respectively; missing records were checked as
+  exact paths, not removed by an unbounded prune.
+- Eleven stash entries, detached heads, reflogs, operation markers, and about
+  1040 unreachable objects were preserved before mutation.
+- Independent clones included the `dual-lane-*` Velnor workspaces, `velnor2`,
+  `velnor3`, the dirty source-integration clone, and task-created integration
+  worktrees. Other repositories such as `velnor-apt`, `velnor-actions`,
+  `homebrew-velnor`, Jackin, Parallax, and Tablerock were identified and kept
+  outside this repository's cleanup scope.
+- The accessible host roots used for the scan were the development project
+  roots, agent-managed workspace/recovery roots, and temporary worktree roots.
+  No additional inaccessible Velnor root or remote was reported by the scan;
+  private/deleted GitHub history remains unknowable and is not claimed here.
+
+## Accepted work landed
+
+### Consolidation PR #1069
+
+The following logical families were reviewed against current main, selectively
+adapted where needed, tested, and landed in the squash merge
+`37e7814995995c107fc704e62096fb86c4709bea`:
+
+| Source | Accepted result |
+| --- | --- |
+| #1054 `256c24bb` | Apple/Mise provider closure, integrated as `e6f55e30` |
+| #1055 `3b0b8f37`, `2a270947` | Product receipt failure closure, integrated as `1f908e1c`, `46019b3f` |
+| #1056 `fce9b563`, `32bb1dee`, `9f795b2e` | Native product-input closure, adapted as `0f5e71a0`, `1390a904`, `fd32fff8` |
+| #1057 `67594a08`, `0ecec338`, `d6535337`, `70268cd5` | Scheduled action/check-profile permission and regression coverage, adapted as `cddb8a9a`, `ab7f9d9d`, `1a1a1cbf`, `f9f1864f`; conflict retained both relevant test families |
+| #1050 `e43951b4`, `1bed04e3`, `b7a8fb77`, `9d519b4c`, `96b835d9` | Lossless desktop candidate evidence, integrated as `94e06a11`, `74fad4f9`, `094f851b`, `5b07dfa8`, `9a60c371` |
+| #1063 `228fc58f`, `5349ec32` | Verified P962 provider/tarball producer-bind subset, integrated as `7634421a`, `094805b4` |
+| `b1a69b9` | Mise fleet/runtime pin and runner fallback authority; pin-integrity passed |
+| #1052 valid subset | Cache verifier `7c37f3ed`; exact bootstrap branch was not merged |
+
+### D19 promotion PR #1070
+
+`21f3c95ea605236eda9ed33ae515664a5f48ad8a` promoted the D19 pin to the
+verified consolidation runtime and squash-merged as
+`b509009a33c0492f535676e4657f474b239c563c`. The post-merge runtime product
+run `35719569102` succeeded and published the immutable product
+`velnor-workflow-runtime-v1-5192f313011711b7`.
+
+### Scanner and lane reconciliation PR #1071
+
+PR #1071 squash-merged as `816046893ef55359ee2f41903d1f1f893d59303e`.
+It accepted the correct portions of #963 and independent review findings:
+
+- Rust `include_str!` ownership now uses the nearest package root, including
+  nested packages and excluded package roots, with schema-1 and schema-2
+  regression tests.
+- Qualified and aliased builtin include macros are recognized while lexical
+  shadowing and opaque macro bodies remain safe.
+- Private lane evidence uses authenticated requests, per-job artifacts, API
+  pagination, and complete paired-run census checks; Velnor-only steps remain
+  informational as intended.
+- Strict package lint and the exact test-only compatibility wrappers were
+  corrected rather than weakening lint or assertions.
+
+The final PR head `77a8abc6b45582a4ee0b04c2ffe1befb803d5c66` had no human review
+threads or unresolved comments; all required checks passed in run
+`35728957511` before merge.
+
+## Disposition of other material
+
+| Source family | Disposition | Reason/evidence |
 | --- | --- | --- |
-| Primary checkout and nested instructions | `AGENTS.md`, nested workflow `AGENTS.md`, repository manifests/docs | Captured; continue review |
-| Registered worktrees | Initial worktree inventory and Git worktree metadata | 86 records; 79 missing/stale records; disposition pending |
-| Local refs and reflogs | Initial refs/reflogs plus recovery bundle | Captured; analyze |
-| Stashes | 11 stash roots preserved and bundled | Analyze individually |
-| Remote branches/tags/PR heads | Explicit non-colliding discovery fetch; 29 non-main branches, main, 20 pre-existing open PRs, no forks | Captured; PR #1069 is the consolidation path |
-| Independent clones and host roots | Host scan covered common Velnor roots and clone/worktree stores | 61 live checkouts and 451 stale records observed; no deletion authorized |
-| Detached/recoverable commits | Worktree heads, handoff refs, reflogs, and bundle preserved | Captured; 1040 unreachable commits retained |
-| Active use/locks | Process and workspace checks delegated | Operation markers and dirty/user material retained; no broad cleanup |
+| #962 whole branch | SUPERSEDED/REJECTED | Configured cross-compilation runner preservation is already present and tested on final main; only the justified P962 subset was ported through #1063/#1069 |
+| #963 whole branch | SUPERSEDED/REJECTED | Mixed branch; correct scanner/evidence portions landed in #1071, opaque `OUT_DIR` behavior was already satisfied, and the obsolete skills-scanner proposal has no current target |
+| #1052 exact branch | SUPERSEDED/REJECTED | Current-main generated/runtime contract did not support the exact bootstrap rewrite; cache-verifier subset was extracted and tested |
+| #1058 | BLOCKED then closed | Incomplete phase activation had strict lint/scanner-order failures and no current candidate-authority contract |
+| #1044, #1064 | BLOCKED then closed | Broad activation/policy rewrites removed or invalidated current contracts; policy/fixture authority was not proven |
+| #973 | SUPERSEDED/REJECTED | Current main commit `7864f9d4` deliberately retains rolling tags when ownership cannot be proven and tests the race; accepting an orphan tag would weaken that boundary |
+| #978, #979, #980 | SUPERSEDED/REJECTED | Paused mixed validation/performance drafts overlap current architecture and contain no distinct verified change ready for landing |
+| #1065–#1068 | SUPERSEDED/REJECTED | Historical paused handoffs; accepted Velnor work was extracted, other-project rollout was out of scope |
+| Legacy rolling-preview branch | SUPERSEDED/REJECTED | Broad stale legacy migration payload; current package-release ownership model is safer and no unique accepted behavior remained |
+| Apple/scaleset integration branch | SUPERSEDED/REJECTED unless independently listed by final clone audit | Mixed pilot/evidence history; accepted native/product closure behavior is already on main, remaining broad pilot changes lack current-main integrated proof |
+| Performance campaign branches | EVIDENCE-ONLY / REJECTED | Measurements and drafts were retained in recovery; no unverified campaign rewrite was promoted |
 
-## Change disposition ledger
+Closed PRs contain disposition comments linking accepted work to #1069/#1071
+or explaining the safety/contract reason for rejection. No review thread was
+deleted or resolved merely to clear a gate.
 
-Every candidate gets a stable source SHA or snapshot digest, logical-change
-scope, evidence, and exactly one disposition: `ACCEPT AS-IS`, `ACCEPT WITH
-ADAPTATION`, `ALREADY SATISFIED`, `SUPERSEDED/REJECTED`, or `BLOCKED`.
+## Verification evidence
 
-| Source identity | Logical change | Disposition | Evidence / destination |
-| --- | --- | --- | --- |
-| #1054 `256c24bb` | Apple mise tool closure | ACCEPT AS-IS | Integrated as `e6f55e30`; focused CI passed |
-| #1055 `3b0b8f37`, `2a270947` | Product receipts | ACCEPT AS-IS | Integrated as `1f908e1c`, `46019b3f`; focused CI passed |
-| #1056 `fce9b563`, `32bb1dee`, `9f795b2e` | Native product closure | ACCEPT WITH ADAPTATION | Rebased onto current main as `0f5e71a0`, `1390a904`, `fd32fff8`; product-input watch closure retained |
-| #1057 `67594a08`, `0ecec338`, `d6535337`, `70268cd5` | Schedule/actions read path | ACCEPT WITH ADAPTATION | Integrated as `cddb8a9a`, `ab7f9d9d`, `1a1a1cbf`, `f9f1864f`; conflict resolved to retain both product-input and check-profile tests; marker removed in `84b8caf` |
-| #1050 `e43951b4`, `1bed04e3`, `b7a8fb77`, `9d519b4c`, `96b835d9` | Desktop candidate evidence | ACCEPT AS-IS | Integrated as `94e06a11`, `74fad4f9`, `094f851b`, `5b07dfa8`, `9a60c371` |
-| #1063 `228fc58f`, `5349ec32` | P962 source integration | ACCEPT AS-IS | Integrated as `7634421a`, `094805b4` |
-| `b1a69b9` | Align mise fleet pin and include runner fallback in integrity authority | ACCEPT WITH ADAPTATION | Root Dockerfile and runner pin aligned to `2026.9.12`; `pin-integrity` passed |
-| #1052 exact head `1119f83f` | Stale generated/refactored cache bootstrap | SUPERSEDED/REJECTED | Exact cherry-pick aborted; branch was 2 ahead/9 behind and failed current strict gates |
-| #1052 valid subset | Verify restored Rust toolchain cache before reuse | ACCEPT WITH ADAPTATION | Current-tree implementation in `7c37f3ed`; generated via Velnor renderer; 6502-test and remote CI pass |
-| #1058 exact head | Rust cache bootstrap candidate | BLOCKED | Strict clippy failed with 18 errors; scanner activation ordering was not proven against the pinned runtime; no direct merge |
-| #962 exact head | ARM selector/parser work | SUPERSEDED/REJECTED | Whole branch rejected; no current-tree proof justified direct merge |
-| #963 exact head | Scanner merge unit | SUPERSEDED/REJECTED | Merge unit rejected; only current-tree invariants would be eligible for separate adaptation |
-| #973 | Workflow follow-up | ALREADY SATISFIED | Current `main` already contains the claimed result |
-| #978 | Earlier workflow family | SUPERSEDED/REJECTED | Superseded by #980/current expected-work architecture |
-| #979 | Earlier expected-work design | SUPERSEDED/REJECTED | Superseded by newer expected-work implementation |
-| #980 | Mixed archival/checkpoint payload | SUPERSEDED/REJECTED | Not a safe merge unit; evidence retained only |
-| #1044 exact head `60bb9326` | Large activation/policy migration | BLOCKED | Policy gate failed; generated outputs were stale/pin-mismatched; useful concepts not direct merge material |
-| #1064–#1068 | Handoff, ledger, macOS, validation, rollout drafts | SUPERSEDED/REJECTED | Evidence extracted; drafts are not merge payloads |
+| Scope | Result |
+| --- | --- |
+| Recovery | `git bundle verify` passed; dirty/index/untracked/ignored snapshots and checksums were verified before mutation |
+| Local formatting/lint | `mise run fmt`, `actionlint`, `pin-integrity`, `deny`, lint, production topology, and release-boundary checks passed on the integrated state |
+| Local tests before #1071 | `mise run test`: 6502 passed, 5 skipped; workflow all-features: 2697 passed |
+| PR #1071 focused tests | Workflow include tests 13 passed; nested ownership 2 passed; tools 354 passed; strict package clippy for `velnor-tools` and `velnor-workflow` passed |
+| PR #1071 integrated workflow tests | `cargo test -p velnor-workflow --all-features`: 2703 passed across 27 suites |
+| PR #1069 | All required PR checks passed; runtime product run `35717854430` succeeded and published the immutable product from source closure `5192f313...` |
+| PR #1070 | All required checks passed after rerunning a single flaky control test; post-merge runtime product run `35719569102` succeeded |
+| Final main | Main CI run `35729846406` succeeded; runtime product run `35729846061` succeeded; Preview run `35729846586` must be recorded after completion |
+| Known baseline limitation | `mise run audit-ci` reported 130 errors on both integrated and clean baseline trees; this pre-existing policy mismatch was not hidden or weakened |
 
-## Integration queue
+## Cleanup gate
 
-Integration is serialized through the clean consolidation worktree. Each unit
-must be reviewed, focused-tested, committed, and pushed before the next unit.
+Deletion was allowlisted by exact ref/path and re-read immediately before each
+operation. Recovery was kept outside cleanup targets. Dirty or operation-marked
+user workspaces were not reset, cleaned, or force-removed.
 
-| Order | Source/change | Dependencies | Verification | Destination |
-| --- | --- | --- | --- | --- |
-| 1 | Baseline and governance evidence | None | Recovery bundle, rulesets, DCO/squash policy, remote census | Ledger commit `0bdde554`; evidence retained |
-| 2 | Fleet pin authority | Baseline | `mise run pin-integrity`; runner mise tests | `b1a69b9` |
-| 3 | Accepted product/closure/schedule/desktop/P962 families | Current main | Focused workflow tests; fmt/clippy | Commits listed above; pushed to consolidation branch |
-| 4 | Rust cache-hit verifier subset | Current generator source | 2697 workflow tests; `--pin-build --check`; generated output | `7c37f3ed` |
-| 5 | D19 promotion experiment | Runtime product must exist first | Dry-run succeeded; real pin caused missing-release bootstrap failure; reverted | Revert `bb102439`; keep published pin until post-merge product exists |
-| 6 | Consolidation PR | All integrated units | PR #1069; DCO, Policy, ci-required, Control, all unit jobs pass | Awaiting merge and post-merge main verification |
+| Candidate class | Disposition |
+| --- | --- |
+| Closed stale remote source branches for #962/#963/#973/#1044/#1050/#1052/#1054–#1058/#1063–#1068/#978–#980 | Delete only after final branch SHA recheck and lease-protected deletion; source commits remain in recovery/main history as applicable |
+| Stale performance/legacy integration refs without an active owner | Delete after independent branch audit and exact SHA recheck |
+| `preserve/*` remote recovery refs | Delete only after the refreshed private bundle verifies their objects; local recovery archive is the retained recovery authority |
+| Main, tags, releases, required maintenance/release refs | Retain |
+| Dirty primary checkout, dirty source-integration clone, and user-authored evidence/plan material | Retain; no destructive cleanup authorized |
+| Task-created baseline, consolidation, D19, post-merge, and final-ledger worktrees | Remove after final PR/ledger merge, exact status/lock/process recheck, and recovery update |
+| Missing registered worktree metadata | Remove only exact records proven absent and not operation/lock-associated; retain ambiguous operation-marker records with recovery evidence |
 
-## Verification log
+## Recovery and restoration
 
-| Scope | Command/evidence | Result |
-| --- | --- | --- |
-| Recovery bundle | `git bundle verify` | Passed; complete history reported |
-| Recovery archives | SHA-256 checksums | Recorded in private recovery record |
-| Main baseline | `mise run fmt`, `actionlint`, workspace check, Bun typecheck/build, and `pin-integrity` | Passed; `audit-ci` failed with 130 errors on clean `origin/main` |
-| Integrated state | `mise run fmt`, `actionlint`, `pin-integrity`, `deny`, `lint`, topology, release-boundary scripts | Passed |
-| Integrated tests | `mise run test` | 6502 passed, 5 skipped |
-| Generator contract | `velnor-workflow --plain --check --pin-build .`; after promotion revert, remote candidate path | Passed locally with candidate pin; final PR CI passed |
-| Failed promotion attempt | PR run `35715057697`, Policy `35715057695` | Diagnosed: non-main D19 pin had no immutable runtime release; corrected by `bb102439` |
-| Remote PR #1069 | CI / PR run `35715417781`; Policy run `35715415160` | All checks passed at head `bb102439` |
-| Remote landing | Final remote-main SHA and post-merge CI | Pending |
+The private recovery record contains the verified all-history bundle, initial
+refs/reflogs/stashes/worktree metadata, staged and unstaged binary-capable
+patches, index/config snapshots, and separate untracked/ignored archives. A
+refreshed final bundle is checked with `git bundle verify` and SHA-256 after the
+last landing.
 
-## Deletion manifest
+To restore Git history in an isolated repository:
 
-No destructive cleanup is authorized by this ledger yet. A candidate may be
-removed only after its unique work is dispositioned, recovery is verified, the
-current state is re-read, active use and shared storage are checked, and an
-independent verifier approves the exact path/ref.
+1. Create an empty repository and run `git bundle verify all-recoverable.bundle`.
+2. Fetch the bundle into the isolated repository, then recreate needed refs
+   from the recorded full object IDs.
+3. Restore index/config and apply staged/unstaged patches separately.
+4. Extract untracked and ignored archives only into the intended restored
+   checkout; inspect before replacing any files.
 
-| Identity | Current state digest | Unique work disposition | Recovery | Active-use check | Approval | Deleted |
-| --- | --- | --- | --- | --- | --- | --- |
-| `/private/tmp/velnor-baseline-audit-20260922` | Temporary read-only baseline worktree | Audit comparison complete; exact removal allowed after process recheck | No user changes | Process recheck pending | Pending | No |
-| Missing/stale registered worktrees | Git metadata records without live paths | No unique state disposition yet | Bundle and refs retained | Not assessed per exact path | No | No |
-| Dirty primary checkout and independent clone | User/unresolved-operation material | Preserve until separately dispositioned | Private archives and bundle verified | Active-use/markers retained | No | No |
+No recovery archive is a substitute for source review. It exists to make every
+rejected or retained state recoverable after cleanup.
 
 ## Completion checkpoint
 
-Not complete. PR #1069 is green but not merged. Remaining required work:
-merge only after the final head review/thread audit; verify authoritative
-remote `main`; verify the mainline runtime product and perform D19 promotion
-through a follow-up PR; close/supersede reviewed stale PRs with evidence; remove
-only exact safe temporary/stale artifacts after independent rechecks; rerun
-discovery/fsck/manifests; and leave a clean canonical main checkout while
-retaining recovery exceptions and restoration steps.
+This ledger becomes complete only after its PR is squash-merged, final Preview
+CI is green, the final remote-main SHA is recorded in the completion report,
+all deletion-manifest entries have an audited outcome, the refreshed bundle is
+verified, and a clean canonical checkout of that exact main SHA passes status
+and synchronization checks.
