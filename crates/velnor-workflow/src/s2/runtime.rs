@@ -199,6 +199,26 @@ impl CiUnit {
         }
     }
 
+    fn aligned_commands(&self, scope: Scope) -> Result<&[String], GeneratorError> {
+        let commands = self.commands(scope);
+        if commands.len() != self.phases.len() {
+            return Err(GeneratorError::usage(format!(
+                "CI unit `{}` carries {} validation phases for {} commands; refusing a misaligned --phase selection",
+                self.id,
+                self.phases.len(),
+                commands.len()
+            )));
+        }
+        Ok(commands)
+    }
+
+    fn first_runnable_phase(&self) -> Option<ValidationPhase> {
+        ValidationPhase::RUNNABLE
+            .iter()
+            .copied()
+            .find(|phase| self.phases.contains(phase))
+    }
+
     /// The unit's commands for one `--phase` selection: the check phase
     /// selects the stored prerequisite commands, a runnable phase selects
     /// the tagged commands positionally. Unphased units and tag/command
@@ -209,40 +229,37 @@ impl CiUnit {
         scope: Scope,
         phase: ValidationPhase,
     ) -> Result<Vec<String>, GeneratorError> {
-        if phase == ValidationPhase::Check {
-            if self.phases.is_empty() {
-                return Err(GeneratorError::usage(format!(
-                    "CI unit `{}` has no validation phases; run it without --phase",
-                    self.id
-                )));
-            }
-            if self.check_commands.is_empty() {
-                return Err(GeneratorError::usage(format!(
-                    "CI unit `{}` carries validation phases without prerequisite check commands",
-                    self.id
-                )));
-            }
-            return Ok(self.check_commands());
-        }
         if self.phases.is_empty() {
             return Err(GeneratorError::usage(format!(
                 "CI unit `{}` has no validation phases; run it without --phase",
                 self.id
             )));
         }
-        let commands = self.commands(scope);
-        if commands.len() != self.phases.len() {
-            return Err(GeneratorError::usage(format!(
-                "CI unit `{}` carries {} validation phases for {} commands; refusing a misaligned --phase selection",
-                self.id,
-                self.phases.len(),
-                commands.len()
-            )));
+        let commands = self.aligned_commands(scope)?;
+        if phase == ValidationPhase::Check {
+            if self.check_commands.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "CI unit `{}` carries validation phases without prerequisite check commands",
+                    self.id
+                )));
+            }
+            let mut selected = commands
+                .iter()
+                .zip(self.phases.iter())
+                .filter(|(_, candidate)| **candidate == ValidationPhase::Preflight)
+                .map(|(command, _)| command.clone())
+                .collect::<Vec<_>>();
+            selected.extend(self.check_commands());
+            return Ok(selected);
         }
+        let include_preflight = self.first_runnable_phase() == Some(phase);
         let selected = commands
             .iter()
             .zip(self.phases.iter())
-            .filter(|(_, candidate)| **candidate == phase)
+            .filter(|(_, candidate)| {
+                **candidate == phase
+                    || (include_preflight && **candidate == ValidationPhase::Preflight)
+            })
             .map(|(command, _)| command.clone())
             .collect::<Vec<_>>();
         if selected.is_empty() {
@@ -3233,10 +3250,13 @@ fn prerequisite_commands(
     match phase {
         None | Some(ValidationPhase::Fmt | ValidationPhase::Check) => {
             if unit.phases.is_empty() {
-                // Units without phase tags — TOML the phase model predates,
-                // declared units, regen-gated units — keep the base
-                // clippy→check rewrite instead of silently no-oping.
-                Ok(legacy_prerequisite_commands(unit, scope))
+                if unit.kind == "rust" {
+                    return Err(GeneratorError::usage(format!(
+                        "CI unit `{}` has no typed validation phases; cannot provide a Rust prerequisite",
+                        unit.id
+                    )));
+                }
+                Ok(Vec::new())
             } else {
                 unit.commands_for_phase(scope, ValidationPhase::Check)
             }
@@ -3245,26 +3265,6 @@ fn prerequisite_commands(
         // validation step; later phase steps no-op.
         Some(_) => Ok(Vec::new()),
     }
-}
-
-/// The prerequisite rewrite for units without phase tags: rust units
-/// compile via their clippy command rewritten to `check`. Non-rust units
-/// have no prerequisite. Byte-identical to the pre-phase behavior.
-fn legacy_prerequisite_commands(unit: &CiUnit, scope: Scope) -> Vec<String> {
-    if unit.kind != "rust" {
-        return Vec::new();
-    }
-    unit.commands(scope)
-        .iter()
-        .filter(|command| command.contains(" clippy "))
-        .map(|command| {
-            command
-                .replacen(" clippy ", " check ", 1)
-                .replace(" -- -D warnings", "")
-                // `mbx check` does not expose Cargo's `--no-deps` flag.
-                .replace(" --no-deps", "")
-        })
-        .collect()
 }
 
 fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
@@ -6686,7 +6686,10 @@ workspace_check = true
                 "cargo fmt --check".to_owned(),
                 "cargo nextest run --locked".to_owned(),
             ],
-            full_commands: vec!["mbx nextest run --locked".to_owned()],
+            full_commands: vec![
+                "mbx fmt --check".to_owned(),
+                "mbx nextest run --locked".to_owned(),
+            ],
             phases: vec![ValidationPhase::Fmt, ValidationPhase::Test],
             check_commands: vec!["cargo check --locked --no-deps --all-targets".to_owned()],
             depends_on: Vec::new(),
@@ -6736,10 +6739,7 @@ workspace_check = true
     }
 
     #[test]
-    fn prerequisite_tier_falls_back_to_clippy_rewrite_without_phases() {
-        // Old-TOML shape: no `phases` or `check_commands` keys, so both
-        // deserialize empty. The prerequisite tier must behave byte-identical
-        // to the pre-phase clippy→check rewrite, never silently no-op.
+    fn prerequisite_tier_rejects_unphased_rust_dependencies() {
         let unit = CiUnit {
             id: "rust-app".to_owned(),
             label: "rust-app".to_owned(),
@@ -6747,13 +6747,9 @@ workspace_check = true
             root: ".".to_owned(),
             watch: vec!["crates/app/**".to_owned()],
             pr_commands: vec![
-                "cargo fmt --check".to_owned(),
                 "cargo clippy --locked --no-deps --all-targets -- -D warnings".to_owned(),
-                "cargo nextest run --locked".to_owned(),
             ],
-            full_commands: vec![
-                "mbx clippy --locked --no-deps --all-targets -- -D warnings".to_owned()
-            ],
+            full_commands: Vec::new(),
             phases: Vec::new(),
             check_commands: Vec::new(),
             depends_on: Vec::new(),
@@ -6765,44 +6761,20 @@ workspace_check = true
             workspace_check: false,
             reads_closed: false,
         };
-        assert_eq!(
-            must(
-                prerequisite_commands(&unit, Scope::Affected, None),
-                "pr scope",
-            ),
-            vec!["cargo check --locked --all-targets"]
-        );
-        assert_eq!(
-            must(
-                prerequisite_commands(&unit, Scope::Full, None),
-                "full scope",
-            ),
-            vec!["mbx check --locked --all-targets"]
-        );
-        // The fallback also covers the first validation step and an explicit
-        // `--phase check`; later phase steps still no-op.
         for phase in [
             None,
             Some(ValidationPhase::Fmt),
             Some(ValidationPhase::Check),
         ] {
-            assert_eq!(
-                must(
-                    prerequisite_commands(&unit, Scope::Affected, phase),
-                    "unphased fallback follows the phase",
-                ),
-                vec!["cargo check --locked --all-targets"]
+            let error = must_fail(
+                prerequisite_commands(&unit, Scope::Affected, phase),
+                "unphased Rust prerequisite",
+            );
+            assert!(
+                error.to_string().contains("no typed validation phases"),
+                "unphased Rust prerequisites fail closed: {error}"
             );
         }
-        assert!(
-            must(
-                prerequisite_commands(&unit, Scope::Affected, Some(ValidationPhase::Test)),
-                "later-step prerequisite",
-            )
-            .is_empty(),
-            "later phase steps no-op on the prerequisite tier"
-        );
-        // Non-rust units have no prerequisite, phased or not.
         let mut foreign = unit.clone();
         foreign.kind = "bun".to_owned();
         assert!(
@@ -6927,6 +6899,66 @@ workspace_check = true
                 .contains("without prerequisite check commands"),
             "a phased unit without a check fails closed: {error}"
         );
+    }
+
+    #[test]
+    fn typed_preflight_runs_with_the_first_phase_and_check() {
+        let unit = CiUnit {
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            pr_commands: vec![
+                "mise run prepare".to_owned(),
+                "cargo fmt --check".to_owned(),
+                "cargo clippy -- -D warnings".to_owned(),
+                "cargo nextest run".to_owned(),
+            ],
+            full_commands: vec![
+                "mise run prepare".to_owned(),
+                "cargo fmt --check".to_owned(),
+                "cargo clippy -- -D warnings".to_owned(),
+                "cargo nextest run".to_owned(),
+            ],
+            phases: vec![
+                ValidationPhase::Preflight,
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ],
+            check_commands: vec!["cargo check --locked --no-deps".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
+            workspace_check: false,
+            reads_closed: false,
+        };
+        assert_eq!(
+            must(
+                unit.commands_for_phase(Scope::Affected, ValidationPhase::Fmt),
+                "preflight fmt selection",
+            ),
+            vec!["mise run prepare", "cargo fmt --check"],
+        );
+        assert_eq!(
+            must(
+                unit.commands_for_phase(Scope::Affected, ValidationPhase::Clippy),
+                "preflight clippy selection",
+            ),
+            vec!["cargo clippy -- -D warnings"],
+        );
+        assert_eq!(
+            must(
+                unit.commands_for_phase(Scope::Affected, ValidationPhase::Check),
+                "preflight check selection",
+            ),
+            vec!["mise run prepare", "cargo check --locked"],
+        );
+        assert!(ValidationPhase::parse("preflight").is_none());
     }
 
     #[test]

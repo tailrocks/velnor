@@ -746,14 +746,17 @@ impl UnitKind {
     }
 }
 
-/// One typed validation phase of a unit's commands. The scan tags each
-/// command it structures (Rust fmt/clippy/test/doctest); generated jobs run
-/// one step per runnable phase behind `--phase`, and the prerequisite tier
-/// selects the check phase. Phase membership is positional data, never
+/// One typed phase of a unit's commands. The scan tags each command it
+/// structures (Rust fmt/clippy/test/doctest); generated jobs run one step per
+/// runnable phase behind `--phase`, and the prerequisite tier selects the
+/// check phase. `Preflight` is a hidden, typed command phase: commands tagged
+/// with it run as part of the first runnable/check selection and never render
+/// as a separate validation step. Phase membership is positional data, never
 /// substring detection on command text.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidationPhase {
+    Preflight,
     Fmt,
     Clippy,
     Test,
@@ -767,7 +770,8 @@ impl ValidationPhase {
     /// a validation step.
     pub(crate) const RUNNABLE: [Self; 4] = [Self::Fmt, Self::Clippy, Self::Test, Self::Doctest];
 
-    /// The phase a `--phase` selector or `phases` TOML entry names.
+    /// The user-selectable phase a `--phase` selector names. `Preflight` is
+    /// intentionally not a selector: it is an internal contract tag only.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "fmt" => Self::Fmt,
@@ -783,6 +787,7 @@ impl ValidationPhase {
     /// `validation_phases` workflow-input record.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Preflight => "preflight",
             Self::Fmt => "fmt",
             Self::Clippy => "clippy",
             Self::Test => "test",
@@ -794,6 +799,7 @@ impl ValidationPhase {
     /// The GitHub Actions step name of one runnable phase.
     pub(crate) fn step_name(self) -> &'static str {
         match self {
+            Self::Preflight => "Preflight",
             Self::Fmt => "Formatting check",
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
@@ -838,8 +844,8 @@ pub struct Unit {
     /// `i` names the phase command `i` belongs to. Empty means unphased
     /// (custom, policy, and Docker units keep the single legacy step). A
     /// phased unit keeps every command vector at exactly this length with no
-    /// lane overrides; any mutation that cannot preserve the alignment
-    /// clears the phases instead.
+    /// lane overrides. Commands that must run before validation use the
+    /// typed `Preflight` tag instead of invalidating this alignment.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) phases: Vec<ValidationPhase>,
     /// The prerequisite-tier check commands, built by the scan from the
@@ -947,6 +953,25 @@ impl Unit {
             .filter(|phase| self.phases.contains(phase))
             .copied()
             .collect()
+    }
+
+    /// Prepend typed preflight commands. Phased units receive one matching
+    /// `Preflight` tag per inserted command; unphased units remain legacy.
+    pub(crate) fn prepend_preflight_commands(&mut self, commands: &[String]) {
+        if commands.is_empty() {
+            return;
+        }
+        let mut pr_commands = commands.to_vec();
+        pr_commands.extend(self.pr_commands.iter().cloned());
+        self.pr_commands = pr_commands;
+        let mut full_commands = commands.to_vec();
+        full_commands.extend(self.full_commands.iter().cloned());
+        self.full_commands = full_commands;
+        if self.has_phases() {
+            let mut phases = vec![ValidationPhase::Preflight; commands.len()];
+            phases.extend(self.phases.iter().copied());
+            self.phases = phases;
+        }
     }
 
     /// Drop the phase model after a command mutation that cannot preserve
@@ -3570,6 +3595,28 @@ pub(crate) fn validate_unit_phases(config: &ProjectConfig) -> Result<(), Generat
                 unit.phases.len(),
                 unit.pr_commands.len(),
                 unit.full_commands.len()
+            )));
+        }
+        let first_non_preflight = unit
+            .phases
+            .iter()
+            .position(|phase| *phase != ValidationPhase::Preflight)
+            .unwrap_or(unit.phases.len());
+        if unit
+            .phases
+            .iter()
+            .skip(first_non_preflight)
+            .any(|phase| *phase == ValidationPhase::Preflight)
+        {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` carries invalid preflight phase tags; preflight must be one contiguous prefix",
+                unit.id
+            )));
+        }
+        if unit.runnable_phases().is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` carries no runnable validation phases",
+                unit.id
             )));
         }
         if unit.github_pr_commands.is_some()

@@ -702,18 +702,11 @@ fn materialize_product_input_watches(config: &mut ProjectConfig) {
 
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every provider and in
-/// local runs, which read the same serialized vectors.
+/// local runs, which read the same serialized vectors. Phased units tag the
+/// inserted commands as typed preflight phases; custom units retain the
+/// legacy unphased contract.
 fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
-    let mut pr_commands = commands.to_vec();
-    pr_commands.extend(unit.pr_commands.iter().cloned());
-    unit.pr_commands = pr_commands;
-    let mut full_commands = commands.to_vec();
-    full_commands.extend(unit.full_commands.iter().cloned());
-    unit.full_commands = full_commands;
-    // Prepare commands carry no phase tags and shift every position: the unit
-    // keeps the product rebuild ahead of its checks and verifies through the
-    // single legacy step.
-    unit.clear_phases();
+    unit.prepend_preflight_commands(commands);
     unit.watch.sort();
     unit.watch.dedup();
 }
@@ -1622,6 +1615,48 @@ mod tests {
             "{}",
             prepared[0]
         );
+    }
+
+    #[test]
+    fn resolve_tags_rust_task_prepare_without_collapsing_validation_phases() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.products = vec![product("xcframework", &["native/out/lib.xcframework"])];
+        let mut consumer = unit("rust-app", UnitKind::Rust);
+        consumer.pr_commands = vec![
+            "cargo fmt --check".to_owned(),
+            "cargo clippy -- -D warnings".to_owned(),
+            "cargo test".to_owned(),
+        ];
+        consumer.full_commands.clone_from(&consumer.pr_commands);
+        consumer.phases = vec![
+            crate::s2::ValidationPhase::Fmt,
+            crate::s2::ValidationPhase::Clippy,
+            crate::s2::ValidationPhase::Test,
+        ];
+        consumer.check_commands = vec!["cargo check".to_owned()];
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut config = project_config(vec![producer, consumer]);
+        must_ok(resolve(&mut config), "rust task product resolves");
+        let prepared = &config.units[1];
+        assert_eq!(
+            prepared.phases,
+            vec![
+                crate::s2::ValidationPhase::Preflight,
+                crate::s2::ValidationPhase::Fmt,
+                crate::s2::ValidationPhase::Clippy,
+                crate::s2::ValidationPhase::Test,
+            ]
+        );
+        assert!(prepared.pr_commands[0].starts_with("mise run build-xcframework"));
+        assert_eq!(
+            &prepared.pr_commands[1..],
+            [
+                "cargo fmt --check".to_owned(),
+                "cargo clippy -- -D warnings".to_owned(),
+                "cargo test".to_owned(),
+            ]
+        );
+        assert_eq!(prepared.full_commands, prepared.pr_commands);
     }
 
     #[test]

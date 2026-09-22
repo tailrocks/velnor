@@ -35,26 +35,31 @@ impl Primitive for RegenGate {
         let mut units = Vec::new();
         for unit in ctx.units {
             let mut unit = (*unit).clone();
-            // The gate runs before anything else, and only once: a declared
-            // command that the unit already carries is left where it is.
-            // Inserting shifts every position, so a unit that gains the gate
-            // drops its phase tags and verifies through the single legacy
-            // step, gate first.
-            if !unit
+            // The gate runs before anything else, and only once. A phased
+            // unit gets a typed preflight tag in both command vectors, so
+            // insertion cannot invalidate the validation phases. An
+            // unphased custom unit keeps the legacy command order.
+            let in_pr = unit
                 .pr_commands
                 .iter()
-                .any(|candidate| candidate == &command)
-            {
-                unit.pr_commands.insert(0, command.clone());
-                unit.clear_phases();
-            }
-            if !unit
+                .any(|candidate| candidate == &command);
+            let in_full = unit
                 .full_commands
                 .iter()
-                .any(|candidate| candidate == &command)
-            {
-                unit.full_commands.insert(0, command.clone());
-                unit.clear_phases();
+                .any(|candidate| candidate == &command);
+            if unit.has_phases() {
+                if !in_pr || !in_full {
+                    unit.pr_commands.retain(|candidate| candidate != &command);
+                    unit.full_commands.retain(|candidate| candidate != &command);
+                    unit.prepend_preflight_commands(std::slice::from_ref(&command));
+                }
+            } else {
+                if !in_pr {
+                    unit.pr_commands.insert(0, command.clone());
+                }
+                if !in_full {
+                    unit.full_commands.insert(0, command.clone());
+                }
             }
             units.push(unit);
         }
