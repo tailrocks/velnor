@@ -12991,7 +12991,7 @@ mod tests {
             "the declared floor reaches the recipe"
         );
         assert_eq!(
-            producer.deployment_target, "15.0",
+            producer.manifest_deployment_target, "15.0",
             "the scan fact keeps the manifest value"
         );
         let _ = fs::remove_dir_all(root);

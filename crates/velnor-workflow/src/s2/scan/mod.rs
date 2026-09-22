@@ -246,7 +246,7 @@ fn wire_native_edge(
                 output_files: producer.output_files.clone(),
                 bindings_dir: producer.bindings_dir.clone(),
                 bindings_file: producer.bindings_file.clone(),
-                deployment_target: producer.deployment_target.clone(),
+                deployment_target: producer.effective_deployment_target().to_owned(),
                 inputs: producer.inputs.clone(),
                 inputs_unknown: producer.inputs_unknown.clone(),
                 inputs_digest: producer.inputs_digest.clone(),
@@ -362,7 +362,7 @@ fn native_product_identity(
         // The scanner only knows the declared Xcode pin, not the installed
         // SDK build. Keep this unknown until the bounded runtime probe.
         sdk: String::new(),
-        deployment_target: producer.deployment_target.clone(),
+        deployment_target: producer.effective_deployment_target().to_owned(),
         toolchain,
         profile: producer.recipe.profile.as_ref().map_or_else(
             || "default".to_owned(),
@@ -739,11 +739,11 @@ mod tests {
             output: "native/out/BridgeCore.xcframework".to_owned(),
             bindings_dir: "native/Sources/BridgeCore".to_owned(),
             bindings_file: "FfiBoltFFI.swift".to_owned(),
-            deployment_target: "26.0".to_owned(),
+            manifest_deployment_target: "16.0".to_owned(),
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: Some(super::rust::CargoProfile("ci-release".to_owned())),
-                deployment: super::rust::DeploymentFloor("26.1".to_owned()),
+                deployment: super::rust::DeploymentFloor("26.0".to_owned()),
                 locked: true,
                 verbose: false,
             },
@@ -768,27 +768,49 @@ mod tests {
         let product = &unit.products[0];
         assert_eq!("xcframework-bridgecore", product.name);
         assert_eq!(vec!["native/out/BridgeCore.xcframework"], product.outputs);
-        let identity = match product.identity.as_ref() {
-            Some(identity) => identity,
-            None => panic!("native product identity"),
-        };
-        assert_eq!(identity.adapter, "boltffi@0.30.1");
-        assert_eq!(identity.host_abi, unit.platform.as_str());
-        assert!(identity.sdk.is_empty(), "static scan must not guess an SDK");
+        assert_eq!(
+            product
+                .identity
+                .as_ref()
+                .map(|identity| identity.adapter.as_str()),
+            Some("boltffi@0.30.1")
+        );
+        assert!(product
+            .identity
+            .as_ref()
+            .is_some_and(|identity| identity.host_abi == unit.platform.as_str()));
         assert!(
-            !identity.exact_reuse_allowed(),
+            product
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.sdk.is_empty()),
+            "static scan must not guess an SDK"
+        );
+        assert_eq!(
+            product
+                .identity
+                .as_ref()
+                .map(|identity| identity.deployment_target.as_str()),
+            Some("26.0"),
+            "identity uses the effective recipe floor, not the manifest fallback"
+        );
+        assert!(
+            product
+                .identity
+                .as_ref()
+                .is_some_and(|identity| !identity.exact_reuse_allowed()),
             "unknown scan-time facts must disable exact reuse"
         );
         assert_eq!(
             product.deployment_target, "26.0",
-            "the product keeps the manifest scan fact"
+            "transport validation uses the effective recipe floor"
         );
         assert_eq!(
             product
                 .env
                 .get(super::rust::MACOSX_DEPLOYMENT_TARGET)
                 .map(String::as_str),
-            Some("26.1"),
+            Some("26.0"),
             "the product exports the recipe's resolved floor: {:?}",
             product.env
         );
@@ -873,7 +895,7 @@ mod tests {
             output: "native/out/BridgeCore.xcframework".to_owned(),
             bindings_dir: "native/Sources/BridgeCore".to_owned(),
             bindings_file: "FfiBoltFFI.swift".to_owned(),
-            deployment_target: "26.0".to_owned(),
+            manifest_deployment_target: "16.0".to_owned(),
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: None,

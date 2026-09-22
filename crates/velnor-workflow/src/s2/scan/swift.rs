@@ -3068,6 +3068,9 @@ mod tests {
             "libs/bridge-ffi/dist/apple/Sources/BoltFFI/BridgeCoreFfiBoltFFI.swift"
         );
         assert_eq!(product.deployment_target, "16.0");
+        let identity = must_some(product.identity.as_ref(), "native product identity");
+        assert_eq!(identity.deployment_target, "16.0");
+        assert!(identity.sdk.is_empty(), "static scan must not guess an SDK");
         let _ = std::fs::remove_dir_all(root);
     }
 
