@@ -1712,8 +1712,6 @@ fn compare_pair(
     reason = "tests may panic"
 )]
 mod tests {
-    use std::io::{Read as _, Write as _};
-
     use super::*;
 
     fn step(number: u64, name: &str, conclusion: &str) -> Step {
