@@ -4480,21 +4480,7 @@ impl WorkflowIr {
         crate::ci_report_action_uses(&self.repository, &self.workflow_revision)
     }
 
-    pub(crate) fn render(&self, kind: WorkflowKind) -> String {
-        let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
-            kind,
-            &self.default_branch,
-            self.runners,
-            self.automatic,
-            &self.default_dispatch_runner,
-            self.merge_group,
-        );
-        let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
-        let _ = writeln!(
-            output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\n"
-        );
+    fn render_aggregate_env(&self, output: &mut String) {
         if self.tools.contains(&ToolRequirement::Sccache)
             || self.tools.contains(&ToolRequirement::OpenTofu)
             || self.mise_present
@@ -4513,6 +4499,24 @@ impl WorkflowIr {
             }
             output.push('\n');
         }
+    }
+
+    pub(crate) fn render(&self, kind: WorkflowKind) -> String {
+        let mut output = String::from(GENERATED_HEADER);
+        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
+            kind,
+            &self.default_branch,
+            self.runners,
+            self.automatic,
+            &self.default_dispatch_runner,
+            self.merge_group,
+        );
+        let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
+        let _ = writeln!(
+            output,
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\n"
+        );
+        self.render_aggregate_env(&mut output);
         output.push_str("jobs:\n");
         // Runner mode is global; every self-hosted job receives the lane
         // admission gate needed for Velnor execution.
