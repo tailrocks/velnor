@@ -976,90 +976,49 @@ fn verification_survives_symlink_and_hardlink_replacement_race() {
 
 #[cfg(unix)]
 #[test]
-fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() {
+fn store_leaves_replaced_temporary_name_instead_of_unlinking_it() {
     let root = fixture("cleanup-race");
-    let safe = vec![b'z'; 1024 * 1024];
     let mut store = must(RawObjectFileStore::new(&root), "open cleanup store");
-    let reference = must(
-        store.store(capture("cleanup-race", b"source", &safe)),
-        "seed cleanup object",
-    );
-    let object = object_path(&root, &reference);
-    must(
-        fs::remove_file(&object),
-        "remove object before publication race",
-    );
     let object_directory = root.join("sha256");
-    let outside = root.join("outside-cleanup");
-    must(
-        fs::write(&outside, b"attacker-bytes"),
-        "write cleanup attacker file",
+    let directory = must(
+        fs::File::open(&object_directory),
+        "open object directory for cleanup hook",
+    );
+    let _replacement = must(
+        github_raw_store::arm_test_publish_replacement(
+            &directory,
+            b"attacker-temporary-file".to_vec(),
+        ),
+        "arm deterministic cleanup replacement",
     );
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let replaced = Arc::new(AtomicBool::new(false));
-    let attacker_stop = Arc::clone(&stop);
-    let attacker_replaced = Arc::clone(&replaced);
-    let attacker_directory = object_directory.clone();
-    let attacker_replacement = object_directory.join("cleanup-attacker-replacement");
-    let attacker = thread::spawn(move || {
-        while !attacker_stop.load(Ordering::Relaxed) {
-            let Ok(entries) = fs::read_dir(&attacker_directory) else {
-                thread::yield_now();
-                continue;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if !name.to_string_lossy().starts_with(".velnor-raw-") {
-                    continue;
-                }
-                let path = entry.path();
-                let _ = fs::remove_file(&attacker_replacement);
-                if fs::write(&attacker_replacement, b"attacker-temporary-file").is_ok()
-                    && fs::rename(&attacker_replacement, &path).is_ok()
-                {
-                    attacker_replaced.store(true, Ordering::Relaxed);
-                    return;
-                }
-            }
-            thread::yield_now();
-        }
-    });
+    // The hook runs immediately after TemporaryFile::create inside store's
+    // publish_if_absent caller. It deterministically replaces that pathname,
+    // so the identity guard must leave the replacement behind. The final
+    // identity check and unlinkat remain separate syscalls on the supported
+    // Unix targets; this proves fail-closed pre-check behavior, not that a
+    // concurrent replacement after the check is impossible.
+    assert!(store
+        .store(capture("cleanup-race", b"source", &[b'z'; 1024]))
+        .is_err());
 
-    let started = Instant::now();
-    while !replaced.load(Ordering::Relaxed) && started.elapsed().as_secs() < 5 {
-        let _ = store.store(capture("cleanup-race", b"source", &safe));
-        thread::yield_now();
-    }
-    stop.store(true, Ordering::Relaxed);
-    attacker
-        .join()
-        .unwrap_or_else(|_| panic!("cleanup attacker panicked"));
-    assert!(replaced.load(Ordering::Relaxed));
+    let replaced = must(
+        fs::read_dir(&object_directory),
+        "read object directory after cleanup rejection",
+    )
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| {
+        path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with(".velnor-raw-") && name.ends_with(".tmp")
+        })
+    })
+    .unwrap_or_else(|| panic!("replaced temporary name missing"));
     assert_eq!(
-        must(fs::read(&outside), "read cleanup attacker file"),
-        b"attacker-bytes"
+        must(fs::read(&replaced), "read replaced temporary"),
+        b"attacker-temporary-file"
     );
-    if object.exists() {
-        assert_eq!(
-            must(fs::read(&object), "read replaced final object"),
-            b"attacker-temporary-file"
-        );
-    } else {
-        let temporary = must(fs::read_dir(&object_directory), "read cleanup directory")
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-"))
-            })
-            .unwrap_or_else(|| panic!("replaced temporary missing"));
-        assert!(temporary.is_file());
-        assert_eq!(
-            must(fs::read(temporary), "read replaced temporary"),
-            b"attacker-temporary-file"
-        );
-    }
     remove_fixture(&root);
 }
 

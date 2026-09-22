@@ -9216,7 +9216,7 @@ mod tests {
         // by plan ID: a same-named row from another job (a legacy cross-job
         // `job-log`, or a redelivered attempt) must survive the overwrite.
         use std::io::{Read, Write};
-        use std::net::{Shutdown, TcpListener, TcpStream};
+        use std::net::{TcpListener, TcpStream};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let probe_addr = listener.local_addr().unwrap();
@@ -9327,7 +9327,10 @@ mod tests {
 
         let mut probe = TcpStream::connect(probe_addr).unwrap();
         probe.write_all(b"PROBE").unwrap();
-        probe.shutdown(Shutdown::Both).unwrap();
+        // The server exits and drops this accepted socket as soon as it reads
+        // PROBE. Drop the client-owned stream instead of racing that peer
+        // close with a fallible shutdown syscall.
+        drop(probe);
         let (requests, extra) = server.join().unwrap();
         assert_eq!(requests.len(), 5);
         assert!(requests[0].contains("ArtifactService/ListArtifacts"));
