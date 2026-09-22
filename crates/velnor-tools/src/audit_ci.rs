@@ -2,11 +2,13 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
+use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -170,7 +172,8 @@ impl Finding {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EstateManifest {
     version: u32,
     #[serde(default)]
@@ -178,12 +181,60 @@ struct EstateManifest {
     repositories: Vec<EstateRepository>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EstateRepository {
     name: String,
     #[serde(default)]
     path: Option<PathBuf>,
     concerns: BTreeMap<String, ConcernContract>,
+}
+
+/// Concern metadata selected only from the canonical estate manifest.
+///
+/// The caller estate supplies repository identities and checkout paths. Its
+/// concern/default plan is validated against the canonical manifest, then
+/// discarded for workload selection and contract auditing.
+struct AcceptedConcernPlan<'a> {
+    name: &'a str,
+    repository_concerns: Option<&'a BTreeMap<String, ConcernContract>>,
+    defaults: &'a BTreeMap<String, ConcernContract>,
+}
+
+impl<'a> AcceptedConcernPlan<'a> {
+    fn from_manifest(manifest: &'a EstateManifest, name: &'a str) -> Self {
+        Self {
+            name,
+            repository_concerns: manifest
+                .repositories
+                .iter()
+                .find(|repository| repository.name == name)
+                .map(|repository| &repository.concerns),
+            defaults: &manifest.defaults,
+        }
+    }
+
+    fn has_repository_projection(&self) -> bool {
+        self.repository_concerns.is_some()
+    }
+
+    fn concern(&self, name: &str) -> Option<&'a ConcernContract> {
+        self.repository_concerns
+            .and_then(|concerns| concerns.get(name))
+            .or_else(|| self.defaults.get(name))
+    }
+
+    fn workflow_files(&self, name: &str) -> BTreeSet<&'a str> {
+        self.concern(name)
+            .map(|concern| {
+                concern
+                    .implementations
+                    .iter()
+                    .map(|implementation| implementation.workflow.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -219,7 +270,7 @@ impl Drop for RemoteCheckout {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum ConcernClassification {
     Required,
@@ -228,7 +279,8 @@ enum ConcernClassification {
     RepoSpecific,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConcernContract {
     classification: ConcernClassification,
     evidence: String,
@@ -236,7 +288,8 @@ struct ConcernContract {
     implementations: Vec<ConcernImplementation>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConcernImplementation {
     workflow: String,
     #[serde(default)]
@@ -252,14 +305,144 @@ struct WorkflowAuditProfile {
     expected_generated_class: Option<GeneratedCallerClass>,
 }
 
-fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerClass>> {
+struct StrictJsonValue;
+
+impl<'de> DeserializeSeed<'de> for StrictJsonValue {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonValueVisitor)
+    }
+}
+
+struct StrictJsonValueVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonValueVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StrictJsonValue.deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(StrictJsonValue)? {
+            values.push(value);
+        }
+        Ok(serde_json::Value::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate JSON object key {key:?}"
+                )));
+            }
+            object.insert(key, map.next_value_seed(StrictJsonValue)?);
+        }
+        Ok(serde_json::Value::Object(object))
+    }
+}
+
+fn parse_estate_manifest(text: &str, context: impl fmt::Display) -> Result<EstateManifest> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let value = StrictJsonValue
+        .deserialize(&mut deserializer)
+        .with_context(|| format!("parse estate manifest {context}"))?;
+    deserializer
+        .end()
+        .with_context(|| format!("parse estate manifest {context}"))?;
+    serde_json::from_value(value).with_context(|| format!("decode estate manifest {context}"))
+}
+
+fn canonical_estate_manifest(root: &Path) -> Result<EstateManifest> {
     let path = root.join(ESTATE_MANIFEST_FILE);
     let text = fs::read_to_string(&path)
         .with_context(|| format!("read estate manifest {}", path.display()))?;
-    let manifest: EstateManifest = serde_json::from_str(&text)
-        .with_context(|| format!("parse estate manifest {}", path.display()))?;
+    parse_estate_manifest(&text, path.display())
+}
+
+fn canonical_fleet_map(
+    manifest: &EstateManifest,
+) -> Result<BTreeMap<String, GeneratedCallerClass>> {
     let mut map = BTreeMap::new();
-    for repo in manifest.repositories {
+    for repo in &manifest.repositories {
         let class = if repo.name == "tailrocks/velnor-actions-fixture" {
             GeneratedCallerClass::Fixture
         } else if repo.name.ends_with("-apt") {
@@ -357,18 +540,20 @@ fn generated_class_equality_findings(
 }
 
 pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
-    let canonical_classes = if args.estate.is_some() || args.repository_name.is_some() {
-        canonical_fleet_map(&args.repo_path)?
+    let canonical_manifest = if args.estate.is_some() || args.repository_name.is_some() {
+        Some(canonical_estate_manifest(&args.repo_path)?)
     } else {
-        BTreeMap::new()
+        None
     };
+    let canonical_classes = canonical_manifest
+        .as_ref()
+        .map(canonical_fleet_map)
+        .transpose()?
+        .unwrap_or_default();
     let estate = if let Some(estate) = &args.estate {
         let text = fs::read_to_string(estate)
             .with_context(|| format!("read estate file {}", estate.display()))?;
-        Some(
-            serde_json::from_str::<EstateManifest>(&text)
-                .with_context(|| format!("parse estate manifest {}", estate.display()))?,
-        )
+        Some(parse_estate_manifest(&text, estate.display())?)
     } else {
         None
     };
@@ -376,6 +561,9 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     let mut generated_samples = Vec::new();
     let mut all = BTreeMap::new();
     if let Some(estate) = &estate {
+        let accepted_manifest = canonical_manifest
+            .as_ref()
+            .context("estate audit has no canonical estate manifest")?;
         if estate.version != 2 {
             bail!(
                 "unsupported estate manifest version {} (expected 2)",
@@ -383,10 +571,18 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             );
         }
         validate_estate_scope(estate, &canonical_classes)?;
+        validate_concern_plan_binding(estate, accepted_manifest)?;
         if args.offline {
             bail!("estate audit cannot skip delivered-default freshness checks");
         }
         for repo in &estate.repositories {
+            let accepted_plan = AcceptedConcernPlan::from_manifest(accepted_manifest, &repo.name);
+            if !accepted_plan.has_repository_projection() {
+                bail!(
+                    "canonical estate manifest has no concern plan for {}",
+                    repo.name
+                );
+            }
             let expected_class = canonical_classes
                 .get(&repo.name)
                 .copied()
@@ -433,15 +629,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                     root.display()
                 )
             })?;
-            let workload_files = concern_implementations(repo, &estate.defaults, "lane-selection")
-                .map(|concern| {
-                    concern
-                        .implementations
-                        .iter()
-                        .map(|implementation| implementation.workflow.as_str())
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
+            let workload_files = accepted_plan.workflow_files("lane-selection");
             let mut findings = audit_repo_profile(
                 &canonical,
                 args.offline,
@@ -449,7 +637,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                 false,
                 Some(expected_class),
             )?;
-            findings.extend(audit_concern_contract(repo, &estate.defaults, &canonical)?);
+            findings.extend(audit_concern_contract(&accepted_plan, &canonical)?);
             let generated_ci_sha256 =
                 generated_caller_sample(&canonical, &repo.name, expected_class)?.map(|sample| {
                     let sha256 = sample.sha256.clone();
@@ -595,6 +783,101 @@ fn validate_estate_scope(
         );
     }
     Ok(())
+}
+
+fn validate_concern_plan_binding(
+    observed: &EstateManifest,
+    accepted: &EstateManifest,
+) -> Result<()> {
+    let differences = concern_plan_differences(observed, accepted);
+    if !differences.is_empty() {
+        bail!(
+            "estate manifest caller plan is not authoritative (caller-plan-not-authority, concern-plan-mismatch): {}; external concern/implementation rewrites cannot change the accepted canonical plan",
+            differences.join("; ")
+        );
+    }
+    Ok(())
+}
+
+fn concern_plan_differences(observed: &EstateManifest, accepted: &EstateManifest) -> Vec<String> {
+    let mut differences = Vec::new();
+    let mut default_names = observed.defaults.keys().collect::<BTreeSet<_>>();
+    default_names.extend(accepted.defaults.keys());
+    for name in default_names {
+        append_concern_difference(
+            &mut differences,
+            &format!("default concern {name}"),
+            accepted.defaults.get(name),
+            observed.defaults.get(name),
+        );
+    }
+
+    let accepted_repositories = accepted
+        .repositories
+        .iter()
+        .map(|repository| (repository.name.as_str(), &repository.concerns))
+        .collect::<BTreeMap<_, _>>();
+    let observed_repositories = observed
+        .repositories
+        .iter()
+        .map(|repository| (repository.name.as_str(), &repository.concerns))
+        .collect::<BTreeMap<_, _>>();
+    let mut repository_names = observed_repositories.keys().collect::<BTreeSet<_>>();
+    repository_names.extend(accepted_repositories.keys());
+    for repository in repository_names {
+        let empty = BTreeMap::new();
+        let accepted_concerns = accepted_repositories
+            .get(repository)
+            .copied()
+            .unwrap_or(&empty);
+        let observed_concerns = observed_repositories
+            .get(repository)
+            .copied()
+            .unwrap_or(&empty);
+        let mut concern_names = accepted_concerns.keys().collect::<BTreeSet<_>>();
+        concern_names.extend(observed_concerns.keys());
+        for concern in concern_names {
+            append_concern_difference(
+                &mut differences,
+                &format!("repository {repository} concern {concern}"),
+                accepted_concerns.get(concern),
+                observed_concerns.get(concern),
+            );
+        }
+    }
+    differences
+}
+
+fn append_concern_difference(
+    differences: &mut Vec<String>,
+    location: &str,
+    accepted: Option<&ConcernContract>,
+    observed: Option<&ConcernContract>,
+) {
+    if accepted == observed {
+        return;
+    }
+    match (accepted, observed) {
+        (Some(accepted), Some(observed))
+            if accepted.classification != observed.classification
+                && matches!(
+                    accepted.classification,
+                    ConcernClassification::Required | ConcernClassification::Applicable
+                )
+                && matches!(
+                    observed.classification,
+                    ConcernClassification::NonApplicable | ConcernClassification::RepoSpecific
+                ) =>
+        {
+            differences.push(format!(
+                "{location} classification downgrade {:?} -> {:?}",
+                accepted.classification, observed.classification
+            ));
+        }
+        _ => differences.push(format!(
+            "{location} concern/implementation definition differs from the accepted canonical plan"
+        )),
+    }
 }
 
 fn git_command() -> Command {
@@ -1038,11 +1321,7 @@ fn verify_checkout_identity(
     Ok(())
 }
 
-fn audit_concern_contract(
-    repo: &EstateRepository,
-    defaults: &BTreeMap<String, ConcernContract>,
-    root: &Path,
-) -> Result<Vec<Finding>> {
+fn audit_concern_contract(plan: &AcceptedConcernPlan<'_>, root: &Path) -> Result<Vec<Finding>> {
     const REQUIRED_CONCERNS: [&str; 14] = [
         "lane-selection",
         "checkout",
@@ -1061,24 +1340,24 @@ fn audit_concern_contract(
     ];
     let mut findings = Vec::new();
     for name in REQUIRED_CONCERNS {
-        if !repo.concerns.contains_key(name) && !defaults.contains_key(name) {
+        if plan.concern(name).is_none() {
             findings.push(Finding::error(
                 "missing-required",
                 "config/estate-repositories.json",
-                format!("$.repositories[{}].concerns.{name}", repo.name),
+                format!("$.repositories[{}].concerns.{name}", plan.name),
                 "classify this concern with evidence; absence is not non-applicability",
             ));
         }
     }
     for name in REQUIRED_CONCERNS {
-        let Some(concern) = repo.concerns.get(name).or_else(|| defaults.get(name)) else {
+        let Some(concern) = plan.concern(name) else {
             continue;
         };
         if concern.evidence.trim().is_empty() {
             findings.push(Finding::error(
                 "missing-required",
                 "config/estate-repositories.json",
-                format!("$.repositories[{}].concerns.{name}.evidence", repo.name),
+                format!("$.repositories[{}].concerns.{name}.evidence", plan.name),
                 "add evidence for this classification",
             ));
         }
@@ -1095,7 +1374,7 @@ fn audit_concern_contract(
                 findings.push(Finding::info(
                     rule,
                     "config/estate-repositories.json",
-                    format!("$.repositories[{}].concerns.{name}", repo.name),
+                    format!("$.repositories[{}].concerns.{name}", plan.name),
                     &concern.evidence,
                 ));
             }
@@ -1106,7 +1385,7 @@ fn audit_concern_contract(
                         "config/estate-repositories.json",
                         format!(
                             "$.repositories[{}].concerns.{name}.implementations",
-                            repo.name
+                            plan.name
                         ),
                         "required/applicable concern must name every implementing workflow",
                     ));
@@ -1194,14 +1473,6 @@ fn audit_concern_contract(
         }
     }
     Ok(findings)
-}
-
-fn concern_implementations<'a>(
-    repo: &'a EstateRepository,
-    defaults: &'a BTreeMap<String, ConcernContract>,
-    name: &str,
-) -> Option<&'a ConcernContract> {
-    repo.concerns.get(name).or_else(|| defaults.get(name))
 }
 
 #[cfg(test)]
@@ -4650,12 +4921,201 @@ jobs:
 
     #[test]
     fn estate_manifest_parses_classified_repository() {
-        let manifest: EstateManifest = serde_json::from_str(
+        let manifest = parse_estate_manifest(
             r#"{"version":2,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+            "unit test",
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
         assert_eq!(manifest.repositories[0].name, "one");
+    }
+
+    #[test]
+    fn estate_manifest_rejects_unknown_fields_at_each_typed_boundary() {
+        let cases = [
+            (
+                "manifest",
+                r#"{"version":2,"defaults":{},"repositories":[],"hostile":true}"#,
+            ),
+            (
+                "repository",
+                r#"{"version":2,"defaults":{},"repositories":[{"name":"one","concerns":{},"hostile":true}]}"#,
+            ),
+            (
+                "concern",
+                r#"{"version":2,"defaults":{"checkout":{"classification":"required","evidence":"evidence","hostile":true}},"repositories":[]}"#,
+            ),
+            (
+                "implementation",
+                r#"{"version":2,"defaults":{"checkout":{"classification":"required","evidence":"evidence","implementations":[{"workflow":"ci.yml","hostile":true}]}},"repositories":[]}"#,
+            ),
+        ];
+        for (label, text) in cases {
+            let error = format!("{:#}", parse_estate_manifest(text, label).unwrap_err());
+            assert!(error.contains("unknown field"), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn estate_manifest_parser_rejects_recursive_duplicates_and_trailing_tokens() {
+        let valid = r#"{"version":2,"defaults":{},"repositories":[]}"#;
+        assert!(parse_estate_manifest(valid, "valid").is_ok());
+
+        let top_level_duplicate = r#"{"version":2,"version":2,"defaults":{},"repositories":[]}"#;
+        let error = format!(
+            "{:#}",
+            parse_estate_manifest(top_level_duplicate, "top-level duplicate").unwrap_err()
+        );
+        assert!(
+            error.contains("duplicate JSON object key \"version\""),
+            "{error}"
+        );
+
+        let nested_duplicate = r#"{"version":2,"defaults":{"checkout":{"classification":"required","evidence":"first","evidence":"second"}},"repositories":[]}"#;
+        let error = format!(
+            "{:#}",
+            parse_estate_manifest(nested_duplicate, "nested duplicate").unwrap_err()
+        );
+        assert!(
+            error.contains("duplicate JSON object key \"evidence\""),
+            "{error}"
+        );
+
+        let error = format!(
+            "{:#}",
+            parse_estate_manifest(&format!("{valid} {{}}"), "trailing tokens").unwrap_err()
+        );
+        assert!(error.contains("trailing"), "{error}");
+    }
+
+    #[test]
+    fn audit_ci_rejects_duplicate_caller_json_before_freshness() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = TestRepo::new();
+        let caller = fixture.path.join("caller-estate.json");
+        fs::write(
+            &caller,
+            r#"{"version":2,"version":2,"defaults":{},"repositories":[]}"#,
+        )
+        .unwrap();
+
+        let error = format!(
+            "{:#}",
+            audit_ci(AuditCiArgs {
+                repo_path: root,
+                repository_name: None,
+                json: false,
+                perf_log: None,
+                repo: None,
+                first_party: Vec::new(),
+                estate: Some(caller),
+                remote_defaults: false,
+                estate_root: None,
+                offline: true,
+            })
+            .unwrap_err()
+        );
+        assert!(
+            error.contains("duplicate JSON object key \"version\""),
+            "{error}"
+        );
+        assert!(!error.contains("freshness"), "{error}");
+    }
+
+    #[test]
+    fn audit_ci_rejects_caller_concern_rewrite_before_freshness() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut caller: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(ESTATE_MANIFEST_FILE)).unwrap())
+                .unwrap();
+        let repositories = caller
+            .get_mut("repositories")
+            .and_then(serde_json::Value::as_array_mut)
+            .unwrap();
+        let repository = repositories
+            .iter_mut()
+            .find(|repository| {
+                repository.get("name").and_then(serde_json::Value::as_str)
+                    == Some("tailrocks/velnor")
+            })
+            .unwrap();
+        let rust_ci = repository
+            .get_mut("concerns")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|concerns| concerns.get_mut("rust-ci"))
+            .unwrap();
+        rust_ci["classification"] = serde_json::json!("non-applicable");
+        rust_ci["implementations"] = serde_json::json!([]);
+
+        let fixture = TestRepo::new();
+        let caller_path = fixture.path.join("caller-estate.json");
+        fs::write(&caller_path, serde_json::to_vec(&caller).unwrap()).unwrap();
+        let error = format!(
+            "{:#}",
+            audit_ci(AuditCiArgs {
+                repo_path: root,
+                repository_name: None,
+                json: false,
+                perf_log: None,
+                repo: None,
+                first_party: Vec::new(),
+                estate: Some(caller_path),
+                remote_defaults: false,
+                estate_root: None,
+                offline: true,
+            })
+            .unwrap_err()
+        );
+        assert!(error.contains("caller-plan-not-authority"), "{error}");
+        assert!(error.contains("classification downgrade"), "{error}");
+        assert!(!error.contains("freshness"), "{error}");
+    }
+
+    fn current_canonical_manifest() -> EstateManifest {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        canonical_estate_manifest(&root).unwrap()
+    }
+
+    #[test]
+    fn canonical_plan_drives_concern_audit_after_caller_substitution() {
+        let accepted = current_canonical_manifest();
+        assert_eq!(accepted.repositories.len(), 28);
+        let mut caller = accepted.clone();
+        let caller_repository = caller
+            .repositories
+            .iter_mut()
+            .find(|repository| repository.name == "tailrocks/velnor")
+            .unwrap();
+        let caller_concern = caller_repository.concerns.get_mut("rust-ci").unwrap();
+        caller_concern.classification = ConcernClassification::NonApplicable;
+        caller_concern.implementations.clear();
+
+        let error = validate_concern_plan_binding(&caller, &accepted)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("caller-plan-not-authority"), "{error}");
+        assert!(error.contains("classification downgrade"), "{error}");
+
+        let accepted_plan = AcceptedConcernPlan::from_manifest(&accepted, "tailrocks/velnor");
+        let root = TestRepo::new();
+        let findings = audit_concern_contract(&accepted_plan, &root.path).unwrap();
+        assert!(findings.iter().any(|finding| {
+            finding.rule == "missing-required" && finding.message.contains("rust-ci")
+        }));
+        assert!(!findings.iter().any(|finding| {
+            finding.rule == "non-applicable" && finding.path.contains("rust-ci")
+        }));
+    }
+
+    fn local_concern_plan<'a>(
+        repository: &'a EstateRepository,
+        defaults: &'a BTreeMap<String, ConcernContract>,
+    ) -> AcceptedConcernPlan<'a> {
+        AcceptedConcernPlan {
+            name: &repository.name,
+            repository_concerns: Some(&repository.concerns),
+            defaults,
+        }
     }
 
     #[test]
@@ -4666,7 +5126,9 @@ jobs:
             path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
-        let findings = audit_concern_contract(&repo, &BTreeMap::new(), &root.path).unwrap();
+        let defaults = BTreeMap::new();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(has_rule(&findings, "missing-required"));
     }
 
@@ -4680,7 +5142,8 @@ jobs:
         };
         let mut defaults = required_concern_defaults();
         defaults.remove("required-aggregator");
-        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(findings.iter().any(|finding| {
             finding.rule == "missing-required"
                 && finding.path.ends_with("concerns.required-aggregator")
@@ -4708,7 +5171,8 @@ jobs:
             )]),
         };
         let defaults = required_concern_defaults();
-        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(!has_rule(&findings, "canonical-drift"));
     }
 
@@ -4737,7 +5201,8 @@ jobs:
             path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
-        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(findings.iter().any(|finding| {
             finding.rule == "canonical-drift" && finding.message.contains("out of order")
         }));
