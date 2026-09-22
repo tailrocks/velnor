@@ -24,10 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{
-    action_reference::RepositoryActionReference, Generation, SlotId, SlotPhase, TelemetryEvent,
-    Timestamp,
-};
+use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
 
 use crate::job_claim::JobClaim;
 use crate::{
@@ -17189,6 +17186,7 @@ mod tests {
     use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
+    use velnor_model::action_reference::RepositoryActionReference;
 
     #[test]
     fn hosted_jit_endpoint_accepts_regional_actions_service_host() {
