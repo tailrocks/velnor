@@ -570,7 +570,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
         if let Some(commands) = prepared.remove(&unit.id) {
-            prepend_prepare_commands(unit, &commands);
+            prepend_prepare_commands(unit, &commands)?;
         }
     }
     Ok(())
@@ -601,32 +601,11 @@ fn materialize_product_input_watches(config: &mut ProjectConfig) {
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every lane and in
 /// local runs, which read the same serialized vectors.
-fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
-    let mut pr_commands = commands.to_vec();
-    pr_commands.extend(unit.pr_commands.iter().cloned());
-    unit.pr_commands = pr_commands;
-    let mut full_commands = commands.to_vec();
-    full_commands.extend(unit.full_commands.iter().cloned());
-    unit.full_commands = full_commands;
-    for commands_for_lane in [
-        &mut unit.github_pr_commands,
-        &mut unit.github_full_commands,
-        &mut unit.velnor_pr_commands,
-        &mut unit.velnor_full_commands,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let mut prefixed = commands.to_vec();
-        prefixed.extend(commands_for_lane.iter().cloned());
-        *commands_for_lane = prefixed;
-    }
-    // Prepare commands carry no phase tags and shift every position: the unit
-    // keeps the product rebuild ahead of its checks and verifies through the
-    // single legacy step.
-    unit.clear_phases();
+fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) -> Result<(), GeneratorError> {
+    unit.prepend_precondition_commands(commands)?;
     unit.watch.sort();
     unit.watch.dedup();
+    Ok(())
 }
 
 /// Describe a requirement for a placement diagnostic: the OS, the
@@ -720,7 +699,10 @@ mod tests {
         valid_product_name, valid_task_name, Arch, Executor, NamedProduct, Os, PlatformRequirement,
         Prerequisite, CAP_XCFRAMEWORK, CAP_XCODE,
     };
-    use crate::{AnalysisSummary, MaintenanceSpec, RunnerMode, Unit, UnitKind, VelnorRustNeeds};
+    use crate::{
+        AnalysisSummary, MaintenanceSpec, RunnerMode, Unit, UnitKind, ValidationPhase,
+        VelnorRustNeeds,
+    };
     use std::collections::{BTreeMap, BTreeSet};
 
     #[expect(
@@ -992,6 +974,53 @@ mod tests {
         assert_eq!(
             prepare_command("build-xcframework", &std::collections::BTreeMap::new()),
             "mise run build-xcframework"
+        );
+    }
+
+    #[test]
+    fn phased_rust_prepare_retains_validation_phases() {
+        let mut consumer = unit("rust-app", UnitKind::Rust);
+        consumer.pr_commands = vec![
+            "cargo fmt --check".to_owned(),
+            "cargo clippy --all-targets".to_owned(),
+            "cargo test --all-targets".to_owned(),
+        ];
+        consumer.full_commands = consumer.pr_commands.clone();
+        consumer.phases = vec![
+            ValidationPhase::Fmt,
+            ValidationPhase::Clippy,
+            ValidationPhase::Test,
+        ];
+        consumer.check_commands = vec!["cargo check --all-targets".to_owned()];
+        let prepare = "mise run build-xcframework".to_owned();
+
+        must_ok(
+            super::prepend_prepare_commands(&mut consumer, std::slice::from_ref(&prepare)),
+            "Rust prepare insertion",
+        );
+
+        assert_eq!(
+            consumer.pr_commands,
+            vec![
+                prepare.clone(),
+                "cargo fmt --check".to_owned(),
+                "cargo clippy --all-targets".to_owned(),
+                "cargo test --all-targets".to_owned(),
+            ]
+        );
+        assert_eq!(consumer.full_commands, consumer.pr_commands);
+        assert_eq!(
+            consumer.phases,
+            vec![
+                ValidationPhase::Precondition,
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ]
+        );
+        assert_eq!(
+            consumer.check_commands,
+            vec!["cargo check --all-targets".to_owned()]
         );
     }
 

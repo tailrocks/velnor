@@ -625,16 +625,19 @@ struct XcodeGenSpec {
 }
 
 impl XcodeGenSpec {
-    /// Every `*.xcframework` path the merged targets link, deduplicated:
-    /// targets sort by name from the merge, so the collection is
-    /// deterministic. One consumer record per path keeps the native join
-    /// from wiring the same product edge twice when two targets link one
-    /// framework.
-    fn xcframeworks(&self) -> Vec<String> {
+    /// Every `*.xcframework` path the merged targets link, deduplicated by
+    /// normalized repository path: targets sort by name from the merge, so
+    /// the collection is deterministic. One consumer record per path keeps
+    /// the native join from wiring the same product edge twice when two
+    /// targets or spellings link one framework.
+    fn xcframeworks(&self, consumer_root: &str) -> Vec<String> {
         let mut frameworks = Vec::new();
+        let mut seen = BTreeSet::new();
         for target in &self.targets {
             for framework in &target.frameworks {
-                if !frameworks.contains(framework) {
+                let identity = resolve_repo_path(consumer_root, framework)
+                    .unwrap_or_else(|| framework.clone());
+                if seen.insert(identity) {
                     frameworks.push(framework.clone());
                 }
             }
@@ -1528,10 +1531,19 @@ pub(crate) fn detect(
         }
         let mut unit = swift_package_unit(&package_root, &facts);
         unit.xcode.clone_from(&xcode);
+        let mut seen_binary_targets = BTreeSet::new();
         for target in &facts.binary_targets {
             let name = target.name.as_deref().unwrap_or("<unnamed>");
             match (&target.path, &target.url) {
                 (Some(path), _) => {
+                    let identity = (
+                        resolve_repo_path(&package_root, path)
+                            .unwrap_or_else(|| format!("raw:{path}")),
+                        target.name.clone(),
+                    );
+                    if !seen_binary_targets.insert(identity) {
+                        continue;
+                    }
                     unit.platform = crate::s2::provider::Platform::MacosArm64;
                     unit.capabilities.native_macos_arm64 = true;
                     shape.swift_consumers.push(SwiftBinaryConsumer {
@@ -1626,18 +1638,47 @@ fn detect_xcodegen_specs(
         shape.detected.push(format!("xcodegen:{}", merged.path));
         let (unit, unit_notes) = xcodegen_unit(&merged, context.files);
         shape.limitations.extend(unit_notes);
-        if let Some(mut unit) = unit {
+        let consumer_root = parent_path(&merged.path);
+        let owner_ids = if let Some(mut unit) = unit {
             unit.xcode = xcode.cloned();
             let unit_id = unit.id.clone();
             shape.units.push(unit);
-            // A linked `*.xcframework` joins the same native-producer edge
-            // a `.binaryTarget` path does: without a consumer record the
-            // unit renders with no prerequisite, no transport edge, and no
-            // diagnostic, and `xcodebuild` fails on the missing bundle.
-            // Paths resolve against the spec's own directory, like package
-            // roots do for `Package.swift` stanzas.
-            let consumer_root = parent_path(&merged.path);
-            for framework in merged.xcframeworks() {
+            vec![unit_id]
+        } else {
+            // A committed generated project is executed by its shared-scheme
+            // units. Keep the native edge on every matching scheme so a
+            // project with several shared schemes cannot lose the producer
+            // prerequisite merely because XcodeGen generation is skipped.
+            let project_name = format!("{}.xcodeproj", merged.name);
+            shape
+                .units
+                .iter()
+                .filter(|candidate| {
+                    candidate.kind == UnitKind::Swift
+                        && candidate.root == consumer_root
+                        && candidate
+                            .pr_commands
+                            .iter()
+                            .any(|command| command.contains(&project_name))
+                })
+                .map(|candidate| candidate.id.clone())
+                .collect::<Vec<_>>()
+        };
+        if owner_ids.is_empty() {
+            shape.limitations.push(format!(
+                "XcodeGen spec `{}` is covered by a committed generated project, but no shared scheme unit owns `{}`; linked native products cannot be joined statically.",
+                merged.path, merged.name
+            ));
+            continue;
+        }
+        // A linked `*.xcframework` joins the same native-producer edge a
+        // `.binaryTarget` path does: without a consumer record the unit
+        // renders with no prerequisite, no transport edge, and no
+        // diagnostic, and `xcodebuild` fails on the missing bundle. Paths
+        // resolve against the spec's own directory, like package roots do
+        // for `Package.swift` stanzas.
+        for unit_id in owner_ids {
+            for framework in merged.xcframeworks(&consumer_root) {
                 shape.swift_consumers.push(SwiftBinaryConsumer {
                     manifest: merged.path.clone(),
                     consumer_root: consumer_root.clone(),
@@ -2321,6 +2362,86 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_normalized_package_references_make_one_native_edge() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "clients/desktop/Package.swift",
+                &native_package(
+                    ".binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/BridgeCore.xcframework\"),\n        .binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/./BridgeCore.xcframework\")",
+                ),
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let consumer = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-package-clients-desktop"),
+            "swift package consumer",
+        );
+        assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
+        assert!(
+            shape.swift_consumers.is_empty(),
+            "joined consumers are drained"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn committed_xcodegen_project_keeps_native_join_on_shared_scheme() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "app/project.yml",
+                "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: ../target/xcframework/BridgeCore.xcframework\n",
+            ),
+            (
+                "app/Widget.xcodeproj/xcshareddata/xcschemes/WidgetApp.xcscheme",
+                "<Scheme><BuildAction/></Scheme>\n",
+            ),
+            (
+                "app/Widget.xcodeproj/xcshareddata/xcschemes/WidgetTests.xcscheme",
+                "<Scheme><BuildAction/><TestAction/></Scheme>\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        assert!(
+            !shape
+                .units
+                .iter()
+                .any(|unit| unit.id.starts_with("swift-xcodegen-")),
+            "the committed project owns verification"
+        );
+        let consumers = shape
+            .units
+            .iter()
+            .filter(|unit| unit.id.starts_with("swift-xcodeproj-"))
+            .collect::<Vec<_>>();
+        assert_eq!(consumers.len(), 2, "{consumers:?}");
+        for consumer in consumers {
+            assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
+        }
+        let consumer = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-xcodeproj-widgetapp"),
+            "committed shared-scheme consumer",
+        );
+        assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
+        assert!(
+            shape.swift_consumers.is_empty(),
+            "joined consumers are drained"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn merged_spec_collects_linked_xcframeworks() {
         let files = spec_files(&[(
             "app/project.yml",
@@ -2341,7 +2462,7 @@ mod tests {
             "only the xcframework bundle root is collected, once, without the trailing slash: {:?}",
             lib.frameworks
         );
-        assert_eq!(spec.xcframeworks(), lib.frameworks);
+        assert_eq!(spec.xcframeworks("app"), lib.frameworks);
     }
 
     #[test]
@@ -2491,7 +2612,7 @@ mod tests {
     }
 
     #[test]
-    fn native_join_escalates_producer_and_appends_pack() {
+    fn native_join_escalates_producer_and_prepends_pack() {
         let root = native_fixture(&[
             ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
             ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
@@ -2514,34 +2635,33 @@ mod tests {
         // requirement instead of staying a portable Linux unit.
         assert_eq!(producer.platform, crate::s2::provider::Platform::MacosArm64);
         assert!(producer.capabilities.native_macos_arm64);
-        // The typed recipe lands after the unit's own checks, in both lanes:
+        // The typed recipe lands before the unit's own checks, in both lanes:
         // wipe, two snapshots, pack, two drift diffs (the fixture keeps
         // the default generated `Package.swift`).
         for commands in [&producer.pr_commands, &producer.full_commands] {
             assert!(commands.len() > 6, "{commands:?}");
-            let tail = &commands[commands.len() - 6..];
+            let head = &commands[..6];
             assert_eq!(
-                tail[0],
+                head[0],
                 "rm -rf 'target/xcframework/BridgeCore.xcframework'"
             );
             assert!(
-                tail[1].contains("cp -R ") && tail[1].contains("velnor-boltffi-staging"),
+                head[1].contains("cp -R ") && head[1].contains("velnor-boltffi-staging"),
                 "bindings snapshot: {}",
-                tail[1]
+                head[1]
             );
             assert!(
-                tail[2].contains("Package.swift") && tail[2].contains("cp "),
+                head[2].contains("Package.swift") && head[2].contains("cp "),
                 "package snapshot: {}",
-                tail[2]
+                head[2]
             );
             assert_eq!(
-                tail[3],
+                head[3],
                 "cd -- 'libs/bridge-ffi' && MACOSX_DEPLOYMENT_TARGET='16.0' boltffi -v pack apple"
             );
             assert!(
-                tail[4].starts_with("diff -r ") && tail[5].starts_with("diff "),
-                "drift diffs: {:?}",
-                &tail[4..]
+                head[4].starts_with("diff -r ") && head[5].starts_with("diff "),
+                "drift diffs: {head:?}"
             );
         }
         assert!(
