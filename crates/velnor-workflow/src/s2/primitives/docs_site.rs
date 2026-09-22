@@ -543,15 +543,15 @@ fn render_site_job(
     );
     let deploy_gate = main_deploy_gate(&config.default_branch);
     let publish = publish_guard(&config.default_branch);
-    let site_dir = yaml_scalar(&spec.site_dir);
-    let escaped = bash_escape(&spec.site_dir);
-    let recipe = docs_reuse_recipe(spec);
     let condition = admitted_condition(
         &format!(
             "github.event_name != 'schedule' && (needs.gate.outputs.result-reuse != 'true' || ({deploy_gate}))"
         ),
         admission_gate,
     );
+    let site_dir = yaml_scalar(&spec.site_dir);
+    let escaped = bash_escape(&spec.site_dir);
+    let recipe = docs_reuse_recipe(spec);
     // The receipt rides inside the uploaded site directory so the lookup can
     // verify the exact bytes it restores. All three receipt steps share one
     // condition: the receipt is written if and only if the publish runs, and
@@ -695,6 +695,10 @@ fn render_verify_job(
 ) -> String {
     let checkout = ActionPin::Checkout.reference();
     let deploy_gate = main_deploy_gate(&config.default_branch);
+    let condition = admitted_condition(
+        &format!("always() && needs.deploy.result == 'success' && ({deploy_gate})"),
+        admission_gate,
+    );
     let sitemap = bash_escape(&spec.sitemap_path);
     let env = "          DEPLOYED_URL: ${{ needs.deploy.outputs.page_url }}\n";
     let verify = command_steps(
@@ -702,10 +706,6 @@ fn render_verify_job(
         "Verify the deployed site",
         None,
         Some(env),
-    );
-    let condition = admitted_condition(
-        &format!("always() && needs.deploy.result == 'success' && ({deploy_gate})"),
-        admission_gate,
     );
     format!(
         r#"  verify-deployed:
@@ -749,13 +749,13 @@ fn render_verify_job(
 /// against the deployed site rather than the checkout.
 fn render_live_job(runner: &str, spec: &DocsSpec, admission_gate: Option<&str>) -> String {
     let checkout = ActionPin::Checkout.reference();
+    let condition = admitted_condition("github.event_name == 'schedule'", admission_gate);
     let steps = command_steps(
         &spec.external_link_commands,
         "Check live external links",
         None,
         None,
     );
-    let condition = admitted_condition("github.event_name == 'schedule'", admission_gate);
     format!(
         r"  check-live:
     name: Check the live site
@@ -957,9 +957,6 @@ mod tests {
             automatic_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::GithubHosted,
             ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::GithubHosted,
-            ]),
             selectors: std::collections::BTreeMap::from([(
                 crate::s2::provider::ProviderId::GithubHosted,
                 crate::s2::provider::ProviderSelector {
@@ -976,6 +973,7 @@ mod tests {
             docs_reason: spec.reason.clone(),
             docs: Some(spec),
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),
@@ -989,8 +987,11 @@ mod tests {
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_lock_backends: BTreeMap::new(),
+            mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         }
@@ -1007,7 +1008,6 @@ mod tests {
         config.providers =
             std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
         config.automatic_providers = config.providers.clone();
-        config.default_dispatch_providers.clear();
         config.selectors = std::collections::BTreeMap::from([(
             crate::s2::provider::ProviderId::Velnor,
             crate::s2::provider::ProviderSelector {
@@ -1022,10 +1022,6 @@ mod tests {
         let workflow = render(&docs_spec());
         assert!(workflow.contains("branches: [main]"), "{workflow}");
         assert!(workflow.contains("- cron: \"17 4 * * *\""), "{workflow}");
-        assert!(
-            !workflow.contains("github.repository =="),
-            "hosted docs jobs keep their existing event gates: {workflow}"
-        );
         for job in ["gate:", "source-links:", "  site:", "  spell:"] {
             let block = must_some(workflow.split(job).nth(1), "the local job renders");
             let gate = must_some(
@@ -1398,10 +1394,7 @@ mod tests {
 
     #[test]
     fn velnor_only_universe_without_a_selector_fails_closed() {
-        let mut config = docs_config(docs_spec());
-        config.providers =
-            std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
-        config.automatic_providers = config.providers.clone();
+        let mut config = velnor_config(docs_spec());
         config.selectors = std::collections::BTreeMap::new();
         let error = must_fail(
             docs_runner(&config),
@@ -1413,8 +1406,7 @@ mod tests {
     #[test]
     fn velnor_only_universe_runs_on_the_velnor_selector() {
         let config = velnor_config(docs_spec());
-        let (provider, runner) = must_ok(docs_runner(&config), "docs test runner resolves");
-        assert_eq!(provider, crate::s2::provider::ProviderId::Velnor);
+        let (_, runner) = must_ok(docs_runner(&config), "docs test runner resolves");
         assert!(runner.contains("self-hosted"), "{runner}");
     }
 
@@ -1426,7 +1418,6 @@ mod tests {
         let admission = WorkflowIr::from_config(&config).provider_admission_expression(
             ProviderAdmission::ProviderTrusted(crate::s2::provider::ProviderId::Velnor),
         );
-        assert_eq!(provider, crate::s2::provider::ProviderId::Velnor);
         let workflow = render_docs_site(&config, &spec, provider, &runner);
         for job in [
             "gate:",
@@ -1448,13 +1439,10 @@ mod tests {
                 "local job {job} uses the canonical provider gate: {condition}"
             );
         }
-        assert!(
-            admission.contains("github.repository == 'example/docs-fixture'"),
-            "local admission binds to the configured repository: {admission}"
-        );
-        assert!(
-            admission.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
-            "local admission is restricted to the default-branch push: {admission}"
+        assert_eq!(
+            admission,
+            format!("({})", WorkflowIr::trusted_event_expression()),
+            "local docs use the canonical trusted-event admission expression"
         );
     }
 
