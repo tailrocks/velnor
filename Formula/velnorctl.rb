@@ -52,7 +52,7 @@ class Velnorctl < Formula
       "velnor-runner"   => "crates/velnor-runner",
       "velnor-workflow" => "crates/velnor-workflow",
     }.each do |binary, path|
-      system "cargo", "install", *std_cargo_args(path: path, bin: binary)
+      system "cargo", "install", *std_cargo_args(path: path), "--bin", binary
     end
 
     gh_bin = formula_opt_bin("gh") / "gh"

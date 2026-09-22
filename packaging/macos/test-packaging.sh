@@ -25,7 +25,11 @@ ruby -c "$formula" >/dev/null
 ruby -c "$template" >/dev/null
 sh "$mode_contract"
 
-grep -F 'SOURCE_COMMIT = "24889535c25db9002e2903dda35cb2ee252c13bb"' "$formula" >/dev/null
+grep -F 'SOURCE_COMMIT = "796c46110274a474572de100b12dadc4aa50f47b"' "$formula" >/dev/null
+grep -F 'SOURCE_ARCHIVE_SHA256 = "e61990d897dc714e018cfe4c1563391e8d602f3badf8cd483016814111c60b04"' "$formula" >/dev/null
+grep -F 'PACKAGING_COMMIT = "8ff29a5c3dd5e9a428ddca393da2ec75d28253bd"' "$formula" >/dev/null
+grep -F 'LAUNCH_SHA256 = "4a725baeec24c2905281b1debb2b493f52411ff53018b07d1c82e431adbda7ee"' "$formula" >/dev/null
+grep -F 'PLIST_SHA256 = "c7d3f69454e8d04a7913dfcfa0b7c0ea36b37c6339118cff580f1d4eb31493f5"' "$formula" >/dev/null
 grep -F 'version "0.1.277"' "$formula" >/dev/null
 grep -F 'sha256 SOURCE_ARCHIVE_SHA256' "$formula" >/dev/null
 grep -F 'depends_on "gh"' "$formula" >/dev/null
