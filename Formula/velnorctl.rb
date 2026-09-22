@@ -74,6 +74,9 @@ class Velnorctl < Formula
         # Keep this file mode 0600: it contains GITHUB_TOKEN.
         GITHUB_TOKEN=
         GH_TOKEN=
+        # macOS host GitHub REST traffic uses system curl; native TLS can be
+        # blocked by host outbound filters while curl is already allowed.
+        VELNOR_GITHUB_HTTP_TRANSPORT=curl
         VELNOR_URL=https://github.com/tailrocks/velnor
         VELNOR_NAME=velnor-macos
         VELNOR_LABELS=velnor,velnor-target-mvp

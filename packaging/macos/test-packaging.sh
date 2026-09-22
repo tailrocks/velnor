@@ -46,6 +46,8 @@ grep -F 'worker_verifier' "$formula" >/dev/null
 grep -F 'worker_verifier' "$template" >/dev/null
 grep -F 'VELNOR_HOST_MODE=' "$formula" >/dev/null
 grep -F 'VELNOR_HOST_MODE=' "$template" >/dev/null
+grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=curl' "$formula" >/dev/null
+grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=curl' "$template" >/dev/null
 grep -F 'requested' "$formula" >/dev/null
 grep -F 'effective' "$formula" >/dev/null
 grep -F 'requested' "$template" >/dev/null
