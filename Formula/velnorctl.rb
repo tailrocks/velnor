@@ -126,6 +126,7 @@ class Velnorctl < Formula
     resource("velnor-runner-launch").stage do
       libexec.install "velnor-runner-launch"
     end
+    (libexec / "velnor-runner-launch").chmod 0755
 
     launchd_dir = share / "velnor" / "launchd"
     launchd_dir.mkpath
