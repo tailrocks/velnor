@@ -537,12 +537,12 @@ pub(crate) fn verify_product(
     root: &Path,
     request: &VerifyRequest,
 ) -> Result<usize, GeneratorError> {
-    if let VerifyMode::Install { marker, .. } = &request.mode {
-        if !valid_env_name(marker) {
-            return Err(GeneratorError::usage(format!(
-                "verify-product needs a valid --marker env name, got `{marker}`"
-            )));
-        }
+    if let VerifyMode::Install { marker, .. } = &request.mode
+        && !valid_env_name(marker)
+    {
+        return Err(GeneratorError::usage(format!(
+            "verify-product needs a valid --marker env name, got `{marker}`"
+        )));
     }
     for output in &request.outputs {
         manifest_rel(output)?;
