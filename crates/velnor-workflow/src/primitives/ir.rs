@@ -167,8 +167,8 @@ mod tests {
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
         lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
-        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
-        WorkflowIr, WorkflowKind,
+        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, ValidationPhase, VelnorPullRequest,
+        VelnorRustNeeds, WorkflowIr, WorkflowKind,
     };
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -791,6 +791,25 @@ mod tests {
             "rust kind reusable renders",
         );
         must_some(rendered, "rust kind has members").1
+    }
+
+    #[test]
+    fn typed_policy_and_custom_units_render_named_steps_without_legacy_fallback() {
+        let mut policy = rust_unit("policy-unit", ".");
+        policy.pr_commands = vec!["mbx deny check".to_owned()];
+        policy.full_commands = policy.pr_commands.clone();
+        policy.phases = vec![ValidationPhase::Policy];
+        let mut custom = rust_unit("custom-unit", ".");
+        custom.pr_commands = vec!["mbx check --workspace --all-targets --locked".to_owned()];
+        custom.full_commands = custom.pr_commands.clone();
+        custom.phases = vec![ValidationPhase::Custom];
+
+        let content = must_render_kind(&owner_test_ir("example/typed", vec![policy, custom]));
+        assert!(content.contains("- name: Dependency policy"), "{content}");
+        assert!(content.contains("--phase policy"), "{content}");
+        assert!(content.contains("- name: Custom checks"), "{content}");
+        assert!(content.contains("--phase custom"), "{content}");
+        assert!(!content.contains("- name: Run unit checks"), "{content}");
     }
 
     #[test]

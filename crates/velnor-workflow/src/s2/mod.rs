@@ -602,12 +602,12 @@ impl UnitKind {
 }
 
 /// One typed phase of a unit's commands. The scan tags each command it
-/// structures (Rust fmt/clippy/test/doctest); generated jobs run one step per
-/// runnable phase behind `--phase`, and the prerequisite tier selects the
-/// check phase. `Preflight` is a hidden, typed command phase: commands tagged
-/// with it run as part of the first runnable/check selection and never render
-/// as a separate validation step. Phase membership is positional data, never
-/// substring detection on command text.
+/// structures (Rust fmt/clippy/test/doctest, policy, or custom); generated
+/// jobs run one step per runnable phase behind `--phase`, and the prerequisite
+/// tier selects the check phase. `Preflight` is a hidden, typed command phase:
+/// commands tagged with it run as part of the first runnable/check selection
+/// and never render as a separate validation step. Phase membership is
+/// positional data, never substring detection on command text.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidationPhase {
@@ -616,14 +616,23 @@ pub enum ValidationPhase {
     Clippy,
     Test,
     Doctest,
+    Policy,
+    Custom,
     Check,
 }
 
 impl ValidationPhase {
-    /// The runnable phases in step order: formatting first, then lints, then
-    /// tests, then doctests. `Check` is prerequisite-only and never renders
-    /// a validation step.
-    pub(crate) const RUNNABLE: [Self; 4] = [Self::Fmt, Self::Clippy, Self::Test, Self::Doctest];
+    /// The runnable phases in step order: standard Rust validation first,
+    /// followed by policy and custom commands. `Check` is prerequisite-only
+    /// and never renders a validation step.
+    pub(crate) const RUNNABLE: [Self; 6] = [
+        Self::Fmt,
+        Self::Clippy,
+        Self::Test,
+        Self::Doctest,
+        Self::Policy,
+        Self::Custom,
+    ];
 
     /// The user-selectable phase a `--phase` selector names. `Preflight` is
     /// intentionally not a selector: it is an internal contract tag only.
@@ -633,6 +642,8 @@ impl ValidationPhase {
             "clippy" => Self::Clippy,
             "test" => Self::Test,
             "doctest" => Self::Doctest,
+            "policy" => Self::Policy,
+            "custom" => Self::Custom,
             "check" => Self::Check,
             _ => return None,
         })
@@ -647,6 +658,8 @@ impl ValidationPhase {
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doctest => "doctest",
+            Self::Policy => "policy",
+            Self::Custom => "custom",
             Self::Check => "check",
         }
     }
@@ -659,6 +672,8 @@ impl ValidationPhase {
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
             Self::Doctest => "Doctests",
+            Self::Policy => "Dependency policy",
+            Self::Custom => "Custom checks",
             Self::Check => "Prerequisite check",
         }
     }

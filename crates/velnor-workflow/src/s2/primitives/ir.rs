@@ -1833,6 +1833,25 @@ mod tests {
         must_some(rendered, "rust kind has members").1
     }
 
+    #[test]
+    fn typed_policy_and_custom_units_render_named_steps_without_legacy_fallback() {
+        let mut policy = rust_unit("policy-unit", ".");
+        policy.pr_commands = vec!["mbx deny check".to_owned()];
+        policy.full_commands = policy.pr_commands.clone();
+        policy.phases = vec![crate::s2::ValidationPhase::Policy];
+        let mut custom = rust_unit("custom-unit", ".");
+        custom.pr_commands = vec!["mbx check --workspace --all-targets --locked".to_owned()];
+        custom.full_commands = custom.pr_commands.clone();
+        custom.phases = vec![crate::s2::ValidationPhase::Custom];
+
+        let content = must_render_kind(&owner_test_ir("example/typed", vec![policy, custom]));
+        assert!(content.contains("- name: Dependency policy"), "{content}");
+        assert!(content.contains("--phase policy"), "{content}");
+        assert!(content.contains("- name: Custom checks"), "{content}");
+        assert!(content.contains("--phase custom"), "{content}");
+        assert!(!content.contains("- name: Run unit checks"), "{content}");
+    }
+
     fn required_gate_script(ir: &WorkflowIr, nodes: &[GraphNode], include_policy: bool) -> String {
         let mut rendered = String::new();
         ir.render_nodes_required(

@@ -484,7 +484,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, policy, custom, or check"
                         ))
                     })
                 })
@@ -6902,6 +6902,58 @@ workspace_check = true
     }
 
     #[test]
+    fn nonstandard_phases_select_explicit_commands_without_text_rewrite() {
+        let mut unit = CiUnit {
+            id: "policy-unit".to_owned(),
+            label: "Dependency policy".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            pr_commands: vec!["mbx deny check".to_owned()],
+            full_commands: vec!["mbx deny check".to_owned()],
+            phases: vec![ValidationPhase::Policy],
+            check_commands: Vec::new(),
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
+            workspace_check: false,
+            reads_closed: false,
+        };
+        assert_eq!(
+            must(
+                unit.commands_for_phase(Scope::Affected, ValidationPhase::Policy),
+                "policy phase selection",
+            ),
+            vec!["mbx deny check"],
+        );
+        assert!(unit.check_commands.is_empty());
+        assert_eq!(
+            ValidationPhase::parse("policy"),
+            Some(ValidationPhase::Policy)
+        );
+
+        unit.id = "custom-unit".to_owned();
+        unit.label = "Custom topology".to_owned();
+        unit.pr_commands = vec!["mbx check --workspace --all-targets --locked".to_owned()];
+        unit.full_commands = unit.pr_commands.clone();
+        unit.phases = vec![ValidationPhase::Custom];
+        assert_eq!(
+            must(
+                unit.commands_for_phase(Scope::Full, ValidationPhase::Custom),
+                "custom phase selection",
+            ),
+            vec!["mbx check --workspace --all-targets --locked"],
+        );
+        assert_eq!(
+            ValidationPhase::parse("custom"),
+            Some(ValidationPhase::Custom)
+        );
+    }
+
+    #[test]
     fn typed_preflight_runs_with_the_first_phase_and_check() {
         let unit = CiUnit {
             id: "rust-app".to_owned(),
@@ -6971,7 +7023,9 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, or check"),
+                .contains(
+                    "unsupported --phase: fuzz; use fmt, clippy, test, doctest, policy, custom, or check",
+                ),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,
