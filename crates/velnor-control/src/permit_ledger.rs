@@ -334,6 +334,17 @@ pub struct PermitLedger {
 /// the new global sequence starts after rows already present in the shared
 /// queue.
 fn migrate_legacy_native_demand(conn: &mut Connection) -> Result<(), LedgerError> {
+    let legacy_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'native_demand'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !legacy_exists {
+        return Ok(());
+    }
+
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let exists: bool = tx.query_row(
         "SELECT EXISTS(
@@ -507,36 +518,45 @@ impl PermitLedger {
         }
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS permit_meta (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                max_jobs INTEGER,
-                generation INTEGER NOT NULL DEFAULT 0,
-                reconciled_generation INTEGER NOT NULL DEFAULT -1
-            );
-            INSERT OR IGNORE INTO permit_meta (id, max_jobs, generation, reconciled_generation)
-                VALUES (1, NULL, 0, -1);
-            CREATE TABLE IF NOT EXISTS permits (
-                holder TEXT PRIMARY KEY,
-                lane TEXT NOT NULL,
-                state TEXT NOT NULL,
-                acquired_unix INTEGER NOT NULL,
-                updated_unix INTEGER NOT NULL,
-                generation INTEGER NOT NULL,
-                pid INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS permit_demands (
-                holder TEXT PRIMARY KEY,
-                lane TEXT NOT NULL,
-                scope TEXT NOT NULL,
-                first_seen_unix INTEGER NOT NULL,
-                sequence INTEGER NOT NULL UNIQUE,
-                state TEXT NOT NULL,
-                updated_unix INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_permit_demands_oldest
-                ON permit_demands (state, first_seen_unix, sequence);",
+        let schema_ready: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE (type = 'table' AND name IN ('permit_meta', 'permits', 'permit_demands'))
+                OR (type = 'index' AND name = 'idx_permit_demands_oldest')",
+            [],
+            |row| row.get(0),
         )?;
+        if schema_ready != 4 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS permit_meta (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    max_jobs INTEGER,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    reconciled_generation INTEGER NOT NULL DEFAULT -1
+                );
+                INSERT OR IGNORE INTO permit_meta (id, max_jobs, generation, reconciled_generation)
+                    VALUES (1, NULL, 0, -1);
+                CREATE TABLE IF NOT EXISTS permits (
+                    holder TEXT PRIMARY KEY,
+                    lane TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    acquired_unix INTEGER NOT NULL,
+                    updated_unix INTEGER NOT NULL,
+                    generation INTEGER NOT NULL,
+                    pid INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS permit_demands (
+                    holder TEXT PRIMARY KEY,
+                    lane TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    first_seen_unix INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL UNIQUE,
+                    state TEXT NOT NULL,
+                    updated_unix INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_permit_demands_oldest
+                    ON permit_demands (state, first_seen_unix, sequence);",
+            )?;
+        }
         migrate_legacy_native_demand(&mut conn)?;
         Ok(Self {
             path: path.to_path_buf(),
