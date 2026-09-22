@@ -2935,7 +2935,7 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
             )));
         }
-        if path_starts_with_github(source) {
+        if starts_with_generated_github_tree(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must stay outside `.github/`, found `{source}`"
             )));
@@ -3012,14 +3012,14 @@ fn is_contained_github_path(path: &str) -> bool {
     is_contained_repository_path(path) && Path::new(path).starts_with(".github/")
 }
 
-/// Ignore lexical `.` components only while checking the generated-tree
-/// boundary. Keep the original path for the existing traversal and symlink
-/// handling.
-fn path_starts_with_github(path: &str) -> bool {
-    let first = Path::new(path)
+fn starts_with_generated_github_tree(path: &str) -> bool {
+    let mut components = Path::new(path)
         .components()
-        .find(|component| !matches!(component, Component::CurDir));
-    matches!(first, Some(Component::Normal(name)) if name.to_str() == Some(".github"))
+        .filter(|component| !matches!(component, Component::CurDir));
+    matches!(
+        components.next(),
+        Some(Component::Normal(component)) if component == ".github"
+    )
 }
 
 fn is_contained_repository_path(path: &str) -> bool {
@@ -6072,34 +6072,17 @@ mod tests {
 
     #[test]
     fn static_file_sources_cannot_be_taken_from_generated_github_tree() {
-        let config = config_for(
-            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/custom.yml\"\nsource = \".github/workflows/input.yml\"\n",
-        );
-        let error = must_fail(
-            config.validate(&[], &[], &BTreeSet::new()),
-            "static source under .github must fail",
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("source must stay outside `.github/`"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn static_file_sources_cannot_reach_generated_github_tree_through_dot_components() {
         for source in [
+            ".github/workflows/input.yml",
             "./.github/workflows/input.yml",
-            "././.github/workflows/input.yml",
-            ".//.github/workflows/input.yml",
+            "././.github/./workflows/input.yml",
         ] {
             let config = config_for(&format!(
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/custom.yml\"\nsource = \"{source}\"\n"
             ));
             let error = must_fail(
                 config.validate(&[], &[], &BTreeSet::new()),
-                "dot-component static source under .github must fail",
+                "static source under .github must fail",
             );
             assert!(
                 error
