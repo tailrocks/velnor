@@ -91,7 +91,6 @@ impl ProductIdentity {
 
     /// Return dimensions that make exact reuse unsafe when absent.
     #[must_use]
-    #[expect(dead_code, reason = "exact-product cache admission uses this boundary")]
     pub(crate) fn missing_dimensions(&self) -> Vec<&'static str> {
         let mut missing = Vec::new();
         if self.schema != PRODUCT_IDENTITY_SCHEMA {
@@ -144,7 +143,6 @@ impl ProductIdentity {
 
     /// Whether every exact-reuse dimension is known.
     #[must_use]
-    #[expect(dead_code, reason = "exact-product cache admission uses this boundary")]
     pub(crate) fn exact_reuse_allowed(&self) -> bool {
         self.missing_dimensions().is_empty()
     }
@@ -604,6 +602,12 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
             validate_bindings(unit, product)?;
             if let Some(identity) = &product.identity {
                 identity.validate(&format!("unit `{}` product `{}`", unit.id, product.name))?;
+                if identity.producer != unit.id {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` product `{}` identity names producer `{}`, but the owning unit is `{}`",
+                        unit.id, product.name, identity.producer, unit.id
+                    )));
+                }
                 if identity.product != product.name {
                     return Err(GeneratorError::usage(format!(
                         "unit `{}` product `{}` identity names product `{}`",
@@ -906,7 +910,8 @@ mod tests {
     use super::{
         agreed_env, guarded_rebuild_command, is_ffi_crate_type, prepare_command, resolve,
         transport_marker, valid_env_name, valid_env_value, valid_product_input, valid_product_name,
-        valid_product_output, valid_task_name, NamedProduct, Prerequisite,
+        valid_product_output, valid_task_name, NamedProduct, Prerequisite, ProductIdentity,
+        PRODUCT_IDENTITY_SCHEMA,
     };
     use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
     use crate::s2::scan::default_selectors;
@@ -1094,6 +1099,17 @@ mod tests {
             bindings_file: String::new(),
             deployment_target: String::new(),
             rebuild: Vec::new(),
+        }
+    }
+
+    fn identity(producer: &str, product: &str) -> ProductIdentity {
+        ProductIdentity {
+            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            adapter: "test-adapter".to_owned(),
+            source: "test-source".to_owned(),
+            ..ProductIdentity::default()
         }
     }
 
@@ -1655,6 +1671,21 @@ mod tests {
             error.to_string().contains("normal form"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn resolve_rejects_identity_owned_by_another_unit() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.a"]);
+        ffi.identity = Some(identity("other-ffi", "xcframework"));
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "identity producer ownership fails closed",
+        );
+        let message = error.to_string();
+        assert!(message.contains("identity names producer"), "{message}");
+        assert!(message.contains("other-ffi"), "{message}");
     }
 
     #[test]

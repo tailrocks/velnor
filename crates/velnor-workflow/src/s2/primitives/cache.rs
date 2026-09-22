@@ -1,8 +1,44 @@
 //! `cache-contract`: the cache transport a unit job restores and saves.
 
+use std::fmt::Write as _;
+
+use sha2::{Digest as _, Sha256};
+
 use super::{Args, CacheBackend, Primitive, RenderCtx, Rendered, CACHE_CONTRACT};
+use crate::s2::platform::ProductIdentity;
 use crate::s2::provider::ProviderId;
 use crate::s2::{CacheSpec, GeneratorError, Unit, WorkflowIr};
+
+/// Schema for the exact native-product cache namespace. The complete typed
+/// product identity is hashed into every key; compatibility-prefix restores
+/// are deliberately not part of this cache contract.
+pub(crate) const NATIVE_PRODUCT_CACHE_KEY_SCHEMA: &str = "velnor-native-product-cache/1";
+
+/// Derive the exact native-product cache key from the complete typed identity.
+///
+/// The cache is an optional acceleration layer. Callers must verify the
+/// staged product manifest against the same identity before installing it and
+/// must never use a cache hit as the product-transport readiness marker.
+pub(crate) fn native_product_cache_key(
+    identity: &ProductIdentity,
+) -> Result<String, GeneratorError> {
+    identity.validate("native product cache")?;
+    if !identity.exact_reuse_allowed() {
+        let missing = identity.missing_dimensions().join(", ");
+        return Err(GeneratorError::usage(format!(
+            "native product cache identity is incomplete; missing: {missing}"
+        )));
+    }
+    let bytes = serde_json::to_vec(identity).map_err(|error| {
+        GeneratorError::usage(format!("serialize native product identity: {error}"))
+    })?;
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(format!("{NATIVE_PRODUCT_CACHE_KEY_SCHEMA}-{hex}"))
+}
 
 /// Exact Velnor mounts whose contents persist across job containers. Keep this
 /// list lexical: classification must not turn path normalization into an
@@ -169,7 +205,69 @@ pub(crate) fn local_skips_pinned_rust_toolchain(provider: ProviderId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::s2::platform::{ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
     use crate::s2::CachePurpose;
+
+    fn native_identity() -> ProductIdentity {
+        ProductIdentity {
+            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            producer: "rust-ffi".to_owned(),
+            product: "xcframework-bridgecore".to_owned(),
+            adapter: "boltffi@0.30.1".to_owned(),
+            source: "libs/bridge-ffi/boltffi.toml".to_owned(),
+            inputs_digest: Some("a".repeat(64)),
+            host_abi: "macos-arm64".to_owned(),
+            target: "apple-xcframework".to_owned(),
+            target_triple: "aarch64-apple-darwin".to_owned(),
+            architectures: vec!["macos-arm64".to_owned()],
+            sdk: "macos26.sdk-26.0".to_owned(),
+            deployment_target: "26.0".to_owned(),
+            toolchain: [("rust.channel".to_owned(), "1.97.1".to_owned())]
+                .into_iter()
+                .collect(),
+            profile: "release".to_owned(),
+            features: Vec::new(),
+            flags: vec!["--locked".to_owned()],
+            generation: [("framework".to_owned(), "BridgeCore".to_owned())]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn native_product_cache_key_hashes_complete_identity() {
+        let identity = native_identity();
+        let key = native_product_cache_key(&identity).expect("complete identity");
+        assert!(key.starts_with("velnor-native-product-cache/1-"), "{key}");
+        assert_eq!(key.len(), "velnor-native-product-cache/1-".len() + 64);
+
+        let mut profile = identity.clone();
+        profile.profile = "debug".to_owned();
+        assert_ne!(
+            key,
+            native_product_cache_key(&profile).expect("debug identity")
+        );
+
+        let mut architecture = identity;
+        architecture.architectures = vec!["macos-x86_64".to_owned()];
+        assert_ne!(
+            key,
+            native_product_cache_key(&architecture).expect("x86 identity")
+        );
+    }
+
+    #[test]
+    fn native_product_cache_key_rejects_incomplete_or_invalid_identity() {
+        let mut missing = native_identity();
+        missing.sdk.clear();
+        let error = native_product_cache_key(&missing).expect_err("missing SDK");
+        assert!(error.to_string().contains("sdk"), "{error}");
+
+        let mut invalid_digest = native_identity();
+        invalid_digest.inputs_digest = Some("not-a-sha256".to_owned());
+        let error = native_product_cache_key(&invalid_digest).expect_err("invalid digest");
+        assert!(error.to_string().contains("inputs_digest"), "{error}");
+    }
 
     #[test]
     fn local_host_persistent_cache_path_matches_runner_contract() {

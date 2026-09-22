@@ -61,15 +61,35 @@ pub(crate) fn transport_eligible(product: &NamedProduct) -> bool {
 /// product cache and is kept separate so an optional cache is never the data
 /// bus for required consumers.
 #[must_use]
-#[expect(dead_code, reason = "native exact-product cache uses this boundary")]
 pub(crate) fn exact_product_reuse_eligible(product: &NamedProduct) -> bool {
+    let Some(identity) = product.identity.as_ref() else {
+        return false;
+    };
     !product.outputs.is_empty()
         && product.inputs_unknown.is_empty()
         && product.inputs_digest.is_some()
-        && product
-            .identity
-            .as_ref()
-            .is_some_and(ProductIdentity::exact_reuse_allowed)
+        && identity.product == product.name
+        && identity.inputs_digest == product.inputs_digest
+        && super::cache::native_product_cache_key(identity).is_ok()
+}
+
+/// Return the exact cache key only for a product whose complete identity and
+/// closure are mutually consistent. This key is an optional acceleration
+/// hint; transport readiness still comes only from verified same-run product
+/// transport.
+#[must_use]
+#[expect(
+    dead_code,
+    reason = "native exact-product cache renderer uses this boundary"
+)]
+pub(crate) fn exact_product_cache_key(product: &NamedProduct) -> Option<String> {
+    if !exact_product_reuse_eligible(product) {
+        return None;
+    }
+    product
+        .identity
+        .as_ref()
+        .and_then(|identity| super::cache::native_product_cache_key(identity).ok())
 }
 
 /// The workflow input record identifying one transported edge.
@@ -579,7 +599,14 @@ fn check_manifest_identity(
         }
     }
     match (&manifest.identity, &request.identity) {
-        (None, None) => {}
+        (None, None) => {
+            if manifest.identity_digest.is_some() {
+                return Err(GeneratorError::usage(
+                    "product manifest carries an identity digest without a typed identity"
+                        .to_owned(),
+                ));
+            }
+        }
         (Some(got), Some(want)) => {
             check_identity_shape(got, "product manifest")?;
             check_identity_shape(want, "verify-product")?;
@@ -931,8 +958,8 @@ fn indent_block(value: &str, indent: &str) -> String {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        artifact_name, ready_records, stage_product, transport_eligible, verify_product,
-        StageRequest, VerifyRequest,
+        artifact_name, exact_product_cache_key, exact_product_reuse_eligible, ready_records,
+        stage_product, transport_eligible, verify_product, StageRequest, VerifyRequest,
     };
     use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
 
@@ -975,6 +1002,49 @@ mod tests {
     fn transport_eligible_requires_declared_outputs() {
         assert!(transport_eligible(&product(&["out/Foo.xcframework"])));
         assert!(!transport_eligible(&product(&[])));
+    }
+
+    #[test]
+    fn exact_product_cache_requires_complete_matching_identity() {
+        let mut full = product(&["out/Foo.xcframework"]);
+        full.inputs_digest = Some("a".repeat(64));
+        full.identity = Some(identity());
+        assert!(exact_product_reuse_eligible(&full));
+        let key = exact_product_cache_key(&full).expect("complete identity gets a cache key");
+        assert!(key.starts_with("velnor-native-product-cache/1-"), "{key}");
+
+        let mut wrong_digest = full.clone();
+        wrong_digest
+            .identity
+            .as_mut()
+            .expect("identity")
+            .inputs_digest = Some("b".repeat(64));
+        assert!(!exact_product_reuse_eligible(&wrong_digest));
+        assert!(exact_product_cache_key(&wrong_digest).is_none());
+
+        let mut wrong_product = full.clone();
+        wrong_product.identity.as_mut().expect("identity").product = "other".to_owned();
+        assert!(!exact_product_reuse_eligible(&wrong_product));
+
+        let mut incomplete = full.clone();
+        incomplete.identity.as_mut().expect("identity").sdk.clear();
+        assert!(!exact_product_reuse_eligible(&incomplete));
+        assert!(exact_product_cache_key(&incomplete).is_none());
+
+        let mut unknown_inputs = full.clone();
+        unknown_inputs.inputs_unknown = vec!["scanner gap".to_owned()];
+        assert!(!exact_product_reuse_eligible(&unknown_inputs));
+
+        let mut different_profile = full;
+        different_profile
+            .identity
+            .as_mut()
+            .expect("identity")
+            .profile = "debug".to_owned();
+        assert_ne!(
+            key,
+            exact_product_cache_key(&different_profile).expect("profile remains complete")
+        );
     }
 
     #[test]
@@ -1282,7 +1352,7 @@ mod tests {
 
         let consumer = scratch("typed-identity-consumer");
         let env_file = consumer.join("github-env");
-        let mut wrong_architecture = expected;
+        let mut wrong_architecture = expected.clone();
         wrong_architecture.architectures = vec!["macos-x86_64".to_owned()];
         let result = verify_product(
             &consumer,
@@ -1299,6 +1369,87 @@ mod tests {
         assert!(
             !consumer.join("out/Foo.xcframework").exists(),
             "typed identity failure installs nothing"
+        );
+
+        let mut wrong_profile = expected;
+        wrong_profile.profile = "debug".to_owned();
+        let result = verify_product(
+            &consumer,
+            &VerifyRequest {
+                identity: Some(wrong_profile),
+                inputs_digest: "d".repeat(64),
+                stage: producer.join("stage"),
+                env_file: env_file.clone(),
+                ..verify_request(&producer.join("stage"), &env_file)
+            },
+        );
+        let message = format!("{}", result.expect_err("wrong profile must fail"));
+        assert!(message.contains("typed identity mismatch"), "{message}");
+        assert!(
+            !consumer.join("out/Foo.xcframework").exists(),
+            "wrong profile installs nothing"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_corrupt_typed_manifest_before_install() {
+        let producer = scratch("corrupt-typed-manifest-producer");
+        stage_fixture(&producer);
+        let mut expected = identity();
+        expected.product = "xcframework-foo".to_owned();
+        expected.inputs_digest = Some("e".repeat(64));
+        let stage = producer.join("stage");
+        stage_product(
+            &producer,
+            &StageRequest {
+                producer: "rust-ffi".to_owned(),
+                product: "xcframework-foo".to_owned(),
+                inputs_digest: "e".repeat(64),
+                identity: Some(expected.clone()),
+                outputs: vec!["out/Foo.xcframework".to_owned()],
+                stage: stage.clone(),
+            },
+        )
+        .expect("stage typed identity");
+
+        let manifest_path = stage.join(super::MANIFEST_FILE);
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+                .expect("manifest JSON");
+        manifest["identity_digest"] = serde_json::Value::String("0".repeat(64));
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string(&manifest).expect("corrupt manifest JSON"),
+        )
+        .expect("rewrite manifest");
+
+        let consumer = scratch("corrupt-typed-manifest-consumer");
+        let env_file = consumer.join("github-env");
+        let result = verify_product(
+            &consumer,
+            &VerifyRequest {
+                producer: "rust-ffi".to_owned(),
+                product: "xcframework-foo".to_owned(),
+                inputs_digest: "e".repeat(64),
+                identity: Some(expected),
+                outputs: vec!["out/Foo.xcframework".to_owned()],
+                output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
+                stage,
+                marker: "VELNOR_PRODUCT_MARKER".to_owned(),
+                env_file,
+            },
+        );
+        let message = format!(
+            "{}",
+            result.expect_err("corrupt typed manifest must fail before install")
+        );
+        assert!(
+            message.contains("typed identity digest mismatch"),
+            "{message}"
+        );
+        assert!(
+            !consumer.join("out/Foo.xcframework").exists(),
+            "corrupt manifest installs nothing"
         );
     }
 
