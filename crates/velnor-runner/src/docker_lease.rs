@@ -15,18 +15,16 @@
 //!
 //! macOS transport security boundary: Docker guests cannot mount the host Unix
 //! socket, so this module exposes a per-job loopback TCP port and forwards it
-//! to that Unix socket. The current guest contract supplies only plain
-//! `DOCKER_HOST=tcp://...`; it supplies no client certificate, SSH credential,
-//! or authenticated request header. The port and `host.docker.internal` route
-//! are therefore not peer authentication, and this module must not claim that
-//! they are. The fail-closed boundary is request admission in
-//! `handle_client_with`: malformed, unsupported, and foreign-resource requests
-//! are denied before the host socket is connected. Residual risk is exact: any
-//! local/guest peer that discovers a live per-job port is treated as that job
-//! for the Docker capabilities accepted by `DockerLeasePolicy`; it cannot use
-//! foreign resource identifiers, but it can exercise every capability that the
-//! policy allows. mTLS or SSH with guest-side credentials must be wired by the
-//! caller before this transport is used against hostile same-host peers.
+//! to that Unix socket. The guest receives a per-job CA, client certificate,
+//! and private key through Docker's standard `DOCKER_TLS_VERIFY=1` plus
+//! `DOCKER_CERT_PATH` contract. The TCP proxy requires that client certificate
+//! before it connects to the host socket, so the transport supports every
+//! Docker client in the job, including Buildx's independent Moby client and
+//! raw hijack/session streams. Unix leases retain the filesystem/socket
+//! boundary and use the same policy proxy without a TLS hop. The residual risk
+//! is exact: any process inside the same job container that can read the
+//! mounted client key can use that job's Docker capabilities until teardown;
+//! a peer without the per-job certificate cannot reach the host engine.
 
 use crate::docker::client as docker_client;
 use anyhow::{bail, Context, Result};
@@ -62,6 +60,9 @@ const UNIX_SOCKET_PATH_LIMIT: usize = 100;
 const MACOS_TCP_PORT_MIN: u16 = 40_000;
 const MACOS_TCP_PORT_SPAN: u16 = 20_000;
 const MACOS_DOCKER_HOST_ALIAS: &str = "host.docker.internal";
+pub(crate) const DOCKER_TLS_CERT_PATH: &str = "/tmp/_velnor/docker-tls";
+#[cfg(target_os = "macos")]
+const DOCKER_TLS_CERT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
 
 const MAX_PROXY_BODY: usize = 32 * 1024 * 1024;
 const MAX_PROXY_HEADER: usize = 64 * 1024;
@@ -74,6 +75,49 @@ const PROXY_MAX_UPGRADE_LIFETIME: Duration = Duration::from_secs(60 * 60);
 const MAX_OWNED_DOCKER_RESOURCES: usize = 1024;
 const MAX_OWNED_DOCKER_RESOURCE_ID: usize = 256;
 const MAX_CREATE_RESPONSE_BODY: usize = 64 * 1024;
+
+#[cfg(target_os = "macos")]
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+#[cfg(target_os = "macos")]
+use rustls::server::WebPkiClientVerifier;
+#[cfg(all(test, target_os = "macos"))]
+use rustls::ClientConfig;
+#[cfg(target_os = "macos")]
+use rustls::{RootCertStore, ServerConfig};
+
+#[cfg(target_os = "macos")]
+struct TlsDirCleanup {
+    path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl TlsDirCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for TlsDirCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = cleanup_tls_dir(&self.path) {
+            eprintln!(
+                "Warning: failed to clean Docker TLS credentials in {}: {error:#}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct DockerTlsMaterial {
+    server_config: Arc<ServerConfig>,
+    tls_cleanup: TlsDirCleanup,
+    #[cfg(test)]
+    client_config: Arc<ClientConfig>,
+    #[cfg(test)]
+    server_cert_pem: String,
+}
 
 /// The proxy is a capability boundary, not a transparent Docker socket.
 /// Resource identifiers are added only after a successful create response and
@@ -2267,6 +2311,12 @@ pub struct DockerLeaseGuard {
     conns: Arc<LeaseConnSet>,
     #[cfg(unix)]
     shutdown_wake: Option<std::os::unix::net::UnixStream>,
+    #[cfg(target_os = "macos")]
+    tls_cleanup: Option<TlsDirCleanup>,
+    #[cfg(all(test, target_os = "macos"))]
+    test_client_config: Arc<ClientConfig>,
+    #[cfg(all(test, target_os = "macos"))]
+    test_server_cert_pem: String,
 }
 
 /// Live guest/host unix streams for one job lease. Drop aborts them so an
@@ -2459,11 +2509,16 @@ impl DockerLeaseGuard {
     /// resolved local Docker daemon socket. A Docker VM path, when needed, is
     /// only used by the container bind mount; it must never be passed here as
     /// the listener path.
-    pub fn bind(listen_path: PathBuf, job_id: String, daemon_id: String) -> Result<Self> {
+    pub fn bind(
+        listen_path: PathBuf,
+        tls_dir: PathBuf,
+        job_id: String,
+        daemon_id: String,
+    ) -> Result<Self> {
         let host_socket = crate::docker::engine::resolve_docker_endpoint()
             .context("resolve Docker endpoint for job lease")?
             .socket;
-        Self::bind_to(listen_path, host_socket, job_id, daemon_id)
+        Self::bind_to_with_tls_dir(listen_path, host_socket, tls_dir, job_id, daemon_id)
     }
 
     pub fn bind_to(
@@ -2472,14 +2527,28 @@ impl DockerLeaseGuard {
         job_id: String,
         daemon_id: String,
     ) -> Result<Self> {
+        let tls_dir = listen_path
+            .parent()
+            .map(|parent| parent.join("docker-tls"))
+            .unwrap_or_else(|| PathBuf::from("docker-tls"));
+        Self::bind_to_with_tls_dir(listen_path, host_socket, tls_dir, job_id, daemon_id)
+    }
+
+    fn bind_to_with_tls_dir(
+        listen_path: PathBuf,
+        host_socket: PathBuf,
+        tls_dir: PathBuf,
+        job_id: String,
+        daemon_id: String,
+    ) -> Result<Self> {
         #[cfg(not(unix))]
         {
-            let _ = (listen_path, host_socket, job_id, daemon_id);
+            let _ = (listen_path, host_socket, tls_dir, job_id, daemon_id);
             bail!("job Docker lease proxy requires unix");
         }
         #[cfg(all(unix, target_os = "macos"))]
         {
-            bind_tcp_lease(listen_path, host_socket, job_id, daemon_id)
+            bind_tcp_lease(listen_path, host_socket, job_id, daemon_id, tls_dir)
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -2520,6 +2589,8 @@ impl Drop for DockerLeaseGuard {
             // untouched).
             let _ = std::fs::remove_dir(path);
         }
+        #[cfg(target_os = "macos")]
+        drop(self.tls_cleanup.take());
     }
 }
 
@@ -2598,6 +2669,8 @@ struct LeaseServeContext {
     conns: Arc<LeaseConnSet>,
     policy: Arc<DockerLeasePolicy>,
     cleanup_path: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    tls_config: Arc<ServerConfig>,
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -2613,6 +2686,8 @@ fn accept_loop(
         conns,
         policy,
         cleanup_path,
+        #[cfg(target_os = "macos")]
+            tls_config: _,
     } = context;
     use std::os::fd::AsRawFd;
 
@@ -2705,11 +2780,309 @@ fn accept_loop(
 /// loopback TCP port instead. The listener is IPv4 loopback-only; the
 /// container reaches it through Docker's `host.docker.internal` gateway.
 #[cfg(target_os = "macos")]
+fn write_tls_file(path: &Path, contents: &str) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o444)
+        .custom_flags(libc::O_NOFOLLOW);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create Docker TLS credential {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("write Docker TLS credential {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync Docker TLS credential {}", path.display()))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o444))
+        .with_context(|| format!("make Docker TLS credential read-only {}", path.display()))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat Docker TLS credential {}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        bail!(
+            "Docker TLS credential is not a runner-owned regular file: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_tls_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect Docker TLS credential directory {}", path.display())
+            });
+        }
+    };
+    if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        bail!(
+            "refusing to clean non-runner-owned Docker TLS directory {}",
+            path.display()
+        );
+    }
+    cleanup_tls_files(path)?;
+    std::fs::remove_dir(path)
+        .with_context(|| format!("remove Docker TLS credential directory {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_tls_files(path: &Path) -> Result<()> {
+    use std::collections::HashSet;
+    use std::os::unix::fs::MetadataExt;
+
+    let allowed: HashSet<&str> = ["ca.pem", "cert.pem", "key.pem"].into_iter().collect();
+    let mut known_files = Vec::new();
+    let mut invalid_known = Vec::new();
+    let mut unexpected = Vec::new();
+    for entry in std::fs::read_dir(path).with_context(|| {
+        format!(
+            "enumerate Docker TLS credential directory {}",
+            path.display()
+        )
+    })? {
+        let entry = entry
+            .with_context(|| format!("read Docker TLS credential directory {}", path.display()))?;
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .with_context(|| format!("inspect Docker TLS credential {}", entry.path().display()))?;
+        if !allowed.contains(name_text.as_ref()) {
+            unexpected.push(name_text.into_owned());
+            continue;
+        }
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || (!metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        {
+            invalid_known.push(entry.path().display().to_string());
+            continue;
+        }
+        known_files.push(entry.path());
+    }
+    for path in known_files {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("remove stale Docker TLS credential {}", path.display()))?;
+    }
+    if !invalid_known.is_empty() || !unexpected.is_empty() {
+        invalid_known.sort_unstable();
+        unexpected.sort_unstable();
+        let mut invalid = invalid_known;
+        invalid.extend(unexpected);
+        bail!(
+            "Docker TLS credential directory {} contains unexpected entries: {}",
+            path.display(),
+            invalid.join(", ")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_docker_tls_material(cert_dir: &Path) -> Result<DockerTlsMaterial> {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+        IsCa, KeyPair, KeyUsagePurpose,
+    };
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use time::{Duration as TimeDuration, OffsetDateTime};
+
+    let parent = cert_dir
+        .parent()
+        .context("Docker TLS credential directory has no parent")?;
+    let parent_metadata = std::fs::symlink_metadata(parent).with_context(|| {
+        format!(
+            "inspect runner-private Docker TLS parent {}",
+            parent.display()
+        )
+    })?;
+    if !parent_metadata.file_type().is_dir() || parent_metadata.uid() != unsafe { libc::geteuid() }
+    {
+        bail!(
+            "runner-private Docker TLS parent is not an owned directory: {}",
+            parent.display()
+        );
+    }
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
+        || {
+            format!(
+                "protect runner-private Docker TLS parent {}",
+                parent.display()
+            )
+        },
+    )?;
+
+    match std::fs::symlink_metadata(cert_dir) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+                bail!(
+                    "Docker TLS credential path is not a runner-owned directory: {}",
+                    cert_dir.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::create_dir(cert_dir).with_context(|| {
+                format!(
+                    "create Docker TLS credential directory {}",
+                    cert_dir.display()
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect Docker TLS credential directory {}",
+                    cert_dir.display()
+                )
+            });
+        }
+    }
+    // The control parent stays private on the host. The mounted leaf itself
+    // is read-only and traversable so a supported non-root job UID can read
+    // Docker's standard PEM files; the client key is intentionally available
+    // to every process in this one job and never to another job or the host.
+    std::fs::set_permissions(cert_dir, std::fs::Permissions::from_mode(0o755)).with_context(
+        || {
+            format!(
+                "protect Docker TLS credential directory {}",
+                cert_dir.display()
+            )
+        },
+    )?;
+    // Arm cleanup only after the path has passed no-symlink and ownership
+    // checks. A rejected symlink must never let cleanup traverse into an
+    // attacker-selected directory.
+    let cleanup = TlsDirCleanup::new(cert_dir.to_path_buf());
+    cleanup_tls_files(cert_dir)?;
+
+    let not_before = OffsetDateTime::now_utc() - TimeDuration::minutes(5);
+    let not_after = OffsetDateTime::now_utc()
+        + TimeDuration::seconds(DOCKER_TLS_CERT_LIFETIME.as_secs() as i64);
+
+    // A per-job CA makes a client certificate from another live lease
+    // cryptographically useless. The leaf keys are also per-job and never
+    // enter argv or logs; only the mounted read-only PEM files carry them.
+    let ca_key = KeyPair::generate().context("generate per-job Docker TLS CA key")?;
+    let mut ca_params = CertificateParams::default();
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Velnor Docker Lease CA");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    // A CA certificate must not carry a leaf-only EKU. Go's x509 verifier,
+    // used by Docker and Buildx, rejects a ServerAuth leaf beneath a CA
+    // constrained to ClientAuth.
+    ca_params.extended_key_usages.clear();
+    ca_params.not_before = not_before;
+    ca_params.not_after = not_after;
+    let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key)
+        .context("self-sign per-job Docker TLS CA")?;
+
+    let server_key = KeyPair::generate().context("generate per-job Docker TLS server key")?;
+    let mut server_params = CertificateParams::new(vec![
+        MACOS_DOCKER_HOST_ALIAS.to_owned(),
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+    ])
+    .context("prepare per-job Docker TLS server certificate")?;
+    server_params.distinguished_name = DistinguishedName::new();
+    server_params
+        .distinguished_name
+        .push(DnType::CommonName, "Velnor Docker Lease Server");
+    server_params.is_ca = IsCa::NoCa;
+    server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    server_params.use_authority_key_identifier_extension = true;
+    server_params.not_before = not_before;
+    server_params.not_after = not_after;
+    let server_cert = server_params
+        .signed_by(&server_key, &ca)
+        .context("sign per-job Docker TLS server certificate")?;
+
+    let client_key = KeyPair::generate().context("generate per-job Docker TLS client key")?;
+    let mut client_params = CertificateParams::new(Vec::<String>::new())
+        .context("prepare per-job Docker TLS client certificate")?;
+    client_params.distinguished_name = DistinguishedName::new();
+    client_params
+        .distinguished_name
+        .push(DnType::CommonName, "Velnor Docker Lease Client");
+    client_params.is_ca = IsCa::NoCa;
+    client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    client_params.use_authority_key_identifier_extension = true;
+    client_params.not_before = not_before;
+    client_params.not_after = not_after;
+    let client_cert = client_params
+        .signed_by(&client_key, &ca)
+        .context("sign per-job Docker TLS client certificate")?;
+
+    let ca_der = CertificateDer::from(ca.der().to_vec());
+    let server_der = CertificateDer::from(server_cert.der().to_vec());
+    #[cfg(test)]
+    let client_der = CertificateDer::from(client_cert.der().to_vec());
+    // rustls 0.23 requires an explicitly selected provider when more than
+    // one dependency in the workspace exposes a provider. Ignore the
+    // already-installed result; concurrent job binds may race here.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(ca_der.clone())
+        .context("install per-job Docker TLS CA")?;
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots.clone()))
+        .build()
+        .context("build per-job Docker TLS client verifier")?;
+    let server_config = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(
+            vec![server_der],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der())),
+        )
+        .context("assemble per-job Docker TLS server config")?;
+
+    #[cfg(test)]
+    let client_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(
+            vec![client_der.clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(client_key.serialize_der())),
+        )
+        .context("assemble per-job Docker TLS test client config")?;
+
+    let ca_pem = ca.pem();
+    #[cfg(test)]
+    let server_cert_pem = server_cert.pem();
+    write_tls_file(&cert_dir.join("ca.pem"), &ca_pem)?;
+    write_tls_file(&cert_dir.join("cert.pem"), &client_cert.pem())?;
+    write_tls_file(&cert_dir.join("key.pem"), &client_key.serialize_pem())?;
+
+    Ok(DockerTlsMaterial {
+        server_config: Arc::new(server_config),
+        tls_cleanup: cleanup,
+        #[cfg(test)]
+        client_config: Arc::new(client_config),
+        #[cfg(test)]
+        server_cert_pem,
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn bind_tcp_lease(
     listen_path: PathBuf,
     host_socket: PathBuf,
     job_id: String,
     daemon_id: String,
+    cert_dir: PathBuf,
 ) -> Result<DockerLeaseGuard> {
     use std::net::{IpAddr, Ipv4Addr, TcpListener};
     use std::os::unix::net::UnixStream;
@@ -2723,6 +3096,7 @@ fn bind_tcp_lease(
     listener
         .set_nonblocking(true)
         .context("configure job Docker TCP lease")?;
+    let tls = prepare_docker_tls_material(&cert_dir)?;
     let (wake_reader, wake_writer) =
         UnixStream::pair().context("create job Docker TCP lease shutdown wake")?;
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -2742,18 +3116,25 @@ fn bind_tcp_lease(
                     conns: conns_thread,
                     policy: policy_thread,
                     cleanup_path: None,
+                    tls_config: Arc::clone(&tls.server_config),
                 },
                 wake_reader,
             );
         })
         .context("start job Docker TCP lease proxy thread")?;
-    Ok(DockerLeaseGuard {
+    let guard = DockerLeaseGuard {
         cleanup_path: None,
         shutdown,
         accept_thread: Some(accept_thread),
         conns,
         shutdown_wake: Some(wake_writer),
-    })
+        tls_cleanup: Some(tls.tls_cleanup),
+        #[cfg(test)]
+        test_client_config: tls.client_config,
+        #[cfg(test)]
+        test_server_cert_pem: tls.server_cert_pem,
+    };
+    Ok(guard)
 }
 
 #[cfg(target_os = "macos")]
@@ -2771,6 +3152,7 @@ fn accept_tcp_loop(
         conns,
         policy,
         cleanup_path,
+        tls_config,
     } = context;
     let mut poll_fds = [
         libc::pollfd {
@@ -2835,13 +3217,20 @@ fn accept_tcp_loop(
         let daemon_id = daemon_id.clone();
         let conns = Arc::clone(&conns);
         let policy = Arc::clone(&policy);
+        let tls_config = Arc::clone(&tls_config);
         let _ = std::thread::Builder::new()
             .name("velnor-docker-lease-tcp-conn".into())
             .spawn(move || {
                 let _permit = permit;
-                if let Err(error) =
-                    handle_tcp_client_with(stream, &host_socket, &job_id, &daemon_id, conns, policy)
-                {
+                if let Err(error) = handle_tcp_client_with(
+                    stream,
+                    &host_socket,
+                    &job_id,
+                    &daemon_id,
+                    conns,
+                    policy,
+                    tls_config,
+                ) {
                     eprintln!("Warning: job Docker TCP lease proxy: {error:#}");
                 }
             });
@@ -2996,9 +3385,11 @@ fn handle_client_with(
     }
 }
 
-/// Adapt a macOS TCP guest connection to the existing Unix-stream HTTP proxy.
-/// The adapter is transport-only: all Docker authorization, request rewrite,
-/// response capture, and cleanup remain in `handle_client_with`.
+/// Terminate per-job mTLS, then adapt the authenticated stream to the existing
+/// Unix-stream HTTP proxy. The bridge is async because a rustls stream cannot
+/// be cloned into independent read/write halves; `copy_bidirectional` keeps
+/// Docker HTTP, Buildx session, and raw hijack traffic full-duplex while the
+/// existing proxy retains request authorization and ownership rewriting.
 #[cfg(target_os = "macos")]
 fn handle_tcp_client_with(
     client: std::net::TcpStream,
@@ -3007,73 +3398,105 @@ fn handle_tcp_client_with(
     daemon_id: &str,
     conns: Arc<LeaseConnSet>,
     policy: Arc<DockerLeasePolicy>,
+    tls_config: Arc<ServerConfig>,
 ) -> Result<()> {
+    use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
+    use tokio::io::copy_bidirectional;
+    use tokio_rustls::TlsAcceptor;
 
     client
-        .set_read_timeout(Some(PROXY_IDLE_TIMEOUT))
-        .context("configure job Docker TCP lease client idle timeout")?;
-    client
-        .set_write_timeout(Some(PROXY_IDLE_TIMEOUT))
-        .context("configure job Docker TCP lease client write timeout")?;
-    let abort_client = client
-        .try_clone()
-        .context("clone job Docker TCP lease client")?;
+        .set_nonblocking(true)
+        .context("configure job Docker TCP lease client")?;
+    let _client_watch = conns.watch(&client);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .context("create Docker TCP lease TLS runtime")?;
+    let acceptor = TlsAcceptor::from(tls_config);
+    let mut tls_stream = runtime.block_on(async {
+        let stream =
+            tokio::net::TcpStream::from_std(client).context("adopt Docker TCP lease client")?;
+        tokio::time::timeout(PROXY_IDLE_TIMEOUT, acceptor.accept(stream))
+            .await
+            .context("Docker TCP lease TLS handshake timed out")?
+            .context("Docker TCP lease TLS handshake failed")
+    })?;
+
     let (proxy_client, bridge_socket) =
-        UnixStream::pair().context("create Docker TCP lease adapter")?;
-    let bridge_conns = Arc::clone(&conns);
-    let bridge = std::thread::Builder::new()
-        .name("velnor-docker-lease-tcp-bridge".into())
-        .spawn(move || bridge_tcp_to_unix(client, bridge_socket, bridge_conns))
-        .context("start Docker TCP lease adapter")?;
-    let result = handle_client_with(proxy_client, host_socket, job_id, daemon_id, conns, policy);
-    // `handle_client_with` can finish while the guest keeps its TCP socket
-    // open after a malformed/denied request. Stop only the guest->proxy read
-    // direction first. The bridge still needs the proxy->guest write
-    // direction to drain a Docker-shaped denial response before the socket is
-    // fully closed; shutting down both directions here races that response
-    // and turns a policy denial into an empty EOF.
-    let _ = abort_client.shutdown(std::net::Shutdown::Read);
-    let _ = bridge.join();
-    let _ = abort_client.shutdown(std::net::Shutdown::Both);
-    result
-}
-
-#[cfg(target_os = "macos")]
-fn bridge_tcp_to_unix(
-    tcp: std::net::TcpStream,
-    unix: std::os::unix::net::UnixStream,
-    conns: Arc<LeaseConnSet>,
-) -> Result<()> {
-    use std::io::copy;
-
-    let _tcp_watch = conns.watch(&tcp);
-    let mut tcp_read = tcp
-        .try_clone()
-        .context("clone Docker TCP lease read stream")?;
-    let mut unix_write = unix
-        .try_clone()
-        .context("clone Docker TCP lease Unix write stream")?;
-    let upstream = std::thread::Builder::new()
-        .name("velnor-docker-lease-tcp-upstream".into())
-        .spawn(move || {
-            let result = copy(&mut tcp_read, &mut unix_write);
-            let _ = unix_write.shutdown(std::net::Shutdown::Write);
-            result
+        UnixStream::pair().context("create Docker TLS lease adapter")?;
+    bridge_socket
+        .set_nonblocking(true)
+        .context("configure Docker TLS lease adapter")?;
+    let proxy_fd = proxy_client.as_raw_fd();
+    let handler = std::thread::Builder::new()
+        .name("velnor-docker-lease-tls-policy".into())
+        .spawn({
+            let host_socket = host_socket.to_owned();
+            let job_id = job_id.to_owned();
+            let daemon_id = daemon_id.to_owned();
+            move || {
+                handle_client_with(
+                    proxy_client,
+                    &host_socket,
+                    &job_id,
+                    &daemon_id,
+                    conns,
+                    policy,
+                )
+            }
         })
-        .context("start Docker TCP lease upstream")?;
-
-    let mut unix_read = unix
-        .try_clone()
-        .context("clone Docker TCP lease Unix read stream")?;
-    let mut tcp_write = tcp
-        .try_clone()
-        .context("clone Docker TCP lease write stream")?;
-    let downstream = copy(&mut unix_read, &mut tcp_write);
-    let _ = tcp.shutdown(std::net::Shutdown::Write);
-    let _ = upstream.join();
-    downstream.context("forward Docker TCP lease response")?;
-    Ok(())
+        .context("start Docker TLS lease policy thread")?;
+    let tls_fd = tls_stream.get_ref().0.as_raw_fd();
+    let bridge_fd = bridge_socket.as_raw_fd();
+    let bridge_result: Result<()> = runtime.block_on(async {
+        let mut bridge_socket = tokio::net::UnixStream::from_std(bridge_socket)
+            .context("adopt Docker TLS lease adapter")?;
+        let mut bridge = Box::pin(copy_bidirectional(&mut tls_stream, &mut bridge_socket));
+        let result = loop {
+            if handler.is_finished() {
+                // Give a Docker-shaped policy denial or final response time
+                // to drain from the Unix adapter before forcing the TLS peer
+                // closed. This preserves the old adapter's denial semantics.
+                match tokio::time::timeout(Duration::from_millis(250), &mut bridge).await {
+                    Ok(result) => break result,
+                    Err(_) => {
+                        // The copy future owns mutable borrows of both
+                        // streams. Shut their descriptors down directly so
+                        // the future wakes without violating those borrows.
+                        unsafe {
+                            libc::shutdown(tls_fd, libc::SHUT_RDWR);
+                            libc::shutdown(bridge_fd, libc::SHUT_RDWR);
+                        }
+                        break bridge.await;
+                    }
+                }
+            }
+            tokio::select! {
+                result = &mut bridge => break result,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        };
+        result.context("forward Docker TLS lease stream")?;
+        Ok(())
+    });
+    if bridge_result.is_err() {
+        // Wake both sides before joining. The connection permit is owned by
+        // the caller of this function, so returning before the policy thread
+        // exits would let the lease accept another connection while this one
+        // still holds host Docker state.
+        unsafe {
+            libc::shutdown(tls_fd, libc::SHUT_RDWR);
+            libc::shutdown(bridge_fd, libc::SHUT_RDWR);
+            libc::shutdown(proxy_fd, libc::SHUT_RDWR);
+        }
+    }
+    let policy_result = handler
+        .join()
+        .map_err(|panic| anyhow::anyhow!("Docker TLS lease policy thread panicked: {panic:?}"))?;
+    bridge_result?;
+    policy_result
 }
 
 #[cfg(unix)]
@@ -6659,59 +7082,227 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_tcp_lease_denies_unowned_request_before_host_connect() {
+    fn macos_tcp_lease_rejects_plain_peer_before_host_connect() {
         use std::io::{Read, Write};
-        use std::net::{TcpListener, TcpStream};
+        use std::net::TcpStream;
         use std::os::unix::net::UnixListener;
         use std::time::Duration;
 
-        // This is the explicit fail-closed boundary for the unauthenticated
-        // TCP adaptation: a peer that discovers the port cannot turn a denied
-        // Docker route into a host-engine connection.
-        let dir = unique_unix_dir("velnor-lease-tcp-deny");
+        let dir = unique_unix_dir("velnor-lease-tcp-mtls");
         let engine_path = dir.join("engine.sock");
         let engine = UnixListener::bind(&engine_path).unwrap();
         engine.set_nonblocking(true).unwrap();
-
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        let host_socket = engine_path.clone();
-        let proxy = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            handle_tcp_client_with(
-                stream,
-                &host_socket,
-                "job",
-                "daemon",
-                LeaseConnSet::new(Arc::new(AtomicBool::new(false))),
-                Arc::new(DockerLeasePolicy::new("job").unwrap()),
-            )
-        });
-
-        let mut client = TcpStream::connect(address).unwrap();
+        let listen_path = dir.join("lease.identity");
+        let guard = DockerLeaseGuard::bind_to(
+            listen_path.clone(),
+            engine_path,
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+        let port = guest_docker_tcp_port(&listen_path);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         client
-            .write_all(
-                b"GET /v1.43/containers/foreign/json HTTP/1.1\r\n\
-                   Host: docker\r\n\
-                   Connection: close\r\n\r\n",
-            )
+            .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
             .unwrap();
         let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-        let response = String::from_utf8_lossy(&response);
-        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
-
-        let result = proxy.join().unwrap();
+        let _ = client.read_to_end(&mut response);
         assert!(
-            result.is_err(),
-            "denied request must terminate the proxy path"
+            !response.starts_with(b"HTTP/1.1"),
+            "a plaintext peer must not receive a Docker response"
         );
         assert!(
             matches!(engine.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-            "a denied TCP peer must not connect the host Docker socket"
+            "a peer without a client certificate must not connect the host Docker socket"
+        );
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tcp_lease_accepts_mtls_and_forwards_full_duplex_http() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = unique_unix_dir("velnor-lease-tcp-authenticated");
+        let engine_path = dir.join("engine.sock");
+        let engine = UnixListener::bind(&engine_path).unwrap();
+        let engine_thread = std::thread::spawn(move || {
+            let (mut stream, _) = engine.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buf).unwrap();
+                assert_ne!(read, 0, "authenticated request must reach the host engine");
+                request.extend_from_slice(&buf[..read]);
+            }
+            assert!(String::from_utf8_lossy(&request).contains("GET /_ping"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+        });
+        let listen_path = dir.join("lease.identity");
+        let guard = DockerLeaseGuard::bind_to(
+            listen_path.clone(),
+            engine_path,
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+        for name in ["ca.pem", "cert.pem", "key.pem"] {
+            let path = dir.join("docker-tls").join(name);
+            assert!(path.is_file(), "missing per-job TLS credential {name}");
+            #[cfg(unix)]
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o444,
+                "TLS credential {name} must be mode 0444 so supported non-root jobs can read the read-only mount"
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(dir.join("docker-tls"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "the mounted TLS leaf must be traversable by supported non-root job users"
+        );
+
+        // Docker/Buildx use Go's x509 verifier, not rustls. Verify the actual
+        // generated chain with OpenSSL when the host provides it. In
+        // particular, this rejects the old invalid shape where the CA carried
+        // a ClientAuth-only EKU and signed the ServerAuth leaf.
+        let server_cert_path = dir.join("server.pem");
+        std::fs::write(&server_cert_path, &guard.test_server_cert_pem).unwrap();
+        let verify = |purpose: &str, cert: &Path| {
+            let mut command = std::process::Command::new("openssl");
+            command.args([
+                "verify",
+                "-CAfile",
+                dir.join("docker-tls/ca.pem").to_str().unwrap(),
+                "-purpose",
+                purpose,
+            ]);
+            if purpose == "sslserver" {
+                command.args(["-verify_hostname", MACOS_DOCKER_HOST_ALIAS]);
+            }
+            let output = command.arg(cert.to_str().unwrap()).output();
+            match output {
+                Ok(output) => assert!(
+                    output.status.success(),
+                    "OpenSSL {purpose} verification failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("run OpenSSL interoperability check: {error}"),
+            }
+        };
+        verify("sslserver", &server_cert_path);
+        verify("sslclient", &dir.join("docker-tls/cert.pem"));
+        let expiry = std::process::Command::new("openssl")
+            .args([
+                "x509",
+                "-in",
+                dir.join("docker-tls/cert.pem").to_str().unwrap(),
+                "-checkend",
+                "7190",
+                "-noout",
+            ])
+            .output();
+        if let Ok(output) = expiry {
+            assert!(
+                output.status.success(),
+                "per-job client certificate must remain valid for nearly the configured two-hour lifetime"
+            );
+        }
+
+        let client_config = Arc::clone(&guard.test_client_config);
+        let port = guest_docker_tcp_port(&listen_path);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap();
+        let response = runtime.block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let connector = tokio_rustls::TlsConnector::from(client_config);
+            let server_name =
+                rustls::pki_types::ServerName::try_from("host.docker.internal".to_owned()).unwrap();
+            let mut stream = connector.connect(server_name, stream).await.unwrap();
+            stream
+                .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            response
+        });
+        assert!(String::from_utf8_lossy(&response).contains("HTTP/1.1 200 OK"));
+        drop(guard);
+        engine_thread.join().unwrap();
+        assert!(!dir.join("docker-tls").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tls_material_rejects_symlinked_paths_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_unix_dir("velnor-lease-tls-symlink");
+        let target = dir.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let target_file = target.join("ca.pem");
+        std::fs::write(&target_file, "must survive\n").unwrap();
+
+        let cert_link = dir.join("docker-tls");
+        symlink(&target, &cert_link).unwrap();
+        assert!(prepare_docker_tls_material(&cert_link).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&target_file).unwrap(),
+            "must survive\n"
+        );
+
+        let parent_target = dir.join("parent-target");
+        std::fs::create_dir(&parent_target).unwrap();
+        let parent_file = parent_target.join("cert.pem");
+        std::fs::write(&parent_file, "must also survive\n").unwrap();
+        let parent_link = dir.join("parent-link");
+        symlink(&parent_target, &parent_link).unwrap();
+        let nested = parent_link.join("docker-tls");
+        assert!(prepare_docker_tls_material(&nested).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&parent_file).unwrap(),
+            "must also survive\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tls_material_rejects_unexpected_entries_and_removes_only_known_credentials() {
+        let dir = unique_unix_dir("velnor-lease-tls-stale");
+        let cert_dir = dir.join("docker-tls");
+        std::fs::create_dir(&cert_dir).unwrap();
+        std::fs::write(cert_dir.join("ca.pem"), "stale\n").unwrap();
+        let unexpected = cert_dir.join("operator-note.txt");
+        std::fs::write(&unexpected, "must remain\n").unwrap();
+
+        assert!(prepare_docker_tls_material(&cert_dir).is_err());
+        assert!(!cert_dir.join("ca.pem").exists());
+        assert_eq!(
+            std::fs::read_to_string(&unexpected).unwrap(),
+            "must remain\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

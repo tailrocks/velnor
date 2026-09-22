@@ -5940,13 +5940,23 @@ where
         })?;
         self.seed_mise_store(container)?;
         if container.mount_docker_socket && !container.uses_private_dind() {
+            container
+                .prepare_job_done_mount()
+                .context("prepare runner-private Docker TLS control directory")?;
             container.validate_docker_host_path_mapping()?;
             let lease_paths = container.docker_lease_paths()?;
+            // A retry reuses the deterministic lease identity/port. Retire
+            // the prior guard before binding so its Drop cannot keep the old
+            // listener occupied or remove the new TLS directory later.
+            if let Some(previous) = self.docker_lease.take() {
+                drop(previous);
+            }
             self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
                 // The runner owns the listener on its host-visible path.
                 // Docker gets the separately mapped daemon-visible source in
                 // the job container's -v argument.
                 lease_paths.host_visible,
+                container.docker_lease_tls_dir(),
                 container.name.clone(),
                 container.daemon_id.clone(),
             )?);

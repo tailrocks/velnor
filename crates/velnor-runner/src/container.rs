@@ -58,6 +58,10 @@ fn is_docker_control_env(name: &str) -> bool {
     name.eq_ignore_ascii_case("DOCKER_HOST")
         || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
+        || name.eq_ignore_ascii_case("DOCKER_CUSTOM_HEADERS")
+        || name.eq_ignore_ascii_case("DOCKER_TLS")
+        || name.eq_ignore_ascii_case("DOCKER_TLS_VERIFY")
+        || name.eq_ignore_ascii_case("DOCKER_CERT_PATH")
         || name.eq_ignore_ascii_case("VELNOR_DOCKER_HOST")
         || name.eq_ignore_ascii_case("VELNOR_DOCKER_CONTEXT")
 }
@@ -397,8 +401,10 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
+        self.append_docker_tls_mount(args);
         args.env("HOME", "/github/home");
         args.env("DOCKER_HOST", self.docker_host());
+        self.append_docker_tls_env(args);
         args.env("RUSTUP_HOME", "/root/.rustup");
         args.env("CARGO_HOME", "/github/home/.cargo");
         args.env("RUNNER_TEMP", "/__t");
@@ -659,6 +665,7 @@ impl JobContainerSpec {
     fn append_base_exec_env(&self, command: &mut DockerCommand) {
         command.env("HOME", "/github/home");
         command.env("DOCKER_HOST", self.docker_host());
+        self.append_docker_tls_env(command);
         command.env("RUSTUP_HOME", "/root/.rustup");
         command.env("CARGO_HOME", "/github/home/.cargo");
         command.env("PATH", self.default_exec_path());
@@ -732,6 +739,7 @@ impl JobContainerSpec {
         }
         args.env("HOME", "/github/home");
         self.append_docker_host_env(args);
+        self.append_docker_tls_mount(args);
         args.env("RUNNER_TOOL_CACHE", "/__tool");
         args.env("AGENT_TOOLSDIRECTORY", "/__tool");
         // The Node image entrypoint/shell drops env names with '-', but
@@ -932,6 +940,7 @@ impl JobContainerSpec {
         ]);
         args.env("HOME", "/github/home");
         self.append_docker_host_env(args);
+        self.append_docker_tls_mount(args);
         args.env("RUNNER_TOOL_CACHE", "/__tool");
         args.env("AGENT_TOOLSDIRECTORY", "/__tool");
         self.append_ownership_labels(args);
@@ -1047,6 +1056,40 @@ impl JobContainerSpec {
         if self.mount_docker_socket || self.uses_private_dind() {
             args.env("DOCKER_HOST", self.docker_host());
         }
+        self.append_docker_tls_env(args);
+    }
+
+    /// macOS host-Docker jobs use the authenticated TCP lease. The mounted
+    /// runner-private control directory carries the per-job CA/client
+    /// certificate/key at this exact container path; private DinD and
+    /// Unix-socket jobs intentionally receive none of these variables.
+    fn append_docker_tls_env(&self, args: &mut DockerCommand) {
+        if self.mount_docker_socket && !self.uses_private_dind() && cfg!(target_os = "macos") {
+            args.env("DOCKER_TLS_VERIFY", "1");
+            args.env(
+                "DOCKER_CERT_PATH",
+                crate::docker_lease::DOCKER_TLS_CERT_PATH,
+            );
+        }
+    }
+
+    fn append_docker_tls_mount(&self, args: &mut impl FlagSink) {
+        if self.mount_docker_socket && !self.uses_private_dind() && cfg!(target_os = "macos") {
+            args.pair(
+                "-v",
+                format!(
+                    "{}:ro",
+                    self.mount_arg(
+                        &self.docker_lease_tls_dir(),
+                        crate::docker_lease::DOCKER_TLS_CERT_PATH,
+                    )
+                ),
+            );
+        }
+    }
+
+    pub(crate) fn docker_lease_tls_dir(&self) -> PathBuf {
+        self.job_done_host_dir().join("docker-tls")
     }
 
     /// Resolve both filesystem views of the job lease.
@@ -1113,6 +1156,12 @@ impl JobContainerSpec {
         }
         if let Some(path) = &self.sccache_store_host {
             self.docker_host_path_checked(path, "sccache store")?;
+        }
+        if self.mount_docker_socket && !self.uses_private_dind() && cfg!(target_os = "macos") {
+            self.docker_host_path_checked(
+                &self.docker_lease_tls_dir(),
+                "Docker TLS credential directory",
+            )?;
         }
         // Linux binds the lease socket into the daemon-visible work root. On
         // macOS the guest reaches the loopback TCP lease through
@@ -2045,6 +2094,23 @@ mod tests {
         out
     }
 
+    fn without_platform_docker_tls(mut args: Vec<String>) -> Vec<String> {
+        let verify = "DOCKER_TLS_VERIFY=1";
+        let cert_path = format!(
+            "DOCKER_CERT_PATH={}",
+            crate::docker_lease::DOCKER_TLS_CERT_PATH
+        );
+        if cfg!(target_os = "macos") {
+            assert!(args.iter().any(|arg| arg == verify));
+            assert!(args.iter().any(|arg| arg == &cert_path));
+        } else {
+            assert!(!args.iter().any(|arg| arg.starts_with("DOCKER_TLS")));
+            assert!(!args.iter().any(|arg| arg.starts_with("DOCKER_CERT_PATH=")));
+        }
+        args.retain(|arg| arg != verify && arg != &cert_path);
+        args
+    }
+
     fn service_env_dir() -> PathBuf {
         container_test_temp("service").join("_velnor/exec-env")
     }
@@ -2055,6 +2121,20 @@ mod tests {
 
     fn has_read_only_mount(args: &[String], host: &Path, container: &str) -> bool {
         args.contains(&format!("{}:ro", mount(host, container)))
+    }
+
+    fn expected_docker_tls_mount(spec: &JobContainerSpec) -> Option<String> {
+        (cfg!(target_os = "macos") && spec.mount_docker_socket && !spec.uses_private_dind()).then(
+            || {
+                format!(
+                    "{}:ro",
+                    mount(
+                        &spec.docker_lease_tls_dir(),
+                        crate::docker_lease::DOCKER_TLS_CERT_PATH
+                    )
+                )
+            },
+        )
     }
 
     /// Every `-v host:container[:ro]` argument of a rendered command.
@@ -3269,7 +3349,7 @@ mod tests {
         let docker_host_env = format!("DOCKER_HOST={}", spec.docker_host());
 
         assert_eq!(
-            rendered(&prepared),
+            without_platform_docker_tls(rendered(&prepared)),
             vec![
                 "exec",
                 "--workdir",
@@ -3320,7 +3400,7 @@ mod tests {
         let docker_host_env = format!("DOCKER_HOST={}", spec.docker_host());
 
         assert_eq!(
-            rendered(&prepared),
+            without_platform_docker_tls(rendered(&prepared)),
             vec![
                 "exec",
                 "--workdir",
@@ -3506,6 +3586,13 @@ mod tests {
             ("DOCKER_HOST".into(), "tcp://attacker.example:2376".into()),
             ("DOCKER_CONTEXT".into(), "attacker".into()),
             ("DOCKER_CONFIG".into(), "/tmp/attacker".into()),
+            (
+                "DOCKER_CUSTOM_HEADERS".into(),
+                "Velnor-Lease-Token=attacker".into(),
+            ),
+            ("DOCKER_TLS".into(), "verify".into()),
+            ("DOCKER_TLS_VERIFY".into(), "0".into()),
+            ("DOCKER_CERT_PATH".into(), "/tmp/attacker-certs".into()),
             ("SAFE_ENV".into(), "kept".into()),
         ];
         let start_prepared = spec.start_args().unwrap();
@@ -3515,6 +3602,29 @@ mod tests {
         assert!(!start.iter().any(|arg| arg.contains("attacker.example")));
         assert!(!start.iter().any(|arg| arg == "DOCKER_CONTEXT=attacker"));
         assert!(!start.iter().any(|arg| arg == "DOCKER_CONFIG=/tmp/attacker"));
+        assert!(!start
+            .iter()
+            .any(|arg| arg.starts_with("DOCKER_CUSTOM_HEADERS=")));
+        assert!(!start.iter().any(|arg| arg == "DOCKER_TLS=verify"));
+        assert!(!start.iter().any(|arg| arg == "DOCKER_TLS_VERIFY=0"));
+        assert!(!start
+            .iter()
+            .any(|arg| arg == "DOCKER_CERT_PATH=/tmp/attacker-certs"));
+        if cfg!(target_os = "macos") {
+            assert!(start.contains(&"DOCKER_TLS_VERIFY=1".into()));
+            assert!(start.contains(
+                &format!(
+                    "DOCKER_CERT_PATH={}",
+                    crate::docker_lease::DOCKER_TLS_CERT_PATH
+                )
+                .into()
+            ));
+        } else {
+            assert!(!start
+                .iter()
+                .any(|arg| arg.starts_with("DOCKER_TLS_VERIFY=")));
+            assert!(!start.iter().any(|arg| arg.starts_with("DOCKER_CERT_PATH=")));
+        }
 
         let prepared = spec
             .prepare_exec_process_args(
@@ -3523,15 +3633,33 @@ mod tests {
                     ("DOCKER_HOST".into(), "tcp://attacker.example:2376".into()),
                     ("DOCKER_CONTEXT".into(), "attacker".into()),
                     ("DOCKER_CONFIG".into(), "/tmp/attacker".into()),
+                    (
+                        "DOCKER_CUSTOM_HEADERS".into(),
+                        "Velnor-Lease-Token=attacker".into(),
+                    ),
+                    ("DOCKER_TLS_VERIFY".into(), "0".into()),
+                    ("DOCKER_CERT_PATH".into(), "/tmp/attacker-certs".into()),
                 ],
                 &[],
                 &["docker".into(), "version".into()],
             )
             .unwrap();
-        assert!(rendered(&prepared).contains(&format!("DOCKER_HOST={}", spec.docker_host())));
-        assert!(!rendered(&prepared)
-            .iter()
-            .any(|arg| arg.contains("attacker")));
+        let exec = rendered(&prepared);
+        assert!(exec.contains(&format!("DOCKER_HOST={}", spec.docker_host())));
+        assert!(!exec.iter().any(|arg| arg.contains("attacker")));
+        if cfg!(target_os = "macos") {
+            assert!(exec.contains(&"DOCKER_TLS_VERIFY=1".into()));
+            assert!(exec.contains(
+                &format!(
+                    "DOCKER_CERT_PATH={}",
+                    crate::docker_lease::DOCKER_TLS_CERT_PATH
+                )
+                .into()
+            ));
+        } else {
+            assert!(!exec.iter().any(|arg| arg.starts_with("DOCKER_TLS_VERIFY=")));
+            assert!(!exec.iter().any(|arg| arg.starts_with("DOCKER_CERT_PATH=")));
+        }
     }
 
     #[test]
@@ -3551,6 +3679,8 @@ mod tests {
         assert_eq!(spec.docker_host(), "tcp://docker:2375");
         let start = rendered(&spec.start_args().unwrap());
         assert!(start.contains(&"DOCKER_HOST=tcp://docker:2375".into()));
+        assert!(!start.iter().any(|arg| arg.starts_with("DOCKER_TLS")));
+        assert!(!start.iter().any(|arg| arg.starts_with("DOCKER_CERT_PATH=")));
         assert!(!start
             .iter()
             .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")));
@@ -3561,6 +3691,8 @@ mod tests {
                 .unwrap(),
         );
         assert!(exec.contains(&"DOCKER_HOST=tcp://docker:2375".into()));
+        assert!(!exec.iter().any(|arg| arg.starts_with("DOCKER_TLS")));
+        assert!(!exec.iter().any(|arg| arg.starts_with("DOCKER_CERT_PATH=")));
     }
 
     #[test]
@@ -3984,7 +4116,7 @@ mod tests {
         // Every mount touching a runner-owned container path is the required
         // one, present exactly once: no PATH entry rebinds it.
         let mounts = mount_args(&prepared);
-        let required = [
+        let mut required = vec![
             mount(&spec.workspace_host, "/__w"),
             mount(&spec.workspace_host, "/github/workspace"),
             mount(&spec.temp_host, "/__t"),
@@ -3996,6 +4128,9 @@ mod tests {
             format!("{}:ro", mount(&spec.actions_host, "/__a")),
             mount(&spec.tools_host, "/__tool"),
         ];
+        if let Some(tls_mount) = expected_docker_tls_mount(&spec) {
+            required.push(tls_mount);
+        }
         for required_mount in &required {
             assert_eq!(
                 mounts.iter().filter(|m| *m == required_mount).count(),
@@ -4059,6 +4194,10 @@ mod tests {
         if JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
             expected.push("/var/run/docker.sock");
         }
+        if expected_docker_tls_mount(&spec).is_some() {
+            expected.push(crate::docker_lease::DOCKER_TLS_CERT_PATH);
+        }
+        expected.sort_unstable();
         assert_eq!(containers, expected);
     }
 

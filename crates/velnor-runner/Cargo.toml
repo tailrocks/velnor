@@ -138,6 +138,7 @@ base64.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rayon.workspace = true
+rcgen.workspace = true
 rustix = { workspace = true, features = ["fs", "event", "process", "system"] }
 rsa.workspace = true
 rusqlite.workspace = true
@@ -152,6 +153,8 @@ thiserror.workspace = true
 time.workspace = true
 toml.workspace = true
 tokio.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 url.workspace = true
 uuid.workspace = true
 tokio-tungstenite.workspace = true
