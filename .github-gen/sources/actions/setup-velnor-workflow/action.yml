@@ -17,6 +17,11 @@
 # the asset and manifest attestations must verify against the pinned
 # producer workflow, default-branch ref, and exact manifest source revision.
 #
+# Transition bridge: the immutable base revision
+# `45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2` predates the build-identity
+# fields. Its one published product is accepted only by its exact closure,
+# tag, and manifest digest; no other revision may use this bridge.
+#
 # The Actions cache is a pure acceleration: the per-closure directory is
 # re-verified on every restore, and a cold cache costs one small download,
 # never a compilation.
@@ -111,8 +116,32 @@ runs:
         for tool in gh jq; do
           command -v "$tool" >/dev/null 2>&1 || { echo "::error::required tool missing: $tool" >&2; exit 1; }
         done
+        legacy_base_revision='45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2'
+        legacy_closure='395f46da9d37156da67513e18dd19d07e7e9760e08b70ada3f0296b47282be16'
+        legacy_tag='velnor-workflow-runtime-v1-395f46da9d37156d'
+        legacy_manifest_digest='b01eecc5a2ca656f9193629e811898dfb3a9ff29e90b5ef5f68a8656455acc45'
+        sha256_file() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | awk '{print $1}'
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$1" | awk '{print $1}'
+          else
+            echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2
+            return 1
+          fi
+        }
         tag="velnor-workflow-runtime-v1-${CLOSURE:0:16}"
         asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+        if [[ "$INSTALL_REV" == "$legacy_base_revision" ]]; then
+          [[ "$CLOSURE" == "$legacy_closure" ]] || {
+            echo "::error::legacy runtime bridge closure mismatch for base revision $INSTALL_REV: got $CLOSURE, expected $legacy_closure" >&2
+            exit 1
+          }
+          [[ "$tag" == "$legacy_tag" ]] || {
+            echo "::error::legacy runtime bridge tag mismatch for base revision $INSTALL_REV: got $tag, expected $legacy_tag" >&2
+            exit 1
+          }
+        fi
         temporary="$(mktemp -d)"
         trap 'rm -rf "$temporary"' EXIT
         if ! gh release download "$tag" --repo "$PRODUCT_REPOSITORY" --pattern manifest.json --dir "$temporary"; then
@@ -125,13 +154,34 @@ runs:
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
           --source-ref refs/heads/main \
           --source-digest "$manifest_revision"
-        jq -e \
-          --arg closure "$CLOSURE" \
-          --arg revision "$manifest_revision" \
-          --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
-          --arg asset "$asset" \
-          '.closure == $closure and .revision == $revision and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == "velnor-workflow.runtime-build-identity.v1" and .source_revision == $revision and .platform == $platform and (.toolchain | (type == "string" and length > 0)) and (.rustc | (type == "string" and length > 0)) and (.target | (type == "string" and length > 0)) and (.host | (type == "string" and length > 0)) and .profile == "release" and .features == "" and (.rustflags | type == "string") and (.cargo_encoded_rustflags | type == "string") and (.linker | type == "string") and (.cc | type == "string") and (.cflags | type == "string"))' \
-          "$temporary/manifest.json" >/dev/null
+        if [[ "$INSTALL_REV" == "$legacy_base_revision" ]]; then
+          actual_manifest_digest="$(sha256_file "$temporary/manifest.json")"
+          [[ "$actual_manifest_digest" == "$legacy_manifest_digest" ]] || {
+            echo "::error::legacy runtime bridge manifest digest mismatch: got $actual_manifest_digest, expected $legacy_manifest_digest" >&2
+            exit 1
+          }
+          jq -e \
+            --arg closure "$legacy_closure" \
+            --arg revision "$legacy_base_revision" \
+            --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+            --arg asset "$asset" \
+            '.closure == $closure and .revision == $revision and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
+            "$temporary/manifest.json" >/dev/null || {
+              echo "::error::legacy runtime bridge manifest fields are invalid" >&2
+              exit 1
+            }
+        else
+          jq -e \
+            --arg closure "$CLOSURE" \
+            --arg revision "$manifest_revision" \
+            --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+            --arg asset "$asset" \
+            '.closure == $closure and .revision == $revision and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == "velnor-workflow.runtime-build-identity.v1" and .source_revision == $revision and .platform == $platform and (.toolchain | (type == "string" and length > 0)) and (.rustc | (type == "string" and length > 0)) and (.target | (type == "string" and length > 0)) and (.host | (type == "string" and length > 0)) and .profile == "release" and .features == "" and (.rustflags | type == "string") and (.cargo_encoded_rustflags | type == "string") and (.linker | type == "string") and (.cc | type == "string") and (.cflags | type == "string"))' \
+            "$temporary/manifest.json" >/dev/null || {
+              echo "::error::runtime manifest does not satisfy the current contract for revision $INSTALL_REV; the legacy bridge is restricted to $legacy_base_revision" >&2
+              exit 1
+            }
+        fi
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         mkdir -p "$runtime"
         cp "$temporary/manifest.json" "$runtime/manifest.json"
@@ -147,8 +197,17 @@ runs:
         PRODUCT_REPOSITORY: tailrocks/velnor
       run: |
         set -euo pipefail
+        legacy_base_revision='45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2'
+        legacy_closure='395f46da9d37156da67513e18dd19d07e7e9760e08b70ada3f0296b47282be16'
+        legacy_tag='velnor-workflow-runtime-v1-395f46da9d37156d'
         tag="velnor-workflow-runtime-v1-${CLOSURE:0:16}"
         asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+        if [[ "$INSTALL_REV" == "$legacy_base_revision" ]]; then
+          [[ "$CLOSURE" == "$legacy_closure" && "$tag" == "$legacy_tag" ]] || {
+            echo "::error::legacy runtime bridge locator mismatch for base revision $INSTALL_REV" >&2
+            exit 1
+          }
+        fi
         temporary="$(mktemp -d)"
         trap 'rm -rf "$temporary"' EXIT
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
@@ -174,14 +233,50 @@ runs:
       shell: bash
       env:
         CLOSURE: ${{ steps.closure.outputs.value }}
+        INSTALL_REV: ${{ inputs.rev }}
       run: |
         set -euo pipefail
+        legacy_base_revision='45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2'
+        legacy_closure='395f46da9d37156da67513e18dd19d07e7e9760e08b70ada3f0296b47282be16'
+        legacy_manifest_digest='b01eecc5a2ca656f9193629e811898dfb3a9ff29e90b5ef5f68a8656455acc45'
+        sha256_file() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | awk '{print $1}'
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$1" | awk '{print $1}'
+          else
+            echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2
+            return 1
+          fi
+        }
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
-        jq -e \
-          --arg closure "$CLOSURE" \
-          --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
-          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \
-          "$runtime/manifest.json" >/dev/null
+        if [[ "$CLOSURE" == "$legacy_closure" ]]; then
+          [[ "${INSTALL_REV:-}" == "$legacy_base_revision" ]] || {
+            echo "::error::legacy runtime bridge is restricted to base revision $legacy_base_revision; got ${INSTALL_REV:-<unset>}" >&2
+            exit 1
+          }
+          actual_manifest_digest="$(sha256_file "$runtime/manifest.json")"
+          [[ "$actual_manifest_digest" == "$legacy_manifest_digest" ]] || {
+            echo "::error::legacy runtime bridge cached manifest digest mismatch: got $actual_manifest_digest, expected $legacy_manifest_digest" >&2
+            exit 1
+          }
+          jq -e \
+            --arg closure "$legacy_closure" \
+            --arg revision "$legacy_base_revision" \
+            --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+            --arg asset "velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}" \
+            '.closure == $closure and .revision == $revision and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
+            "$runtime/manifest.json" >/dev/null || {
+              echo "::error::legacy runtime bridge cached manifest fields are invalid" >&2
+              exit 1
+            }
+        else
+          jq -e \
+            --arg closure "$CLOSURE" \
+            --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+            '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \
+            "$runtime/manifest.json" >/dev/null
+        fi
         if command -v sha256sum >/dev/null 2>&1; then
           actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"
         else
