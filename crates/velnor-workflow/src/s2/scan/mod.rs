@@ -76,7 +76,7 @@ pub(crate) fn scan_shape(
     docker::detect(&context, &mut shape);
     homebrew::detect(&context, &mut shape);
     docs::detect(&context, &mut shape);
-    join_native_producers(&mut shape, &file_set);
+    join_native_producers(&mut shape, &file_set)?;
     shape.finalize();
     shape.files = files;
     Ok(shape)
@@ -96,7 +96,10 @@ pub(crate) fn scan_shape(
 /// the matched limitation keeps naming the materialization obligation.
 /// Ambiguous producers, module mismatches, and unresolvable paths stay
 /// diagnostics with no edge: the join never guesses.
-fn join_native_producers(shape: &mut RepositoryShape, file_set: &BTreeSet<String>) {
+fn join_native_producers(
+    shape: &mut RepositoryShape,
+    file_set: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
     let consumers = std::mem::take(&mut shape.swift_consumers);
     for consumer in &consumers {
         let name = consumer.display_name();
@@ -148,8 +151,9 @@ fn join_native_producers(shape: &mut RepositoryShape, file_set: &BTreeSet<String
             ));
             continue;
         }
-        wire_native_edge(shape, consumer, producer, name);
+        wire_native_edge(shape, consumer, producer, name)?;
     }
+    Ok(())
 }
 
 /// Wire one agreed producer/consumer pair: ensure the product on the Rust
@@ -161,7 +165,7 @@ fn wire_native_edge(
     consumer: &swift::SwiftBinaryConsumer,
     producer: &rust::BoltffiProducer,
     name: &str,
-) {
+) -> Result<(), GeneratorError> {
     let manifest = consumer.source.manifest_noun();
     let reference = consumer.source.reference_noun();
     let Some(producer_unit) = producer.unit.clone() else {
@@ -169,7 +173,7 @@ fn wire_native_edge(
             "{manifest} {} {reference} `{name}` matches BoltFFI producer {}, but no Rust unit owns `{}`; no product edge was constructed.",
             consumer.manifest, producer.manifest, producer.root,
         ));
-        return;
+        return Ok(());
     };
     let product_name = native_product_name(&producer.framework);
     let producer_index = shape.units.iter().position(|unit| unit.id == producer_unit);
@@ -179,7 +183,7 @@ fn wire_native_edge(
             "{manifest} {} {reference} `{name}` matches BoltFFI producer {}, but the owning unit is missing; no product edge was constructed.",
             consumer.manifest, producer.manifest,
         ));
-        return;
+        return Ok(());
     };
     if shape.units[producer_index].products.iter().any(|product| {
         product.name == product_name
@@ -193,7 +197,7 @@ fn wire_native_edge(
             "BoltFFI manifest {} framework `{}` collides with product `{product_name}` on unit `{producer_unit}`; no product edge was constructed.",
             producer.manifest, producer.framework,
         ));
-        return;
+        return Ok(());
     }
     if !shape.units[producer_index]
         .products
@@ -201,9 +205,9 @@ fn wire_native_edge(
         .any(|product| product.name == product_name)
     {
         // The pack runs Apple tooling, so the producing unit inherits the
-        // macOS requirement and carries the typed recipe commands after
-        // its own checks. A second consumer of the same product reuses
-        // the materialized output instead of appending a second pack.
+        // macOS requirement and carries the typed recipe commands as a
+        // precondition. A second consumer of the same product reuses the
+        // materialized output instead of adding a second pack.
         // The product records the same recipe as its local rebuild, so a
         // consumer whose producer did not run can materialize it.
         let surface = rust::BoltffiDriftSurface {
@@ -242,11 +246,7 @@ fn wire_native_edge(
         let unit = &mut shape.units[producer_index];
         unit.platform = crate::s2::provider::Platform::MacosArm64;
         unit.capabilities.native_macos_arm64 = true;
-        unit.pr_commands.extend(recipe_commands.clone());
-        unit.full_commands.extend(recipe_commands);
-        // Recipe commands carry no phase tag; the unit keeps every command
-        // in order and verifies through the single legacy step.
-        unit.clear_phases();
+        unit.prepend_precondition_commands(&recipe_commands)?;
     }
     shape.units[consumer_index]
         .prerequisites
@@ -261,6 +261,7 @@ fn wire_native_edge(
         "{manifest} {} consumes {reference} `{name}` from BoltFFI manifest {} (crate `{}`); the producer step must materialize `{}` {materialization}.",
         consumer.manifest, producer.manifest, producer.crate_name, producer.output,
     ));
+    Ok(())
 }
 
 /// The product name for a framework: lowercase, shell-safe, within the
@@ -560,6 +561,18 @@ impl From<RepositoryShape> for ProjectConfig {
 #[cfg(test)]
 mod tests {
     use super::{native_product_name, RepositoryShape};
+    use crate::s2::ValidationPhase;
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
 
     #[test]
     fn native_product_name_sanitizes_frameworks() {
@@ -589,13 +602,23 @@ mod tests {
 
     #[test]
     fn wired_native_product_records_the_pack_recipe_as_its_rebuild() {
-        let rust = super::unit(
+        let mut rust = super::unit(
             crate::s2::UnitKind::Rust,
             "crates/ffi",
             Vec::new(),
-            vec!["cargo test --locked".to_owned()],
+            vec![
+                "cargo fmt --check".to_owned(),
+                "cargo clippy --all-targets".to_owned(),
+                "cargo test --locked".to_owned(),
+            ],
             None,
         );
+        rust.phases = vec![
+            ValidationPhase::Fmt,
+            ValidationPhase::Clippy,
+            ValidationPhase::Test,
+        ];
+        rust.check_commands = vec!["cargo check --all-targets".to_owned()];
         let swift = super::unit(
             crate::s2::UnitKind::Swift,
             "native",
@@ -647,7 +670,10 @@ mod tests {
             path: "out/BridgeCore.xcframework".to_owned(),
             source: super::swift::SwiftBinarySource::SwiftPackage,
         };
-        super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore");
+        must(
+            super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore"),
+            "wire native edge",
+        );
         let unit = &shape.units[0];
         assert_eq!(1, unit.products.len(), "{unit:?}");
         let product = &unit.products[0];
@@ -677,13 +703,29 @@ mod tests {
         );
         assert_eq!(
             product.rebuild,
-            unit.pr_commands[1..],
+            unit.pr_commands[..product.rebuild.len()],
             "the rebuild is the recipe the producer itself runs"
         );
         assert_eq!(
             product.rebuild,
-            unit.full_commands[1..],
+            unit.full_commands[..product.rebuild.len()],
             "both command vectors carry the same recipe"
+        );
+        assert!(
+            unit.phases[..product.rebuild.len()]
+                .iter()
+                .all(|phase| *phase == ValidationPhase::Precondition),
+            "the pack recipe is tagged as a precondition: {:?}",
+            unit.phases
+        );
+        assert_eq!(
+            unit.phases[product.rebuild.len()..],
+            [
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ],
+            "the Rust phases remain ordered after native joining"
         );
         assert!(
             product
@@ -705,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn second_consumer_of_a_wired_product_appends_no_second_pack() {
+    fn package_and_xcodegen_consumers_share_one_wired_product() {
         let rust = super::unit(
             crate::s2::UnitKind::Rust,
             "crates/ffi",
@@ -762,15 +804,31 @@ mod tests {
             inputs_digest: None,
         };
         for index in [1, 2] {
+            let source = if index == 1 {
+                super::swift::SwiftBinarySource::SwiftPackage
+            } else {
+                super::swift::SwiftBinarySource::XcodeGenSpec
+            };
             let consumer = super::swift::SwiftBinaryConsumer {
-                manifest: format!("{}/Package.swift", shape.units[index].root),
+                manifest: match source {
+                    super::swift::SwiftBinarySource::SwiftPackage => {
+                        format!("{}/Package.swift", shape.units[index].root)
+                    }
+                    super::swift::SwiftBinarySource::XcodeGenSpec => {
+                        format!("{}/project.yml", shape.units[index].root)
+                    }
+                },
                 consumer_root: shape.units[index].root.clone(),
                 unit: shape.units[index].id.clone(),
-                name: Some("BridgeCore".to_owned()),
+                name: (source == super::swift::SwiftBinarySource::SwiftPackage)
+                    .then(|| "BridgeCore".to_owned()),
                 path: "out/BridgeCore.xcframework".to_owned(),
-                source: super::swift::SwiftBinarySource::SwiftPackage,
+                source,
             };
-            super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore");
+            must(
+                super::wire_native_edge(&mut shape, &consumer, &producer, "BridgeCore"),
+                "wire native edge",
+            );
         }
         let unit = &shape.units[0];
         assert_eq!(1, unit.products.len(), "{unit:?}");
@@ -786,5 +844,50 @@ mod tests {
         );
         assert_eq!(1, shape.units[1].prerequisites.len());
         assert_eq!(1, shape.units[2].prerequisites.len());
+    }
+
+    #[test]
+    fn unphased_native_preconditions_deduplicate_and_keep_requested_order() {
+        let mut unit = super::unit(
+            crate::s2::UnitKind::Rust,
+            "crates/ffi",
+            Vec::new(),
+            vec![
+                "cargo check --locked".to_owned(),
+                "pack existing".to_owned(),
+                "cargo check --locked".to_owned(),
+            ],
+            None,
+        );
+        unit.full_commands = vec![
+            "full command".to_owned(),
+            "pack existing".to_owned(),
+            "full command".to_owned(),
+        ];
+        let requested = vec![
+            "pack existing".to_owned(),
+            "pack new".to_owned(),
+            "pack existing".to_owned(),
+        ];
+
+        must(
+            unit.prepend_precondition_commands(&requested),
+            "normalize unphased preconditions",
+        );
+
+        assert_eq!(
+            unit.pr_commands,
+            vec![
+                "pack existing",
+                "pack new",
+                "cargo check --locked",
+                "cargo check --locked",
+            ]
+        );
+        assert_eq!(
+            unit.full_commands,
+            vec!["pack existing", "pack new", "full command", "full command",]
+        );
+        assert!(unit.phases.is_empty());
     }
 }

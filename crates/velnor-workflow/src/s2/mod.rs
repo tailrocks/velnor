@@ -606,13 +606,16 @@ impl UnitKind {
 
 /// One typed validation phase of a unit's commands. The scan tags each
 /// command it structures (Rust fmt/clippy/test/doctest, `XcodeGen` generation,
-/// and Swift build/run/test); generated jobs run
-/// one step per runnable phase behind `--phase`, and the prerequisite tier
-/// selects the check phase. Phase membership is positional data, never
-/// substring detection on command text.
+/// and Swift build/run/test); contract primitives tag commands they must
+/// prepend as preconditions. Generated jobs run one step per runnable phase
+/// behind `--phase`, and the prerequisite tier selects the check phase. Phase
+/// membership is positional data, never substring detection on command text.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidationPhase {
+    /// A command required before the scanner-derived validation phases, such
+    /// as regeneration or a product rebuild.
+    Precondition,
     Fmt,
     Clippy,
     Test,
@@ -629,11 +632,12 @@ pub enum ValidationPhase {
 }
 
 impl ValidationPhase {
-    /// The runnable phases in step order: formatting first, then lints, then
-    /// tests, then doctests, then `XcodeGen` generation, then Swift builds and
+    /// The runnable phases in step order: preconditions first, then formatting,
+    /// lints, tests, doctests, `XcodeGen` generation, Swift builds and
     /// executable runs, then tests. `Check` is prerequisite-only and never
     /// renders a validation step.
-    pub(crate) const RUNNABLE: [Self; 8] = [
+    pub(crate) const RUNNABLE: [Self; 9] = [
+        Self::Precondition,
         Self::Fmt,
         Self::Clippy,
         Self::Test,
@@ -647,6 +651,7 @@ impl ValidationPhase {
     /// The phase a `--phase` selector or `phases` TOML entry names.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "precondition" => Self::Precondition,
             "fmt" => Self::Fmt,
             "clippy" => Self::Clippy,
             "test" => Self::Test,
@@ -664,6 +669,7 @@ impl ValidationPhase {
     /// `validation_phases` workflow-input record.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Precondition => "precondition",
             Self::Fmt => "fmt",
             Self::Clippy => "clippy",
             Self::Test => "test",
@@ -679,6 +685,7 @@ impl ValidationPhase {
     /// The GitHub Actions step name of one runnable phase.
     pub(crate) fn step_name(self) -> &'static str {
         match self {
+            Self::Precondition => "Preconditions",
             Self::Fmt => "Formatting check",
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
@@ -701,11 +708,17 @@ impl ValidationPhase {
     }
 
     /// Native Apple phases do not need a Rust-style prerequisite tier. Any
-    /// other phase set must carry an explicit check command.
+    /// other phase set must carry an explicit check command. A precondition
+    /// also does not imply a Rust-style check; Apple units can prepend one to
+    /// their typed phases without acquiring a synthetic Cargo check.
     pub(crate) fn allows_empty_prerequisites(self) -> bool {
         matches!(
             self,
-            Self::XcodegenGenerate | Self::SwiftBuild | Self::SwiftRun | Self::SwiftTest
+            Self::Precondition
+                | Self::XcodegenGenerate
+                | Self::SwiftBuild
+                | Self::SwiftRun
+                | Self::SwiftTest
         )
     }
 }
@@ -734,8 +747,8 @@ pub struct Unit {
     /// Positional phase tags over `pr_commands` and `full_commands`: entry
     /// `i` names the phase command `i` belongs to. Empty means unphased
     /// (custom, policy, and Docker units keep the single legacy step).
-    /// Any mutation that cannot preserve the alignment clears the phases
-    /// instead.
+    /// Typed precondition mutations prepend matching tags, while any other
+    /// mutation that cannot preserve the alignment clears the phases instead.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) phases: Vec<ValidationPhase>,
     /// The prerequisite-tier check commands, built by the scan from the
@@ -855,9 +868,113 @@ impl Unit {
             .collect()
     }
 
+    /// Prefix commands required before validation on every command lane.
+    /// Phased units get one `precondition` tag per inserted command, so their
+    /// existing phase identity and order remain intact. A phased unit must be
+    /// in one of two complete states across both lanes: both already have the
+    /// whole prefix, or neither has any of it. Refusing partial state prevents
+    /// the PR/full vectors from acquiring a different positional phase map.
+    pub(crate) fn prepend_precondition_commands(
+        &mut self,
+        commands: &[String],
+    ) -> Result<(), GeneratorError> {
+        let mut requested = Vec::new();
+        for command in commands {
+            if !requested.contains(command) {
+                requested.push(command.clone());
+            }
+        }
+        if requested.is_empty() {
+            return Ok(());
+        }
+
+        let phased = self.has_phases();
+        let phase_count = self.phases.len();
+        let mut lanes = vec![
+            ("PR", &mut self.pr_commands),
+            ("full", &mut self.full_commands),
+        ];
+
+        if phased {
+            for (lane, commands) in &lanes {
+                if commands.len() != phase_count {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` has {phase_count} validation phases but {lane} carries {} commands; refusing a precondition insertion that would misalign phases",
+                        self.id,
+                        commands.len()
+                    )));
+                }
+            }
+
+            // 0 = no requested command anywhere, 1 = the complete requested
+            // prefix with no later duplicate, 2 = a partial or misplaced
+            // prefix. Only states 0 and 1 compose positionally.
+            let prefix_state = |lane: &[String]| {
+                if lane.starts_with(&requested)
+                    && !lane[requested.len()..]
+                        .iter()
+                        .any(|command| requested.contains(command))
+                {
+                    1_u8
+                } else if requested.iter().all(|command| !lane.contains(command)) {
+                    0_u8
+                } else {
+                    2_u8
+                }
+            };
+            let state = prefix_state(lanes[0].1);
+            if state == 2 || lanes.iter().any(|(_, lane)| prefix_state(lane) != state) {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` has a partial or misplaced precondition across command lanes; both lanes must omit the gate or carry the same prefix",
+                    self.id
+                )));
+            }
+            if state == 1 {
+                if self.phases[..requested.len()]
+                    .iter()
+                    .any(|phase| *phase != ValidationPhase::Precondition)
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` has a precondition command without a matching precondition phase tag",
+                        self.id
+                    )));
+                }
+                return Ok(());
+            }
+            if self.phases.contains(&ValidationPhase::Precondition) {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` has a precondition phase tag without a matching command prefix",
+                    self.id
+                )));
+            }
+
+            for (_, lane) in &mut lanes {
+                for command in requested.iter().rev() {
+                    lane.insert(0, command.clone());
+                }
+            }
+            let mut phase_tags = vec![ValidationPhase::Precondition; requested.len()];
+            phase_tags.extend(self.phases.iter().copied());
+            self.phases = phase_tags;
+            return Ok(());
+        }
+
+        // Unphased units have no positional tags to preserve. Normalize each
+        // lane to one copy of the requested prefix so a gate cannot be
+        // silently skipped on the full lane.
+        for (_, lane) in &mut lanes {
+            for command in requested.iter().rev() {
+                lane.retain(|candidate| candidate != command);
+                lane.insert(0, command.clone());
+            }
+        }
+        Ok(())
+    }
+
     /// Drop the phase model after a command mutation that cannot preserve
     /// the positional alignment: the unit keeps every command in order and
-    /// verifies through the single legacy step.
+    /// verifies through the single legacy step. Typed precondition mutations
+    /// use [`Self::prepend_precondition_commands`] instead.
     pub(crate) fn clear_phases(&mut self) {
         self.phases.clear();
         self.check_commands.clear();
