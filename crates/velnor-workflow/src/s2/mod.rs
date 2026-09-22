@@ -9006,6 +9006,48 @@ fn parse_ownership_state(
     }))
 }
 
+/// Return paths proven to be generator outputs by the ownership sidecar.
+///
+/// Generated-looking bytes are not authority: a handwritten file can forge
+/// the generated header. Scanners therefore omit only outputs recorded by a
+/// valid sidecar, plus the sidecar and the fixed fleet cache artifact.
+pub(crate) fn generator_owned_output_paths(
+    root: &Path,
+) -> Result<BTreeSet<PathBuf>, GeneratorError> {
+    let state_path = PathBuf::from(OWNERSHIP_STATE);
+    let mut paths = BTreeSet::from([
+        state_path.clone(),
+        PathBuf::from("config/fleet/velnor-host.env"),
+    ]);
+    let preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
+    match parse_ownership_state(root, &preimage)? {
+        OwnershipStateFile::Present(state) => paths.extend(state.outputs.into_keys()),
+        OwnershipStateFile::ForeignSchema { .. } => {
+            // Generation still rejects foreign state, but a migration must not
+            // reinterpret its already-recorded outputs as repository inputs.
+            // Recover only the independently delimited output section.
+            if let Some(bytes) = preimage.bytes() {
+                let mut lines = std::str::from_utf8(bytes)
+                    .map_err(|_| GeneratorError::usage("invalid generated ownership state"))?
+                    .lines();
+                let _ = lines.next();
+                let _ = lines.next();
+                while let Some(line) = lines.next() {
+                    if line == "[outputs]" {
+                        let output_lines = std::iter::once(line).chain(lines);
+                        paths.extend(
+                            parse_digest(output_lines, &root.join(OWNERSHIP_STATE))?.into_keys(),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        OwnershipStateFile::Absent => {}
+    }
+    Ok(paths)
+}
+
 fn parse_inputs<'a>(
     lines: &mut impl Iterator<Item = &'a str>,
     path: &Path,
@@ -13890,6 +13932,19 @@ path-only = { path = "../path-only" }
         must(
             fs::write(root.join(".github/workflows/ci.yml"), GENERATED_HEADER),
             "write generated GitHub output",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/ci")),
+            "create ownership directory",
+        );
+        must(
+            fs::write(
+                root.join(OWNERSHIP_STATE),
+                format!(
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{GENERATOR_REVISION}\n[outputs]\n.github/workflows/ci.yml\t0000000000000000\n"
+                ),
+            ),
+            "write generated ownership state",
         );
 
         let error = must_some(

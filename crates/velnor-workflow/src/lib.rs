@@ -12817,6 +12817,19 @@ path-only = { path = "../path-only" }
             fs::write(root.join(".github/workflows/ci.yml"), GENERATED_HEADER),
             "write generated GitHub output",
         );
+        must(
+            fs::create_dir_all(root.join(".github/ci")),
+            "create ownership directory",
+        );
+        must(
+            fs::write(
+                root.join(crate::s2::OWNERSHIP_STATE),
+                format!(
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{GENERATOR_REVISION}\n[outputs]\n.github/workflows/ci.yml\t0000000000000000\n"
+                ),
+            ),
+            "write generated ownership state",
+        );
 
         let error = must_some(
             scan_repository(&root, RunnerMode::Github).err(),
