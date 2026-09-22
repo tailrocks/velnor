@@ -30,6 +30,7 @@ syn = { workspace = true }
 tar = { workspace = true }
 termrock = { git = "https://github.com/tailrocks/termrock.git", rev = "5283c2acf9154d0cfcd37b1ffe821c00faf90ea2", features = ["crossterm"], optional = true }
 toml = { workspace = true }
+velnor-model = { path = "../velnor-model", version = "0.1.0" }
 uuid = { workspace = true }
 
 [features]
@@ -42,7 +43,7 @@ sha2 = { workspace = true }
 # Contract tests prove emitted `install_args` pass the runner's own lock gate.
 # Dev-only: the shipped generator never links the runner.
 [dev-dependencies]
-velnor-runner = { path = "../velnor-runner" }
+velnor-runner = { path = "../velnor-runner", features = ["test-support"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] }
