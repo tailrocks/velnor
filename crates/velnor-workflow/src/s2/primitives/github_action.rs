@@ -36,6 +36,10 @@ impl Primitive for GithubActionFixtures {
         ]
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture validation and per-action-unit expansion are one atomic primitive"
+    )]
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let success = args.strings("success_fixtures")?.unwrap_or_default();
         let failure = args.strings("failure_fixtures")?.unwrap_or_default();
@@ -933,9 +937,9 @@ mod tests {
             nodes: ctx.nodes,
             contracts: ctx.contracts,
         };
-        let no_action_render = match super::GithubActionFixtures.render(&non_action_ctx, &args) {
-            Ok(_) => panic!("non-action-only scope unexpectedly rendered"),
-            Err(error) => error,
+        let Err(no_action_render) = super::GithubActionFixtures.render(&non_action_ctx, &args)
+        else {
+            panic!("non-action-only scope unexpectedly rendered")
         };
         assert!(
             no_action_render
@@ -945,9 +949,8 @@ mod tests {
         );
         let empty_values = BTreeMap::new();
         let empty_args = super::super::Args(&empty_values);
-        let empty_render = match super::GithubActionFixtures.render(&ctx, &empty_args) {
-            Ok(_) => panic!("empty fixture declaration unexpectedly rendered"),
-            Err(error) => error,
+        let Err(empty_render) = super::GithubActionFixtures.render(&ctx, &empty_args) else {
+            panic!("empty fixture declaration unexpectedly rendered")
         };
         assert!(
             empty_render
