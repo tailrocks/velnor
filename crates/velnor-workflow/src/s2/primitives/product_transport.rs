@@ -10,14 +10,15 @@
 //! against the plan's expected identity before installing anything.
 //!
 //! Verification is strict and local: the manifest must name the expected
-//! schema, producer, product, and inputs digest; every staged file's SHA-256
-//! must match; every declared structural file must be present; every
-//! installed path must sit under a declared output root. A mismatch fails
-//! the consumer — a corrupt or tampered artifact is never a hit.
-//! Provenance is the same run and commit on both ends, so an empty inputs
-//! digest (an incomplete closure) still transports safely within the run;
-//! cross-run reuse stays disabled until the exact-product cache can bind the
-//! stronger identity.
+//! schema, producer, product, typed identity, runtime provenance, and inputs
+//! digest; every staged file's SHA-256 must match; every declared structural
+//! file must be present; every installed path must sit under a declared output
+//! root. A mismatch fails the consumer — a corrupt or tampered artifact is
+//! never a hit.
+//! Same-run transport binds source commit, workflow ref, run, attempt, and
+//! producer platform on both ends. Cross-run native-cache transport validates
+//! the producer tuple but binds reuse through the complete typed product
+//! identity instead of pretending the current run is the producer run.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -35,7 +36,9 @@ use crate::s2::platform::{
 use crate::s2::{shell_quote, GeneratorError};
 
 /// The manifest schema the producer writes and the consumer requires.
-pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/2";
+/// Version 3 adds explicit transport mode and runtime provenance while
+/// retaining the typed product identity fields from schema 2.
+pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/3";
 /// The manifest filename inside the staged artifact directory.
 pub(crate) const MANIFEST_FILE: &str = "velnor-product-manifest.json";
 /// The artifact-internal directory holding the copied output trees.
@@ -50,6 +53,88 @@ pub(crate) const OUTPUT_FILES_ENV: &str = "VELNOR_TRANSPORT_OUTPUT_FILES";
 const PRODUCT_IDENTITY_ENV: &str = "VELNOR_PRODUCT_IDENTITY";
 /// Same-run artifacts live only for the consuming jobs.
 const ARTIFACT_RETENTION_DAYS: u32 = 1;
+
+/// The provenance comparison contract for one product transport edge.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TransportMode {
+    /// An artifact produced and consumed by jobs in the same Actions run.
+    SameRun,
+    /// An exact native-product cache entry that intentionally crosses runs.
+    NativeCache,
+}
+
+impl TransportMode {
+    fn parse(value: &str, command: &str) -> Result<Self, GeneratorError> {
+        match value {
+            "same-run" => Ok(Self::SameRun),
+            "native-cache" => Ok(Self::NativeCache),
+            _ => Err(GeneratorError::usage(format!(
+                "{command} --transport must be `same-run` or `native-cache`, got `{value}`"
+            ))),
+        }
+    }
+
+    const fn cli_value(self) -> &'static str {
+        match self {
+            Self::SameRun => "same-run",
+            Self::NativeCache => "native-cache",
+        }
+    }
+}
+
+/// Runtime provenance supplied by GitHub Actions. This is deliberately a
+/// separate identity domain from [`ProductIdentity`]: the typed identity
+/// names the product and its build recipe, while this tuple names the exact
+/// workflow execution and runner that transported its bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ProductTransportProvenance {
+    /// The checked-out source commit (`GITHUB_SHA`).
+    pub(crate) source: String,
+    /// The workflow reference that built the product (`GITHUB_WORKFLOW_REF`).
+    pub(crate) builder: String,
+    /// The Actions run (`GITHUB_RUN_ID`).
+    pub(crate) run_id: String,
+    /// The attempt within the Actions run (`GITHUB_RUN_ATTEMPT`).
+    pub(crate) run_attempt: String,
+    /// The producer runner ABI (`RUNNER_OS-RUNNER_ARCH`).
+    pub(crate) platform: String,
+}
+
+impl ProductTransportProvenance {
+    fn validate(&self) -> Result<(), GeneratorError> {
+        if !is_revision(&self.source) {
+            return Err(GeneratorError::usage(format!(
+                "product provenance source must be a 40-character lowercase commit SHA, got `{}`",
+                self.source
+            )));
+        }
+        if self.builder.trim().is_empty() || self.builder.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(
+                "product provenance builder must be a non-empty workflow reference",
+            ));
+        }
+        if !is_run_identity(&self.run_id) {
+            return Err(GeneratorError::usage(format!(
+                "product provenance run_id must be decimal digits, got `{}`",
+                self.run_id
+            )));
+        }
+        if !is_run_identity(&self.run_attempt) {
+            return Err(GeneratorError::usage(format!(
+                "product provenance run_attempt must be decimal digits, got `{}`",
+                self.run_attempt
+            )));
+        }
+        if !is_platform(&self.platform) {
+            return Err(GeneratorError::usage(format!(
+                "product provenance platform must be OS-ARCH shaped, got `{}`",
+                self.platform
+            )));
+        }
+        Ok(())
+    }
+}
 
 /// The product-to-consumer transport contract.
 ///
@@ -184,13 +269,21 @@ struct LinkEntry {
     dir: bool,
 }
 
-/// The digest manifest binding one staged artifact to its product.
+/// The digest manifest binding one staged artifact to its product, transport
+/// mode, typed identity, and producer execution provenance.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ProductManifest {
     schema: String,
+    transport: TransportMode,
     producer: String,
     product: String,
     inputs_digest: String,
+    source: String,
+    builder: String,
+    run_id: String,
+    run_attempt: String,
+    platform: String,
     identity: Option<ProductIdentity>,
     identity_digest: Option<String>,
     files: BTreeMap<String, String>,
@@ -203,6 +296,8 @@ pub(crate) struct StageRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) mode: TransportMode,
+    pub(crate) provenance: ProductTransportProvenance,
     pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) stage: PathBuf,
@@ -215,6 +310,8 @@ pub(crate) struct VerifyRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) mode: TransportMode,
+    pub(crate) provenance: ProductTransportProvenance,
     pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) output_files: Vec<String>,
@@ -283,6 +380,36 @@ fn identity_digest_matches_input(identity: &ProductIdentity, inputs_digest: &str
         .inputs_digest
         .as_deref()
         .map_or(inputs_digest.is_empty(), |digest| digest == inputs_digest)
+}
+
+/// Whether `value` is a full lowercase hexadecimal source revision.
+fn is_revision(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// Whether `value` is an Actions run identity: decimal digits only.
+fn is_run_identity(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether `value` is a runner platform ABI, for example `Linux-X64`.
+fn is_platform(value: &str) -> bool {
+    let mut segments = value.split('-');
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some(os), Some(arch), None) => {
+            fn segment_ok(segment: &str) -> bool {
+                !segment.is_empty()
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            }
+            segment_ok(os) && segment_ok(arch)
+        }
+        _ => false,
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
@@ -463,6 +590,12 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             "stage-product needs at least one output; refusing to stage an empty product",
         ));
     }
+    request.provenance.validate()?;
+    if request.mode == TransportMode::NativeCache && request.identity.is_none() {
+        return Err(GeneratorError::usage(
+            "stage-product native-cache transport requires a complete typed product identity",
+        ));
+    }
     for output in &request.outputs {
         manifest_rel(output)?;
     }
@@ -520,9 +653,15 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
     dirs.sort();
     let manifest = ProductManifest {
         schema: MANIFEST_SCHEMA.to_owned(),
+        transport: request.mode,
         producer: request.producer.clone(),
         product: request.product.clone(),
         inputs_digest: request.inputs_digest.clone(),
+        source: request.provenance.source.clone(),
+        builder: request.provenance.builder.clone(),
+        run_id: request.provenance.run_id.clone(),
+        run_attempt: request.provenance.run_attempt.clone(),
+        platform: request.provenance.platform.clone(),
         identity_digest: request.identity.as_ref().map(identity_digest).transpose()?,
         identity: request.identity.clone(),
         files,
@@ -614,15 +753,32 @@ fn load_manifest(stage: &Path) -> Result<ProductManifest, GeneratorError> {
     })
 }
 
-/// The manifest must name the expected schema, producer, product, and
-/// inputs digest. Typed identity presence and bytes must match exactly before
-/// any staged path is installed, and the manifest must list at least one file.
+/// The manifest must name the expected schema, transport mode, producer,
+/// product, inputs digest, and valid producer provenance. Same-run transport
+/// requires exact provenance equality; native-cache transport intentionally
+/// permits a different current run but requires a complete typed identity.
+/// Typed identity bytes must match exactly before any staged path is installed,
+/// and the manifest must list at least one file.
 fn check_manifest_identity(
     manifest: &ProductManifest,
     request: &VerifyRequest,
 ) -> Result<(), GeneratorError> {
+    request.provenance.validate()?;
+    let manifest_provenance = ProductTransportProvenance {
+        source: manifest.source.clone(),
+        builder: manifest.builder.clone(),
+        run_id: manifest.run_id.clone(),
+        run_attempt: manifest.run_attempt.clone(),
+        platform: manifest.platform.clone(),
+    };
+    manifest_provenance.validate()?;
     for (field, got, want) in [
         ("schema", manifest.schema.as_str(), MANIFEST_SCHEMA),
+        (
+            "transport",
+            manifest.transport.cli_value(),
+            request.mode.cli_value(),
+        ),
         (
             "producer",
             manifest.producer.as_str(),
@@ -644,6 +800,45 @@ fn check_manifest_identity(
                 "product manifest {field} mismatch: {got:?} != {want:?}"
             )));
         }
+    }
+    if request.mode == TransportMode::SameRun {
+        for (field, got, want) in [
+            (
+                "source",
+                manifest_provenance.source.as_str(),
+                request.provenance.source.as_str(),
+            ),
+            (
+                "builder",
+                manifest_provenance.builder.as_str(),
+                request.provenance.builder.as_str(),
+            ),
+            (
+                "run_id",
+                manifest_provenance.run_id.as_str(),
+                request.provenance.run_id.as_str(),
+            ),
+            (
+                "run_attempt",
+                manifest_provenance.run_attempt.as_str(),
+                request.provenance.run_attempt.as_str(),
+            ),
+            (
+                "platform",
+                manifest_provenance.platform.as_str(),
+                request.provenance.platform.as_str(),
+            ),
+        ] {
+            if got != want {
+                return Err(GeneratorError::usage(format!(
+                    "product manifest {field} mismatch: {got:?} != {want:?}"
+                )));
+            }
+        }
+    } else if request.identity.is_none() {
+        return Err(GeneratorError::usage(
+            "verify-product native-cache transport requires a complete typed product identity",
+        ));
     }
     match (&manifest.identity, &request.identity) {
         (None, None) => {
@@ -826,14 +1021,57 @@ fn env_list(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Build provenance from an Actions environment reader. Keeping the reader
+/// injectable makes missing and malformed runtime fields testable without
+/// mutating process-global environment state.
+fn runtime_provenance_from<F>(get: F) -> Result<ProductTransportProvenance, GeneratorError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let required = |name: &str| {
+        get(name).ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "product transport needs {name} from the GitHub Actions runtime"
+            ))
+        })
+    };
+    let provenance = ProductTransportProvenance {
+        source: required("GITHUB_SHA")?,
+        builder: required("GITHUB_WORKFLOW_REF")?,
+        run_id: required("GITHUB_RUN_ID")?,
+        run_attempt: required("GITHUB_RUN_ATTEMPT")?,
+        platform: format!(
+            "{}-{}",
+            required("RUNNER_OS")?,
+            required("RUNNER_ARCH")?
+        ),
+    };
+    provenance.validate()?;
+    Ok(provenance)
+}
+
+/// Read the immutable producer identity supplied by GitHub Actions. A local
+/// empty fallback would make the manifest self-consistent without proving
+/// which run and platform built it, so every field is mandatory.
+fn runtime_provenance() -> Result<ProductTransportProvenance, GeneratorError> {
+    runtime_provenance_from(|name| std::env::var(name).ok())
+}
+
 /// Run `stage-product` from the runtime CLI: `root` is the repository
 /// checkout, the outputs arrive via [`OUTPUTS_ENV`].
 pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(), GeneratorError> {
     let options = crate::s2::runtime::parse_options(
         arguments,
-        &["producer", "product", "digest", "identity", "stage"],
+        &[
+            "producer",
+            "product",
+            "digest",
+            "identity",
+            "transport",
+            "stage",
+        ],
     )?;
-    let missing = ["producer", "product", "stage"]
+    let missing = ["producer", "product", "transport", "stage"]
         .into_iter()
         .find(|name| !options.contains_key(*name));
     if let Some(name) = missing {
@@ -845,6 +1083,8 @@ pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        mode: TransportMode::parse(&options["transport"], "stage-product")?,
+        provenance: runtime_provenance()?,
         identity: parse_identity(&options, "stage-product")?,
         outputs: env_list(OUTPUTS_ENV),
         stage: PathBuf::from(&options["stage"]),
@@ -868,10 +1108,16 @@ pub(crate) fn verify_product_cli(
     let options = crate::s2::runtime::parse_options(
         arguments,
         &[
-            "producer", "product", "digest", "identity", "stage", "marker",
+            "producer",
+            "product",
+            "digest",
+            "identity",
+            "transport",
+            "stage",
+            "marker",
         ],
     )?;
-    let missing = ["producer", "product", "stage", "marker"]
+    let missing = ["producer", "product", "transport", "stage", "marker"]
         .into_iter()
         .find(|name| !options.contains_key(*name));
     if let Some(name) = missing {
@@ -886,6 +1132,8 @@ pub(crate) fn verify_product_cli(
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        mode: TransportMode::parse(&options["transport"], "verify-product")?,
+        provenance: runtime_provenance()?,
         identity: parse_identity(&options, "verify-product")?,
         outputs: env_list(OUTPUTS_ENV),
         output_files: env_list(OUTPUT_FILES_ENV),
@@ -912,14 +1160,16 @@ pub(crate) fn render_producer_block_with_identity(
     producer: &str,
     product: &NamedProduct,
     identity: Option<&ProductIdentity>,
+    mode: TransportMode,
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
     let digest = product.inputs_digest.clone().unwrap_or_default();
     let (identity_env, identity_arg) = identity_env_and_arg(identity);
     let mut command = format!(
-        "velnor-workflow stage-product --producer {} --product {}",
+        "velnor-workflow stage-product --producer {} --product {} --transport {}",
         shell_quote(producer),
         shell_quote(&product.name),
+        mode.cli_value(),
     );
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
@@ -944,14 +1194,16 @@ pub(crate) fn render_consumer_block_with_identity(
     product: &NamedProduct,
     marker: &str,
     identity: Option<&ProductIdentity>,
+    mode: TransportMode,
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
     let digest = product.inputs_digest.clone().unwrap_or_default();
     let (identity_env, identity_arg) = identity_env_and_arg(identity);
     let mut command = format!(
-        "velnor-workflow verify-product --producer {} --product {}",
+        "velnor-workflow verify-product --producer {} --product {} --transport {}",
         shell_quote(producer),
         shell_quote(&product.name),
+        mode.cli_value(),
     );
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
@@ -1013,7 +1265,11 @@ pub(crate) fn render_native_product_cache_restore_block(
     product: &NamedProduct,
     identity: Option<&ProductIdentity>,
     marker: &str,
+    mode: TransportMode,
 ) -> Option<String> {
+    if mode != TransportMode::NativeCache {
+        return None;
+    }
     let identity = identity?;
     let key = exact_product_cache_key(producer, product, identity)?;
     let restore_id = native_product_cache_step_id(&key);
@@ -1026,9 +1282,10 @@ pub(crate) fn render_native_product_cache_restore_block(
     let identity_env =
         format!("          {PRODUCT_IDENTITY_ENV}: |\n            {identity_json}\n");
     let mut command = format!(
-        "velnor-workflow verify-product --producer {} --product {}",
+        "velnor-workflow verify-product --producer {} --product {} --transport {}",
         shell_quote(producer),
         shell_quote(&product.name),
+        mode.cli_value(),
     );
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(digest));
@@ -1069,7 +1326,11 @@ pub(crate) fn render_native_product_cache_save_block(
     product: &NamedProduct,
     identity: Option<&ProductIdentity>,
     trusted_save_gate: &str,
+    mode: TransportMode,
 ) -> Option<String> {
+    if mode != TransportMode::NativeCache {
+        return None;
+    }
     let identity = identity?;
     let key = exact_product_cache_key(producer, product, identity)?;
     let restore_id = native_product_cache_step_id(&key);
@@ -1082,9 +1343,10 @@ pub(crate) fn render_native_product_cache_save_block(
     let identity_env =
         format!("          {PRODUCT_IDENTITY_ENV}: |\n            {identity_json}\n");
     let mut command = format!(
-        "velnor-workflow stage-product --producer {} --product {}",
+        "velnor-workflow stage-product --producer {} --product {} --transport {}",
         shell_quote(producer),
         shell_quote(&product.name),
+        mode.cli_value(),
     );
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(digest));

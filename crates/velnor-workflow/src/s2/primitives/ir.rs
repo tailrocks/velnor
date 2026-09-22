@@ -8274,6 +8274,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 product,
                 &marker,
                 identity.as_ref(),
+                super::product_transport::TransportMode::SameRun,
             );
             output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
         }
@@ -8341,6 +8342,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 product,
                 identity.as_ref(),
                 &marker,
+                super::product_transport::TransportMode::NativeCache,
             ) else {
                 continue;
             };
@@ -8397,6 +8399,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 producer,
                 product,
                 identity.as_ref(),
+                super::product_transport::TransportMode::SameRun,
             );
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
@@ -8453,6 +8456,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 product,
                 identity.as_ref(),
                 &trusted_gate,
+                super::product_transport::TransportMode::NativeCache,
             ) else {
                 continue;
             };
