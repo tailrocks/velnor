@@ -23,6 +23,10 @@
         {
           "file": "Dockerfile",
           "pattern": "MISE_VERSION=\"v(?<version>[0-9][0-9.]*)\""
+        },
+        {
+          "file": "crates/velnor-runner/src/mise.rs",
+          "pattern": "FLEET_PINNED_MISE_VERSION: &str = \"(?<version>[0-9][0-9.]*)\""
         }
       ]
     },

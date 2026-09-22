@@ -17,7 +17,7 @@ use super::{
     WorkflowIr, D19_PIN_FETCH_COMMANDS, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
     RELEASE_SIGNER, STATIC_WORKFLOW,
 };
-use crate::s2::provider::{runs_on_for, ProviderId, ProviderSet};
+use crate::s2::provider::{self, runs_on_for, ProviderId, ProviderSet};
 use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, runs_on_labels_yaml,
     selector_runs_on_yaml, shell_quote, unit_display_label, workflow_runtime_setup,
@@ -163,6 +163,7 @@ impl Primitive for Release {
             "source_repository",
             "tag_pattern",
             "targets",
+            "verification_providers",
             "version_gate_tasks",
             "version_manifest",
             "version_prefix",
@@ -187,8 +188,17 @@ impl Primitive for Release {
             let content = render_versioned_tool_release(ctx.config, &spec);
             return render_file(ctx, file, content);
         }
+        let declared = !args.keys().is_empty();
         let spec = declared_or_configured_spec(ctx, args)?;
-        let content = render_release(ctx.config, &spec);
+        if declared {
+            validate_declared_verification_providers(ctx.config, ctx.family, &spec)?;
+        }
+        let content = if declared {
+            let render_config = config_with_release_spec(ctx.config, &spec);
+            render_release(&render_config, &spec)
+        } else {
+            render_release(ctx.config, &spec)
+        };
         render_file(ctx, "release.yml", content)
     }
 }
@@ -214,6 +224,7 @@ impl Primitive for Preview {
             "producer_workflow_id",
             "producer_workflow_path",
             "targets",
+            "verification_providers",
         ]
     }
 
@@ -227,7 +238,9 @@ impl Primitive for Preview {
             if !release_contract_complete(&spec) {
                 return Err(incomplete_contract(ctx.family, &spec));
             }
-            render_preview(ctx.config, Some(&spec))
+            validate_declared_verification_providers(ctx.config, ctx.family, &spec)?;
+            let render_config = config_with_release_spec(ctx.config, &spec);
+            render_preview(&render_config, Some(&spec))
         };
         render_file(ctx, "preview.yml", content)
     }
@@ -328,7 +341,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
     )?;
     let spec = ReleaseSpec {
         kind,
-        verification_providers: None,
+        verification_providers: declared_verification_providers(family, args)?,
         package: args.string("package")?.unwrap_or_default(),
         packages: args.strings("packages")?.unwrap_or_default(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -462,7 +475,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
     )?;
     Ok(ReleaseSpec {
         kind: "rust-binary".to_owned(),
-        verification_providers: None,
+        verification_providers: declared_verification_providers(family, args)?,
         package: args.string("package")?.unwrap_or_default(),
         packages: Vec::new(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -517,6 +530,41 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         jobs: Vec::new(),
         images: Vec::new(),
     })
+}
+
+fn declared_verification_providers(
+    family: &str,
+    args: &Args<'_>,
+) -> Result<Option<ProviderSet>, GeneratorError> {
+    let Some(values) = args.strings("verification_providers")? else {
+        return Ok(None);
+    };
+    let field = format!("`{family}` verification_providers");
+    let providers = provider::parse_provider_set(&values, &field)?;
+    provider::require_non_empty(&providers, &field)?;
+    Ok(Some(providers))
+}
+
+fn validate_declared_verification_providers(
+    config: &ProjectConfig,
+    family: &str,
+    spec: &ReleaseSpec,
+) -> Result<(), GeneratorError> {
+    let Some(providers) = spec.verification_providers.as_ref() else {
+        return Ok(());
+    };
+    provider::require_subset(
+        providers,
+        &config.providers,
+        &format!("`{family}` verification_providers"),
+        "[workflow] providers",
+    )
+}
+
+fn config_with_release_spec(config: &ProjectConfig, spec: &ReleaseSpec) -> ProjectConfig {
+    let mut render_config = config.clone();
+    render_config.release = Some(spec.clone());
+    render_config
 }
 
 /// The main-branch-driven versioned publisher: a tool whose version comes
@@ -2984,6 +3032,15 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     } else {
         "true"
     };
+    // A producer-bound rolling release is built from the admitted source
+    // revision, not the workflow_run event's default-branch SHA. Keep the
+    // initial create and replacement edit on one explicit target so a missing
+    // release cannot silently fall back to the moving default branch.
+    let preview_target = if has_producer_binding(release) {
+        "${{ needs.publish-gate.outputs.sha }}"
+    } else {
+        "${{ github.sha }}"
+    };
     let mut output = format!(
         r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
@@ -3080,6 +3137,24 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ),
     )
     .replace("run: cargo build ", "run: mbx build ");
+    if has_producer_binding(release) {
+        // Bind both the first-create fallback and the replacement edit to the
+        // exact source admitted by publish-gate. Without this pair, a
+        // workflow_run publisher can create/tag the moving default branch.
+        output = output
+            .replace(
+                "gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title \"Rolling preview\"",
+                &format!(
+                    "gh release view preview >/dev/null 2>&1 || gh release create preview --target \"{preview_target}\" --prerelease --title \"Rolling preview\""
+                ),
+            )
+            .replace(
+                "gh release edit preview --target \"${{ github.sha }}\" --prerelease",
+                &format!(
+                    "gh release edit preview --target \"{preview_target}\" --prerelease"
+                ),
+            );
+    }
     // Unit verification is part of the preview admission graph. Keep the
     // provider jobs ahead of the artifact build and make the singular
     // publisher wait on the same exact IDs.
@@ -5289,7 +5364,6 @@ on:
         type: string
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
@@ -5302,6 +5376,9 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
     runs-on: __MAINTENANCE_PRUNE_RUNNER__
     timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
     steps:
       - name: Delete merge-ref cache namespace
         env:
@@ -6079,6 +6156,16 @@ cp "$record" "$out"
     }
 
     fn assert_cache_retention_has_actions_write(workflow: &str) {
+        let workflow_permissions = workflow.split("jobs:").next().unwrap_or_default();
+        assert!(
+            !workflow_permissions.contains("actions: write"),
+            "maintenance must not grant cache mutation to every job: {workflow}"
+        );
+        let prune = yaml_job(workflow, "prune-pr-cache");
+        assert!(
+            prune.contains("permissions:\n      actions: write\n      contents: read"),
+            "closed-PR pruning must hold its own minimal cache mutation permission: {prune}"
+        );
         let job = yaml_job(workflow, "cache-budget");
         assert!(
             job.contains("name: Cache retention"),
@@ -6650,15 +6737,15 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "63e4abe43158fc16153efef67d4d81ed0ef3cd7306d0c69930c0201f36563bc6",
+                "ccb41bed96febf991764dcf752169bc5e56d2f8a83593199b96e16d24df9ea9f",
             ),
             (
                 "preview.yml",
-                "9c01438ada4a500c8f221aa890c20b58d492a2ae1b35ab54392f1d161393097f",
+                "9a860863d29563a89c267e04b9eb0b2f95e6f17ffbf02042feedfbef55a09a94",
             ),
             (
                 "maintenance.yml",
-                "3725b27e2f9fe196c7a5694f8e1255feef011f7b88ad52e214c47300809c0328",
+                "627a5ea5c4e44ea9f612b556b4b21cf40be99fb632fe1684644174e3d4538525",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -6781,11 +6868,11 @@ cp "$record" "$out"
             // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "8514a9408c8cb038cace01a99b87a4c0362cdd0bbf25d028a37ba5c39d3c5add",
+                "d41173c905e9d6b2627f21da8f3f9a7e1fed164720b5c928e76030b39dd2b2a2",
             ),
             (
                 "preview.yml",
-                "d52e270ef0fb50716483220dfa88bd94074ed377ccb63b2e13285a9136db5b25",
+                "b462ebf6c21ec929e45a99b108689011f2ae079dbcac21d45cc9f0c8df043a27",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7858,6 +7945,47 @@ cp "$record" "$out"
             "{release}"
         );
         assert_eq!(surface.added_files, vec!["release.yml".to_owned()]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_release_verification_lanes_are_exact() {
+        let root = scanned_root("declared-release-verification");
+        let config = config(&["preview.yml"], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "rust-binary"
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["github-hosted"]
+"#,
+            ),
+        );
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("release-github-hosted-rust-example"),
+            "declared release must render the requested hosted verifier: {release}"
+        );
+        assert!(
+            !release.contains("release-github-self-hosted-")
+                && !release.contains("release-velnor-"),
+            "declared release must not fan out to unrelated providers: {release}"
+        );
+        let build = yaml_job(&release, "build");
+        assert!(
+            build.contains("release-github-hosted-rust-example")
+                && !build.contains("release-github-self-hosted-")
+                && !build.contains("release-velnor-"),
+            "release publication must depend on exactly the requested verifier: {build}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -10678,6 +10806,32 @@ cp "$record" "$out"
                 ),
             "the rolling publish must admit only the gate's publish mode: {publish}"
         );
+        let release_commands: Vec<&str> = publish
+            .lines()
+            .filter(|line| {
+                line.contains("gh release create preview")
+                    || line.contains("gh release edit preview")
+            })
+            .collect();
+        assert_eq!(
+            release_commands.len(),
+            2,
+            "producer tarball publisher must render both create and edit paths: {publish}"
+        );
+        for command in release_commands {
+            assert!(
+                command.contains("--target \"${{ needs.publish-gate.outputs.sha }}\""),
+                "producer release command must target the admitted source SHA: {command}"
+            );
+            assert!(
+                !command.contains("github.sha"),
+                "producer release command must not use the workflow event SHA: {command}"
+            );
+        }
+        assert!(
+            !publish.contains("gh release create preview --prerelease --title \"Rolling preview\""),
+            "producer create fallback must not omit its admitted target: {publish}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11214,6 +11368,21 @@ cp "$record" "$out"
                 "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\narchive_retention_days = 91\n",
                 "must be 1-90",
             ),
+            (
+                "empty-verification-providers",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = []\n",
+                "must name at least one provider",
+            ),
+            (
+                "duplicate-verification-providers",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = [\"github-hosted\", \"github-hosted\"]\n",
+                "more than once",
+            ),
+            (
+                "unknown-verification-provider",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = [\"unknown\"]\n",
+                "unknown provider",
+            ),
         ] {
             let error = match try_generate(
                 &root,
@@ -11230,6 +11399,38 @@ cp "$record" "$out"
                 "`{name}` must name the problem: {error}"
             );
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_verification_providers_must_be_available() {
+        let root = scanned_root("declared-verification-availability");
+        let mut config = config(&[], None);
+        config.providers = [ProviderId::GithubHosted].into_iter().collect();
+        let error = match try_generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "rust-binary"
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["velnor"]
+"#,
+            ),
+        ) {
+            Ok(_) => panic!("an unavailable verification provider must fail closed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("outside [workflow] providers"),
+            "availability errors must name the provider universe: {error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11257,6 +11458,46 @@ cp "$record" "$out"
                 && preview.contains("--members 'example-role'")
                 && preview.contains("          retention-days: 7\n"),
             "declared preview bindings must render: {preview}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_preview_verification_lanes_are_exact() {
+        let root = scanned_root("declared-preview-verification");
+        let config = config(&[], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "preview"
+file = "preview.yml"
+
+[declare.args]
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["github-hosted"]
+"#,
+            ),
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("release-github-hosted-rust-example"),
+            "declared preview must render the requested hosted verifier: {preview}"
+        );
+        assert!(
+            !preview.contains("release-github-self-hosted-")
+                && !preview.contains("release-velnor-"),
+            "declared preview must not fan out to unrelated providers: {preview}"
+        );
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains("release-github-hosted-rust-example")
+                && !publish.contains("release-github-self-hosted-")
+                && !publish.contains("release-velnor-"),
+            "preview publication must depend on exactly the requested verifier: {publish}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -11949,7 +12190,7 @@ cp "$record" "$out"
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "e1f70f90b117a103207f8fc764366e81c2d053781dd59781b29a2f45aa595f3e",
+            "ecfe5139ad9f64a1ea7936abcfcdf72e853dc4bdb9fbc45ac06a19414178369b",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));

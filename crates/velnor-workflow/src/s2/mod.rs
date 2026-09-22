@@ -995,6 +995,9 @@ pub(crate) struct CheckProfileSpec {
     /// `continue-on-error`.
     pub(crate) advisory: bool,
     pub(crate) env: BTreeMap<String, String>,
+    /// Job-level read-only GitHub token capabilities requested by the profile.
+    /// Generation-time only: profiles never enter the runtime `project.toml`.
+    pub(crate) permissions: BTreeMap<String, String>,
     /// Whether the profile's checkout clones full history (`fetch-depth: 0`).
     /// Generation-time only: profiles never enter the runtime `project.toml`.
     pub(crate) full_history: bool,
@@ -2706,6 +2709,7 @@ fn apply_check_profiles(
             artifacts: row.artifacts().unwrap_or_default().to_vec(),
             advisory: row.status().is_some_and(|status| status == "advisory"),
             env: row.env().clone(),
+            permissions: row.permissions().clone(),
             full_history: row.full_history(),
         });
     }
@@ -5834,7 +5838,9 @@ pub(crate) fn rust_dependency_needs(
 /// artifact on `provider`. Hosted only — local providers share the
 /// workspace, so their consumers rebuild or reuse in place. An edge whose
 /// producer cannot run here, or whose product declares no outputs, yields
-/// no edge: the consumer's guarded rebuild covers it.
+/// no edge because no artifact contract exists. A declared transport edge is
+/// mandatory only when its producer is selected and admitted; an out-of-plan
+/// or inadmissible producer is intentionally a local-rebuild fallback.
 pub(crate) fn product_dependency_needs(
     provider: provider::ProviderId,
     unit: &Unit,
@@ -14138,8 +14144,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
         assert!(workflow.contains("name: Restore Rust toolchain"));
         assert!(workflow.contains("id: rustup-toolchain"));
+        assert!(workflow.contains("name: Verify Rust toolchain cache"));
+        assert!(workflow.contains("id: rustup-toolchain-verify"));
+        assert!(workflow.contains("if: steps.rustup-toolchain.outputs.cache-hit == 'true'"));
         assert!(workflow.contains("name: Provision Rust toolchain"));
+        assert!(workflow.contains(
+            "if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'"
+        ));
         assert!(workflow.contains("rustup toolchain install --profile minimal"));
+        assert!(workflow.contains("awk -v wanted='clippy'"));
+        assert!(workflow.contains("awk -v wanted='x86_64-unknown-linux-musl'"));
         assert!(workflow.contains("rustup target add 'x86_64-unknown-linux-musl'"));
         assert!(workflow.contains("key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}"));
         // No unit commands run nextest and none hand work to the mise task

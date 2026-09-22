@@ -887,6 +887,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apple_rust_producer_passes_the_closed_mise_tools_to_both_provider_lanes() {
+        let mut apple = boltffi_unit("rust-apple-producer");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        let linux = boltffi_unit("rust-linux-producer");
+        let mut ir = owner_test_ir("example/fixture", vec![apple.clone(), linux.clone()]);
+        ir.mise_lock_keys = BTreeSet::from([
+            super::BOLTFFI_TOOL.to_owned(),
+            "rust".to_owned(),
+            "cargo-binstall".to_owned(),
+            "cargo:sccache".to_owned(),
+        ]);
+        let expected = vec![
+            super::BOLTFFI_TOOL.to_owned(),
+            "rust".to_owned(),
+            "cargo-binstall".to_owned(),
+            "cargo:sccache".to_owned(),
+        ];
+
+        for unit in [&apple, &linux] {
+            for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+                let contract = ir.default_unit_contract(unit, true);
+                let facts = ir.unit_provider_facts(unit, &contract, provider);
+                assert_eq!(
+                    facts.mise_tools, expected,
+                    "{provider:?} derives the same closed tools for {}",
+                    unit.id
+                );
+                assert!(
+                    !facts.mise_runner,
+                    "a tool install needs no bare Mise runner"
+                );
+                assert!(
+                    facts
+                        .input_values()
+                        .contains(&(provider_input::MISE_TOOLS, expected.join(" "))),
+                    "the caller passes the complete closure for {provider:?} {}",
+                    unit.id
+                );
+                let caller_inputs = super::render_caller_inputs(&facts.input_values());
+                assert!(
+                    caller_inputs
+                        .lines()
+                        .any(|line| {
+                            line == "      mise_tools: \"cargo:boltffi_cli rust cargo-binstall cargo:sccache\""
+                        }),
+                    "the rendered caller keeps the complete closure for {provider:?} {}: {caller_inputs}",
+                    unit.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn velnor_runtime_installs_the_same_closed_apple_tools() {
+        let mut apple = boltffi_unit("rust-apple-producer");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        let mut ir = owner_test_ir("example/fixture", vec![apple.clone()]);
+        let expected = [
+            super::BOLTFFI_TOOL,
+            "rust",
+            "cargo-binstall",
+            "cargo:sccache",
+        ];
+        ir.mise_lock_keys = expected.iter().map(|tool| (*tool).to_owned()).collect();
+
+        let contract = ir.default_unit_contract(&apple, true);
+        let facts = ir.unit_provider_facts(&apple, &contract, ProviderId::Velnor);
+        assert_eq!(
+            facts.mise_tools,
+            expected
+                .iter()
+                .map(|tool| (*tool).to_owned())
+                .collect::<Vec<_>>()
+        );
+        let mut output = String::new();
+        ir.render_tool_provisioning(&mut output, ProviderId::Velnor, &apple, true);
+        assert!(
+            output.contains(&format!("mise --yes install {}", expected.join(" "))),
+            "Velnor direct runtime installs caller's closed tools: {output}"
+        );
+        assert!(
+            !output.contains("Set up Mise tools"),
+            "Velnor does not emit hosted action: {output}"
+        );
+    }
+
+    #[test]
+    fn apple_rust_without_tools_emits_no_empty_mise_action() {
+        let mut apple = rust_unit("rust-apple-plain", "crates/plain");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        let mut ir = owner_test_ir("example/fixture", vec![apple.clone()]);
+        // This exercises the empty derived subset even when the repository
+        // has Mise: Rust provisioning must not turn that global fact into an
+        // empty `install_args` action for an unrelated Apple unit.
+        ir.mise_present = true;
+
+        for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+            let contract = ir.default_unit_contract(&apple, true);
+            let facts = ir.unit_provider_facts(&apple, &contract, provider);
+            assert!(facts.mise_tools.is_empty(), "{provider:?} has no tools");
+            assert!(!facts.mise_runner, "{provider:?} does not need bare Mise");
+
+            let mut output = String::new();
+            ir.render_tool_provisioning(&mut output, provider, &apple, true);
+            assert!(
+                !output.contains("Set up Mise"),
+                "{provider:?} emits no empty Mise setup for Apple Rust: {output}"
+            );
+            assert!(
+                !output.contains("install_args:"),
+                "{provider:?} emits no empty install_args: {output}"
+            );
+        }
+    }
+
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
         WorkflowIr {
             default_branch: "main".to_owned(),
@@ -1381,6 +1497,72 @@ mod tests {
         assert!(
             !kind.contains("velnor-product-rust-ffi--sourceless"),
             "an output-less product rides no artifact"
+        );
+    }
+
+    #[test]
+    fn transportable_prerequisite_requires_a_successful_producer() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer]);
+        let workflow = ir.render_nested(
+            WorkflowKind::PullRequest,
+            &aggregate_fixture_nodes(&ir),
+            None,
+        );
+        let producer_job = "needs.github-hosted-rust-ffi.result";
+        assert!(
+            workflow.contains(&format!("{producer_job} == 'success'")),
+            "transport consumer requires producer success: {workflow}"
+        );
+        assert!(
+            workflow
+                .contains("|| !(contains(needs.plan.outputs.units, '\"unit_id\":\"rust-ffi\"'))"),
+            "an unselected producer permits the consumer's guarded rebuild: {workflow}"
+        );
+        assert!(
+            !workflow.contains(
+                "needs.github-hosted-rust-ffi.result == 'success' || needs.github-hosted-rust-ffi.result == 'skipped'"
+            ),
+            "transport consumer never treats a skipped producer as an artifact: {workflow}"
+        );
+        let consumer = job_block(&workflow, "github-hosted-rust-app");
+        let gate = must_some(consumer.find("if: ${{"), "consumer caller gate");
+        let call = must_some(
+            consumer.find("uses: ./.github/workflows/"),
+            "consumer reusable call",
+        );
+        assert!(
+            gate < call,
+            "the producer-success gate is evaluated before the consumer reusable can execute: {consumer}"
+        );
+        assert!(
+            consumer.contains("needs: [plan, github-hosted-rust-ffi]"),
+            "the consumer caller waits on the artifact producer: {consumer}"
+        );
+    }
+
+    #[test]
+    fn transportable_prerequisite_falls_back_when_producer_is_inadmissible() {
+        let (mut producer, consumer) = transport_fixture();
+        producer.trust = crate::s2::provider::TrustReq::TrustedOnly;
+        let ir = owner_test_ir("example/transport", vec![producer, consumer]);
+        let workflow = ir.render_nested(
+            WorkflowKind::PullRequest,
+            &aggregate_fixture_nodes(&ir),
+            None,
+        );
+        let admission = ir.provider_admission_expression(ProviderAdmission::for_unit(
+            ProviderId::GithubHosted,
+            &ir.units[0],
+        ));
+        let fallback = format!("|| !({admission})");
+        assert!(
+            workflow.contains(&fallback),
+            "an inadmissible producer permits the consumer's guarded rebuild: {workflow}"
+        );
+        assert!(
+            workflow.contains("needs.github-hosted-rust-ffi.result == 'success'"),
+            "an admissible producer still requires success: {workflow}"
         );
     }
 
@@ -3332,6 +3514,31 @@ mod tests {
     }
 
     #[test]
+    fn producer_failure_is_written_as_a_failed_expected_work_receipt() {
+        let steps = super::render_unit_result_steps(
+            "actions/upload-artifact@pinned",
+            "github-hosted",
+            "always()",
+        );
+        assert!(
+            steps.contains("VELNOR_RESULT_OUTCOME: ${{ job.status }}"),
+            "the receipt binds to the enclosing job status: {steps}"
+        );
+        assert!(
+            steps.contains("*) outcome=failure ;;"),
+            "setup, execution, and any other non-green job state records failure: {steps}"
+        );
+        assert!(
+            steps.contains("if: ${{ always() }}"),
+            "the receipt runs after a failed producer step: {steps}"
+        );
+        assert!(
+            !steps.contains("continue-on-error"),
+            "a failed producer cannot be hidden by the receipt step: {steps}"
+        );
+    }
+
+    #[test]
     fn collect_step_creates_result_dir_before_first_read() {
         let steps = super::render_aggregate_score_steps("", "actions/download-artifact@pinned");
         let mkdir = must_some(
@@ -3623,8 +3830,18 @@ mod tests {
             "the MSRV leg restores under its own step id: {kind}"
         );
         assert!(
+            kind.contains("id: rustup-toolchain-1-88-0-verify"),
+            "the MSRV leg verifies its own cache: {kind}"
+        );
+        assert!(
             kind.contains("steps.rustup-toolchain-1-88-0.outputs.cache-hit != 'true'"),
             "the MSRV save gate reads its own leg's cache-hit: {kind}"
+        );
+        assert!(
+            kind.contains(
+                "steps.rustup-toolchain-1-88-0.outputs.cache-hit != 'true' || steps.rustup-toolchain-1-88-0-verify.outputs.valid != 'true'"
+            ),
+            "the MSRV leg provisions a miss or invalid hit: {kind}"
         );
         assert!(
             kind.contains("echo \"RUSTUP_TOOLCHAIN=1.88.0\" >> \"$GITHUB_ENV\""),
@@ -4657,14 +4874,48 @@ pub(crate) fn nextest_tool_id(lock_keys: &BTreeSet<String>) -> &'static str {
 
 /// The restore/provision/save steps every hosted Rust job needs before it may
 /// run a hosted Cargo command: restore the cached `~/.rustup` keyed by the
-/// repository's pin, install exactly that pin, and — when `save_gate` carries
-/// the step's `if:` body — save the result for the next run. Image-backed
-/// Velnor jobs intentionally bypass this helper because their pinned toolchain
+/// repository's pin, verify an exact hit, install exactly that pin when the
+/// hit is absent or incomplete, and save the result for the next run.
+/// Image-backed Velnor jobs bypass this helper because their pinned toolchain
 fn step_output_expr(step_id: &str, field: &str) -> String {
     format!("${{{{ steps.{step_id}.outputs.{field} }}}}")
 }
 
-/// is part of the runner image.
+/// Render the cache-hit verifier shared by pinned and explicit toolchain legs.
+/// A cache hit is only usable when rustup can find the expected channel and
+/// every declared component/target in that installation. A failed probe sends
+/// the leg through normal provisioning instead of failing the job.
+fn render_toolchain_cache_verifier(
+    output: &mut String,
+    cache_step_id: &str,
+    verify_step_id: &str,
+    toolchain: &RustToolchain,
+) {
+    let expected_channel = crate::s2::shell_quote(&toolchain.channel);
+    let _ = writeln!(
+        output,
+        "      - name: Verify Rust toolchain cache\n        id: {verify_step_id}\n        if: steps.{cache_step_id}.outputs.cache-hit == 'true'\n        shell: bash\n        run: |\n          valid=true\n          if ! command -v rustup >/dev/null 2>&1; then\n            valid=false\n          else\n            expected_channel={expected_channel}\n            installed=\"$(rustup toolchain list 2>/dev/null | awk -v expected=\"$expected_channel\" '$1 == expected || index($1, expected \"-\") == 1 {{ print $1; exit }}')\" || installed=\"\"\n            if [[ -z \"$installed\" ]]; then\n              valid=false\n            else\n              :"
+    );
+    for component in &toolchain.components {
+        let component = crate::s2::shell_quote(component);
+        let _ = writeln!(
+            output,
+            "              if ! rustup component list --installed --toolchain \"$installed\" 2>/dev/null | awk -v wanted={component} '$1 == wanted || index($1, wanted \"-\") == 1 {{ found=1 }} END {{ exit found ? 0 : 1 }}'; then\n                valid=false\n              fi"
+        );
+    }
+    for target in &toolchain.targets {
+        let target = crate::s2::shell_quote(target);
+        let _ = writeln!(
+            output,
+            "              if ! rustup target list --installed --toolchain \"$installed\" 2>/dev/null | awk -v wanted={target} '$1 == wanted {{ found=1 }} END {{ exit found ? 0 : 1 }}'; then\n                valid=false\n              fi"
+        );
+    }
+    let _ = writeln!(
+        output,
+        "            fi\n          fi\n          echo \"valid=$valid\" >> \"$GITHUB_OUTPUT\""
+    );
+}
+
 pub(crate) fn render_pinned_toolchain_steps(
     output: &mut String,
     cache_restore: &str,
@@ -4690,6 +4941,8 @@ pub(crate) fn render_pinned_toolchain_steps(
         output,
         "      - name: Restore Rust toolchain\n        id: {rustup_id}\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}"
     );
+    let verify_id = "rustup-toolchain-verify";
+    render_toolchain_cache_verifier(output, rustup_id, verify_id, toolchain);
     // The channel is not passed explicitly: the checkout put the
     // repository's toolchain file at the workspace root, and a file-driven
     // install also applies the components and targets the file declares,
@@ -4700,7 +4953,7 @@ pub(crate) fn render_pinned_toolchain_steps(
     };
     let _ = writeln!(
         output,
-        "      - name: Provision Rust toolchain\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}"
+        "      - name: Provision Rust toolchain\n        if: steps.{rustup_id}.outputs.cache-hit != 'true' || steps.{verify_id}.outputs.valid != 'true'\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}"
     );
     if !toolchain.targets.is_empty() {
         let targets = toolchain
@@ -4754,6 +5007,8 @@ pub(crate) fn render_explicit_toolchain_steps(
         "      - name: Restore Rust toolchain ({})\n        id: {step_id}\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}",
         toolchain.channel
     );
+    let verify_id = format!("{step_id}-verify");
+    render_toolchain_cache_verifier(output, step_id, &verify_id, toolchain);
     // A declared channel carries no components, targets, or profile of its
     // own: the leg provisions it with a minimal profile, so pin-only
     // components can never leak onto a channel that lacks them. Targets are
@@ -4769,7 +5024,7 @@ pub(crate) fn render_explicit_toolchain_steps(
     }
     let _ = writeln!(
         output,
-        "      - name: Provision Rust toolchain ({})\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}",
+        "      - name: Provision Rust toolchain ({})\n        if: steps.{step_id}.outputs.cache-hit != 'true' || steps.{verify_id}.outputs.valid != 'true'\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}",
         toolchain.channel
     );
     if !toolchain.targets.is_empty() {
@@ -5350,14 +5605,7 @@ fn push_mise_tool(tools: &mut Vec<String>, tool: String) {
     }
 }
 
-fn render_velnor_mise_install(
-    output: &mut String,
-    unit: &Unit,
-    lock_keys: &BTreeSet<String>,
-    lock_backends: &BTreeMap<String, String>,
-    install_deps: &MiseInstallDeps,
-) {
-    let tools = velnor_mise_install_tool_ids(unit, lock_keys, lock_backends, install_deps);
+fn render_velnor_mise_install(output: &mut String, tools: &[String]) {
     if tools.is_empty() {
         return;
     }
@@ -6633,6 +6881,18 @@ pub(crate) struct ProviderStepFacts {
     pub(crate) toolchain: Option<String>,
 }
 
+/// The Mise portion of one unit/provider contract. Callers, collapsed
+/// provider jobs, and direct setup paths must use the same derived list: an
+/// Apple Rust producer is still a Rust unit whose `BoltFFI` recipe needs the
+/// same `cargo:boltffi_cli` plus `cargo-binstall` closure as its Linux
+/// counterpart. An empty list is meaningful — it suppresses the tools action;
+/// only `runner` can request the bare Mise action for a `mise run` command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MiseStepFacts {
+    tools: Vec<String>,
+    runner: bool,
+}
+
 impl ProviderStepFacts {
     /// The `with:` values a caller passes: one entry per non-empty fact.
     /// Tailed groups (transport, verification selectors) live in their own
@@ -7303,12 +7563,12 @@ impl WorkflowIr {
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
         }
-        // A skipped or failed producer means no artifact: the consumer's
-        // guarded rebuild covers it, so the caller still runs.
+        // A selected, admitted transportable prerequisite is an explicit
+        // artifact dependency. An out-of-plan or inadmissible producer is
+        // intentionally skipped and the consumer's guarded rebuild covers
+        // that product; a failed producer never qualifies for the fallback.
         for dependency in product_dependency_needs(provider, unit, &self.units) {
-            conditions.push(format!(
-                "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
-            ));
+            conditions.push(self.product_dependency_condition(provider, unit, &dependency));
         }
         conditions.push(aggregate_selected_unit_selector(&caller.unit_id));
         // The caller skips exactly when the callee's provider job would: same
@@ -7330,6 +7590,45 @@ impl WorkflowIr {
             caller.provider.as_str(),
             render_caller_inputs(&caller.inputs),
         );
+    }
+
+    /// Gate one transported-product caller on the producer only when that
+    /// producer is part of this plan and admitted on this provider. The
+    /// static workflow still lists the producer in `needs` so its result is
+    /// available; a skipped producer is safe only when the plan or admission
+    /// predicate proves it was never required. A selected/admitted producer
+    /// that fails or unexpectedly skips blocks the consumer and leaves the
+    /// expected-work aggregate red.
+    fn product_dependency_condition(
+        &self,
+        provider: ProviderId,
+        consumer: &Unit,
+        dependency: &str,
+    ) -> String {
+        let producer = consumer.prerequisites.iter().find_map(|prerequisite| {
+            let candidate = self
+                .units
+                .iter()
+                .find(|candidate| candidate.id == prerequisite.producer)?;
+            (unit_job_id(provider, &candidate.id) == dependency
+                && candidate.products.iter().any(|product| {
+                    product.name == prerequisite.product
+                        && super::product_transport::transport_eligible(product)
+                }))
+            .then_some(candidate)
+        });
+        let Some(producer) = producer else {
+            return format!("needs.{dependency}.result == 'success'");
+        };
+        let selected = aggregate_selected_unit_selector(&producer.id);
+        let admission =
+            self.provider_admission_expression(ProviderAdmission::for_unit(provider, producer));
+        let not_admitted = match admission.as_str() {
+            "true" => "false".to_owned(),
+            "false" => "true".to_owned(),
+            _ => format!("!({admission})"),
+        };
+        format!("(needs.{dependency}.result == 'success' || !({selected}) || {not_admitted})")
     }
 
     /// One reusable-workflow caller per (unit, provider). The kind reusable holds
@@ -8012,11 +8311,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     ) -> ProviderStepFacts {
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mise_tools = self.mise_tool_ids_for_provider(hosted, &tools, unit);
-        let mise_runner = hosted
-            && tools.contains(&ToolRequirement::Mise)
-            && mise_tools.is_empty()
-            && commands_invoke_mise(unit);
+        let mise = self.mise_step_facts(hosted, &tools, unit);
         let mbx = (hosted && tools.contains(&ToolRequirement::MrBoxington))
             .then(|| unit_snapshot_facts(self, unit, provider));
         let cargo_bin_tools = if hosted {
@@ -8072,8 +8367,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 .as_ref()
                 .is_some_and(cache_is_local_host_persistent);
         ProviderStepFacts {
-            mise_tools,
-            mise_runner,
+            mise_tools: mise.tools,
+            mise_runner: mise.runner,
             mbx_enabled: tools.contains(&ToolRequirement::MrBoxington),
             mbx,
             cargo_bin_tools,
@@ -8105,6 +8400,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             validation_phases: unit.runnable_phases(),
             full_history: unit.full_history,
             toolchain: Self::toolchain_fact_for_kind(&self.units, unit),
+        }
+    }
+
+    /// Derive the complete Mise contract once for every rendering path. The
+    /// caller passes these values through `workflow_call`; the callee gates
+    /// its steps from those inputs; direct provider setup (release and local
+    /// render tests) consumes the same values. Keeping the provider choice in
+    /// this helper prevents an Apple executor split from changing the tool
+    /// closure or emitting an empty tools action.
+    fn mise_step_facts(
+        &self,
+        hosted: bool,
+        tools: &BTreeSet<ToolRequirement>,
+        unit: &Unit,
+    ) -> MiseStepFacts {
+        let mise_tools = self.mise_tool_ids_for_provider(hosted, tools, unit);
+        let runner = hosted
+            && tools.contains(&ToolRequirement::Mise)
+            && mise_tools.is_empty()
+            && commands_invoke_mise(unit);
+        MiseStepFacts {
+            tools: mise_tools,
+            runner,
         }
     }
 
@@ -9577,45 +9895,33 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // action surface and hoping the runner can ignore the other provider.
         let hosted = provider == ProviderId::GithubHosted;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        if !hosted && tools.contains(&ToolRequirement::Mise) {
+        let mise = self.mise_step_facts(hosted, &tools, unit);
+        if !hosted && !mise.tools.is_empty() {
             // Hosted mise-action is not admitted on Velnor. Auto-install is
             // off on the checks step, so declared lockfile tools must be
             // installed explicitly or shims fail closed. Install only what
             // this unit's commands need — never the whole root manifest.
-            render_velnor_mise_install(
-                output,
-                unit,
-                &self.mise_lock_keys,
-                &self.mise_lock_backends,
-                &self.mise_install_deps,
-            );
+            render_velnor_mise_install(output, &mise.tools);
         }
         if !local_skips_pinned_rust_toolchain(provider)
             && let Some(toolchain) = &unit.toolchain
         {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
         }
-        if hosted && tools.contains(&ToolRequirement::Mise) {
+        if hosted {
             // The Rust toolchain is never a mise tool: the scan refuses a
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
             // the unit's own commands name or the repository declares.
-            let mise_tools = mise_tool_ids(
-                unit,
-                &self.mise_lock_keys,
-                &self.mise_lock_backends,
-                &self.mise_install_deps,
-            );
-            let invokes_mise = commands_invoke_mise(unit);
-            if !mise_tools.is_empty() {
+            if !mise.tools.is_empty() {
                 let trusted = trusted_cache_save_expression(&self.default_branch);
                 let _ = writeln!(
                     output,
                     "      - name: Set up Mise tools\n        uses: {}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
                     self.pins.mise,
-                    mise_tools.join(" ")
+                    mise.tools.join(" ")
                 );
-            } else if invokes_mise {
+            } else if mise.runner {
                 // The unit runs repository tasks through the mise task
                 // runner. It gets the runner binary and nothing else: the
                 // tools those tasks need are provisioned by the steps above,

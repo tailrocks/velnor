@@ -253,8 +253,11 @@ pub(crate) fn github_runner_for_unit<'a>(
 /// A named build product one unit produces for others: an `XCFramework`
 /// bundle, a generated header set, a packed archive. `task` is the repository
 /// task that rebuilds it (run through the task runner, never a shell string),
-/// and `env` carries the task's outputs — the paths and flags consumers need
-/// once the product exists.
+/// `env` carries the task's outputs — the paths and flags consumers need once
+/// the product exists — and `inputs` names the product's semantic input
+/// closure. Input paths are selection ownership: changing one selects this
+/// producer, then the prerequisite edge selects its consumers. Unknown input
+/// gaps stay conservative as well as disabling exact reuse.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub(crate) struct NamedProduct {
     pub(crate) name: String,
@@ -262,6 +265,10 @@ pub(crate) struct NamedProduct {
     pub(crate) task: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) inputs_unknown: Vec<String>,
 }
 
 /// One prerequisite edge: `producer` builds `product` for this consumer.
@@ -296,6 +303,27 @@ pub(crate) fn valid_product_name(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
+}
+
+/// A declared product input: a repo-relative path or `hashFiles`-style glob.
+/// Keep the schema-1 contract identical to schema 2 so a product cannot have
+/// one selection identity merely because an older renderer consumed it.
+pub(crate) fn valid_product_input(value: &str) -> bool {
+    if value.is_empty() || value.len() > 500 || value.starts_with('/') || value.starts_with('!') {
+        return false;
+    }
+    if value.bytes().any(|byte| byte == b'\\') || value.chars().any(char::is_control) {
+        return false;
+    }
+    if value.split('/').any(|segment| {
+        segment.is_empty() || segment == "." || segment == ".." || segment.contains('!')
+    }) {
+        return false;
+    }
+    value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'/' | b'*' | b'?' | b'[' | b']')
+    })
 }
 
 /// A repository task name, as the task runner resolves it: no whitespace, no
@@ -385,8 +413,40 @@ pub(crate) fn prepare_command(task: &str, env: &BTreeMap<String, String>) -> Str
 /// unit that cannot use it, and for a unit no enabled lane can execute.
 pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     validate_mbx_toggles(config)?;
+    validate_product_inputs(config)?;
     materialize_prerequisites(config)?;
     validate_placement(config)?;
+    Ok(())
+}
+
+fn validate_product_inputs(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for unit in &config.units {
+        for product in &unit.products {
+            let mut seen = BTreeSet::new();
+            for input in &product.inputs {
+                if !valid_product_input(input) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` with input `{input}`, which is not a repo-relative path or glob in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+                        unit.id, product.name
+                    )));
+                }
+                if !seen.insert(input.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` input `{input}` twice; one entry per pattern",
+                        unit.id, product.name
+                    )));
+                }
+            }
+            for gap in &product.inputs_unknown {
+                if !valid_env_value(gap) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` with an unprintable closure gap; keep gap entries to printable text",
+                        unit.id, product.name
+                    )));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -416,9 +476,10 @@ fn find_product<'a>(
 }
 
 /// Compile prerequisite edges into `depends_on` (so producer changes select
-/// the consumer through the existing transitive closure), prepare commands
-/// (so the consumer rebuilds each product before its own checks on every
-/// lane), and consumer env (so product outputs reach the checks).
+/// the consumer through the existing transitive closure), materialize every
+/// product's input closure into its producer watch set, prepare commands (so
+/// the consumer rebuilds each product before its own checks on every lane),
+/// and merge consumer env (so product outputs reach the checks).
 fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     for unit in &config.units {
         for prerequisite in &unit.prerequisites {
@@ -463,6 +524,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
     }
+    materialize_product_input_watches(config);
     let mut prepared: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut inherited_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -512,6 +574,28 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
         }
     }
     Ok(())
+}
+
+/// Add every product input to its producer's canonical watch/read closure.
+/// Unknown closure gaps widen ownership to the whole tree: exact reuse and
+/// affected selection both fail closed instead of silently skipping a read.
+fn materialize_product_input_watches(config: &mut ProjectConfig) {
+    for unit in &mut config.units {
+        let inputs = unit
+            .products
+            .iter()
+            .flat_map(|product| product.inputs.iter().cloned())
+            .chain(
+                unit.products
+                    .iter()
+                    .filter(|product| !product.inputs_unknown.is_empty())
+                    .map(|_| "**".to_owned()),
+            )
+            .collect::<BTreeSet<_>>();
+        unit.watch.extend(inputs);
+        unit.watch.sort();
+        unit.watch.dedup();
+    }
 }
 
 /// Prepend prepare commands ahead of every command vector the unit runs, so
@@ -632,11 +716,12 @@ pub(crate) fn agreed_env(
 mod tests {
     use super::{
         agreed_env, describe_requirement, executors_for, is_ffi_crate_type, lane_supports_platform,
-        prepare_command, valid_env_name, valid_env_value, valid_product_name, valid_task_name,
-        Arch, Executor, NamedProduct, Os, PlatformRequirement, Prerequisite, CAP_XCFRAMEWORK,
-        CAP_XCODE,
+        prepare_command, resolve, valid_env_name, valid_env_value, valid_product_input,
+        valid_product_name, valid_task_name, Arch, Executor, NamedProduct, Os, PlatformRequirement,
+        Prerequisite, CAP_XCFRAMEWORK, CAP_XCODE,
     };
-    use crate::{RunnerMode, Unit, UnitKind};
+    use crate::{AnalysisSummary, MaintenanceSpec, RunnerMode, Unit, UnitKind, VelnorRustNeeds};
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[expect(
         clippy::panic,
@@ -693,6 +778,121 @@ mod tests {
             mbx: None,
             prepared_tools: Vec::new(),
         }
+    }
+
+    fn product(name: &str, inputs: &[&str]) -> NamedProduct {
+        NamedProduct {
+            name: name.to_owned(),
+            task: Some(format!("build-{name}")),
+            env: BTreeMap::new(),
+            inputs: inputs.iter().map(ToString::to_string).collect(),
+            inputs_unknown: Vec::new(),
+        }
+    }
+
+    fn requires(producer: &str, product: &str) -> Prerequisite {
+        Prerequisite {
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            task: None,
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn project_config(units: Vec<Unit>) -> crate::ProjectConfig {
+        crate::ProjectConfig {
+            repository: String::new(),
+            workflow_revision: "test-revision".to_owned(),
+            profile: "generic".to_owned(),
+            analysis: AnalysisSummary {
+                method: "test".to_owned(),
+                detected: Vec::new(),
+                limitations: Vec::new(),
+            },
+            verified: true,
+            workflow_files: Vec::new(),
+            notes: Vec::new(),
+            version_bump_units: Vec::new(),
+            default_branch: "main".to_owned(),
+            runners: RunnerMode::Both,
+            automatic: RunnerMode::Both,
+            github_runner: "ubuntu-latest".to_owned(),
+            macos_runner: "macos-latest".to_owned(),
+            velnor_labels: vec!["self-hosted".to_owned()],
+            release_enabled: false,
+            release_reason: String::new(),
+            release: None,
+            renovate_enabled: false,
+            renovate_reason: String::new(),
+            renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
+            check_profiles: Vec::new(),
+            maintenance: MaintenanceSpec::default(),
+            units,
+            workflow_templates: BTreeMap::new(),
+            adopted_workflow_surface: true,
+            actionlint_config_variables_null: false,
+            ci_required: true,
+            ruleset_required_status_checks: Vec::new(),
+            ruleset_external_status_checks: Vec::new(),
+            package_update_channels: None,
+            velnor_runner_group: None,
+            velnor_trusted_label: None,
+            velnor_trusted_runner_available: None,
+            pull_request_on_velnor: false,
+            default_dispatch_runner: "github".to_owned(),
+            automatic_lanes: "github".to_owned(),
+            velnor_rust_needs: VelnorRustNeeds::Parallel,
+            velnor_concurrency_group: None,
+            velnor_serial_stack_groups: false,
+            static_files: Vec::new(),
+            reviewers: Vec::new(),
+            declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
+            github_cache: crate::config::CacheGithubSection::default(),
+            velnor_host_cache: crate::config::CacheVelnorSection::default(),
+        }
+    }
+
+    fn selected_change(
+        config: &crate::ProjectConfig,
+        change: crate::reuse::ChangedPath,
+    ) -> BTreeSet<String> {
+        let units = config
+            .units
+            .iter()
+            .map(|unit| crate::reuse::WatchedUnit {
+                id: unit.id.clone(),
+                watch: unit.watch.clone(),
+                depends_on: unit.depends_on.clone(),
+                kind: unit.kind.id_prefix().to_owned(),
+                commands: unit
+                    .pr_commands
+                    .iter()
+                    .chain(unit.full_commands.iter())
+                    .cloned()
+                    .collect(),
+                reads_closed: unit.reads_closed,
+            })
+            .collect::<Vec<_>>();
+        must_ok(
+            crate::reuse::select_affected(&units, &[change], &[]),
+            "product input selection",
+        )
+        .required
+    }
+
+    fn selected(config: &crate::ProjectConfig, path: &str) -> BTreeSet<String> {
+        selected_change(
+            config,
+            crate::reuse::ChangedPath {
+                path: path.to_owned(),
+                previous: None,
+                status: crate::reuse::ChangeKind::Modified,
+            },
+        )
     }
 
     #[test]
@@ -801,6 +1001,8 @@ mod tests {
             name: "xcframework".to_owned(),
             task: Some("build-xcframework".to_owned()),
             env: std::collections::BTreeMap::new(),
+            inputs: Vec::new(),
+            inputs_unknown: Vec::new(),
         };
         let plain = Prerequisite {
             producer: "rust-ffi".to_owned(),
@@ -816,6 +1018,100 @@ mod tests {
         assert_eq!(
             overridden.effective_task(&product),
             Some("build-xcframework-device")
+        );
+    }
+
+    #[test]
+    fn product_inputs_select_schema_one_producer_and_dependents() {
+        for input in [
+            "libs/bridge-ffi/boltffi.toml",
+            "native/Sources/BridgeCore/FfiBoltFFI.swift",
+            "libs/sibling/**/*.rs",
+        ] {
+            assert!(
+                valid_product_input(input),
+                "fixture input is valid: {input}"
+            );
+        }
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.products = vec![product(
+            "xcframework",
+            &[
+                "libs/bridge-ffi/boltffi.toml",
+                "native/Sources/BridgeCore/FfiBoltFFI.swift",
+                "libs/sibling/**/*.rs",
+            ],
+        )];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut unrelated = unit("unrelated", UnitKind::Rust);
+        unrelated.watch = vec!["tools/unrelated/**".to_owned()];
+        let mut config = project_config(vec![producer, consumer, unrelated]);
+        must_ok(resolve(&mut config), "schema-one product graph resolves");
+        let expected = BTreeSet::from(["rust-ffi".to_owned(), "swift-app".to_owned()]);
+        for input in [
+            "libs/bridge-ffi/boltffi.toml",
+            "native/Sources/BridgeCore/FfiBoltFFI.swift",
+            "libs/sibling/src/lib.rs",
+        ] {
+            assert_eq!(selected(&config, input), expected, "selection for {input}");
+        }
+        assert_eq!(
+            selected(&config, "tools/unrelated/src/lib.rs"),
+            BTreeSet::from(["unrelated".to_owned()]),
+            "an unrelated input selects only its owner"
+        );
+        assert_eq!(
+            selected_change(
+                &config,
+                crate::reuse::ChangedPath {
+                    path: "libs/bridge-ffi/boltffi.toml.moved".to_owned(),
+                    previous: Some("libs/bridge-ffi/boltffi.toml".to_owned()),
+                    status: crate::reuse::ChangeKind::Renamed,
+                },
+            ),
+            expected,
+            "renaming a product input keeps old ownership"
+        );
+        assert_eq!(
+            selected_change(
+                &config,
+                crate::reuse::ChangedPath {
+                    path: "libs/bridge-ffi/boltffi.toml".to_owned(),
+                    previous: None,
+                    status: crate::reuse::ChangeKind::Deleted,
+                },
+            ),
+            expected,
+            "deleting a product input selects its producer and dependent"
+        );
+        assert_eq!(
+            config.units[0].watch,
+            vec![
+                "libs/bridge-ffi/boltffi.toml".to_owned(),
+                "libs/sibling/**/*.rs".to_owned(),
+                "native/Sources/BridgeCore/FfiBoltFFI.swift".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_schema_one_product_inputs_fail_closed_to_whole_tree() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["libs/bridge-ffi/boltffi.toml"]);
+        ffi.inputs_unknown = vec!["build script reads an untracked path".to_owned()];
+        producer.products = vec![ffi];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut unrelated = unit("unrelated", UnitKind::Rust);
+        unrelated.watch = vec!["tools/unrelated/**".to_owned()];
+        let mut config = project_config(vec![producer, consumer, unrelated]);
+        must_ok(resolve(&mut config), "unknown schema-one graph resolves");
+        assert!(config.units[0].watch.contains(&"**".to_owned()));
+        assert_eq!(
+            selected(&config, "unmodeled/input.txt"),
+            BTreeSet::from(["rust-ffi".to_owned(), "swift-app".to_owned()]),
+            "unknown closure cannot silently narrow selection"
         );
     }
 
