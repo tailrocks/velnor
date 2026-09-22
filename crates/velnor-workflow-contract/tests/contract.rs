@@ -315,6 +315,57 @@ fn runtime_product_bootstrap_admits_only_protected_human_main_dispatch() {
     );
 }
 
+#[test]
+fn runtime_product_bootstrap_attests_and_uploads_readiness_on_same_protected_revision() {
+    let source = read(".github-gen/sources/workflows/runtime-products-bootstrap.yml");
+    let attest =
+        "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2";
+    let attestation_step = source
+        .find("      - name: Attest publication readiness")
+        .expect("bootstrap must attest publication readiness");
+    let verification_step = source
+        .find("      - name: Verify publication readiness attestation")
+        .expect("bootstrap must verify publication readiness attestation");
+    let release_step = source
+        .find("      - name: Create immutable release")
+        .expect("bootstrap must publish only after readiness verification");
+    let upload_step = source
+        .find("      - name: Upload publication readiness")
+        .expect("bootstrap must upload publication readiness");
+
+    assert_eq!(
+        source.matches(attest).count(),
+        3,
+        "the pinned attestation action must cover assets, manifest, and readiness: {source}"
+    );
+    assert!(
+        source.contains("subject-path: dist/publication-readiness.json"),
+        "readiness must be the attestation subject: {source}"
+    );
+    assert!(
+        attestation_step < verification_step && verification_step < release_step,
+        "readiness attestation must be verified before release publication: {source}"
+    );
+    assert!(
+        source.contains("signer='tailrocks/velnor/.github/workflows/ci-runtime-products.yml'")
+            && source.contains("gh attestation verify dist/publication-readiness.json")
+            && source.contains("--source-ref refs/heads/main")
+            && source.contains("--source-digest \"$HEAD_SHA\""),
+        "readiness attestation must bind the protected publisher workflow and source revision: {source}"
+    );
+    assert!(
+        source.contains("HEAD_SHA: ${{ needs.closure.outputs.head-sha }}")
+            && source.contains("workflow=\"$REPOSITORY/.github/workflows/ci-runtime-products.yml\""),
+        "readiness metadata and verification must name the same protected-main revision/workflow: {source}"
+    );
+    assert!(
+        upload_step > verification_step
+            && source.contains("${{ runner.temp }}/publication-readiness.json")
+            && source.contains("if-no-files-found: error"),
+        "readiness upload must remain fail-closed after attestation verification: {source}"
+    );
+}
+
 /// The Rust unit workflow realizes exactly the backends its generated
 /// project config declares: `github-hosted` renders the GitHub Mr. Boxington
 /// backend, a local provider (`velnor`, `github-self-hosted`) renders the
