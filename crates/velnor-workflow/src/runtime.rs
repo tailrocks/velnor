@@ -2785,6 +2785,13 @@ fn selection_for_diff_with_closed_excluded<'a>(
             .map(|selection| (selection, BTreeSet::new()));
     };
     if changed.is_empty() {
+        // An empty three-dot diff is also produced when BASE and HEAD name
+        // the same commit. That is not proof of no work: an affected manual
+        // dispatch must not silently skip the baseline in that case. Only a
+        // successfully resolved, distinct revision pair can prove no work.
+        if git_revisions_same(root, base, head)? {
+            return full_selection(config, None).map(|selection| (selection, BTreeSet::new()));
+        }
         return Ok((
             UnitSelection {
                 units: Vec::new(),
@@ -3039,6 +3046,38 @@ fn git_name_status_nul(
         return Ok(None);
     }
     Ok(Some(output.stdout))
+}
+
+/// Return whether two revision names resolve to the same commit object.
+/// Failed resolution is treated conservatively as equal so affected planning
+/// falls back to the full baseline instead of asserting unproven no work.
+fn git_revisions_same(root: &Path, base: &str, head: &str) -> Result<bool, GeneratorError> {
+    let (Some(base), Some(head)) = (
+        resolve_git_revision(root, base)?,
+        resolve_git_revision(root, head)?,
+    ) else {
+        return Ok(true);
+    };
+    Ok(base == head)
+}
+
+fn resolve_git_revision(root: &Path, revision: &str) -> Result<Option<String>, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify"])
+        .arg(format!("{revision}^{{commit}}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("resolve git revision: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 /// Parse `--name-status -z` bytes into the matchable path list, mirroring the
@@ -6571,8 +6610,21 @@ workspace_check = true
             );
             std::fs::remove_dir_all(root)?;
         }
-        let (root, base, _) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
-        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let (root, _, head) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
+        let same_object = selection_for_diff(&root, &config, Scope::Affected, &head, &head)?;
+        assert_eq!(
+            selected_ids(same_object.units),
+            vec!["base", "app", "consumer", "docs"]
+        );
+        assert_eq!(same_object.full_units.len(), 4);
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let runtime_selection =
+            selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         let model =
             crate::reuse::select_affected(&watched, &[], crate::reuse::FULL_SELECTION_PREFIXES)?;
         assert!(selected_id_set(&runtime_selection).is_empty());
@@ -6808,10 +6860,23 @@ workspace_check = true
     }
 
     #[test]
-    fn affected_selection_is_empty_for_an_empty_diff() -> Result<(), Box<dyn Error>> {
-        let (root, base, _) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+    fn affected_selection_is_empty_only_for_distinct_empty_revisions() -> Result<(), Box<dyn Error>>
+    {
+        let (root, _, head) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
         let config = selection_config();
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let same_object = selection_for_diff(&root, &config, Scope::Affected, &head, &head)?;
+        assert_eq!(
+            selected_ids(same_object.units),
+            vec!["base", "app", "consumer", "docs"]
+        );
+        assert_eq!(same_object.full_units.len(), 4);
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         assert!(selection.units.is_empty());
         assert!(selection.full_units.is_empty());
         std::fs::remove_dir_all(root)?;
@@ -9519,9 +9584,15 @@ velnor_full_commands = ["true"]
     #[test]
     fn empty_diff_and_lane_narrowing_carry_reasons_while_unproven_empty_errors(
     ) -> Result<(), Box<dyn Error>> {
-        let (root, base, _) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
+        let (root, _, head) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
         let config = selection_config();
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         assert!(selection.units.is_empty());
         assert_eq!(
             must(
