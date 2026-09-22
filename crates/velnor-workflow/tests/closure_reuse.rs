@@ -18,6 +18,9 @@ static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 /// checkout SHAs, independent of the outer environment.
 const FIXTURE_BASE: &str = "closure-reuse-base";
 const FIXTURE_HEAD: &str = "closure-reuse-head";
+const FIXTURE_PLAN_DIGEST: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const FIXTURE_GENERATOR_REVISION: &str = "closure-reuse-generator";
 
 struct Fixture {
     root: PathBuf,
@@ -39,11 +42,63 @@ impl Fixture {
         let mut document: serde_json::Value = serde_json::from_str(expected)?;
         document["base_sha"] = serde_json::Value::String(FIXTURE_BASE.to_owned());
         document["head_sha"] = serde_json::Value::String(FIXTURE_HEAD.to_owned());
+        document["candidate_sha"] = serde_json::Value::String(FIXTURE_HEAD.to_owned());
+        document["plan_digest"] = serde_json::Value::String(FIXTURE_PLAN_DIGEST.to_owned());
+        document["generator_revision"] =
+            serde_json::Value::String(FIXTURE_GENERATOR_REVISION.to_owned());
+        document["provenance"] = serde_json::Value::Bool(true);
+        if let Some(units) = document
+            .get_mut("units")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for unit in units {
+                if unit.get("phase").is_none() {
+                    unit["phase"] = serde_json::Value::String("unphased".to_owned());
+                }
+            }
+        }
+        let expected_units = document
+            .get("units")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut reported: serde_json::Value = serde_json::from_str(results)?;
+        if let Some(results) = reported
+            .get_mut("results")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for result in results {
+                let unit_id = result
+                    .get("unit")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let lane = result
+                    .get("lane")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let phase = expected_units
+                    .iter()
+                    .find(|unit| {
+                        unit.get("id").and_then(serde_json::Value::as_str) == Some(unit_id)
+                    })
+                    .and_then(|unit| unit.get("phase"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unphased");
+                result["provider"] = serde_json::Value::String(lane.to_owned());
+                result["candidate_sha"] = serde_json::Value::String(FIXTURE_HEAD.to_owned());
+                result["head_sha"] = serde_json::Value::String(FIXTURE_HEAD.to_owned());
+                result["base_sha"] = serde_json::Value::String(FIXTURE_BASE.to_owned());
+                result["plan_digest"] = serde_json::Value::String(FIXTURE_PLAN_DIGEST.to_owned());
+                result["generator_revision"] =
+                    serde_json::Value::String(FIXTURE_GENERATOR_REVISION.to_owned());
+                result["phase"] = serde_json::Value::String(phase.to_owned());
+            }
+        }
         fs::write(
             root.join("expected.json"),
             serde_json::to_string(&document)?,
         )?;
-        fs::write(root.join("results.json"), results)?;
+        fs::write(root.join("results.json"), serde_json::to_string(&reported)?)?;
         Ok(Self { root })
     }
 
@@ -52,6 +107,9 @@ impl Fixture {
             .current_dir(&self.root)
             .env("BASE_SHA", FIXTURE_BASE)
             .env("HEAD_SHA", FIXTURE_HEAD)
+            .env("PLAN_DIGEST", FIXTURE_PLAN_DIGEST)
+            .env("GENERATOR_REVISION", FIXTURE_GENERATOR_REVISION)
+            .env("VELNOR_RESULT_PROVENANCE", "1")
             .args([
                 "aggregate",
                 "--expected",

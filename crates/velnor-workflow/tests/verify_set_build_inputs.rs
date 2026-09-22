@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
+const FIXTURE_GENERATOR_REVISION: &str = "verify-set-generator";
+
 const CONFIG_S1: &str = r#"
 schema = 2
 repository = "example/verify-set"
@@ -189,6 +191,8 @@ impl Fixture {
             .env("EVENT_NAME", "pull_request")
             .env("BASE_SHA", &self.base)
             .env("HEAD_SHA", &self.head)
+            .env("GENERATOR_REVISION", FIXTURE_GENERATOR_REVISION)
+            .env("VELNOR_RESULT_PROVENANCE", "1")
             .env("GITHUB_OUTPUT", &github_output)
             .env("VELNOR_SELECTION_FILE", &selection_file)
             .env("VELNOR_EXPECTED_WORK_FILE", &expected_file)
@@ -299,10 +303,22 @@ impl Fixture {
         let results_path = self.root.join("agg-results.json");
         fs::write(&expected_path, expected)?;
         fs::write(&results_path, results)?;
+        let expected_document: serde_json::Value = serde_json::from_str(expected)?;
+        let plan_digest = expected_document
+            .get("plan_digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("expected plan digest")?;
+        let generator_revision = expected_document
+            .get("generator_revision")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("expected generator revision")?;
         let output = Self::binary()
             .current_dir(&self.root)
             .env("BASE_SHA", &self.base)
             .env("HEAD_SHA", &self.head)
+            .env("PLAN_DIGEST", plan_digest)
+            .env("GENERATOR_REVISION", generator_revision)
+            .env("VELNOR_RESULT_PROVENANCE", "1")
             .args([
                 "aggregate",
                 "--expected",
@@ -356,11 +372,33 @@ fn success_results_for(expected: &serde_json::Value) -> Result<String, Box<dyn E
             .ok_or("expected lanes")?;
         for lane in lanes {
             let lane = lane.as_str().ok_or("lane string")?;
-            results.push(serde_json::json!({
+            let mut result = serde_json::json!({
                 "unit": id,
                 "lane": lane,
                 "outcome": "success",
-            }));
+            });
+            if let Some(value) = expected.get("candidate_sha") {
+                result["candidate_sha"] = value.clone();
+            }
+            if let Some(value) = expected.get("head_sha") {
+                result["head_sha"] = value.clone();
+            }
+            if let Some(value) = expected.get("base_sha") {
+                result["base_sha"] = value.clone();
+            }
+            if let Some(value) = expected.get("plan_digest") {
+                result["plan_digest"] = value.clone();
+            }
+            if let Some(value) = expected.get("generator_revision") {
+                result["generator_revision"] = value.clone();
+            }
+            if let Some(value) = unit.get("phase") {
+                result["phase"] = value.clone();
+            }
+            if expected.get("provenance") == Some(&serde_json::Value::Bool(true)) {
+                result["provider"] = serde_json::Value::String(lane.to_owned());
+            }
+            results.push(result);
         }
     }
     Ok(serde_json::to_string(

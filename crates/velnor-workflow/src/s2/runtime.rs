@@ -1144,9 +1144,19 @@ fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorErr
         .map_err(|error| GeneratorError::io("read reported results", results, &error))?;
     let base_sha = env::var("BASE_SHA").unwrap_or_default();
     let head_sha = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    let verdict =
-        crate::s2::reuse::aggregate_files(&expected_text, &results_text, &base_sha, &head_sha)
-            .map_err(GeneratorError::usage)?;
+    let plan_digest = env::var("PLAN_DIGEST").unwrap_or_default();
+    let generator_revision = env::var("GENERATOR_REVISION").unwrap_or_default();
+    let provenance = result_provenance_from_env()?;
+    let verdict = crate::s2::reuse::aggregate_files_with_mode(
+        &expected_text,
+        &results_text,
+        &base_sha,
+        &head_sha,
+        &plan_digest,
+        &generator_revision,
+        provenance,
+    )
+    .map_err(GeneratorError::usage)?;
     print!("{}", crate::s2::reuse::render_report(&verdict));
     if let Some(line) = explicit_no_work_line(&expected_text, &verdict) {
         println!("{line}");
@@ -1157,6 +1167,20 @@ fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorErr
         Err(GeneratorError::usage(
             "aggregate: expected work did not complete",
         ))
+    }
+}
+
+fn result_provenance_from_env() -> Result<bool, GeneratorError> {
+    match env::var("VELNOR_RESULT_PROVENANCE") {
+        Err(env::VarError::NotPresent) => Ok(false),
+        Ok(value) if value.is_empty() || value == "0" || value == "false" => Ok(false),
+        Ok(value) if value == "1" || value == "true" => Ok(true),
+        Ok(value) => Err(GeneratorError::usage(format!(
+            "VELNOR_RESULT_PROVENANCE must be absent, 0/false, or 1/true; got `{value}`"
+        ))),
+        Err(env::VarError::NotUnicode(_)) => Err(GeneratorError::usage(
+            "VELNOR_RESULT_PROVENANCE is not valid Unicode",
+        )),
     }
 }
 
@@ -1667,6 +1691,8 @@ struct PlanInputs {
     scope_override: Option<String>,
     base: String,
     head: String,
+    generator_revision: String,
+    provenance: bool,
     providers: String,
     event_trusted: String,
     selection_file: Option<PathBuf>,
@@ -1685,6 +1711,8 @@ impl PlanInputs {
                 .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
             base: env::var("BASE_SHA").unwrap_or_default(),
             head: env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+            generator_revision: env::var("GENERATOR_REVISION").unwrap_or_default(),
+            provenance: result_provenance_from_env()?,
             providers: env::var("VELNOR_PROVIDERS").unwrap_or_default(),
             event_trusted: env::var("VELNOR_EVENT_TRUSTED").unwrap_or_default(),
             selection_file: env::var_os("VELNOR_SELECTION_FILE").map(PathBuf::from),
@@ -1877,7 +1905,16 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
         )?;
     }
     if let Some(path) = &inputs.expected_file {
-        write_expected_work_file(path, &planned, &config, &inputs.base, &inputs.head)?;
+        write_expected_work_file(
+            path,
+            &planned,
+            &config,
+            &inputs.base,
+            &inputs.head,
+            &digest,
+            &inputs.generator_revision,
+            inputs.provenance,
+        )?;
     }
     if let Some(output_path) = &inputs.github_output {
         let mut file = fs::OpenOptions::new()
@@ -1902,6 +1939,10 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
             writeln!(file, "{name}={value}")
                 .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
         }
+        if inputs.provenance {
+            writeln!(file, "generator_revision={}", inputs.generator_revision)
+                .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+        }
         if let Some(reason) = &selection.fallback_reason {
             writeln!(file, "fallback_reason={reason}")
                 .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
@@ -1921,6 +1962,9 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     println!("prereq_inputs={prereq_inputs}");
     println!("closed_excluded={closed_excluded}");
     println!("plan_digest={digest}");
+    if inputs.provenance {
+        println!("generator_revision={}", inputs.generator_revision);
+    }
     println!("excluded={excluded_json}");
     if let Some(reason) = &selection.fallback_reason {
         println!("fallback_reason={reason}");
@@ -2560,13 +2604,27 @@ fn planned_no_work_reason(selection: &UnitSelection<'_>) -> Result<Option<String
 /// - `base_sha`/`head_sha`: the plan's transport identity, exactly as the
 ///   plan saw it. The aggregate compares these against its own checkout and
 ///   rejects any file from another plan — including a stale no-work file.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "writer arguments mirror the planner's serialized identity contract"
+)]
 fn write_expected_work_file(
     path: &Path,
     planned: &[PlannedUnit],
     config: &CiConfig,
     base_sha: &str,
     head_sha: &str,
+    plan_digest: &str,
+    generator_revision: &str,
+    provenance: bool,
 ) -> Result<(), GeneratorError> {
+    if provenance
+        && (head_sha.is_empty() || plan_digest.is_empty() || generator_revision.is_empty())
+    {
+        return Err(GeneratorError::usage(
+            "expected work requires non-empty head, plan, and generator identity",
+        ));
+    }
     let depends: BTreeMap<&str, &[String]> = config
         .unit
         .iter()
@@ -2581,12 +2639,26 @@ fn write_expected_work_file(
                 unit.unit_id
             )));
         }
-        units.push(serde_json::json!({
+        let config_unit = config
+            .unit
+            .iter()
+            .find(|candidate| candidate.id == unit.unit_id)
+            .ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "CI unit `{}` is selected but missing from the configuration",
+                    unit.unit_id
+                ))
+            })?;
+        let mut expected_unit = serde_json::json!({
             "id": unit.unit_id,
             "lanes": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
             "matrix": Vec::<String>::new(),
             "required": true,
-        }));
+        });
+        if provenance {
+            expected_unit["phase"] = serde_json::json!(phase_identity(&config_unit.phases));
+        }
+        units.push(expected_unit);
         prerequisites.insert(
             unit.unit_id.clone(),
             depends
@@ -2596,13 +2668,19 @@ fn write_expected_work_file(
                 }),
         );
     }
-    let document = serde_json::json!({
+    let mut document = serde_json::json!({
         "planned_no_work": planned.is_empty(),
         "units": units,
         "prerequisites": prerequisites,
         "base_sha": base_sha,
         "head_sha": head_sha,
     });
+    if provenance {
+        document["candidate_sha"] = serde_json::json!(head_sha);
+        document["plan_digest"] = serde_json::json!(plan_digest);
+        document["generator_revision"] = serde_json::json!(generator_revision);
+        document["provenance"] = serde_json::json!(true);
+    }
     let text = serde_json::to_string_pretty(&document)
         .map_err(|error| GeneratorError::usage(format!("serialize expected work: {error}")))?;
     // The plan job runs in a fresh checkout with no parent directory, so
@@ -2617,6 +2695,14 @@ fn write_expected_work_file(
     }
     fs::write(path, format!("{text}\n"))
         .map_err(|error| GeneratorError::io("write expected work", path, &error))
+}
+
+fn phase_identity(phases: &[ValidationPhase]) -> String {
+    if phases.is_empty() {
+        "unphased".to_owned()
+    } else {
+        ValidationPhase::id_list(phases).join(",")
+    }
 }
 
 fn write_selection_file(
@@ -5036,6 +5122,10 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::s2::primitives::prepared_tools::{ProducerIdentity, ToolFile, ToolOutcome};
+
+    const TEST_PLAN_DIGEST: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const TEST_GENERATOR_REVISION: &str = "test-generator-revision";
 
     #[expect(
         clippy::panic,
@@ -9382,8 +9472,34 @@ workspace_check = true
         let path = dir.join("expected.json");
         let (base, head) = s4_ambient_shas();
         must(
-            write_expected_work_file(&path, &planned, config, &base, &head),
+            write_expected_work_file(&path, &planned, config, &base, &head, "", "", false),
             "write expected work",
+        );
+        let text = must(std::fs::read_to_string(&path), "read expected work");
+        must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
+        text
+    }
+
+    fn s4_expected_for_selection_with_provenance(
+        config: &CiConfig,
+        selection: &UnitSelection<'_>,
+    ) -> String {
+        let planned = s4_planned_for_selection(config, selection);
+        let dir = s4_dir("expected-provenance");
+        let path = dir.join("expected.json");
+        let (base, head) = s4_ambient_shas();
+        must(
+            write_expected_work_file(
+                &path,
+                &planned,
+                config,
+                &base,
+                &head,
+                TEST_PLAN_DIGEST,
+                TEST_GENERATOR_REVISION,
+                true,
+            ),
+            "write provenance expected work",
         );
         let text = must(std::fs::read_to_string(&path), "read expected work");
         must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
@@ -9397,7 +9513,14 @@ workspace_check = true
         results_json: &str,
     ) -> Result<crate::s2::reuse::AggregateVerdict, String> {
         let (base, head) = s4_ambient_shas();
-        crate::s2::reuse::aggregate_files(expected_json, results_json, &base, &head)
+        crate::s2::reuse::aggregate_files(
+            expected_json,
+            results_json,
+            &base,
+            &head,
+            TEST_PLAN_DIGEST,
+            TEST_GENERATOR_REVISION,
+        )
     }
 
     /// All-success results JSON covering every (unit, lane) the expected-work
@@ -9420,9 +9543,17 @@ workspace_check = true
                 "expected unit lanes",
             );
             for lane in lanes {
+                let lane = must_some(lane.as_str(), "expected lane name");
                 results.push(serde_json::json!({
                     "unit": id,
-                    "lane": must_some(lane.as_str(), "expected lane name"),
+                    "lane": lane,
+                    "provider": lane,
+                    "candidate_sha": document.get("candidate_sha"),
+                    "head_sha": document.get("head_sha"),
+                    "base_sha": document.get("base_sha"),
+                    "plan_digest": document.get("plan_digest"),
+                    "generator_revision": document.get("generator_revision"),
+                    "phase": unit.get("phase"),
                     "outcome": "success",
                 }));
             }
@@ -9562,6 +9693,8 @@ workspace_check = true
                     scope_override: None,
                     base,
                     head,
+                    generator_revision: TEST_GENERATOR_REVISION.to_owned(),
+                    provenance: true,
                     providers: providers.to_owned(),
                     event_trusted: String::new(),
                     selection_file: None,
@@ -9802,6 +9935,10 @@ trust = "untrusted-ok"
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the writer test checks every serialized provenance identity"
+    )]
     fn expected_work_writer_maps_units_lanes_and_full_prerequisite_edges(
     ) -> Result<(), Box<dyn Error>> {
         let (root, base, head) = selection_git_fixture("s4-owned", "crates/app/src/lib.rs")?;
@@ -9816,7 +9953,7 @@ trust = "untrusted-ok"
             "real work carries no no-work reason"
         )
         .is_none());
-        let expected = s4_expected_for_selection(&config, &selection);
+        let expected = s4_expected_for_selection_with_provenance(&config, &selection);
         let document: serde_json::Value = serde_json::from_str(&expected)?;
         assert_eq!(
             document
@@ -9835,6 +9972,25 @@ trust = "untrusted-ok"
             Some(ambient_head.as_str()),
             "the writer binds the plan's head SHA",
         );
+        assert_eq!(
+            document
+                .get("candidate_sha")
+                .and_then(serde_json::Value::as_str),
+            Some(ambient_head.as_str()),
+            "the writer binds the candidate SHA to the plan head",
+        );
+        let plan_digest = document
+            .get("plan_digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("the writer must emit a plan digest")?;
+        assert_eq!(plan_digest, TEST_PLAN_DIGEST);
+        assert_eq!(
+            document
+                .get("generator_revision")
+                .and_then(serde_json::Value::as_str),
+            Some(TEST_GENERATOR_REVISION),
+            "the writer binds the generator revision",
+        );
         let units = document
             .get("units")
             .and_then(serde_json::Value::as_array)
@@ -9847,6 +10003,11 @@ trust = "untrusted-ok"
                 "every eligible provider must hear a verdict",
             );
             assert_eq!(unit.get("matrix"), Some(&serde_json::json!([])));
+            assert_eq!(
+                unit.get("phase").and_then(serde_json::Value::as_str),
+                Some("unphased"),
+                "every expected unit carries an explicit phase identity",
+            );
             assert_eq!(
                 unit.get("required").and_then(serde_json::Value::as_bool),
                 Some(true),
@@ -9881,7 +10042,7 @@ trust = "untrusted-ok"
         let path = dir.join("expected.json");
         let (base, head) = s4_ambient_shas();
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(&path, &planned, &config, &base, &head, "", "", false),
             "write expected work",
         );
         let expected = must(std::fs::read_to_string(&path), "read expected work");
@@ -9921,7 +10082,7 @@ trust = "untrusted-ok"
         let path = dir.join("does/not/exist/expected-work.json");
         let (base, head) = s4_ambient_shas();
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(&path, &planned, &config, &base, &head, "", "", false),
             "write expected work through a missing nested parent",
         );
         let text = must(std::fs::read_to_string(&path), "read expected work");
@@ -10109,7 +10270,7 @@ trust = "untrusted-ok"
         }];
         let path = dir.join("single.json");
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(&path, &planned, &config, &base, &head, "", "", false),
             "write expected work",
         );
         let expected = must(std::fs::read_to_string(&path), "read expected work");
@@ -10242,8 +10403,15 @@ trust = "untrusted-ok"
     fn invalid_plan_fails_closed() -> Result<(), Box<dyn Error>> {
         // An unparseable plan is a usage error, never a pass.
         let error = must_fail(
-            crate::s2::reuse::aggregate_files("{not json", "{}", "", "")
-                .map_err(GeneratorError::usage),
+            crate::s2::reuse::aggregate_files(
+                "{not json",
+                "{}",
+                "",
+                "",
+                TEST_PLAN_DIGEST,
+                TEST_GENERATOR_REVISION,
+            )
+            .map_err(GeneratorError::usage),
             "an unparseable plan must fail",
         );
         assert!(error.to_string().contains("not valid JSON"), "{error}");
@@ -10434,7 +10602,16 @@ trust = "untrusted-ok"
         let dir = s4_dir("nowhere");
         let (base, head) = s4_ambient_shas();
         let error = must_fail(
-            write_expected_work_file(&dir.join("expected.json"), &planned, &config, &base, &head),
+            write_expected_work_file(
+                &dir.join("expected.json"),
+                &planned,
+                &config,
+                &base,
+                &head,
+                TEST_PLAN_DIGEST,
+                TEST_GENERATOR_REVISION,
+                true,
+            ),
             "a unit runnable nowhere must fail the plan",
         );
         assert!(
@@ -10449,7 +10626,16 @@ trust = "untrusted-ok"
         }];
         let path = dir.join("fanout.json");
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(
+                &path,
+                &planned,
+                &config,
+                &base,
+                &head,
+                TEST_PLAN_DIGEST,
+                TEST_GENERATOR_REVISION,
+                true,
+            ),
             "write expected work",
         );
         let expected = must(std::fs::read_to_string(&path), "read expected work");
@@ -10551,6 +10737,8 @@ trust = "untrusted-ok"
                     scope_override: None,
                     base: base.clone(),
                     head: head.clone(),
+                    generator_revision: TEST_GENERATOR_REVISION.to_owned(),
+                    provenance: true,
                     providers: String::new(),
                     event_trusted: String::new(),
                     selection_file: None,
@@ -10588,10 +10776,35 @@ trust = "untrusted-ok"
                 .map(Vec::len),
             Some(0),
         );
+        assert_eq!(
+            document
+                .get("candidate_sha")
+                .and_then(serde_json::Value::as_str),
+            Some(head.as_str()),
+        );
+        let plan_digest = document
+            .get("plan_digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("the active plan must emit plan_digest")?;
+        assert_eq!(plan_digest.len(), 64);
+        assert_eq!(
+            document
+                .get("generator_revision")
+                .and_then(serde_json::Value::as_str),
+            Some(TEST_GENERATOR_REVISION),
+        );
+        assert_eq!(document.get("provenance"), Some(&serde_json::json!(true)));
         // The bound file scores against the same SHAs: proven no-work plus
         // zero results passes with the machine-readable reason.
-        let verdict =
-            crate::s2::reuse::aggregate_files(&expected, r#"{"results": []}"#, &base, &head)?;
+        let verdict = crate::s2::reuse::aggregate_files_with_mode(
+            &expected,
+            r#"{"results": []}"#,
+            &base,
+            &head,
+            plan_digest,
+            TEST_GENERATOR_REVISION,
+            true,
+        )?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert_eq!(
             explicit_no_work_line(&expected, &verdict).as_deref(),
