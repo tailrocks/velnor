@@ -14,7 +14,9 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
-use velnor_model::action_reference::ActionImageReference;
+use velnor_model::action_reference::{
+    resolve_action_path, ActionImageReference, RepositoryActionReference,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActionMetadata {
@@ -696,20 +698,30 @@ impl ResolvedAction {
             )
         };
         let action_container_path = container_path(actions_host, &self.plan.action_dir)?;
-        let main_container_path =
-            format!("{}/{}", action_container_path, main.trim_start_matches('/'));
+        let main_container_path = container_path(
+            actions_host,
+            &resolve_metadata_action_path(&self.plan.action_dir, main)?,
+        )?;
         let pre_container_path = self
             .metadata
             .runs
             .pre
             .as_ref()
-            .map(|pre| format!("{}/{}", action_container_path, pre.trim_start_matches('/')));
+            .map(|pre| {
+                resolve_metadata_action_path(&self.plan.action_dir, pre)
+                    .and_then(|path| container_path(actions_host, &path))
+            })
+            .transpose()?;
         let post_container_path = self
             .metadata
             .runs
             .post
             .as_ref()
-            .map(|post| format!("{}/{}", action_container_path, post.trim_start_matches('/')));
+            .map(|post| {
+                resolve_metadata_action_path(&self.plan.action_dir, post)
+                    .and_then(|path| container_path(actions_host, &path))
+            })
+            .transpose()?;
         let mut env = vec![
             ("GITHUB_ACTION".to_string(), self.plan.step_id.clone()),
             (
@@ -787,7 +799,7 @@ impl ResolvedAction {
             })? {
             ActionImageReference::DockerImage(image) => (image.as_str().to_owned(), None, None),
             ActionImageReference::Dockerfile(path) => {
-                let dockerfile_host = self.plan.action_dir.join(path);
+                let dockerfile_host = resolve_metadata_action_path(&self.plan.action_dir, &path)?;
                 let tag = docker_action_tag(
                     &self.plan.repository,
                     &self.plan.git_ref,
@@ -795,7 +807,7 @@ impl ResolvedAction {
                 );
                 (
                     tag,
-                    Some(self.plan.action_dir.clone()),
+                    Some(self.plan.repository_dir.clone()),
                     Some(dockerfile_host),
                 )
             }
@@ -1206,38 +1218,15 @@ fn composite_action_invocations_with_path(
     Ok(invocations)
 }
 
-#[derive(Debug, Clone)]
-struct RepositoryUsesReference {
-    repository: String,
-    source_path: Option<String>,
-    git_ref: String,
-}
-
-fn parse_repository_uses(uses: &str) -> Result<RepositoryUsesReference> {
+fn parse_repository_uses(uses: &str) -> Result<RepositoryActionReference> {
     if uses.starts_with('.') {
         bail!("nested local composite uses '{uses}' are not implemented yet")
     }
     if uses.starts_with("docker://") {
         bail!("nested Docker composite uses '{uses}' are not implemented yet")
     }
-    let Some((path, git_ref)) = uses.rsplit_once('@') else {
-        bail!("repository action '{uses}' missing ref")
-    };
-    let parts = path.split('/').collect::<Vec<_>>();
-    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
-        bail!("unsupported repository action reference '{uses}'")
-    }
-    let repository = format!("{}/{}", parts[0], parts[1]);
-    let source_path = if parts.len() > 2 {
-        Some(parts[2..].join("/"))
-    } else {
-        None
-    };
-    Ok(RepositoryUsesReference {
-        repository,
-        source_path,
-        git_ref: git_ref.to_string(),
-    })
+    RepositoryActionReference::parse(uses)
+        .map_err(|error| anyhow::anyhow!("invalid repository action reference: {error}"))
 }
 
 fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
@@ -1248,6 +1237,11 @@ fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
         }
     }
     bail!("action metadata not found in {}", action_dir.display())
+}
+
+fn resolve_metadata_action_path(action_dir: &Path, value: &str) -> Result<PathBuf> {
+    resolve_action_path(action_dir, value)
+        .map_err(|error| anyhow::anyhow!("unsafe action metadata path: {error}"))
 }
 
 fn is_local_action_reference(name: Option<&str>, path: Option<&str>) -> bool {
@@ -2846,7 +2840,7 @@ runs:
   using: composite
   steps:
     - id: upload-artifact
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
 "#,
         )
         .unwrap();
@@ -2882,7 +2876,7 @@ runs:
 runs:
   using: composite
   steps:
-    - uses: jdx/mise-action/sub/action@v4
+    - uses: jdx/mise-action/sub/action@c2a87611a18de5b3828c5652fe268e992400cb5c
       if: ${{ inputs.github-token != '' }}
       with:
         github_token: ${{ inputs.github-token }}
@@ -2897,7 +2891,7 @@ runs:
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].step_id, "docs-1");
         assert_eq!(plans[0].repository, "jdx/mise-action");
-        assert_eq!(plans[0].git_ref, "v4");
+        assert_eq!(plans[0].git_ref, "c2a87611a18de5b3828c5652fe268e992400cb5c");
         assert_eq!(plans[0].source_path.as_deref(), Some("sub/action"));
         assert_eq!(plans[0].inputs["github_token"], "ghs_token");
         assert_eq!(
@@ -3137,7 +3131,7 @@ runs:
     - shell: bash
       continue-on-error: ${{ inputs.soft-fail }}
       run: cargo install acme-cli
-    - uses: actions/cache@v5
+    - uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a
       continue-on-error: "true"
 "#,
         )
@@ -3185,7 +3179,7 @@ runs:
 runs:
   using: composite
   steps:
-    - uses: actions/upload-artifact@v7
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         path: ${{ inputs.path }}
 "#,
@@ -3206,7 +3200,7 @@ runs:
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].step_id, "pages-1");
         assert_eq!(plans[0].repository, "actions/upload-artifact");
-        assert_eq!(plans[0].git_ref, "v7");
+        assert_eq!(plans[0].git_ref, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
         assert_eq!(plans[0].inputs["path"], "site");
     }
 
@@ -3710,6 +3704,257 @@ runs:
         assert!(invocation
             .env
             .contains(&("LOG_LEVEL".into(), "debug".into())));
+    }
+
+    #[test]
+    fn dockerfile_action_uses_repository_root_context_for_nested_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-docker-action-context-{}",
+            std::process::id()
+        ));
+        let repository_dir = root.join("repository");
+        let action_dir = repository_dir.join("actions/docker");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&action_dir).unwrap();
+        fs::write(
+            action_dir.join("Dockerfile"),
+            "FROM alpine:3.20\nCOPY actions/docker/payload /payload\n",
+        )
+        .unwrap();
+        fs::write(action_dir.join("payload"), "nested payload\n").unwrap();
+        let plan = RepositoryActionPlan {
+            step_id: "docker".into(),
+            repository: "octo/action".into(),
+            git_ref: "0123456789abcdef0123456789abcdef01234567".into(),
+            source_path: Some("actions/docker".into()),
+            repository_dir: repository_dir.clone(),
+            action_dir: action_dir.clone(),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let metadata =
+            parse_action_metadata("runs:\n  using: docker\n  image: Dockerfile\n").unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: action_dir.join("action.yml"),
+            runtime: metadata.runtime().unwrap(),
+            metadata,
+        };
+
+        let invocation = resolved.docker_invocation(&root).unwrap();
+
+        assert_eq!(invocation.build_context_host, Some(repository_dir));
+        assert_eq!(
+            invocation.dockerfile_host,
+            Some(action_dir.join("Dockerfile"))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn downloaded_javascript_entrypoints_reject_unsafe_paths() {
+        let actions_host = Path::new("/tmp/actions");
+        for main in [
+            "../escape.js",
+            "/absolute.js",
+            "C:/drive.js",
+            "nested\\entry.js",
+        ] {
+            let plan = RepositoryActionPlan {
+                step_id: "unsafe".into(),
+                repository: "octo/action".into(),
+                git_ref: "0123456789abcdef0123456789abcdef01234567".into(),
+                source_path: None,
+                repository_dir: actions_host.join("_actions/octo_action/sha"),
+                action_dir: actions_host.join("_actions/octo_action/sha"),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            };
+            let metadata =
+                parse_action_metadata(&format!("runs:\n  using: node20\n  main: '{main}'\n"))
+                    .unwrap();
+            let resolved = ResolvedAction {
+                plan,
+                metadata_path: actions_host.join("_actions/octo_action/sha/action.yml"),
+                runtime: metadata.runtime().unwrap(),
+                metadata,
+            };
+            let error = resolved
+                .javascript_invocation(actions_host)
+                .expect_err("unsafe downloaded JavaScript path passed runner");
+            assert!(error.to_string().contains("unsafe action metadata path"));
+        }
+
+        for (field, value) in [
+            ("pre", "../pre.js"),
+            ("post", "/post.js"),
+            ("pre", "C:/pre.js"),
+            ("post", "nested\\post.js"),
+        ] {
+            let plan = RepositoryActionPlan {
+                step_id: "unsafe-stage".into(),
+                repository: "octo/action".into(),
+                git_ref: "0123456789abcdef0123456789abcdef01234567".into(),
+                source_path: None,
+                repository_dir: actions_host.join("_actions/octo_action/sha"),
+                action_dir: actions_host.join("_actions/octo_action/sha"),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            };
+            let metadata = parse_action_metadata(&format!(
+                "runs:\n  using: node20\n  main: safe.js\n  {field}: '{value}'\n"
+            ))
+            .unwrap();
+            let resolved = ResolvedAction {
+                plan,
+                metadata_path: actions_host.join("_actions/octo_action/sha/action.yml"),
+                runtime: metadata.runtime().unwrap(),
+                metadata,
+            };
+            let error = resolved
+                .javascript_invocation(actions_host)
+                .expect_err("unsafe downloaded JavaScript stage path passed runner");
+            assert!(error.to_string().contains("unsafe action metadata path"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloaded_javascript_entrypoints_reject_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-runner-action-symlink-{}",
+            std::process::id()
+        ));
+        let action_dir = root.join("repository/actions/tool");
+        let outside = root.join("outside");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&action_dir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, action_dir.join("link")).unwrap();
+
+        let plan = RepositoryActionPlan {
+            step_id: "symlink".into(),
+            repository: "octo/action".into(),
+            git_ref: "0123456789abcdef0123456789abcdef01234567".into(),
+            source_path: None,
+            repository_dir: root.join("repository"),
+            action_dir: action_dir.clone(),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let metadata =
+            parse_action_metadata("runs:\n  using: node20\n  main: link/entry.js\n").unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: action_dir.join("action.yml"),
+            runtime: metadata.runtime().unwrap(),
+            metadata,
+        };
+
+        let error = resolved
+            .javascript_invocation(root.join("repository").as_path())
+            .expect_err("symlink escape passed runner");
+        assert!(error.to_string().contains("unsafe action metadata path"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dockerfile_metadata_paths_reject_unsafe_paths() {
+        let actions_host = Path::new("/tmp/actions");
+        for image in [
+            "/Dockerfile",
+            "../Dockerfile",
+            "C:/Dockerfile",
+            "nested\\Dockerfile",
+        ] {
+            let plan = RepositoryActionPlan {
+                step_id: "unsafe-dockerfile".into(),
+                repository: "octo/action".into(),
+                git_ref: "0123456789abcdef0123456789abcdef01234567".into(),
+                source_path: None,
+                repository_dir: actions_host.join("_actions/octo_action/sha"),
+                action_dir: actions_host.join("_actions/octo_action/sha"),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            };
+            let metadata =
+                parse_action_metadata(&format!("runs:\n  using: docker\n  image: '{image}'\n"))
+                    .unwrap();
+            let resolved = ResolvedAction {
+                plan,
+                metadata_path: actions_host.join("_actions/octo_action/sha/action.yml"),
+                runtime: metadata.runtime().unwrap(),
+                metadata,
+            };
+            let error = resolved
+                .docker_invocation(actions_host)
+                .expect_err("unsafe Dockerfile path passed runner");
+            assert!(error.to_string().contains("unsafe action metadata path"));
+        }
+    }
+
+    #[test]
+    fn docker_scheme_surrounding_whitespace_is_rejected_by_runner() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "whitespace".into(),
+            repository: "octo/action".into(),
+            git_ref: "0123456789abcdef0123456789abcdef01234567".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/octo_action/sha"),
+            action_dir: actions_host.join("_actions/octo_action/sha"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let metadata =
+            parse_action_metadata("runs:\n  using: docker\n  image: 'docker://alpine:3.20 '\n")
+                .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/octo_action/sha/action.yml"),
+            metadata,
+            runtime,
+        };
+        let error = resolved
+            .docker_invocation(actions_host)
+            .expect_err("surrounding image whitespace passed runner");
+        assert!(error.to_string().contains("invalid Docker image"));
+    }
+
+    #[test]
+    fn planner_uses_strict_shared_repository_reference_parser() {
+        let parsed = parse_repository_uses(
+            "octo/example/sub/action@0123456789abcdef0123456789abcdef01234567",
+        )
+        .unwrap();
+        assert_eq!(parsed.repository, "octo/example");
+        assert_eq!(parsed.source_path.as_deref(), Some("sub/action"));
+        assert!(parse_repository_uses("octo/example@v1").is_err());
+        assert!(parse_repository_uses(
+            "octo/example/../action@0123456789abcdef0123456789abcdef01234567"
+        )
+        .is_err());
     }
 
     #[test]
