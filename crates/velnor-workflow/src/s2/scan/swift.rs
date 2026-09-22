@@ -12,7 +12,7 @@ use super::file_walk::{
 use super::{unit, RepositoryShape, ScanContext};
 use crate::s2::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
-    GeneratorError, Unit, UnitKind, XcodeToolchain,
+    GeneratorError, Unit, UnitKind, ValidationPhase, XcodeToolchain,
 };
 
 /// Toolchain pin files every Swift cache key hashes, mirroring how Rust keys
@@ -1031,6 +1031,11 @@ fn swift_package_unit(package_root: &str, facts: &PackageFacts) -> Unit {
     // its toolchain provisions. Only Xcode scheme work below and local
     // binary-target consumers carry an Apple need.
     result.tool_version.clone_from(&facts.tools_version);
+    result.phases = if facts.has_tests {
+        vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+    } else {
+        vec![ValidationPhase::SwiftBuild]
+    };
     result
 }
 
@@ -1379,7 +1384,7 @@ mod tests {
     use super::{
         is_xcodegen_spec, load_spec_closure, merge_spec, parse_package_facts,
         parse_xcode_toolchain, parse_yaml_mapping, validate_xcode_version, xcodegen_unit,
-        PackageFacts, XcodeGenSpec, XCODEGEN_TOOL,
+        PackageFacts, ValidationPhase, XcodeGenSpec, XCODEGEN_TOOL,
     };
     use std::collections::BTreeMap;
 
@@ -1432,6 +1437,34 @@ mod tests {
         assert!(parse_package_facts(".testTarget (name: \"App\")").has_tests);
         assert!(!parse_package_facts(".target(name: \"App\")").has_tests);
         assert!(!parse_package_facts("// see .testTarget docs").has_tests);
+    }
+
+    #[test]
+    fn swift_package_units_tag_build_and_test_commands() {
+        let facts = parse_package_facts(".target(name: \"App\")\n.testTarget (name: \"AppTests\")");
+        let unit = super::swift_package_unit("native", &facts);
+        assert_eq!(
+            unit.phases,
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        );
+        assert_eq!(
+            unit.pr_commands,
+            vec![
+                "cd -- 'native' && swift build".to_owned(),
+                "cd -- 'native' && swift test --parallel".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn testless_swift_package_units_keep_only_build_phase() {
+        let facts = parse_package_facts(".target(name: \"App\")");
+        let unit = super::swift_package_unit("native", &facts);
+        assert_eq!(unit.phases, vec![ValidationPhase::SwiftBuild]);
+        assert_eq!(
+            unit.pr_commands,
+            vec!["cd -- 'native' && swift build".to_owned()]
+        );
     }
 
     #[test]
