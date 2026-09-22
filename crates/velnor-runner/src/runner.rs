@@ -24,7 +24,10 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
+use velnor_model::{
+    action_reference::RepositoryActionReference, Generation, SlotId, SlotPhase, TelemetryEvent,
+    Timestamp,
+};
 
 use crate::job_claim::JobClaim;
 use crate::{
@@ -25640,7 +25643,7 @@ runs:
 runs:
   using: composite
   steps:
-    - uses: jdx/mise-action@v4
+    - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
       with:
         github_token: ${{ inputs.github-token }}
 "#,
@@ -25651,10 +25654,12 @@ runs:
         let nested_plan = RepositoryActionPlan {
             step_id: "docs-1".into(),
             repository: "jdx/mise-action".into(),
-            git_ref: "v4".into(),
+            git_ref: "c2a87611a18de5b3828c5652fe268e992400cb5c".into(),
             source_path: None,
-            repository_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
-            action_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
+            repository_dir: Path::new("/tmp/actions")
+                .join("_actions/jdx_mise-action/c2a87611a18de5b3828c5652fe268e992400cb5c"),
+            action_dir: Path::new("/tmp/actions")
+                .join("_actions/jdx_mise-action/c2a87611a18de5b3828c5652fe268e992400cb5c"),
             inputs: [("github_token".to_string(), "ghs_token".to_string())].into(),
             env: Vec::new(),
             condition: None,
@@ -25663,7 +25668,9 @@ runs:
         };
         let resolved = ResolvedAction {
             plan: nested_plan,
-            metadata_path: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4/action.yml"),
+            metadata_path: Path::new("/tmp/actions").join(
+                "_actions/jdx_mise-action/c2a87611a18de5b3828c5652fe268e992400cb5c/action.yml",
+            ),
             metadata: nested_metadata,
             runtime: ActionRuntime::JavaScript {
                 node: "node20".into(),
@@ -26363,17 +26370,19 @@ runs:
   using: composite
   steps:
     - id: upload
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
 "#,
         )
         .unwrap();
         let upload_plan = RepositoryActionPlan {
             step_id: "pages-upload".into(),
             repository: "actions/upload-artifact".into(),
-            git_ref: "v7".into(),
+            git_ref: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a".into(),
             source_path: None,
-            repository_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
-            action_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
+            repository_dir: actions_host
+                .join("_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+            action_dir: actions_host
+                .join("_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
             inputs: BTreeMap::new(),
             env: Vec::new(),
             condition: None,
@@ -26393,7 +26402,9 @@ runs:
         };
         let upload = ResolvedAction {
             plan: upload_plan,
-            metadata_path: actions_host.join("_actions/actions_upload-artifact/v7/action.yml"),
+            metadata_path: actions_host.join(
+                "_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml",
+            ),
             runtime: upload_metadata.runtime().unwrap(),
             metadata: upload_metadata,
         };
@@ -26428,12 +26439,7 @@ runs:
         assert!(*continue_on_error);
     }
 
-    #[derive(Clone)]
-    struct TargetActionReference {
-        repository: String,
-        source_path: Option<String>,
-        git_ref: String,
-    }
+    type TargetActionReference = RepositoryActionReference;
 
     fn collect_repository_uses(
         value: &serde_yaml::Value,
@@ -26468,25 +26474,18 @@ runs:
     }
 
     fn target_repository_uses(value: &serde_yaml::Value) -> Option<TargetActionReference> {
-        let uses = value.as_str()?.trim();
+        let uses = value.as_str()?;
         if uses.starts_with('.') || uses.starts_with("docker://") {
             return None;
         }
-        let (path, git_ref) = uses.rsplit_once('@')?;
-        let parts = path.split('/').collect::<Vec<_>>();
-        if parts.len() < 2 {
+        let reference = RepositoryActionReference::parse(uses).ok()?;
+        if reference
+            .repository
+            .eq_ignore_ascii_case("actions/checkout")
+        {
             return None;
         }
-        let repository = format!("{}/{}", parts[0], parts[1]);
-        if repository.eq_ignore_ascii_case("actions/checkout") {
-            return None;
-        }
-        let source_path = (parts.len() > 2).then(|| parts[2..].join("/"));
-        Some(TargetActionReference {
-            repository,
-            source_path,
-            git_ref: git_ref.to_string(),
-        })
+        Some(reference)
     }
 
     fn workflow_files(root: &Path) -> Vec<PathBuf> {
