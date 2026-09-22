@@ -218,14 +218,10 @@ impl CiUnit {
             }
             if self.check_commands.is_empty() {
                 if self.kind == "swift"
-                    && self.phases.iter().all(|phase| {
-                        matches!(
-                            phase,
-                            ValidationPhase::XcodegenGenerate
-                                | ValidationPhase::SwiftBuild
-                                | ValidationPhase::SwiftTest
-                        )
-                    })
+                    && self
+                        .phases
+                        .iter()
+                        .all(|phase| phase.allows_empty_prerequisites())
                 {
                     return Ok(Vec::new());
                 }
@@ -479,7 +475,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-test, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"
                         ))
                     })
                 })
@@ -6955,6 +6951,34 @@ workspace_check = true
             ValidationPhase::SwiftTest,
         ];
         swift.check_commands.clear();
+        let mut swift_run = swift.clone();
+        swift_run.id = "swift-package-app".to_owned();
+        swift_run.pr_commands = vec![
+            "true # swift build".to_owned(),
+            "true # swift run --skip-build --product App".to_owned(),
+            "true # swift test".to_owned(),
+        ];
+        swift_run.full_commands = swift_run.pr_commands.clone();
+        swift_run.phases = vec![
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftRun,
+            ValidationPhase::SwiftTest,
+        ];
+        assert_eq!(
+            must(
+                swift_run.commands_for_phase(Scope::Affected, ValidationPhase::SwiftRun),
+                "Swift executable selection",
+            ),
+            vec!["true # swift run --skip-build --product App".to_owned()]
+        );
+        assert!(
+            must(
+                swift_run.commands_for_phase(Scope::Affected, ValidationPhase::Check),
+                "typed Swift check phase",
+            )
+            .is_empty(),
+            "swift-run participates in the typed empty prerequisite contract"
+        );
         assert_eq!(
             must(
                 swift.commands_for_phase(Scope::Affected, ValidationPhase::XcodegenGenerate),
@@ -6992,11 +7016,22 @@ workspace_check = true
             .is_empty(),
             "typed Swift --phase check is an explicit empty tier"
         );
+        let mut skewed_check = swift.clone();
+        skewed_check.pr_commands.pop();
+        assert_eq!(
+            must(
+                skewed_check.commands_for_phase(Scope::Affected, ValidationPhase::Check),
+                "Swift check selection with skewed runnable commands",
+            ),
+            Vec::<String>::new(),
+            "--phase check does not require runnable command alignment"
+        );
 
         let mut invalid_swift = swift.clone();
         invalid_swift.phases = vec![
             ValidationPhase::Fmt,
             ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftRun,
             ValidationPhase::SwiftTest,
         ];
         let error = must_fail(
@@ -7068,7 +7103,7 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-test, or check"),
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,

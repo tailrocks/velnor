@@ -603,7 +603,7 @@ impl UnitKind {
 
 /// One typed validation phase of a unit's commands. The scan tags each
 /// command it structures (Rust fmt/clippy/test/doctest, XcodeGen generation,
-/// and Swift build/test); generated jobs run
+/// and Swift build/run/test); generated jobs run
 /// one step per runnable phase behind `--phase`, and the prerequisite tier
 /// selects the check phase. Phase membership is positional data, never
 /// substring detection on command text.
@@ -618,6 +618,8 @@ pub enum ValidationPhase {
     XcodegenGenerate,
     #[serde(rename = "swift-build")]
     SwiftBuild,
+    #[serde(rename = "swift-run")]
+    SwiftRun,
     #[serde(rename = "swift-test")]
     SwiftTest,
     Check,
@@ -626,15 +628,16 @@ pub enum ValidationPhase {
 impl ValidationPhase {
     /// The runnable phases in step order: formatting first, then lints, then
     /// tests, then doctests, then XcodeGen generation, then Swift builds and
-    /// tests. `Check` is prerequisite-only and never renders a validation
-    /// step.
-    pub(crate) const RUNNABLE: [Self; 7] = [
+    /// executable runs, then tests. `Check` is prerequisite-only and never
+    /// renders a validation step.
+    pub(crate) const RUNNABLE: [Self; 8] = [
         Self::Fmt,
         Self::Clippy,
         Self::Test,
         Self::Doctest,
         Self::XcodegenGenerate,
         Self::SwiftBuild,
+        Self::SwiftRun,
         Self::SwiftTest,
     ];
 
@@ -647,6 +650,7 @@ impl ValidationPhase {
             "doctest" => Self::Doctest,
             "xcodegen-generate" => Self::XcodegenGenerate,
             "swift-build" => Self::SwiftBuild,
+            "swift-run" => Self::SwiftRun,
             "swift-test" => Self::SwiftTest,
             "check" => Self::Check,
             _ => return None,
@@ -663,6 +667,7 @@ impl ValidationPhase {
             Self::Doctest => "doctest",
             Self::XcodegenGenerate => "xcodegen-generate",
             Self::SwiftBuild => "swift-build",
+            Self::SwiftRun => "swift-run",
             Self::SwiftTest => "swift-test",
             Self::Check => "check",
         }
@@ -677,6 +682,7 @@ impl ValidationPhase {
             Self::Doctest => "Doctests",
             Self::XcodegenGenerate => "XcodeGen project generation",
             Self::SwiftBuild => "Swift build",
+            Self::SwiftRun => "Swift executable runs",
             Self::SwiftTest => "Swift tests",
             Self::Check => "Prerequisite check",
         }
@@ -689,6 +695,15 @@ impl ValidationPhase {
             .iter()
             .map(|phase| phase.as_str().to_owned())
             .collect()
+    }
+
+    /// Native Apple phases do not need a Rust-style prerequisite tier. Any
+    /// other phase set must carry an explicit check command.
+    pub(crate) fn allows_empty_prerequisites(self) -> bool {
+        matches!(
+            self,
+            Self::XcodegenGenerate | Self::SwiftBuild | Self::SwiftRun | Self::SwiftTest
+        )
     }
 }
 
@@ -3719,7 +3734,13 @@ pub(crate) fn validate_unit_phases(config: &ProjectConfig) -> Result<(), Generat
                 unit.full_commands.len()
             )));
         }
-        if unit.check_commands.is_empty() && unit.kind != UnitKind::Swift {
+        if unit.check_commands.is_empty()
+            && !(unit.kind == UnitKind::Swift
+                && unit
+                    .phases
+                    .iter()
+                    .all(|phase| phase.allows_empty_prerequisites()))
+        {
             return Err(GeneratorError::usage(format!(
                 "unit `{}` carries validation phases without prerequisite check commands",
                 unit.id
@@ -14721,6 +14742,37 @@ channel = "stable"
                 .contains("without prerequisite check commands"),
             "phases without a stored check fail closed: {error}"
         );
+        let mut swift = phased_unit();
+        swift.id = "swift-package-app".to_owned();
+        swift.kind = UnitKind::Swift;
+        swift.pr_commands = vec![
+            "swift build".to_owned(),
+            "swift run App".to_owned(),
+            "swift test".to_owned(),
+        ];
+        swift.full_commands = swift.pr_commands.clone();
+        swift.phases = vec![
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftRun,
+            ValidationPhase::SwiftTest,
+        ];
+        swift.check_commands.clear();
+        must(
+            validate(swift.clone()),
+            "typed Swift phases may omit the prerequisite check",
+        );
+        let mut invalid_swift = swift;
+        invalid_swift.phases[1] = ValidationPhase::Fmt;
+        let error = must_fail(
+            validate(invalid_swift),
+            "untyped Swift phases without a prerequisite",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without prerequisite check commands"),
+            "empty prerequisites are only valid for typed Swift phases: {error}"
+        );
         let mut tagless = phased_unit();
         tagless.phases.clear();
         let error = must_fail(validate(tagless), "a check without phases");
@@ -14737,10 +14789,15 @@ channel = "stable"
             Some(ValidationPhase::SwiftBuild)
         );
         assert_eq!(
+            ValidationPhase::parse("swift-run"),
+            Some(ValidationPhase::SwiftRun)
+        );
+        assert_eq!(
             ValidationPhase::parse("swift-test"),
             Some(ValidationPhase::SwiftTest)
         );
         assert_eq!(ValidationPhase::SwiftBuild.as_str(), "swift-build");
+        assert_eq!(ValidationPhase::SwiftRun.as_str(), "swift-run");
         assert_eq!(ValidationPhase::SwiftTest.as_str(), "swift-test");
         assert_eq!(
             ValidationPhase::parse("xcodegen-generate"),
@@ -14758,6 +14815,10 @@ channel = "stable"
         assert_eq!(
             serde_json::to_string(&ValidationPhase::SwiftBuild).expect("serialize swift build"),
             "\"swift-build\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ValidationPhase::SwiftRun).expect("serialize swift run"),
+            "\"swift-run\""
         );
         assert_eq!(
             serde_json::to_string(&ValidationPhase::SwiftTest).expect("serialize swift test"),
