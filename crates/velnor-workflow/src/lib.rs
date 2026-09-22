@@ -1794,10 +1794,13 @@ fn close_unit_mise_tools_for_target(
     }
     let declared_install_deps = install_deps.depends.clone();
     validate_mise_install_deps_are_closed(
-        &config.units,
+        config,
         lock_keys,
         &lock_backends,
         &declared_install_deps,
+        |tools| {
+            crate::s2::close_mise_tool_subset(tools, lock_keys, &lock_backends, &install_deps);
+        },
     )?;
     Ok(())
 }
@@ -1807,17 +1810,37 @@ fn close_unit_mise_tools_for_target(
 /// the same parsed dependency graph at the S1 scan boundary instead of
 /// weakening the contract or converting a whole S1 project into an S2 model.
 fn validate_mise_install_deps_are_closed(
-    units: &[Unit],
+    config: &ProjectConfig,
     lock_keys: &BTreeSet<String>,
     lock_backends: &BTreeMap<String, String>,
     install_deps: &BTreeMap<String, Vec<String>>,
+    close_subset: impl Fn(&mut Vec<String>),
 ) -> Result<(), GeneratorError> {
-    for unit in units {
-        if unit.mise_tools.is_empty() {
+    // Validate the same final per-lane tool subsets the schema-1 IR renders:
+    // `mise_tool_ids` adds nextest, while the Velnor subset also adds
+    // cargo-deny. The union proves both provider lanes, including units whose
+    // declared `mise_tools` vector is empty. Close once more after those
+    // implicit additions, matching schema-2's structural ordering.
+    let ir = WorkflowIr::from_config(config);
+    for unit in &config.units {
+        let contract = ir.default_unit_contract(unit, false);
+        let mut tools = ir
+            .unit_lane_facts(unit, &contract, RunnerMode::Github)
+            .mise_tools;
+        for tool in ir
+            .unit_lane_facts(unit, &contract, RunnerMode::Velnor)
+            .mise_tools
+        {
+            if !tools.iter().any(|existing| existing == &tool) {
+                tools.push(tool);
+            }
+        }
+        close_subset(&mut tools);
+        if tools.is_empty() {
             continue;
         }
         let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
-        for tool in &unit.mise_tools {
+        for tool in &tools {
             if let Some(reason) = schema_one_unknown_mise_backend(tool, lock_backends) {
                 return Err(GeneratorError::usage(format!(
                     "unit {} installs {tool}, {reason} (planning models mise install dependencies), known keys: {}",
@@ -1826,13 +1849,12 @@ fn validate_mise_install_deps_are_closed(
                 )));
             }
         }
-        for tool in &unit.mise_tools {
+        for tool in &tools {
             let Some(names) = install_deps.get(tool) else {
                 continue;
             };
             for name in names {
-                if !unit
-                    .mise_tools
+                if !tools
                     .iter()
                     .any(|member| schema_one_mise_dependency_matches(name, member))
                 {
@@ -1859,6 +1881,7 @@ fn schema_one_unknown_mise_backend(
         "aube",
         "bun",
         "cargo-binstall",
+        "cargo-nextest",
         "dotnet",
         "elixir",
         "erlang",
@@ -14346,6 +14369,80 @@ lockfile = true
         assert!(
             message.contains("examplebackend") && message.contains("backend"),
             "error names the unknown backend: {message}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_rejects_a_dangling_implicit_nextest_dependency_after_closure() {
+        let root = nextest_fixture_repository("mise-schema-one-implicit-nextest-dependency");
+        let unit = scanned_rust_unit_id(&root);
+        // No generation-config row declares tools for this scanned unit: the
+        // only install member is the nextest tool the schema-1 IR derives
+        // from its commands later in rendering.
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[settings]\nlockfile = true\n\n[tools]\n\"aqua:nextest-rs/nextest/cargo-nextest\" = { version = \"0.9.0\", depends = [\"example-ghost\"] }\n",
+            ),
+            "write implicit nextest dependency fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"aqua:nextest-rs/nextest/cargo-nextest\"]]\nversion = \"0.9.0\"\nbackend = \"aqua:nextest-rs/nextest/cargo-nextest\"\n",
+            ),
+            "write implicit nextest dependency lock",
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "schema-1 must reject a dangling implicit nextest dependency",
+        );
+        let message = error.to_string();
+        assert!(message.contains(&unit), "error names the unit: {message}");
+        assert!(
+            message.contains("aqua:nextest-rs/nextest/cargo-nextest")
+                && message.contains("example-ghost"),
+            "error names the implicit nextest dependency edge: {message}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_rejects_a_dangling_implicit_cargo_deny_dependency_after_closure() {
+        let root = configured_repository("mise-schema-one-implicit-cargo-deny-dependency", None);
+        must(
+            fs::write(root.join("deny.toml"), "[advisories]\n"),
+            "write cargo-deny policy fixture",
+        );
+        // The policy unit has an empty declared mise_tools vector. Its
+        // cargo-deny install is introduced only by the final Velnor IR.
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[settings]\nlockfile = true\n\n[tools]\n\"aqua:EmbarkStudios/cargo-deny\" = { version = \"0.18.3\", depends = [\"example-ghost\"] }\n",
+            ),
+            "write implicit cargo-deny dependency fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"aqua:EmbarkStudios/cargo-deny\"]]\nversion = \"0.18.3\"\nbackend = \"aqua:EmbarkStudios/cargo-deny\"\n",
+            ),
+            "write implicit cargo-deny dependency lock",
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "schema-1 must reject a dangling implicit cargo-deny dependency",
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("rust-policy"),
+            "error names the policy unit: {message}"
+        );
+        assert!(
+            message.contains("aqua:EmbarkStudios/cargo-deny") && message.contains("example-ghost"),
+            "error names the implicit cargo-deny dependency edge: {message}"
         );
         let _ = fs::remove_dir_all(root);
     }
