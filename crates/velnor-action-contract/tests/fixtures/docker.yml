@@ -1,0 +1,12 @@
+runs:
+  using: docker
+  image: Dockerfile
+  entrypoint: /entrypoint.sh
+  args: [false, 7, null]
+  env:
+    FLAG: false
+    COUNT: 7
+  pre-entrypoint: /pre.sh
+  pre-if: success()
+  post-entrypoint: /post.sh
+  post-if: always()
