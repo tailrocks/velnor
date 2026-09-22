@@ -1253,9 +1253,11 @@ fn post_provision(state: ScaleSetWorkerState) -> bool {
 /// (`velnor-<set>-<request>`). Returns `None` for foreign shapes — the
 /// caller then releases nothing instead of guessing.
 fn holder_for_key(scale_set_id: i32, key: &str) -> Option<String> {
-    let name = key.split('/').next_back()?;
-    let request = name.split('-').next_back()?.parse::<i64>().ok()?;
-    Some(permit_holder(scale_set_id, request))
+    let (key_set, name) = key.split_once('/')?;
+    let key_set = key_set.parse::<i32>().ok()?;
+    let (name_set, request) = crate::scaleset::intents::parse_runner_name(name)?;
+    (key_set == scale_set_id && name_set == scale_set_id)
+        .then_some(permit_holder(scale_set_id, request))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1510,15 +1512,29 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_started(&mut self, started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
-        let Some(intent) = self
-            .intents
-            .get_by_request(self.config.scale_set_id, request_id)
-            .map_err(|error| LaneError::new("find provision intent", error))?
-        else {
-            return Ok(());
+        let key = if !started.runner_name.is_empty() {
+            let Some((scale_set_id, _)) =
+                crate::scaleset::intents::parse_runner_name(&started.runner_name)
+            else {
+                return Ok(());
+            };
+            if scale_set_id != self.config.scale_set_id {
+                return Ok(());
+            }
+            OwnershipId::bind(self.config.scale_set_id, &started.runner_name)
+                .as_str()
+                .to_string()
+        } else {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
+            let Some(intent) = self
+                .intents
+                .get_by_request(self.config.scale_set_id, request_id)
+                .map_err(|error| LaneError::new("find provision intent", error))?
+            else {
+                return Ok(());
+            };
+            Self::ownership_key(&intent)
         };
-        let key = Self::ownership_key(&intent);
         let known = self
             .registry
             .get(&key)
@@ -1556,15 +1572,35 @@ impl WorkerLane for DaemonWorkerLane {
             self.transition_worker(&key, *edge)
                 .map_err(|error| LaneError::new("record job started", error))?;
         }
-        let holder = permit_holder(self.config.scale_set_id, request_id);
+        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
+        let holder = holder_for_key(self.config.scale_set_id, &key)
+            .unwrap_or_else(|| permit_holder(self.config.scale_set_id, request_id));
         self.fenced_transition(&holder, LedgerPermitState::Running)
             .map_err(|error| LaneError::new("mark permit running", error))?;
         Ok(())
     }
 
     fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
-        self.note_terminal_request(request_id)
+        self.refresh_generation()?;
+        self.opportunistic_sweep();
+        let key = if !completed.runner_name.is_empty() {
+            let Some((scale_set_id, _)) =
+                crate::scaleset::intents::parse_runner_name(&completed.runner_name)
+            else {
+                return Ok(());
+            };
+            if scale_set_id != self.config.scale_set_id {
+                return Ok(());
+            }
+            OwnershipId::bind(self.config.scale_set_id, &completed.runner_name)
+                .as_str()
+                .to_string()
+        } else {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
+            self.terminal_key(request_id)?
+        };
+        self.drive_terminal(&key)
+            .map_err(|error| LaneError::new("drive worker terminal", error))
     }
 
     fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {
@@ -1749,6 +1785,8 @@ mod tests {
             holder_for_key(7, "7/velnor-7-4244").as_deref(),
             Some("scaleset/7/4244")
         );
+        assert_eq!(holder_for_key(7, "7/velnor-8-4244"), None);
+        assert_eq!(holder_for_key(7, "8/velnor-8-4244"), None);
         assert_eq!(holder_for_key(7, "no-slash-here"), None);
         assert_eq!(holder_for_key(7, "7/velnor-7-notanumber"), None);
         assert_eq!(holder_for_key(7, ""), None);
