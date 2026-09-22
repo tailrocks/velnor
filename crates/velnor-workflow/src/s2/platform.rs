@@ -672,7 +672,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
         if let Some(commands) = prepared.remove(&unit.id) {
-            prepend_prepare_commands(unit, &commands);
+            prepend_prepare_commands(unit, &commands)?;
         }
     }
     Ok(())
@@ -703,19 +703,11 @@ fn materialize_product_input_watches(config: &mut ProjectConfig) {
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every provider and in
 /// local runs, which read the same serialized vectors.
-fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
-    let mut pr_commands = commands.to_vec();
-    pr_commands.extend(unit.pr_commands.iter().cloned());
-    unit.pr_commands = pr_commands;
-    let mut full_commands = commands.to_vec();
-    full_commands.extend(unit.full_commands.iter().cloned());
-    unit.full_commands = full_commands;
-    // Prepare commands carry no phase tags and shift every position: the unit
-    // keeps the product rebuild ahead of its checks and verifies through the
-    // single legacy step.
-    unit.clear_phases();
+fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) -> Result<(), GeneratorError> {
+    unit.prepend_precondition_commands(commands)?;
     unit.watch.sort();
     unit.watch.dedup();
+    Ok(())
 }
 
 /// The job-level env a collapsed kind workflow agrees on: every member's env

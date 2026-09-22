@@ -43,7 +43,7 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
-fn generated_project(schema: u8, use_nextest: bool) -> String {
+fn generated_project(schema: u8, use_nextest: bool, with_precondition: bool) -> String {
     let label = format!(
         "schema-{schema}-{}",
         if use_nextest { "nextest" } else { "test" }
@@ -61,6 +61,13 @@ fn generated_project(schema: u8, use_nextest: bool) -> String {
         "\n[workflow]",
         "\nrevision = \"1111111111111111111111111111111111111111\"\n\n[[units]]\nid = \"rust-policy-gate\"\nkind = \"rust\"\nroot = \".\"\nworkspace_check = true\nci_tasks = [\"check-smoke\"]\n\n[workflow]",
     );
+    let config = if with_precondition {
+        format!(
+            "{config}\n[[declare]]\nprimitive = \"regen-gate\"\n\n[declare.args]\ncommand = \"echo precondition\"\n"
+        )
+    } else {
+        config
+    };
     fs::write(config_path, config).unwrap();
     fs::write(
         root.join("mise.toml"),
@@ -100,7 +107,9 @@ fn command_labels(commands: &[toml::Value]) -> Vec<&'static str> {
         .iter()
         .map(|command| command.as_str().unwrap())
         .filter_map(|command| {
-            if command.contains("cargo fmt ") || command.contains("mbx fmt ") {
+            if command == "echo precondition" {
+                Some("precondition")
+            } else if command.contains("cargo fmt ") || command.contains("mbx fmt ") {
                 Some("fmt")
             } else if command.contains("cargo clippy ") || command.contains("mbx clippy ") {
                 Some("clippy")
@@ -121,12 +130,24 @@ fn command_labels(commands: &[toml::Value]) -> Vec<&'static str> {
 /// crates through an explicit doctest phase. Schema 1's gamma is bin-only
 /// and schema 2's polyglot package ships no sources, so neither earns the
 /// phase; without nextest `cargo test` covers doctests inline.
-fn assert_rust_unit_phases(unit: &toml::Value, unit_id: &str, use_nextest: bool) -> bool {
+fn assert_rust_unit_phases(
+    unit: &toml::Value,
+    unit_id: &str,
+    use_nextest: bool,
+    with_precondition: bool,
+) -> bool {
     let wants_doctest = use_nextest && !matches!(unit_id, "rust-gamma" | "rust-fixture");
-    let expected_phases: &[&str] = if wants_doctest {
-        &["fmt", "clippy", "test", "doctest"]
+    let expected_phases: Vec<&str> = if wants_doctest {
+        vec!["fmt", "clippy", "test", "doctest"]
     } else {
-        &["fmt", "clippy", "test"]
+        vec!["fmt", "clippy", "test"]
+    };
+    let expected_phases = if with_precondition {
+        std::iter::once("precondition")
+            .chain(expected_phases.iter().copied())
+            .collect::<Vec<_>>()
+    } else {
+        expected_phases
     };
     let phases = unit["phases"].as_array().unwrap();
     let phase_ids = phases
@@ -144,7 +165,7 @@ fn assert_rust_unit_phases(unit: &toml::Value, unit_id: &str, use_nextest: bool)
     wants_doctest
 }
 
-fn assert_policy_gate(units: &[toml::Value], keys: &[&str], schema: u8) {
+fn assert_policy_gate(units: &[toml::Value], keys: &[&str], schema: u8, with_precondition: bool) {
     let policy_gate = units
         .iter()
         .find(|unit| unit["id"].as_str() == Some("rust-policy-gate"));
@@ -153,10 +174,18 @@ fn assert_policy_gate(units: &[toml::Value], keys: &[&str], schema: u8) {
         "schema {schema} omitted the declared workspace gate"
     );
     let policy_gate = policy_gate.unwrap();
-    let expected_gate_commands = [
-        "mbx check --workspace --all-targets --locked",
-        "mise run check-smoke",
-    ];
+    let expected_gate_commands = if with_precondition {
+        vec![
+            "echo precondition",
+            "mbx check --workspace --all-targets --locked",
+            "mise run check-smoke",
+        ]
+    } else {
+        vec![
+            "mbx check --workspace --all-targets --locked",
+            "mise run check-smoke",
+        ]
+    };
     let mut gate_keys_checked = 0;
     for key in keys {
         let Some(commands) = policy_gate.get(*key).and_then(toml::Value::as_array) else {
@@ -178,7 +207,7 @@ fn assert_policy_gate(units: &[toml::Value], keys: &[&str], schema: u8) {
     }
 }
 
-fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
+fn assert_rust_order(project: &str, schema: u8, use_nextest: bool, with_precondition: bool) {
     let document: toml::Value = toml::from_str(project).unwrap();
     let units = document["unit"].as_array().unwrap();
     let keys = if schema == 1 {
@@ -186,7 +215,7 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
     } else {
         &COMMAND_KEYS_SCHEMA_2[..]
     };
-    assert_policy_gate(units, keys, schema);
+    assert_policy_gate(units, keys, schema, with_precondition);
     let mut checked = 0;
     for unit in units {
         if unit["kind"].as_str() != Some("rust") {
@@ -201,7 +230,7 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
         if unit_id == "rust-policy-gate" {
             continue;
         }
-        let wants_doctest = assert_rust_unit_phases(unit, unit_id, use_nextest);
+        let wants_doctest = assert_rust_unit_phases(unit, unit_id, use_nextest, with_precondition);
         for key in keys {
             let commands = unit.get(*key).and_then(toml::Value::as_array);
             assert!(
@@ -210,13 +239,16 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
             );
             let commands = commands.unwrap();
             let labels = command_labels(commands);
-            let expected: &[&str] = if wants_doctest {
-                &["fmt", "clippy", "nextest", "test"]
+            let mut expected = if wants_doctest {
+                vec!["fmt", "clippy", "nextest", "test"]
             } else if use_nextest {
-                &["fmt", "clippy", "nextest"]
+                vec!["fmt", "clippy", "nextest"]
             } else {
-                &["fmt", "clippy", "test"]
+                vec!["fmt", "clippy", "test"]
             };
+            if with_precondition {
+                expected.insert(0, "precondition");
+            }
             assert_eq!(
                 labels.len(),
                 commands.len(),
@@ -267,8 +299,38 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
 fn generated_rust_commands_keep_clippy_before_tests_in_both_schemas() {
     for schema in [1, 2] {
         for use_nextest in [false, true] {
-            let project = generated_project(schema, use_nextest);
-            assert_rust_order(&project, schema, use_nextest);
+            let project = generated_project(schema, use_nextest, false);
+            assert_rust_order(&project, schema, use_nextest, false);
+        }
+    }
+}
+
+#[test]
+fn generated_preconditions_zip_with_phases_in_both_schemas() {
+    for schema in [1, 2] {
+        let project = generated_project(schema, false, true);
+        assert_rust_order(&project, schema, false, true);
+
+        let document: toml::Value = toml::from_str(&project).unwrap();
+        let units = document["unit"].as_array().unwrap();
+        let keys = if schema == 1 {
+            &COMMAND_KEYS_SCHEMA_1[..]
+        } else {
+            &COMMAND_KEYS_SCHEMA_2[..]
+        };
+        for unit in units {
+            if unit["kind"].as_str() != Some("rust")
+                || unit["id"].as_str() == Some("rust-policy-gate")
+            {
+                continue;
+            }
+            let phases = unit["phases"].as_array().unwrap();
+            assert_eq!(phases[0].as_str(), Some("precondition"));
+            for key in keys {
+                let commands = unit[*key].as_array().unwrap();
+                assert_eq!(commands[0].as_str(), Some("echo precondition"));
+                assert_eq!(commands.len(), phases.len(), "schema {schema} {key}");
+            }
         }
     }
 }

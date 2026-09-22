@@ -249,6 +249,16 @@ impl CiUnit {
         Ok(selected)
     }
 
+    /// The first runnable phase a phased unit carries. Preconditions are
+    /// inserted ahead of the scanner-derived phases, so prerequisite-only
+    /// consumers can run them before their stored check command too.
+    fn first_runnable_phase(&self) -> Option<ValidationPhase> {
+        ValidationPhase::RUNNABLE
+            .iter()
+            .copied()
+            .find(|phase| self.phases.contains(phase))
+    }
+
     /// The stored prerequisite check commands for a lane. The Velnor lane
     /// drops Cargo's `--no-deps`: `mbx check` does not expose it. The flag
     /// adaptation is the preserved lane rule; phase selection itself never
@@ -555,7 +565,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, or check"
+                            "unsupported --phase: {value}; use precondition, fmt, clippy, test, doctest, or check"
                         ))
                     })
                 })
@@ -3201,14 +3211,44 @@ fn prerequisite_commands(
     phase: Option<ValidationPhase>,
 ) -> Result<Vec<String>, GeneratorError> {
     match phase {
-        None | Some(ValidationPhase::Fmt | ValidationPhase::Check) => {
+        None | Some(ValidationPhase::Check) => {
             if unit.phases.is_empty() {
                 // Units without phase tags — TOML the phase model predates,
-                // declared units, regen-gated units — keep the base
-                // clippy→check rewrite instead of silently no-oping.
+                // declared units — keep the base clippy→check rewrite
+                // instead of silently no-oping.
                 Ok(legacy_prerequisite_commands(unit, lane, scope))
+            } else if unit.first_runnable_phase() == Some(ValidationPhase::Precondition) {
+                let mut commands =
+                    unit.commands_for_phase(lane, scope, ValidationPhase::Precondition)?;
+                commands.extend(unit.commands_for_phase(lane, scope, ValidationPhase::Check)?);
+                Ok(commands)
             } else {
                 unit.commands_for_phase(lane, scope, ValidationPhase::Check)
+            }
+        }
+        Some(ValidationPhase::Precondition) => {
+            if unit.phases.is_empty() {
+                Ok(legacy_prerequisite_commands(unit, lane, scope))
+            } else {
+                let mut commands =
+                    unit.commands_for_phase(lane, scope, ValidationPhase::Precondition)?;
+                if unit.first_runnable_phase() == Some(ValidationPhase::Precondition) {
+                    commands.extend(unit.commands_for_phase(
+                        lane,
+                        scope,
+                        ValidationPhase::Check,
+                    )?);
+                }
+                Ok(commands)
+            }
+        }
+        Some(ValidationPhase::Fmt) => {
+            if unit.phases.is_empty() {
+                Ok(legacy_prerequisite_commands(unit, lane, scope))
+            } else if unit.first_runnable_phase() == Some(ValidationPhase::Fmt) {
+                unit.commands_for_phase(lane, scope, ValidationPhase::Check)
+            } else {
+                Ok(Vec::new())
             }
         }
         // The prerequisite tier compiles the unit once, in the first
@@ -6266,6 +6306,78 @@ workspace_check = true
     }
 
     #[test]
+    fn precondition_phase_zips_with_runtime_selection_and_prerequisites() {
+        let unit = CiUnit {
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            github_pr_commands: vec![
+                "echo precondition".to_owned(),
+                "cargo fmt --check".to_owned(),
+            ],
+            github_full_commands: vec![
+                "echo precondition".to_owned(),
+                "cargo fmt --check".to_owned(),
+            ],
+            velnor_pr_commands: vec!["echo precondition".to_owned(), "mbx fmt --check".to_owned()],
+            velnor_full_commands: vec![
+                "echo precondition".to_owned(),
+                "mbx fmt --check".to_owned(),
+            ],
+            phases: vec![ValidationPhase::Precondition, ValidationPhase::Fmt],
+            check_commands: vec!["cargo check --locked --no-deps".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+            reads_closed: false,
+        };
+        for lane in [RunnerLane::Github, RunnerLane::Velnor] {
+            let expected_check = if lane == RunnerLane::Velnor {
+                "cargo check --locked"
+            } else {
+                "cargo check --locked --no-deps"
+            };
+            assert_eq!(
+                must(
+                    unit.commands_for_phase(lane, Scope::Affected, ValidationPhase::Precondition),
+                    "precondition selection",
+                ),
+                vec!["echo precondition"]
+            );
+            assert_eq!(
+                must(
+                    unit.commands_for_phase(lane, Scope::Affected, ValidationPhase::Fmt),
+                    "format selection",
+                )
+                .len(),
+                1
+            );
+            assert_eq!(
+                must(
+                    prerequisite_commands(&unit, lane, Scope::Affected, None),
+                    "full prerequisite tier",
+                ),
+                vec!["echo precondition", expected_check]
+            );
+        }
+        assert_eq!(
+            must(
+                prerequisite_commands(
+                    &unit,
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    Some(ValidationPhase::Precondition),
+                ),
+                "precondition prerequisite tier",
+            ),
+            vec!["echo precondition", "cargo check --locked --no-deps"]
+        );
+    }
+
+    #[test]
     fn prerequisite_tier_falls_back_to_clippy_rewrite_without_phases() {
         // Old-TOML shape: no `phases` or `check_commands` keys, so both
         // deserialize empty. The prerequisite tier must behave byte-identical
@@ -6473,9 +6585,9 @@ workspace_check = true
             .collect::<Vec<_>>();
         let error = must_fail(super::try_run(&args), "unknown phase");
         assert!(
-            error
-                .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, or check"),
+            error.to_string().contains(
+                "unsupported --phase: fuzz; use precondition, fmt, clippy, test, doctest, or check"
+            ),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,
