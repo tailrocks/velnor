@@ -14808,20 +14808,31 @@ channel = "stable"
             "xcodegen-generate"
         );
         assert_eq!(
-            serde_json::to_string(&ValidationPhase::XcodegenGenerate)
-                .expect("serialize XcodeGen generation"),
+            must(
+                serde_json::to_string(&ValidationPhase::XcodegenGenerate),
+                "serialize XcodeGen generation",
+            ),
             "\"xcodegen-generate\""
         );
         assert_eq!(
-            serde_json::to_string(&ValidationPhase::SwiftBuild).expect("serialize swift build"),
+            must(
+                serde_json::to_string(&ValidationPhase::SwiftBuild),
+                "serialize swift build",
+            ),
             "\"swift-build\""
         );
         assert_eq!(
-            serde_json::to_string(&ValidationPhase::SwiftRun).expect("serialize swift run"),
+            must(
+                serde_json::to_string(&ValidationPhase::SwiftRun),
+                "serialize swift run",
+            ),
             "\"swift-run\""
         );
         assert_eq!(
-            serde_json::to_string(&ValidationPhase::SwiftTest).expect("serialize swift test"),
+            must(
+                serde_json::to_string(&ValidationPhase::SwiftTest),
+                "serialize swift test",
+            ),
             "\"swift-test\""
         );
     }
