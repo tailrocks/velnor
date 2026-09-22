@@ -530,12 +530,20 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         started: &ScaleSetJobStarted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
         let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
+        let Some(request_id) = crate::scaleset::intents::request_id_for_runner(
+            self.config.scale_set_id,
+            &started.runner_name,
+            request_id,
+        ) else {
+            return Ok(false);
+        };
         let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
             return Ok(false);
         };
         if row.state == DemandState::Terminal || row.state == DemandState::Declined {
             return Ok(true);
         }
+        let holder = permit_holder(self.config.scale_set_id, request_id);
         if row.state == DemandState::CanceledPending {
             let generation = self.generation()?;
             self.demand
@@ -543,7 +551,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 .map_err(ScaleError::Store)?;
             transition_or_adopt(
                 &mut self.ledger,
-                &permit_holder(self.config.scale_set_id, request_id),
+                &holder,
                 LedgerPermitState::Acquiring,
                 generation,
             )
@@ -569,7 +577,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         }
         transition_or_adopt(
             &mut self.ledger,
-            &permit_holder(self.config.scale_set_id, request_id),
+            &holder,
             LedgerPermitState::Acquiring,
             generation,
         )
@@ -588,6 +596,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         completed: &ScaleSetJobCompleted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
         let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
+        let Some(request_id) = crate::scaleset::intents::request_id_for_runner(
+            self.config.scale_set_id,
+            &completed.runner_name,
+            request_id,
+        ) else {
+            return Ok(false);
+        };
         let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
             return Ok(false);
         };
@@ -1296,6 +1311,7 @@ mod tests {
         // Plus an untracked completion (another listener's job): ignored.
         let mut foreign = completed.clone();
         foreign.base.runner_request_id = 999_999;
+        foreign.runner_name = "velnor-7-999999".to_owned();
         let observed = RunnerScaleSetMessage {
             message_id: 14,
             statistics: Some(stats(4)),
@@ -1603,6 +1619,64 @@ mod tests {
         );
         assert!(processor.lane_mut().terminals.is_empty());
         assert!(processor.lane_mut().provisioned.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runner_name_routes_by_set_and_request_and_rejects_foreign_events() {
+        let path = temp_path("runner-name-routing");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        processor
+            .scale(Some(&message(18, vec![push_offer(801)])))
+            .await
+            .unwrap();
+
+        let foreign_started = ScaleSetJobStarted {
+            runner_id: 1,
+            runner_name: "velnor-8-801".to_owned(),
+            base: base(801, ScaleSetJobMessageType::JobStarted),
+        };
+        assert!(!processor.observe_started(&foreign_started).unwrap());
+        assert!(processor.lane_mut().started.is_empty());
+        assert_eq!(
+            processor.demand_mut().get(801).unwrap().unwrap().state,
+            DemandState::ProvisionIntent
+        );
+
+        let foreign_completed = ScaleSetJobCompleted {
+            result: "succeeded".to_owned(),
+            runner_id: 1,
+            runner_name: "velnor-8-801".to_owned(),
+            base: base(801, ScaleSetJobMessageType::JobCompleted),
+        };
+        assert!(!processor.observe_completed(&foreign_completed).unwrap());
+        assert_eq!(
+            processor.demand_mut().get(801).unwrap().unwrap().state,
+            DemandState::ProvisionIntent
+        );
+
+        // The runner identity is authoritative even when the wire request
+        // field is stale: this event must finish request 801, not request 999.
+        let routed_started = ScaleSetJobStarted {
+            runner_id: 1,
+            runner_name: "velnor-7-801".to_owned(),
+            base: base(999, ScaleSetJobMessageType::JobStarted),
+        };
+        assert!(processor.observe_started(&routed_started).unwrap());
+        assert_eq!(processor.lane_mut().started, vec![999]);
+
+        let routed_completed = ScaleSetJobCompleted {
+            result: "succeeded".to_owned(),
+            runner_id: 1,
+            runner_name: "velnor-7-801".to_owned(),
+            base: base(999, ScaleSetJobMessageType::JobCompleted),
+        };
+        assert!(processor.observe_completed(&routed_completed).unwrap());
+        assert_eq!(processor.lane_mut().terminals, vec![999]);
+        assert_eq!(
+            processor.demand_mut().get(801).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert!(processor.demand_mut().get(999).unwrap().is_none());
     }
 
     #[tokio::test]

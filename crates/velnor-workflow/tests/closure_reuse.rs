@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+const GENERATION_CONFIG: &str = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n";
+
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 /// The plan identity every fixture binds: the harness stamps it into the
@@ -29,6 +31,11 @@ impl Fixture {
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root)?;
+        fs::create_dir_all(root.join(".github-gen"))?;
+        fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            GENERATION_CONFIG,
+        )?;
         let mut document: serde_json::Value = serde_json::from_str(expected)?;
         document["base_sha"] = serde_json::Value::String(FIXTURE_BASE.to_owned());
         document["head_sha"] = serde_json::Value::String(FIXTURE_HEAD.to_owned());
@@ -205,8 +212,13 @@ impl GitFixture {
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join(".github/ci"))?;
+        fs::create_dir_all(root.join(".github-gen"))?;
         fs::create_dir_all(root.join("crates/alpha/src"))?;
         fs::create_dir_all(root.join("crates/beta/src"))?;
+        fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            GENERATION_CONFIG,
+        )?;
         fs::write(root.join(".github/ci/project.toml"), CONFIG)?;
         fs::write(root.join("crates/alpha/src/lib.rs"), "initial\n")?;
         fs::write(root.join("crates/beta/src/lib.rs"), "initial\n")?;
@@ -358,6 +370,11 @@ fn reuse_decision_scores_evidence_against_a_request() -> Result<(), Box<dyn Erro
         NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&root)?;
+    fs::create_dir_all(root.join(".github-gen"))?;
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        GENERATION_CONFIG,
+    )?;
     let fingerprint = "f".repeat(64);
     let recipe = "9".repeat(64);
     fs::write(
@@ -412,27 +429,34 @@ fn reuse_decision_scores_evidence_against_a_request() -> Result<(), Box<dyn Erro
 }
 
 const CONFIG: &str = r#"
-schema = 2
+schema = 3
+repository = "example/fixture"
+profile = "generic"
+verified = true
+default_branch = "main"
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
 
 [[unit]]
 id = "rust-alpha"
 label = "alpha"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/alpha"
 watch = ["crates/alpha/**"]
-github_pr_commands = ["cargo test --locked"]
-github_full_commands = ["cargo test --locked"]
-velnor_pr_commands = ["cargo test --locked"]
-velnor_full_commands = ["cargo test --locked"]
+pr_commands = ["cargo test --locked"]
+full_commands = ["cargo test --locked"]
 
 [[unit]]
 id = "rust-beta"
 label = "beta"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/beta"
 watch = ["crates/beta/**"]
-github_pr_commands = ["cargo test --locked"]
-github_full_commands = ["cargo test --locked"]
-velnor_pr_commands = ["cargo test --locked"]
-velnor_full_commands = ["cargo test --locked"]
+pr_commands = ["cargo test --locked"]
+full_commands = ["cargo test --locked"]
 "#;

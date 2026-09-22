@@ -921,7 +921,7 @@ fn resolve_repo_url(repo: Option<&str>, url: Option<&str>) -> Result<String, Com
 }
 
 /// Whether an on-demand host on `arch` may claim the x64 target pack
-/// (`ubuntu-24.04`, `ubuntu-latest`, `hetzner-sentry-ci`). An arm64 host
+/// (`ubuntu-latest`, `hetzner-sentry-ci`). An arm64 host
 /// claiming those labels would attract jobs it cannot run natively and
 /// would impersonate Sentry's pool identity, so only x86_64 claims them.
 fn arch_claims_x64_target_pack(arch: &str) -> bool {
