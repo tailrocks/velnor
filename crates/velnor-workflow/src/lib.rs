@@ -11601,6 +11601,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the scanner regression covers package and shared-scheme parity"
+    )]
     #[test]
     fn scanner_extracts_swiftpm_and_shared_xcode_scheme_units() {
         let root = temporary_repository("swift-analysis");
@@ -11616,7 +11620,10 @@ mod tests {
         );
         must(fs::create_dir_all(&schemes), "create shared schemes");
         must(
-            fs::write(root.join("Package.swift"), "// swift-tools-version: 5.9\n"),
+            fs::write(
+                root.join("Package.swift"),
+                "// swift-tools-version: 5.9\nlet package = Package(targets: [.testTarget(name: \"AppTests\")])\n",
+            ),
             "write Package.swift",
         );
         must(
@@ -11641,6 +11648,13 @@ mod tests {
             ),
             "write shared scheme",
         );
+        must(
+            fs::write(
+                schemes.join("BuildOnly.xcscheme"),
+                "<Scheme><BuildAction/></Scheme>\n",
+            ),
+            "write build-only shared scheme",
+        );
         let config = must(
             scan_repository(&root, RunnerMode::Github),
             "scan Swift repository",
@@ -11651,8 +11665,23 @@ mod tests {
                 .iter()
                 .filter(|unit| unit.kind == UnitKind::Swift)
                 .count(),
-            2
+            3
         );
+        let package = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift && unit.root == "."),
+            "Swift package unit",
+        );
+        assert_eq!(
+            package.phases,
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        );
+        assert!(package
+            .pr_commands
+            .iter()
+            .any(|command| command.ends_with("swift test --parallel")));
         let xcode = must_some(
             config
                 .units
@@ -11664,6 +11693,22 @@ mod tests {
             .pr_commands
             .iter()
             .any(|command| command.contains("platform=iOS Simulator")));
+        assert_eq!(
+            xcode.phases,
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        );
+        let build_only = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-xcodeproj-buildonly"),
+            "build-only Xcode scheme unit",
+        );
+        assert_eq!(build_only.phases, vec![ValidationPhase::SwiftBuild]);
+        assert!(build_only
+            .pr_commands
+            .iter()
+            .all(|command| !command.ends_with(" test")));
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
         assert!(workflow.contains("runs-on: macos-15"));
         assert!(workflow.contains("CI_UNIT_ID: swift-xcodeproj-app"));

@@ -385,6 +385,45 @@ fn identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn contains_interpolation(literal: &str) -> bool {
+    let bytes = literal.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index] == b'\\' {
+            index += 1;
+        }
+        if (index - start) % 2 == 1 && bytes.get(index) == Some(&b'(') {
+            return true;
+        }
+    }
+    false
+}
+
+fn executable_marker_end(contents: &str, bytes: &[u8], index: usize) -> Option<usize> {
+    const SHORTHAND: &str = ".executable";
+    const QUALIFIED: &str = "Product.executable";
+    if contents[index..].starts_with(SHORTHAND)
+        && (index == 0 || (!identifier_byte(bytes[index - 1]) && bytes[index - 1] != b'.'))
+        && (index + SHORTHAND.len() == bytes.len()
+            || !identifier_byte(bytes[index + SHORTHAND.len()]))
+    {
+        return Some(index + SHORTHAND.len());
+    }
+    if contents[index..].starts_with(QUALIFIED)
+        && (index == 0 || !identifier_byte(bytes[index - 1]))
+        && (index + QUALIFIED.len() == bytes.len()
+            || !identifier_byte(bytes[index + QUALIFIED.len()]))
+    {
+        return Some(index + QUALIFIED.len());
+    }
+    None
+}
+
 /// A top-level literal `key: "value"` argument in a Swift call. Nested
 /// target/dependency arguments, comments, interpolations, and expressions do
 /// not count: the scanner must never infer a product name from executable
@@ -440,7 +479,11 @@ fn literal_string_arg(group: &str, key: &str) -> Option<String> {
                 if after < bytes.len() && bytes[after] != b',' {
                     return None;
                 }
-                return read_quoted(&group[value + 1..end]);
+                let literal = &group[value + 1..end];
+                if contains_interpolation(literal) {
+                    return None;
+                }
+                return read_quoted(literal);
             }
         }
     }
@@ -456,7 +499,6 @@ struct ExecutableProductFacts {
 /// Discover only literal `.executable(name: "...")` product declarations.
 /// This lexer skips Swift strings/comments and never evaluates the manifest.
 fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
-    const MARKER: &str = ".executable";
     let bytes = contents.as_bytes();
     let mut names = BTreeSet::new();
     let mut has_dynamic_name = false;
@@ -480,13 +522,12 @@ fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
                 };
                 index = next;
             }
-            b'.' if contents[index..].starts_with(MARKER)
-                && (index == 0
-                    || (!identifier_byte(bytes[index - 1]) && bytes[index - 1] != b'.'))
-                && (index + MARKER.len() == bytes.len()
-                    || !identifier_byte(bytes[index + MARKER.len()])) =>
-            {
-                let marker_end = index + MARKER.len();
+            _ => {
+                let Some(marker_end) = executable_marker_end(contents, bytes, index) else {
+                    let width = contents[index..].chars().next().map_or(1, char::len_utf8);
+                    index += width;
+                    continue;
+                };
                 let Some(group_start) = skip_trivia(bytes, marker_end) else {
                     break;
                 };
@@ -505,10 +546,6 @@ fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
                     _ => has_dynamic_name = true,
                 }
                 index = group_start + group.len() - after.len();
-            }
-            _ => {
-                let width = contents[index..].chars().next().map_or(1, char::len_utf8);
-                index += width;
             }
         }
     }
@@ -1673,6 +1710,7 @@ mod tests {
                     .executable(name: "Alpha" + computed),
                     .executable(name: "Zulu"),
                     Product.executable(name: "Qualified"),
+                    .executable(name: "cli-\(flavor)"),
                 ]
             )
             let text = ".executable(name: \"StringContent\")"
@@ -1680,10 +1718,23 @@ mod tests {
         );
         assert_eq!(
             facts.executable_products,
-            vec!["Zulu".to_owned()],
+            vec!["Qualified".to_owned(), "Zulu".to_owned()],
             "literal names are sorted and duplicate products are collapsed"
         );
         assert!(facts.has_dynamic_executable_products);
+    }
+
+    #[test]
+    fn interpolated_product_names_are_not_run() {
+        let facts = parse_package_facts(r#".executable(name: "cli-\(flavor)")"#);
+        assert!(facts.executable_products.is_empty());
+        assert!(facts.has_dynamic_executable_products);
+        let unit = super::swift_package_unit("native", &facts);
+        assert_eq!(
+            unit.pr_commands,
+            vec!["cd -- 'native' && swift build".to_owned()]
+        );
+        assert_eq!(unit.phases, vec![ValidationPhase::SwiftBuild]);
     }
 
     #[test]
