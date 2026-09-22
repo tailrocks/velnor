@@ -51,12 +51,44 @@ const PRODUCT_IDENTITY_ENV: &str = "VELNOR_PRODUCT_IDENTITY";
 /// Same-run artifacts live only for the consuming jobs.
 const ARTIFACT_RETENTION_DAYS: u32 = 1;
 
-/// Whether a product can ride the transport: it declares at least one
-/// output root. Inputs identity strengthens verification but is not
-/// required — same-run same-commit provenance already binds the bytes.
+/// The product-to-consumer transport contract.
+///
+/// A product with declared outputs has an artifact contract: the consumer
+/// must have an explicit producer dependency and may proceed only after that
+/// producer succeeds. A product without outputs has no transport contract and
+/// stays on the existing local rebuild path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductTransportContract {
+    /// The product has no declared artifact outputs; rebuild locally.
+    LocalRebuild,
+    /// The product must arrive from the explicitly selected producer.
+    RequiredArtifact,
+}
+
+impl ProductTransportContract {
+    /// Whether this contract requires the producer job to succeed before the
+    /// consumer caller can be scheduled.
+    pub(crate) const fn requires_producer_success(self) -> bool {
+        matches!(self, Self::RequiredArtifact)
+    }
+}
+
+/// Resolve the transport contract from the product declaration. Inputs
+/// identity strengthens verification but is not required: same-run,
+/// same-commit provenance binds the transported bytes.
+#[must_use]
+pub(crate) fn transport_contract(product: &NamedProduct) -> ProductTransportContract {
+    if product.outputs.is_empty() {
+        ProductTransportContract::LocalRebuild
+    } else {
+        ProductTransportContract::RequiredArtifact
+    }
+}
+
+/// Whether a product can ride the required artifact transport.
 #[must_use]
 pub(crate) fn transport_eligible(product: &NamedProduct) -> bool {
-    !product.outputs.is_empty()
+    transport_contract(product).requires_producer_success()
 }
 
 /// Whether a product has enough identity for an exact cross-run cache hit.
@@ -1079,7 +1111,8 @@ mod tests {
     use super::{
         artifact_name, exact_product_cache_key, exact_product_reuse_eligible, ready_records,
         render_native_product_cache_restore_block, render_native_product_cache_save_block,
-        stage_product, transport_eligible, verify_product, StageRequest, VerifyRequest,
+        stage_product, transport_contract, transport_eligible, verify_product,
+        ProductTransportContract, StageRequest, VerifyRequest,
     };
     use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
 
@@ -1121,6 +1154,17 @@ mod tests {
     fn transport_eligible_requires_declared_outputs() {
         assert!(transport_eligible(&product(&["out/Foo.xcframework"])));
         assert!(!transport_eligible(&product(&[])));
+    }
+
+    #[test]
+    fn transport_contract_requires_an_explicit_successful_producer() {
+        let required = transport_contract(&product(&["out/Foo.xcframework"]));
+        assert_eq!(required, ProductTransportContract::RequiredArtifact);
+        assert!(required.requires_producer_success());
+
+        let local = transport_contract(&product(&[]));
+        assert_eq!(local, ProductTransportContract::LocalRebuild);
+        assert!(!local.requires_producer_success());
     }
 
     #[test]
