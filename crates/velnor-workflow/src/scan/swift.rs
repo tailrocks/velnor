@@ -14,6 +14,18 @@ use crate::{
     GeneratorError, Unit, UnitKind, ValidationPhase,
 };
 
+/// Toolchain identity pins shared by every Apple cache and watch contract.
+/// `.swift-tools-version` is intentionally absent: it is only a minimum floor.
+const APPLE_TOOLCHAIN_PIN_KEY_FILES: [&str; 3] = ["mise.lock", ".swift-version", ".xcode-version"];
+
+fn append_apple_toolchain_pin_paths(paths: &mut Vec<String>) {
+    paths.extend(
+        APPLE_TOOLCHAIN_PIN_KEY_FILES
+            .iter()
+            .map(std::string::ToString::to_string),
+    );
+}
+
 fn call_present(contents: &str, call: &str) -> bool {
     let mut rest = contents;
     while let Some(found) = rest.find(call) {
@@ -70,6 +82,25 @@ fn swift_block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+fn swift_trivia_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'/') {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'*') {
+            index = swift_block_comment_end(bytes, index)?;
+            continue;
+        }
+        return Some(index);
+    }
+}
+
 fn swift_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
@@ -105,12 +136,13 @@ fn has_swift_call(contents: &str, call: &str) -> bool {
                     && (index == 0 || !swift_identifier_byte(bytes[index - 1]))
                     && (index + call.len() == bytes.len()
                         || !swift_identifier_byte(bytes[index + call.len()]));
-                if matches_call
-                    && contents[index + call.len()..]
-                        .trim_start_matches([' ', '\t', '\n', '\r'])
-                        .starts_with('(')
-                {
-                    return true;
+                if matches_call {
+                    let Some(next) = swift_trivia_end(bytes, index + call.len()) else {
+                        return false;
+                    };
+                    if bytes.get(next) == Some(&b'(') {
+                        return true;
+                    }
                 }
                 let width = contents[index..].chars().next().map_or(1, char::len_utf8);
                 index += width;
@@ -176,24 +208,28 @@ fn swift_package_unit(package_root: &str, has_tests: bool) -> Unit {
         commands.push(format!("{command_prefix}swift test --parallel"));
         phases.push(ValidationPhase::SwiftTest);
     }
+    let mut watch = vec![
+        join_repo_path(package_root, "Package.swift"),
+        join_repo_path(package_root, "Package.resolved"),
+        join_repo_path(package_root, ".swiftpm/Package.resolved"),
+        format!("{prefix}Sources/**"),
+        format!("{prefix}Tests/**"),
+        format!("{prefix}**/*.swift"),
+    ];
+    append_apple_toolchain_pin_paths(&mut watch);
+    let mut cache_key_files = vec![
+        join_repo_path(package_root, "Package.swift"),
+        join_repo_path(package_root, "Package.resolved"),
+        join_repo_path(package_root, ".swiftpm/Package.resolved"),
+    ];
+    append_apple_toolchain_pin_paths(&mut cache_key_files);
     let mut result = unit(
         UnitKind::Swift,
         package_root,
-        vec![
-            join_repo_path(package_root, "Package.swift"),
-            join_repo_path(package_root, "Package.resolved"),
-            join_repo_path(package_root, ".swiftpm/Package.resolved"),
-            format!("{prefix}Sources/**"),
-            format!("{prefix}Tests/**"),
-            format!("{prefix}**/*.swift"),
-        ],
+        watch,
         commands,
         Some(CacheSpec {
-            key_files: vec![
-                join_repo_path(package_root, "Package.swift"),
-                join_repo_path(package_root, "Package.resolved"),
-                join_repo_path(package_root, ".swiftpm/Package.resolved"),
-            ],
+            key_files: cache_key_files,
             paths: vec!["~/.swiftpm".to_owned()],
             purpose: CachePurpose::Generic,
             mbx_output_cache_justification: None,
@@ -293,6 +329,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                 cache_key_files.push(format!("{project}/project.pbxproj"));
             }
         }
+        append_apple_toolchain_pin_paths(&mut cache_key_files);
         cache_key_files.sort();
         cache_key_files.dedup();
         let root_watch = if container_root == "." {
@@ -300,16 +337,20 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
         } else {
             format!("{container_root}/**")
         };
+        let mut watch = vec![
+            format!("{container}/**"),
+            root_watch,
+            "*.xcconfig".to_owned(),
+        ];
+        append_apple_toolchain_pin_paths(&mut watch);
+        watch.sort();
+        watch.dedup();
         let mut unit = Unit {
             id: format!("swift-{extension}-{}", identifier_suffix(scheme_name)),
             label: format!("Apple scheme ({scheme_name})"),
             kind: UnitKind::Swift,
             root: container_root.clone(),
-            watch: vec![
-                format!("{container}/**"),
-                root_watch,
-                "*.xcconfig".to_owned(),
-            ],
+            watch,
             pr_commands: commands.clone(),
             full_commands: commands,
             github_pr_commands: None,
@@ -431,8 +472,31 @@ pub(crate) fn detect(
 mod tests {
     use super::{
         has_swift_call, is_xcodegen_spec, swift_package_unit, xcode_scheme_has_test_action,
+        APPLE_TOOLCHAIN_PIN_KEY_FILES,
     };
     use crate::ValidationPhase;
+
+    fn assert_apple_toolchain_pin_paths(unit: &crate::Unit) {
+        assert!(
+            unit.cache.is_some(),
+            "Swift unit must have a cache contract"
+        );
+        let Some(cache) = unit.cache.as_ref() else {
+            return;
+        };
+        for pin in APPLE_TOOLCHAIN_PIN_KEY_FILES {
+            assert!(
+                unit.watch.iter().any(|path| path == pin),
+                "watch set must include {pin}: {:?}",
+                unit.watch
+            );
+            assert!(
+                cache.key_files.iter().any(|path| path == pin),
+                "cache key files must include {pin}: {:?}",
+                cache.key_files
+            );
+        }
+    }
 
     #[test]
     fn executable_product_detection_skips_comments_and_strings() {
@@ -443,6 +507,10 @@ mod tests {
         assert!(has_swift_call(
             "products: [Product.executable(name: \"App\", targets: [\"App\"])]",
             "Product.executable"
+        ));
+        assert!(has_swift_call(
+            "products: [.executable /* comment */ (name: \"App\", targets: [\"App\"])]",
+            ".executable"
         ));
         assert!(!has_swift_call(
             "// .executable(name: \"App\")\nlet note = \".executable(name: \\\"App\\\")\"",
@@ -473,6 +541,7 @@ mod tests {
             vec!["cd -- 'native' && swift build".to_owned()]
         );
         assert_eq!(unit.phases, vec![ValidationPhase::SwiftBuild]);
+        assert_apple_toolchain_pin_paths(&unit);
     }
 
     #[test]

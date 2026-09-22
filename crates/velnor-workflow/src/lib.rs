@@ -11697,6 +11697,24 @@ mod tests {
             xcode.phases,
             vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
         );
+        for pin in ["mise.lock", ".swift-version", ".xcode-version"] {
+            for (label, unit) in [("Swift package", package), ("Xcode scheme", xcode)] {
+                assert!(unit.cache.is_some(), "{label} must have a cache contract");
+                let Some(cache) = unit.cache.as_ref() else {
+                    continue;
+                };
+                assert!(
+                    unit.watch.iter().any(|path| path == pin),
+                    "{label} watch set must include {pin}: {:?}",
+                    unit.watch
+                );
+                assert!(
+                    cache.key_files.iter().any(|path| path == pin),
+                    "{label} cache key files must include {pin}: {:?}",
+                    cache.key_files
+                );
+            }
+        }
         let build_only = must_some(
             config
                 .units
