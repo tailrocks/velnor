@@ -5353,14 +5353,18 @@ fn policy_candidate_step(revision: &str) -> String {
 /// checkout, the stable closure probe, Cargo, and artifact transport. The
 /// candidate is published before `plan`; policy and every hosted Rust unit
 /// consume the same immutable artifact afterward.
-pub(crate) fn candidate_bootstrap_steps(upload_artifact_pin: &str) -> String {
+pub(crate) fn candidate_bootstrap_steps(
+    upload_artifact_pin: &str,
+    head_sha_expression: &str,
+    base_sha_expression: &str,
+) -> String {
     format!(
         r#"      - name: Bootstrap candidate generator product
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         id: candidate
         env:
-          CANDIDATE_HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
-          CANDIDATE_BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before || 'refs/heads/main' }}}}
+          CANDIDATE_HEAD_SHA: ${{{{ {head_sha_expression} }}}}
+          CANDIDATE_BASE_SHA: ${{{{ {base_sha_expression} }}}}
         run: |
           set -euo pipefail
           HEAD="$CANDIDATE_HEAD_SHA"
@@ -5419,16 +5423,16 @@ pub(crate) fn candidate_bootstrap_steps(upload_artifact_pin: &str) -> String {
     )
 }
 
-/// Acquire the control-plane candidate in a hosted Rust unit before its first
-/// `run --config`. The step uses the same closure/name/manifest contract as
-/// [`candidate_bootstrap_steps`], then places the verified binary first in
-/// `PATH`; no unit needs to know whether the plan used the candidate.
+/// Acquire the control-plane candidate in a hosted non-Apple Rust unit before
+/// its first `run --config`. The step uses the same closure/name/manifest
+/// contract as [`candidate_bootstrap_steps`], then places the verified binary
+/// first in `PATH`; no unit needs to know whether the plan used the candidate.
 pub(crate) fn candidate_runtime_acquire_steps() -> &'static str {
     r#"      - name: Acquire candidate generator runtime
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && inputs.apple_executor != true
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          CANDIDATE_HEAD_SHA: ${{ inputs.head_sha }}
           CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}
         run: |
           set -euo pipefail
@@ -5485,6 +5489,21 @@ pub(crate) const fn candidate_bootstrap_restore_step() -> &'static str {
           set -euo pipefail
           test "$VELNOR_WORKFLOW_BASE_PATH" != ''
           echo "PATH=$VELNOR_WORKFLOW_BASE_PATH" >> "$GITHUB_ENV"
+"#
+}
+
+/// Select the staged candidate inside the plan shell itself. GitHub Actions
+/// actions may rewrite `PATH` while running, so a PATH mutation exported by
+/// the bootstrap step cannot safely cross the artifact-upload action boundary.
+pub(crate) const fn candidate_bootstrap_plan_path() -> &'static str {
+    r#"          planner=velnor-workflow
+          if [[ "${{ steps.candidate.outputs.name }}" != '' ]]; then
+            candidate_binary="${{ runner.temp }}/velnor-workflow-candidate/velnor-workflow"
+            test -x "$candidate_binary"
+            export PATH="${{ runner.temp }}/velnor-workflow-candidate:$PATH"
+            planner="$candidate_binary"
+          fi
+          "$planner" plan --config .github/ci/project.toml
 "#
 }
 
@@ -16771,7 +16790,9 @@ channel = "stable"
         assert!(workflow.contains("github.ref == 'refs/heads/main'"));
         assert!(workflow.contains("github.event_name == 'workflow_dispatch'"));
         assert!(workflow.contains("BASE_SHA: ${{ github.event.pull_request.base.sha"));
-        assert!(workflow.contains("HEAD_SHA: ${{ github.sha }}"));
+        assert!(
+            workflow.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}")
+        );
         assert!(workflow.contains("persist-credentials: false"));
         assert!(workflow.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(!workflow.contains("\non:\n  pull_request_target:"));

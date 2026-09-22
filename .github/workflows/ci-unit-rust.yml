@@ -520,10 +520,10 @@ jobs:
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$pin"
           fi
       - name: Acquire candidate generator runtime
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && inputs.apple_executor != true
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          CANDIDATE_HEAD_SHA: ${{ inputs.head_sha }}
           CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}
         run: |
           set -euo pipefail

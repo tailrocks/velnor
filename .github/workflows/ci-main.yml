@@ -72,7 +72,7 @@ jobs:
         id: candidate
         env:
           CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          CANDIDATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'refs/heads/main' }}
+          CANDIDATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
         run: |
           set -euo pipefail
           HEAD="$CANDIDATE_HEAD_SHA"
@@ -133,7 +133,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           VELNOR_PROVIDERS: github-hosted
           VELNOR_EVENT_TRUSTED: ${{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) && 'true' || 'false' }}
           VELNOR_EXPECTED_WORK_FILE: .velnor-ci-expected-work/expected-work.json
@@ -141,7 +141,15 @@ jobs:
           set -euo pipefail
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
           mkdir -p .velnor-ci-expected-work
-          velnor-workflow plan --config .github/ci/project.toml
+          planner=velnor-workflow
+          if [[ "${{ steps.candidate.outputs.name }}" != '' ]]; then
+            candidate_binary="${{ runner.temp }}/velnor-workflow-candidate/velnor-workflow"
+            test -x "$candidate_binary"
+            export PATH="${{ runner.temp }}/velnor-workflow-candidate:$PATH"
+            planner="$candidate_binary"
+          fi
+          "$planner" plan --config .github/ci/project.toml
+
 
       - name: Restore pinned generator runtime
         if: steps.candidate.outputs.name != ''

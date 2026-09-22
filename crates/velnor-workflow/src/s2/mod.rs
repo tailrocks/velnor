@@ -17976,7 +17976,9 @@ lockfile = true
         assert!(rust.contains("github.ref == 'refs/heads/main'"));
         assert!(workflow.contains("  workflow_dispatch:\n    inputs:\n      scope:\n"));
         assert!(workflow.contains("BASE_SHA: ${{ github.event.pull_request.base.sha"));
-        assert!(workflow.contains("HEAD_SHA: ${{ github.sha }}"));
+        assert!(
+            workflow.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}")
+        );
         assert!(workflow.contains("persist-credentials: false"));
         assert!(rust.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(!workflow.contains("\non:\n  pull_request_target:"));

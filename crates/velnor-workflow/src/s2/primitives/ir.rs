@@ -2959,7 +2959,7 @@ mod tests {
         );
         for binding in [
             "CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
-            "CANDIDATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'refs/heads/main' }}",
+            "CANDIDATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}",
         ] {
             assert!(candidate.contains(binding), "candidate binds {binding}: {candidate}");
         }
@@ -3062,11 +3062,20 @@ mod tests {
             "the staged candidate is published with short retention: {publication}"
         );
         assert!(
-            plan.contains("PATH=$stage:$PATH") && plan.contains("PATH=$VELNOR_WORKFLOW_BASE_PATH"),
+            plan.contains("PATH=$stage:$PATH")
+                && plan.contains("PATH=$VELNOR_WORKFLOW_BASE_PATH")
+                && plan.contains(
+                    "candidate_binary=\"${{ runner.temp }}/velnor-workflow-candidate/velnor-workflow\"",
+                )
+                && plan.contains("planner=\"$candidate_binary\"")
+                && plan.contains("\"$planner\" plan --config .github/ci/project.toml"),
             "plan consumes the candidate then restores the pinned runtime: {plan}"
         );
         assert!(
-            plan.contains("velnor-workflow plan --config .github/ci/project.toml"),
+            plan.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}")
+                && plan.contains(
+                    "BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}"
+                ),
             "{plan}"
         );
         assert!(
@@ -3109,12 +3118,12 @@ mod tests {
         let candidate = &hosted[acquire..run];
         assert!(
             candidate.contains(
-                "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+                "if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && inputs.apple_executor != true"
             ),
             "consumer is confined to same-repository code: {candidate}"
         );
         for binding in [
-            "CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}",
+            "CANDIDATE_HEAD_SHA: ${{ inputs.head_sha }}",
             "CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}",
             "velnor-workflow closure --rev=\"$HEAD\" --candidate",
             "velnor-workflow closure --rev=\"$base_pin\" --candidate",
@@ -3149,6 +3158,54 @@ mod tests {
         assert!(
             !velnor.contains("Acquire candidate generator runtime"),
             "local Velnor jobs do not consume hosted artifacts: {velnor}"
+        );
+    }
+
+    #[test]
+    fn plan_identity_covers_pr_dispatch_and_hosted_checkout() {
+        let owner = workflow_setup_action_repository().to_owned();
+        let ir = owner_test_ir(
+            &owner,
+            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
+        );
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        assert_eq!(
+            WorkflowIr::head_sha_expression(),
+            "github.event.pull_request.head.sha || github.sha",
+            "pull requests use their source head; dispatch falls back to github.sha because no head input exists"
+        );
+        assert!(
+            plan.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}")
+                && plan.contains(
+                    "CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
+                )
+                && !plan.contains("github.event.inputs.head_sha"),
+            "plan and candidate share the PR/dispatch head identity without a misleading input: {plan}"
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        assert!(
+            callers.contains("head_sha: ${{ needs.plan.outputs.head_sha }}"),
+            "hosted callers consume the plan head output: {callers}"
+        );
+        assert!(
+            must_render_kind(&ir).contains("ref: ${{ inputs.head_sha }}"),
+            "hosted reusable checkout uses the caller-provided head: {}",
+            must_render_kind(&ir)
+        );
+    }
+
+    #[test]
+    fn apple_rust_preserves_macos_job_without_linux_candidate_acquire() {
+        let owner = workflow_setup_action_repository().to_owned();
+        let mut apple = rust_unit("rust-apple", "crates/apple");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        let content = must_render_kind(&owner_test_ir(&owner, vec![apple]));
+        assert!(content.contains("runs-on: macos-26"), "{content}");
+        assert!(
+            !content.contains("Acquire candidate generator runtime"),
+            "Apple Rust must not download the Linux-only candidate: {content}"
         );
     }
 
@@ -3234,7 +3291,11 @@ mod tests {
 
     #[test]
     fn candidate_bootstrap_gates_follow_their_step_names() {
-        let steps = crate::candidate_bootstrap_steps("actions/upload-artifact@pinned");
+        let steps = crate::candidate_bootstrap_steps(
+            "actions/upload-artifact@pinned",
+            "github.event.pull_request.head.sha || github.sha",
+            "github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main'",
+        );
         assert!(
             steps.contains(
                 "      - name: Bootstrap candidate generator product\n        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository\n        id: candidate\n"
@@ -3252,6 +3313,13 @@ mod tests {
                 && steps.contains("test ! -e \"$worktree\"")
                 && steps.contains("test ! -e \"$stage\""),
             "the helper rejects pre-existing scoped paths without recursive deletion: {steps}"
+        );
+        let plan_path = crate::candidate_bootstrap_plan_path();
+        assert!(
+            plan_path.contains(
+                "candidate_binary=\"${{ runner.temp }}/velnor-workflow-candidate/velnor-workflow\""
+            ) && plan_path.contains("\"$planner\" plan --config .github/ci/project.toml"),
+            "the plan invokes the staged candidate by absolute path: {plan_path}"
         );
     }
 
@@ -8877,6 +8945,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if hosted
             && self.repository == crate::s2::workflow_setup_action_repository()
             && kind == UnitKind::Rust
+            && members
+                .iter()
+                .any(|unit| unit.platform != crate::s2::provider::Platform::MacosArm64)
         {
             output.push_str(crate::candidate_runtime_acquire_steps());
         }
@@ -9210,15 +9281,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             &self.workflow_revision,
             &crate::s2::workflow_setup_install_rev(&self.repository, &self.workflow_revision),
         );
+        let head_sha = Self::head_sha_expression();
+        let base_sha = self.base_sha_expression();
         let candidate_bootstrap = if control_plane == ProviderId::GithubHosted
             && self.repository == crate::s2::workflow_setup_action_repository()
         {
-            crate::candidate_bootstrap_steps(self.pins.upload_artifact)
+            crate::candidate_bootstrap_steps(self.pins.upload_artifact, head_sha, &base_sha)
         } else {
             String::new()
         };
         let runtime_setup = format!("{runtime_setup}{candidate_bootstrap}");
-        let base_sha = self.base_sha_expression();
         // Every event selects the static automatic set: there is no provider
         // input to read.
         let automatic = self
@@ -9262,18 +9334,27 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         outputs.push("      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned());
         outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
+        let candidate_plan_path = if control_plane == ProviderId::GithubHosted
+            && self.repository == crate::s2::workflow_setup_action_repository()
+        {
+            crate::candidate_bootstrap_plan_path()
+        } else {
+            "          velnor-workflow plan --config .github/ci/project.toml\n"
+        };
         let _ = writeln!(
             output,
-            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ {head_sha} }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n{candidate_plan_path}\n",
             crate::s2::control_job_name("Planning"),
             self.runs_on_yaml(self.control_plane_provider()),
             outputs.join("\n"),
             self.pins.checkout,
+            head_sha = head_sha,
             base_sha = base_sha,
             trusted = Self::trusted_event_expression(),
             expected_work_env = EXPECTED_WORK_FILE_ENV,
             expected_work_file = EXPECTED_WORK_FILE,
             expected_work_dir = EXPECTED_WORK_DIR,
+            candidate_plan_path = candidate_plan_path,
         );
         if control_plane == ProviderId::GithubHosted
             && self.repository == crate::s2::workflow_setup_action_repository()
@@ -9359,6 +9440,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
             self.default_branch
         )
+    }
+
+    fn head_sha_expression() -> &'static str {
+        "github.event.pull_request.head.sha || github.sha"
     }
 
     /// The one admission predicate of a provider class: the GitHub expression
