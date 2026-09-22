@@ -6737,11 +6737,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "63e4abe43158fc16153efef67d4d81ed0ef3cd7306d0c69930c0201f36563bc6",
+                "ccb41bed96febf991764dcf752169bc5e56d2f8a83593199b96e16d24df9ea9f",
             ),
             (
                 "preview.yml",
-                "9c01438ada4a500c8f221aa890c20b58d492a2ae1b35ab54392f1d161393097f",
+                "9a860863d29563a89c267e04b9eb0b2f95e6f17ffbf02042feedfbef55a09a94",
             ),
             (
                 "maintenance.yml",
@@ -6868,11 +6868,11 @@ cp "$record" "$out"
             // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "8514a9408c8cb038cace01a99b87a4c0362cdd0bbf25d028a37ba5c39d3c5add",
+                "d41173c905e9d6b2627f21da8f3f9a7e1fed164720b5c928e76030b39dd2b2a2",
             ),
             (
                 "preview.yml",
-                "d52e270ef0fb50716483220dfa88bd94074ed377ccb63b2e13285a9136db5b25",
+                "b462ebf6c21ec929e45a99b108689011f2ae079dbcac21d45cc9f0c8df043a27",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -12190,7 +12190,7 @@ verification_providers = ["github-hosted"]
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "e1f70f90b117a103207f8fc764366e81c2d053781dd59781b29a2f45aa595f3e",
+            "ecfe5139ad9f64a1ea7936abcfcdf72e853dc4bdb9fbc45ac06a19414178369b",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));

@@ -14144,8 +14144,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
         assert!(workflow.contains("name: Restore Rust toolchain"));
         assert!(workflow.contains("id: rustup-toolchain"));
+        assert!(workflow.contains("name: Verify Rust toolchain cache"));
+        assert!(workflow.contains("id: rustup-toolchain-verify"));
+        assert!(workflow.contains("if: steps.rustup-toolchain.outputs.cache-hit == 'true'"));
         assert!(workflow.contains("name: Provision Rust toolchain"));
+        assert!(workflow.contains(
+            "if: steps.rustup-toolchain.outputs.cache-hit != 'true' || steps.rustup-toolchain-verify.outputs.valid != 'true'"
+        ));
         assert!(workflow.contains("rustup toolchain install --profile minimal"));
+        assert!(workflow.contains("awk -v wanted='clippy'"));
+        assert!(workflow.contains("awk -v wanted='x86_64-unknown-linux-musl'"));
         assert!(workflow.contains("rustup target add 'x86_64-unknown-linux-musl'"));
         assert!(workflow.contains("key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}"));
         // No unit commands run nextest and none hand work to the mise task

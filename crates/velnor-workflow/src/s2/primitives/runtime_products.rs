@@ -212,9 +212,9 @@ pub(crate) fn runtime_products_content(
     // ambient cargo config. The shared renderer stays untouched so no other
     // family gains this env.
     toolchain_steps = toolchain_steps.replace(
-        "      - name: Provision Rust toolchain\n        shell: bash\n",
+        "      - name: Provision Rust toolchain\n",
         &format!(
-            "      - name: Provision Rust toolchain\n        shell: bash\n        env:\n          CARGO_HOME: {PRODUCER_CARGO_HOME_VALUE}\n"
+            "      - name: Provision Rust toolchain\n        env:\n          CARGO_HOME: {PRODUCER_CARGO_HOME_VALUE}\n"
         ),
     );
     let platforms = platforms();
@@ -1032,7 +1032,7 @@ mod tests {
             "exactly four step-level CARGO_HOME entries: {build}"
         );
         let steps: Vec<&str> = build.split("      - name: ").skip(1).collect();
-        assert_eq!(steps.len(), 9, "the build job has nine steps: {build}");
+        assert_eq!(steps.len(), 10, "the build job has ten steps: {build}");
         for step in &steps {
             let name = must_some(step.split('\n').next(), "the step name");
             let has_cargo_home = step.contains(PRODUCER_CARGO_HOME_VALUE);
@@ -1820,7 +1820,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "a7b4721e9dbd7a19fb6fbbb51aca185678ebeb1b0b05b16be9c15d463ff39765";
+        const PINNED: &str = "5af36c64290af071e9f4d0aff08e7ef39ecb274401c7c9029ff04ba2cc45eda5";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

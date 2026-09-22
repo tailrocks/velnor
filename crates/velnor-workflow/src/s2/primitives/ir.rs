@@ -3830,8 +3830,18 @@ mod tests {
             "the MSRV leg restores under its own step id: {kind}"
         );
         assert!(
+            kind.contains("id: rustup-toolchain-1-88-0-verify"),
+            "the MSRV leg verifies its own cache: {kind}"
+        );
+        assert!(
             kind.contains("steps.rustup-toolchain-1-88-0.outputs.cache-hit != 'true'"),
             "the MSRV save gate reads its own leg's cache-hit: {kind}"
+        );
+        assert!(
+            kind.contains(
+                "steps.rustup-toolchain-1-88-0.outputs.cache-hit != 'true' || steps.rustup-toolchain-1-88-0-verify.outputs.valid != 'true'"
+            ),
+            "the MSRV leg provisions a miss or invalid hit: {kind}"
         );
         assert!(
             kind.contains("echo \"RUSTUP_TOOLCHAIN=1.88.0\" >> \"$GITHUB_ENV\""),
@@ -4864,14 +4874,48 @@ pub(crate) fn nextest_tool_id(lock_keys: &BTreeSet<String>) -> &'static str {
 
 /// The restore/provision/save steps every hosted Rust job needs before it may
 /// run a hosted Cargo command: restore the cached `~/.rustup` keyed by the
-/// repository's pin, install exactly that pin, and — when `save_gate` carries
-/// the step's `if:` body — save the result for the next run. Image-backed
-/// Velnor jobs intentionally bypass this helper because their pinned toolchain
+/// repository's pin, verify an exact hit, install exactly that pin when the
+/// hit is absent or incomplete, and save the result for the next run.
+/// Image-backed Velnor jobs bypass this helper because their pinned toolchain
 fn step_output_expr(step_id: &str, field: &str) -> String {
     format!("${{{{ steps.{step_id}.outputs.{field} }}}}")
 }
 
-/// is part of the runner image.
+/// Render the cache-hit verifier shared by pinned and explicit toolchain legs.
+/// A cache hit is only usable when rustup can find the expected channel and
+/// every declared component/target in that installation. A failed probe sends
+/// the leg through normal provisioning instead of failing the job.
+fn render_toolchain_cache_verifier(
+    output: &mut String,
+    cache_step_id: &str,
+    verify_step_id: &str,
+    toolchain: &RustToolchain,
+) {
+    let expected_channel = crate::s2::shell_quote(&toolchain.channel);
+    let _ = writeln!(
+        output,
+        "      - name: Verify Rust toolchain cache\n        id: {verify_step_id}\n        if: steps.{cache_step_id}.outputs.cache-hit == 'true'\n        shell: bash\n        run: |\n          valid=true\n          if ! command -v rustup >/dev/null 2>&1; then\n            valid=false\n          else\n            expected_channel={expected_channel}\n            installed=\"$(rustup toolchain list 2>/dev/null | awk -v expected=\"$expected_channel\" '$1 == expected || index($1, expected \"-\") == 1 {{ print $1; exit }}')\" || installed=\"\"\n            if [[ -z \"$installed\" ]]; then\n              valid=false\n            else\n              :"
+    );
+    for component in &toolchain.components {
+        let component = crate::s2::shell_quote(component);
+        let _ = writeln!(
+            output,
+            "              if ! rustup component list --installed --toolchain \"$installed\" 2>/dev/null | awk -v wanted={component} '$1 == wanted || index($1, wanted \"-\") == 1 {{ found=1 }} END {{ exit found ? 0 : 1 }}'; then\n                valid=false\n              fi"
+        );
+    }
+    for target in &toolchain.targets {
+        let target = crate::s2::shell_quote(target);
+        let _ = writeln!(
+            output,
+            "              if ! rustup target list --installed --toolchain \"$installed\" 2>/dev/null | awk -v wanted={target} '$1 == wanted {{ found=1 }} END {{ exit found ? 0 : 1 }}'; then\n                valid=false\n              fi"
+        );
+    }
+    let _ = writeln!(
+        output,
+        "            fi\n          fi\n          echo \"valid=$valid\" >> \"$GITHUB_OUTPUT\""
+    );
+}
+
 pub(crate) fn render_pinned_toolchain_steps(
     output: &mut String,
     cache_restore: &str,
@@ -4897,6 +4941,8 @@ pub(crate) fn render_pinned_toolchain_steps(
         output,
         "      - name: Restore Rust toolchain\n        id: {rustup_id}\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}"
     );
+    let verify_id = "rustup-toolchain-verify";
+    render_toolchain_cache_verifier(output, rustup_id, verify_id, toolchain);
     // The channel is not passed explicitly: the checkout put the
     // repository's toolchain file at the workspace root, and a file-driven
     // install also applies the components and targets the file declares,
@@ -4907,7 +4953,7 @@ pub(crate) fn render_pinned_toolchain_steps(
     };
     let _ = writeln!(
         output,
-        "      - name: Provision Rust toolchain\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}"
+        "      - name: Provision Rust toolchain\n        if: steps.{rustup_id}.outputs.cache-hit != 'true' || steps.{verify_id}.outputs.valid != 'true'\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}"
     );
     if !toolchain.targets.is_empty() {
         let targets = toolchain
@@ -4961,6 +5007,8 @@ pub(crate) fn render_explicit_toolchain_steps(
         "      - name: Restore Rust toolchain ({})\n        id: {step_id}\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}",
         toolchain.channel
     );
+    let verify_id = format!("{step_id}-verify");
+    render_toolchain_cache_verifier(output, step_id, &verify_id, toolchain);
     // A declared channel carries no components, targets, or profile of its
     // own: the leg provisions it with a minimal profile, so pin-only
     // components can never leak onto a channel that lacks them. Targets are
@@ -4976,7 +5024,7 @@ pub(crate) fn render_explicit_toolchain_steps(
     }
     let _ = writeln!(
         output,
-        "      - name: Provision Rust toolchain ({})\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}",
+        "      - name: Provision Rust toolchain ({})\n        if: steps.{step_id}.outputs.cache-hit != 'true' || steps.{verify_id}.outputs.valid != 'true'\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}",
         toolchain.channel
     );
     if !toolchain.targets.is_empty() {
