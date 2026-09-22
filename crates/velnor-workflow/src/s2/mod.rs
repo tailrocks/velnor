@@ -551,6 +551,7 @@ pub enum UnitKind {
     Gradle,
     Node,
     Bun,
+    GithubAction,
     Swift,
     OpenTofu,
     Docker,
@@ -566,6 +567,7 @@ impl UnitKind {
             "gradle" => Self::Gradle,
             "node" => Self::Node,
             "bun" => Self::Bun,
+            "github-action" => Self::GithubAction,
             "swift" => Self::Swift,
             "opentofu" => Self::OpenTofu,
             "docker" => Self::Docker,
@@ -581,6 +583,7 @@ impl UnitKind {
             Self::Gradle => "gradle",
             Self::Node => "node",
             Self::Bun => "bun",
+            Self::GithubAction => "github-action",
             Self::Swift => "swift",
             Self::OpenTofu => "opentofu",
             Self::Docker => "docker",
@@ -595,6 +598,7 @@ impl UnitKind {
             Self::Gradle => "Gradle",
             Self::Node => "Node.js",
             Self::Bun => "Bun",
+            Self::GithubAction => "GitHub Action",
             Self::Swift => "Swift / Apple",
             Self::OpenTofu => "OpenTofu",
             Self::Docker => "Docker",
@@ -3811,6 +3815,7 @@ pub(crate) fn unit_group(kind: UnitKind) -> &'static str {
         UnitKind::Node => "Node / Packages",
         UnitKind::Docker => "Docker / Images",
         UnitKind::Docs => "Documentation",
+        UnitKind::GithubAction => "GitHub Actions",
         UnitKind::OpenTofu => "OpenTofu",
         UnitKind::Homebrew => "Homebrew",
         UnitKind::Swift => "Swift / Packages",
@@ -6160,6 +6165,10 @@ pub(crate) fn workflow_pinned_policy_runtime_local(revision: &str, checkout: &st
     format!(
         "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n        run: |\n          set -euo pipefail\n          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
     )
+    .replace(
+        "crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo",
+        &closure::CLOSURE_PATHS.join(" "),
+    )
 }
 
 /// Where a hosted unit job places the runtime pair it downloads from the
@@ -6617,6 +6626,7 @@ fn generated_files_with_surface(
             files.insert(path, content);
         }
     }
+    merge_declared_surface_files(&mut files, surface)?;
     for (name, template) in &config.workflow_templates {
         files.insert(
             PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name),
@@ -6682,6 +6692,30 @@ fn generated_files_with_surface(
     // generator's 8 MiB ceiling before it can fail every run at startup.
     template_memory::validate_template_memory(&files)?;
     Ok(files)
+}
+
+fn merge_declared_surface_files(
+    files: &mut BTreeMap<PathBuf, String>,
+    surface: Option<&primitives::Surface>,
+) -> Result<(), GeneratorError> {
+    let Some(surface) = surface else {
+        return Ok(());
+    };
+    for (path, content) in &surface.files {
+        match files.entry(path.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(content.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == content => {}
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                return Err(GeneratorError::usage(format!(
+                    "declared primitive output collides with generated file {}",
+                    entry.key().display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Composite actions the generator always emits; repository `static_files`
@@ -11104,7 +11138,7 @@ mod tests {
         );
         // Closure resolution: local git first, trees API fallback, same
         // canonical bytes (byte-sorted ls-tree lines plus the footer).
-        assert!(action.contains("ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"), "{action}");
+        assert!(action.contains("ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow crates/velnor-model Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"), "{action}");
         assert!(
             action.contains("git/trees/$INSTALL_REV?recursive=1"),
             "{action}"

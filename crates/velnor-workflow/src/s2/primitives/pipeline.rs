@@ -7,8 +7,8 @@
 
 use super::{
     Args, CacheBackend, GraphNode, Primitive, RenderCtx, Rendered, UnitContract, BUN_PACKAGE,
-    DEFAULT_UNIT_TIMEOUT_MINUTES, DOCKER_IMAGE, DOCS_LINT, GRADLE_PROJECT, HOMEBREW_TAP,
-    NODE_PACKAGE, OPENTOFU, RUST_CRATE, SWIFT_PACKAGE,
+    DEFAULT_UNIT_TIMEOUT_MINUTES, DOCKER_IMAGE, DOCS_LINT, GITHUB_ACTION, GRADLE_PROJECT,
+    HOMEBREW_TAP, NODE_PACKAGE, OPENTOFU, RUST_CRATE, SWIFT_PACKAGE,
 };
 use crate::s2::{GeneratorError, UnitKind};
 
@@ -212,4 +212,10 @@ pipeline!(
     DOCS_LINT,
     UnitKind::Docs,
     "Render one documentation unit's verification surface."
+);
+pipeline!(
+    GithubAction,
+    GITHUB_ACTION,
+    UnitKind::GithubAction,
+    "Render one GitHub Action's metadata, local entrypoint, and configured consumer fixture verification surface."
 );
