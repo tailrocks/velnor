@@ -178,6 +178,7 @@ mod tests {
     };
     use crate::s2::config::MiseInstallDeps;
     use crate::s2::platform::{NamedProduct, Prerequisite};
+    use crate::s2::provider::ProviderMode;
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
@@ -3378,6 +3379,42 @@ mod tests {
     }
 
     #[test]
+    fn plan_provider_environment_covers_each_typed_mode() {
+        let full = ProviderSet::from([
+            ProviderId::GithubHosted,
+            ProviderId::GithubSelfHosted,
+            ProviderId::Velnor,
+        ]);
+        for mode in ProviderMode::ALL {
+            let mut ir = owner_test_ir("example/provider-mode", vec![rust_unit("rust", ".")]);
+            ir.providers = full.clone();
+            ir.automatic_providers = mode.automatic_providers();
+            let environment = ir.plan_provider_environment();
+            let automatic = mode
+                .automatic_providers()
+                .iter()
+                .map(ProviderId::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            let dispatch = full
+                .iter()
+                .map(ProviderId::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            if mode == ProviderMode::Both {
+                assert_eq!(environment, dispatch);
+            } else {
+                assert_eq!(
+                    environment,
+                    format!(
+                        "${{{{ github.event_name == 'workflow_dispatch' && '{dispatch}' || '{automatic}' }}}}"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
     fn plan_step_creates_expected_work_dir_before_invoking_plan() {
         // The pinned product predates the runtime's own parent creation, so
         // the branch-controlled render prepares the dir for the old binary.
@@ -6203,8 +6240,8 @@ pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) providers: ProviderSet,
     pub(crate) automatic_providers: ProviderSet,
-    // NOTE: no `default_dispatch_providers`. Manual dispatches select the
-    // static universe; there is no dispatch-side provider input to default.
+    // Manual dispatches select the complete static universe; there is no
+    // dispatch-side provider input to narrow it.
     pub(crate) selectors: SelectorMap,
     pub(crate) ci_required: bool,
     pub(crate) repository: String,
@@ -9377,6 +9414,31 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .unwrap_or_default()
     }
 
+    /// The planner's provider input is automatic-event scoped, except for a
+    /// manual dispatch. A dispatch must plan the complete declared universe so
+    /// every statically emitted provider caller can receive expected work.
+    fn plan_provider_environment(&self) -> String {
+        let automatic = self
+            .automatic_providers
+            .iter()
+            .map(ProviderId::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let dispatch = self
+            .providers
+            .iter()
+            .map(ProviderId::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        if automatic == dispatch {
+            automatic
+        } else {
+            github_expression(&format!(
+                "github.event_name == 'workflow_dispatch' && '{dispatch}' || '{automatic}'"
+            ))
+        }
+    }
+
     pub(crate) fn render_plan(&self, output: &mut String) {
         // Planning is control plane. Hosted planning pins `uses:` to
         // SOURCE_REV. `rev:` uses a context-gated `${{ github.sha }}`
@@ -9389,14 +9451,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             &crate::s2::workflow_setup_install_rev(&self.repository, &self.workflow_revision),
         );
         let base_sha = self.base_sha_expression();
-        // Every event selects the static automatic set: there is no provider
-        // input to read.
-        let automatic = self
-            .automatic_providers
-            .iter()
-            .map(ProviderId::as_str)
-            .collect::<Vec<_>>()
-            .join(",");
+        // Ordinary events select the static automatic set. Manual dispatch
+        // selects the complete declared provider universe.
+        let automatic = self.plan_provider_environment();
         // A local control plane never plans untrusted events: fork and bot
         // pull requests skip planning (and therefore the whole aggregate),
         // exactly like any other local job without a trusted event.

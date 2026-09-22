@@ -815,6 +815,13 @@ fn write_config(
          group_name = \"{GROUP_NAME}\"\n\
          set_name = \"{SET_NAME}\"\n\
          labels = [\"velnor\", \"linux\"]\n\
+         [admission]\n\
+         owner = [\"{OWNER}\"]\n\
+         repository = [\"{OWNER}/velnor\"]\n\
+         ref = [\"main\"]\n\
+         source = [\"{OWNER}/velnor\"]\n\
+         workflow = [\".github/workflows/ci.yml\"]\n\
+         event = [\"push\"]\n\
          ready_attempts = 2\n\
          sweep_interval_secs = 3600\n\
          poll_timeout_secs = 5\n\

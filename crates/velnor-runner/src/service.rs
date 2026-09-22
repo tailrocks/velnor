@@ -187,6 +187,14 @@ pub struct DaemonArgs {
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
 
+    /// Host execution topology. Defaults to native-only.
+    #[arg(
+        long,
+        env = "VELNOR_HOST_MODE",
+        default_value_t = crate::args::HostMode::NativeOnly
+    )]
+    pub mode: crate::args::HostMode,
+
     /// Host-wide maximum concurrent jobs. Native and Scale Set lanes share
     /// one permit ledger capped at this N; job containers run unbounded and
     /// only this number is tuned for throughput. Unset (or 0) falls back to
@@ -457,6 +465,7 @@ impl From<DaemonArgs> for crate::args::DaemonArgs {
             dry_run_jobs: a.dry_run_jobs,
             dump_job_message: a.dump_job_message,
             docker_image: a.docker_image,
+            mode: a.mode,
             max_jobs: a.max_jobs,
             permit_ledger: a.permit_ledger,
             scale_set_config: a.scale_set_config,
@@ -751,6 +760,24 @@ mod tests {
                 "unexpected error: {error:#}"
             );
         }
+    }
+
+    #[test]
+    fn service_daemon_host_mode_defaults_and_parses_explicitly() {
+        let default = ServiceCli::try_parse_from(["velnor-runner", "daemon"])
+            .expect("default daemon arguments should parse");
+        let ServiceCommand::Daemon(default_args) = default.command else {
+            panic!("expected daemon command");
+        };
+        assert_eq!(default_args.mode, crate::args::HostMode::NativeOnly);
+
+        let explicit =
+            ServiceCli::try_parse_from(["velnor-runner", "daemon", "--mode", "scale-set-only"])
+                .expect("explicit host mode should parse");
+        let ServiceCommand::Daemon(explicit_args) = explicit.command else {
+            panic!("expected daemon command");
+        };
+        assert_eq!(explicit_args.mode, crate::args::HostMode::ScaleSetOnly);
     }
 
     #[test]

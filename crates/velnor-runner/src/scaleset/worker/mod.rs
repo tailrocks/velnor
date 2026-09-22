@@ -43,10 +43,10 @@ pub use dind::{
 };
 pub use ownership::{OwnershipId, WorkerIdentity};
 pub use runner::{
-    DockerToolContentHook, HomogeneousProfile, InvalidPinnedImage, PinnedImage, RunnerConnection,
-    RunnerProvision, RunnerSpec, ToolContentAttestation, ToolContentExpectation, ToolContentHook,
-    DIND_DIGEST_AMD64, DIND_DIGEST_ARM64, DIND_INDEX_DIGEST, DIND_REPOSITORY, DIND_VERSION,
-    RUNNER_DIGEST_AMD64, RUNNER_DIGEST_ARM64, RUNNER_INDEX_DIGEST, RUNNER_REPOSITORY,
+    DockerToolContentHook, HomogeneousProfile, ImagePlatform, InvalidPinnedImage, PinnedImage,
+    RunnerConnection, RunnerProvision, RunnerSpec, ToolContentAttestation, ToolContentExpectation,
+    ToolContentHook, DIND_DIGEST_AMD64, DIND_DIGEST_ARM64, DIND_INDEX_DIGEST, DIND_REPOSITORY,
+    DIND_VERSION, RUNNER_DIGEST_AMD64, RUNNER_DIGEST_ARM64, RUNNER_INDEX_DIGEST, RUNNER_REPOSITORY,
     RUNNER_VERSION, RUNNER_WORK_DIR, TOOL_CACHE_DIR,
 };
 pub use supervise::{CleanupReport, DiagnosticExport, Supervision, SupervisionOutcome};
@@ -345,16 +345,14 @@ pub fn provision_worker(
     if plan.ready_attempts == 0 {
         anyhow::bail!("provision plan needs at least one DinD readiness attempt");
     }
-    let dind_attestation = hook
-        .verify(runner, plan.profile.dind(), &ToolContentExpectation::dind())
-        .context("verify DinD tool content")?;
-    let runner_attestation = hook
-        .verify(
-            runner,
-            plan.profile.runner(),
-            &ToolContentExpectation::runner(),
-        )
-        .context("verify runner tool content")?;
+    let dind_expectation = ToolContentExpectation::dind_for(plan.profile.platform());
+    let dind_attestation =
+        runner::admit_tool_content(hook, runner, plan.profile.dind(), &dind_expectation)
+            .context("admit DinD tool content")?;
+    let runner_expectation = ToolContentExpectation::runner_for(plan.profile.platform());
+    let runner_attestation =
+        runner::admit_tool_content(hook, runner, plan.profile.runner(), &runner_expectation)
+            .context("admit runner tool content")?;
 
     let network = dind::ensure_network(runner, &plan.identity)?;
     let dind_spec = DindSpec::new(
@@ -587,6 +585,50 @@ mod tests {
         }
     }
 
+    /// The provision-order test supplies all admission proofs explicitly;
+    /// the production Docker hook performs the real runner provenance check.
+    struct CompleteTestHook;
+
+    impl ToolContentHook for CompleteTestHook {
+        fn verify(
+            &self,
+            runner: &mut dyn WorkerRunner,
+            image: &runner::PinnedImage,
+            expected: &runner::ToolContentExpectation,
+        ) -> anyhow::Result<runner::ToolContentAttestation> {
+            DockerToolContentHook.verify(runner, image, expected)
+        }
+
+        fn verify_platform(
+            &self,
+            _runner: &mut dyn WorkerRunner,
+            _image: &runner::PinnedImage,
+            _expected: &runner::ImagePlatform,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn verify_attestation(
+            &self,
+            _runner: &mut dyn WorkerRunner,
+            _image: &runner::PinnedImage,
+            _expected: &runner::ToolContentExpectation,
+            _attestation: &runner::ToolContentAttestation,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn verify_signature(
+            &self,
+            _runner: &mut dyn WorkerRunner,
+            _image: &runner::PinnedImage,
+            _expected: &runner::ToolContentExpectation,
+            _attestation: &runner::ToolContentAttestation,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn provision_runs_verify_network_dind_ready_runner_in_order() {
         let dind_ref = format!("{DIND_REPOSITORY}@{DIND_INDEX_DIGEST}");
@@ -633,7 +675,7 @@ mod tests {
         let sleeps = std::cell::Cell::new(0u32);
         let outcome = provision_worker(
             &mut script,
-            &DockerToolContentHook,
+            &CompleteTestHook,
             &plan,
             &|_| {
                 sleeps.set(sleeps.get() + 1);
@@ -691,13 +733,9 @@ mod tests {
             ScriptRunner::fail(1, "Cannot connect"),
             ScriptRunner::fail(1, "Cannot connect"),
         ]);
-        let error = provision_worker(
-            &mut script,
-            &DockerToolContentHook,
-            &plan,
-            &|_| {},
-            &mut || Ok(()),
-        )
+        let error = provision_worker(&mut script, &CompleteTestHook, &plan, &|_| {}, &mut || {
+            Ok(())
+        })
         .unwrap_err();
         assert!(error.to_string().contains("never became ready"), "{error}");
         // The runner was never created: no runner argv ran.

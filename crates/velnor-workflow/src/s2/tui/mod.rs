@@ -26,7 +26,7 @@ use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
 use super::provider::ProviderSet;
 use super::{
-    apply_generated_write_plan, generated_files, plan_generated_write, scan_target, Checkout, Cli,
+    apply_generated_write_plan, generated_files, plan_generated_write, Checkout, Cli,
     GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
     WriteOutcome,
 };
@@ -508,6 +508,7 @@ impl App {
         let receiver = spawn_scan(
             source,
             self.cli.providers.clone(),
+            self.cli.provider_mode,
             self.cli.output.clone(),
             self.cli.default_branch.clone(),
         );
@@ -829,6 +830,7 @@ fn required_dependencies(config: &ProjectConfig, selected: &[String], id: &str) 
 fn spawn_scan(
     source: RepositorySource,
     providers: Option<ProviderSet>,
+    provider_mode: Option<super::provider::ProviderMode>,
     output: Option<std::path::PathBuf>,
     default_branch: Option<String>,
 ) -> Receiver<ScanResult> {
@@ -840,7 +842,12 @@ fn spawn_scan(
                 Some(branch) => super::validate_default_branch(branch)?.to_owned(),
                 None => source.default_branch(checkout.path())?,
             };
-            let scanned = scan_target(checkout.path(), providers, &default_branch)?;
+            let scanned = super::scan_target_with_mode(
+                checkout.path(),
+                providers,
+                provider_mode,
+                &default_branch,
+            )?;
             let output_root = match output.as_deref() {
                 Some(path) => super::resolve_output_path(path)?,
                 None => source.output_root(checkout.path())?,
@@ -863,6 +870,7 @@ pub(super) fn run(cli: &Cli) -> Result<(), GeneratorError> {
     let receiver = spawn_scan(
         source,
         cli.providers.clone(),
+        cli.provider_mode,
         cli.output.clone(),
         cli.default_branch.clone(),
     );
@@ -1080,6 +1088,7 @@ mod tests {
                 default_branch: None,
                 output: None,
                 providers: None,
+                provider_mode: None,
                 dry_run: true,
                 check: false,
                 force: false,

@@ -20,6 +20,7 @@ use velnor_model::ExitClass;
 use crate::commands::{HostBootstrapImageArgs, HostCommand, HostStartArgs};
 use crate::runtime::{self, DaemonArgs};
 use crate::{CommandError, GlobalArgs};
+use velnor_runner::args::HostMode as RunnerHostMode;
 
 const DEFAULT_REPO: &str = "tailrocks/velnor";
 const HOST_PID_FILE: &str = "host.pid";
@@ -38,6 +39,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     crate::ensure_native_github_http_transport();
     ensure_dev_canonical_storage()?;
     ensure_dev_service_binary()?;
+    let mode = resolve_host_mode(&args)?;
     let url = resolve_repo_url(globals.repo.as_deref(), args.url.as_deref())?;
     if github_pat().is_none() {
         return Err(CommandError::new(
@@ -49,7 +51,12 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     }
 
     let name = effective_host_name(globals, &args)?;
-    let slots = args.slots.max(1);
+    let requested_slots = args.slots.max(1);
+    let native_slots = if mode.native_enabled() {
+        requested_slots
+    } else {
+        0
+    };
     let socket = velnor_client::socket_root();
     let docker = docker_endpoint_display();
     let execution = execution_platform();
@@ -70,17 +77,42 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         println!("  github_transport {transport} (REST only; broker, run-service, and uploads stay in-process)");
     }
     println!("  instance         {name}");
-    println!("  slots            {slots}");
-    {
+    println!("  mode             {}", args.mode.as_str());
+    println!("  requested_slots  {requested_slots}");
+    println!("  native_slots     {native_slots}");
+    if mode.native_enabled() {
         let host = velnor_runner::runner::github_runner_host_slug();
         let first = velnor_runner::runner::compose_github_runner_name(&host, &name, 0);
-        let last = velnor_runner::runner::compose_github_runner_name(&host, &name, slots - 1);
-        if slots == 1 {
+        let last =
+            velnor_runner::runner::compose_github_runner_name(&host, &name, native_slots - 1);
+        if native_slots == 1 {
             println!("  runner_names     {first}");
         } else {
             println!("  runner_names     {first} .. {last}");
         }
+    } else {
+        println!("  runner_names     none (Scale Set lane only)");
     }
+    println!(
+        "  max_jobs         {}",
+        args.max_jobs.map_or_else(
+            || "native slot fallback".to_owned(),
+            |value| value.to_string()
+        )
+    );
+    println!(
+        "  permit_ledger    {}",
+        args.permit_ledger.as_deref().map_or_else(
+            || "host default".to_owned(),
+            |path| path.display().to_string()
+        )
+    );
+    println!(
+        "  scale_set_config {}",
+        args.scale_set_config
+            .as_deref()
+            .map_or_else(|| "none".to_owned(), |path| path.display().to_string())
+    );
     println!("  docker_endpoint  {docker}");
     println!("  execution        {execution}");
     println!(
@@ -98,14 +130,20 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     let config_dir = resolve_host_config_dir(&args, &name)?;
     let state_db = config_dir.join("state.db");
     ensure_dev_state_db_env(&state_db)?;
-    ensure_docker_execution_file(&config_dir, slots)?;
+    if mode.native_enabled() {
+        ensure_docker_execution_file(&config_dir, native_slots)?;
+    }
     let docker_image = args
         .docker_image
         .clone()
         .unwrap_or_else(|| "velnor/job-ubuntu:26.04".into());
-    ensure_local_job_image(&docker_image)?;
+    if mode.native_enabled() {
+        ensure_local_job_image(&docker_image)?;
+    }
     println!("  config_dir       {}", config_dir.display());
-    println!("  job_image        {docker_image}");
+    if mode.native_enabled() {
+        println!("  job_image        {docker_image}");
+    }
 
     let trust_scope = env::var("VELNOR_TRUST_SCOPE").unwrap_or_else(|_| "untrusted".into());
     let daemon = DaemonArgs {
@@ -122,7 +160,8 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         pool_name: None,
         routing_policy_file: None,
         dry_run_registration: false,
-        slots,
+        slots: native_slots,
+        mode: args.mode,
         max_idle_slot_age_seconds: None,
         once: false,
         idle_timeout_seconds: None,
@@ -131,9 +170,9 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         dry_run_jobs: false,
         dump_job_message: None,
         docker_image,
-        max_jobs: None,
-        permit_ledger: None,
-        scale_set_config: None,
+        max_jobs: args.max_jobs,
+        permit_ledger: args.permit_ledger,
+        scale_set_config: args.scale_set_config,
         trust: velnor_runner::trust_scope::TrustScopeArg { trust_scope },
         emergency_reserve_bytes: 10_737_418_240,
         job_peak_bytes: 32_212_254_720,
@@ -141,7 +180,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         work_dir: args.work_dir,
         docker_host_work_dir: args.docker_host_work_dir,
         skip_preflight: false,
-        require_docker_socket: true,
+        require_docker_socket: mode.native_enabled(),
     };
     // `run_daemon` also creates the socket root, but the PID guard lives in
     // the instance directory and is installed before that call. A fresh
@@ -176,6 +215,35 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
             format!("unable to start on-demand host: {error}"),
         )
     })
+}
+
+fn resolve_host_mode(args: &HostStartArgs) -> Result<RunnerHostMode, CommandError> {
+    let mode: RunnerHostMode = args.mode.into();
+    let has_scale_set_config = args.scale_set_config.is_some();
+    let has_positive_max_jobs = matches!(args.max_jobs, Some(value) if value > 0);
+
+    match mode {
+        RunnerHostMode::NativeOnly if has_scale_set_config => Err(CommandError::new(
+            ExitClass::Usage,
+            "host.mode_config_conflict",
+            "native-only mode forbids --scale-set-config/VELNOR_SCALE_SET_CONFIG; choose scale-set-only or both",
+        )),
+        RunnerHostMode::ScaleSetOnly | RunnerHostMode::Both if !has_scale_set_config => {
+            Err(CommandError::new(
+                ExitClass::Usage,
+                "host.scale_set_config_required",
+                "scale-set-only and both modes require --scale-set-config or VELNOR_SCALE_SET_CONFIG",
+            ))
+        }
+        RunnerHostMode::ScaleSetOnly | RunnerHostMode::Both if !has_positive_max_jobs => {
+            Err(CommandError::new(
+                ExitClass::Usage,
+                "host.max_jobs_required",
+                "scale-set-only and both modes require a positive --max-jobs or VELNOR_MAX_JOBS",
+            ))
+        }
+        _ => Ok(mode),
+    }
 }
 
 /// Reconnect an explicitly restarted on-demand host to its durable state.
@@ -1579,17 +1647,88 @@ mod tests {
         assert_eq!(error.reason, "host.org_scope_refused");
     }
 
+    fn mode_args(
+        mode: crate::commands::HostMode,
+        max_jobs: Option<u32>,
+        scale_set_config: Option<&str>,
+    ) -> HostStartArgs {
+        HostStartArgs {
+            url: None,
+            name: None,
+            slots: 1,
+            mode,
+            pr: None,
+            work_dir: None,
+            config_dir: None,
+            docker_host_work_dir: None,
+            docker_image: None,
+            max_jobs,
+            permit_ledger: None,
+            scale_set_config: scale_set_config.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn host_mode_validation_is_explicit() {
+        assert_eq!(
+            resolve_host_mode(&mode_args(
+                crate::commands::HostMode::NativeOnly,
+                None,
+                None,
+            ))
+            .unwrap(),
+            RunnerHostMode::NativeOnly
+        );
+        assert!(resolve_host_mode(&mode_args(
+            crate::commands::HostMode::NativeOnly,
+            None,
+            Some("scale-set.toml"),
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("native-only"));
+        assert!(resolve_host_mode(&mode_args(
+            crate::commands::HostMode::ScaleSetOnly,
+            None,
+            None,
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("require --scale-set-config"));
+        assert!(resolve_host_mode(&mode_args(
+            crate::commands::HostMode::ScaleSetOnly,
+            Some(0),
+            Some("scale-set.toml"),
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("positive --max-jobs"));
+        assert_eq!(
+            resolve_host_mode(&mode_args(
+                crate::commands::HostMode::Both,
+                Some(2),
+                Some("scale-set.toml"),
+            ))
+            .unwrap(),
+            RunnerHostMode::Both
+        );
+    }
+
     #[test]
     fn default_config_dir_is_isolated_per_host_name() {
         let args = HostStartArgs {
             url: None,
             name: None,
             slots: 1,
+            mode: crate::commands::HostMode::NativeOnly,
             pr: None,
             work_dir: None,
             config_dir: None,
             docker_host_work_dir: None,
             docker_image: None,
+            max_jobs: None,
+            permit_ledger: None,
+            scale_set_config: None,
         };
         let dir = resolve_host_config_dir(&args, "velnor-macos-smoke").expect("config dir");
         assert!(
@@ -1605,11 +1744,15 @@ mod tests {
             url: None,
             name: None,
             slots: 1,
+            mode: crate::commands::HostMode::NativeOnly,
             pr: None,
             work_dir: None,
             config_dir: Some(PathBuf::from("/tmp/explicit-host")),
             docker_host_work_dir: None,
             docker_image: None,
+            max_jobs: None,
+            permit_ledger: None,
+            scale_set_config: None,
         };
         assert_eq!(
             resolve_host_config_dir(&args, "ignored").expect("explicit"),

@@ -20,7 +20,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, ToSql};
-use velnor_model::ScaleSetJobAvailable;
+use serde::Deserialize;
+use velnor_model::{ScaleSetJobAssigned, ScaleSetJobAvailable};
 
 /// Demand-row lifecycle. Stored verbatim in `scaleset_demand.state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -128,6 +129,11 @@ pub struct Demand {
     pub updated_at: String,
     /// Durable deciding input for the grant-pass trust gate (v23).
     pub event_name: String,
+    /// Durable workflow identity input for the configured admission gate.
+    pub job_workflow_ref: String,
+    /// Exact wire identity used to detect a fallback-ID collision. An empty
+    /// value is historical/incomplete and is never treated as a redelivery.
+    pub request_identity: String,
 }
 
 /// Outcome of submitting one offered job.
@@ -149,12 +155,137 @@ pub enum OfferTrust {
     Unknown { reason: &'static str },
 }
 
+/// Explicit scale-set admission allowlists.
+///
+/// Every dimension is required. An absent or incomplete policy never grants
+/// trusted treatment. `repository` and `source` are full `owner/repository`
+/// names; `workflow` is the `.github/workflows/...` path; `ref` is normalized
+/// to a qualified ref before comparison.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OfferAdmission {
+    #[serde(default)]
+    pub owner: Vec<String>,
+    #[serde(default)]
+    pub repository: Vec<String>,
+    #[serde(rename = "ref", default)]
+    pub git_ref: Vec<String>,
+    #[serde(default)]
+    pub source: Vec<String>,
+    #[serde(default)]
+    pub workflow: Vec<String>,
+    #[serde(default)]
+    pub event: Vec<String>,
+}
+
+impl OfferAdmission {
+    /// Build an exact policy for one workflow identity.
+    #[must_use]
+    pub fn exact(
+        owner: &str,
+        repository: &str,
+        git_ref: &str,
+        source: &str,
+        workflow: &str,
+        event: &str,
+    ) -> Self {
+        Self {
+            owner: vec![owner.to_owned()],
+            repository: vec![repository.to_owned()],
+            git_ref: vec![git_ref.to_owned()],
+            source: vec![source.to_owned()],
+            workflow: vec![workflow.to_owned()],
+            event: vec![event.to_owned()],
+        }
+    }
+
+    /// Validate the policy shape before it can reach the grant path.
+    pub fn validate(&self) -> Result<()> {
+        for (name, values) in [
+            ("owner", &self.owner),
+            ("repository", &self.repository),
+            ("ref", &self.git_ref),
+            ("source", &self.source),
+            ("workflow", &self.workflow),
+            ("event", &self.event),
+        ] {
+            if values.is_empty() {
+                anyhow::bail!("scale-set admission: {name} allowlist is required");
+            }
+            if values.iter().any(|value| value.trim().is_empty()) {
+                anyhow::bail!("scale-set admission: {name} allowlist contains an empty value");
+            }
+        }
+        if self
+            .git_ref
+            .iter()
+            .any(|value| normalize_workflow_ref(value).is_none())
+        {
+            anyhow::bail!("scale-set admission: ref allowlist contains an invalid ref");
+        }
+        if self
+            .workflow
+            .iter()
+            .any(|value| !valid_workflow_path(value.trim()))
+        {
+            anyhow::bail!("scale-set admission: workflow allowlist contains an invalid path");
+        }
+        if self
+            .event
+            .iter()
+            .any(|value| !valid_event_name(value.trim()))
+        {
+            anyhow::bail!("scale-set admission: event allowlist contains an invalid event");
+        }
+        Ok(())
+    }
+
+    fn allows(&self, identity: &OfferIdentity) -> bool {
+        self.owner
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(&identity.owner))
+            && self
+                .repository
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(&identity.repository))
+            && self.git_ref.iter().any(|value| {
+                normalize_workflow_ref(value).is_some_and(|value| value == identity.git_ref)
+            })
+            && self
+                .source
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(&identity.source))
+            && self
+                .workflow
+                .iter()
+                .any(|value| value.trim() == identity.workflow)
+            && self
+                .event
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(&identity.event))
+    }
+}
+
+impl Default for OfferAdmission {
+    fn default() -> Self {
+        Self {
+            owner: Vec::new(),
+            repository: Vec::new(),
+            git_ref: Vec::new(),
+            source: Vec::new(),
+            workflow: Vec::new(),
+            event: Vec::new(),
+        }
+    }
+}
+
 /// The classifiable slice of an offer: the only fields the verdict reads.
 #[derive(Debug, Clone, Copy)]
 pub struct OfferProbe<'a> {
     pub event_name: &'a str,
     pub owner_name: &'a str,
     pub repository_name: &'a str,
+    pub job_workflow_ref: &'a str,
 }
 
 impl<'a> From<&'a ScaleSetJobAvailable> for OfferProbe<'a> {
@@ -163,6 +294,18 @@ impl<'a> From<&'a ScaleSetJobAvailable> for OfferProbe<'a> {
             event_name: &offer.base.event_name,
             owner_name: &offer.base.owner_name,
             repository_name: &offer.base.repository_name,
+            job_workflow_ref: &offer.base.job_workflow_ref,
+        }
+    }
+}
+
+impl<'a> From<&'a ScaleSetJobAssigned> for OfferProbe<'a> {
+    fn from(assigned: &'a ScaleSetJobAssigned) -> Self {
+        Self {
+            event_name: &assigned.base.event_name,
+            owner_name: &assigned.base.owner_name,
+            repository_name: &assigned.base.repository_name,
+            job_workflow_ref: &assigned.base.job_workflow_ref,
         }
     }
 }
@@ -180,28 +323,120 @@ fn is_workflow_run_event(event: &str) -> bool {
     event.eq_ignore_ascii_case("workflow_run")
 }
 
-/// Resolve a stable non-negative 64-bit request ID from a job message.
+fn valid_event_name(event: &str) -> bool {
+    !event.is_empty()
+        && event
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn valid_workflow_path(path: &str) -> bool {
+    path.starts_with(".github/workflows/")
+        && path.len() > ".github/workflows/".len()
+        && !path.contains("..")
+        && !path.chars().any(char::is_control)
+}
+
+fn normalize_workflow_ref(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.chars().any(char::is_control) {
+        return None;
+    }
+    if raw.starts_with("refs/")
+        || (raw.len() == 40 && raw.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Some(raw.to_owned());
+    }
+    Some(format!("refs/heads/{raw}"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OfferIdentity {
+    owner: String,
+    repository: String,
+    git_ref: String,
+    source: String,
+    workflow: String,
+    event: String,
+}
+
+fn parse_offer_identity(probe: &OfferProbe<'_>) -> Option<OfferIdentity> {
+    let event = probe.event_name.trim();
+    if !valid_event_name(event) {
+        return None;
+    }
+    let owner = probe.owner_name.trim();
+    let repository_name = probe.repository_name.trim();
+    if owner.is_empty()
+        || repository_name.is_empty()
+        || owner.contains('/')
+        || repository_name.contains('/')
+        || owner.chars().any(char::is_control)
+        || repository_name.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let (source_path, raw_ref) = probe.job_workflow_ref.trim().rsplit_once('@')?;
+    let mut source_parts = source_path.splitn(3, '/');
+    let source_owner = source_parts.next()?.trim();
+    let source_repository = source_parts.next()?.trim();
+    let workflow = source_parts.next()?.trim();
+    if source_owner.is_empty()
+        || source_repository.is_empty()
+        || source_owner.contains('/')
+        || source_repository.contains('/')
+        || !valid_workflow_path(workflow)
+    {
+        return None;
+    }
+    Some(OfferIdentity {
+        owner: owner.to_ascii_lowercase(),
+        repository: format!(
+            "{}/{}",
+            owner.to_ascii_lowercase(),
+            repository_name.to_ascii_lowercase()
+        ),
+        git_ref: normalize_workflow_ref(raw_ref)?,
+        source: format!(
+            "{}/{}",
+            source_owner.to_ascii_lowercase(),
+            source_repository.to_ascii_lowercase()
+        ),
+        workflow: workflow.to_owned(),
+        event: event.to_ascii_lowercase(),
+    })
+}
+
+/// Resolve the canonical durable request ID from a job message.
 ///
 /// Upstream Actions Service transmits `runnerRequestId` on job offers.
 /// When direct scale-set assignment is active, `runnerRequestId` may be 0,
 /// but `jobId` (GUID) is consistently transmitted across `JobAssigned`,
 /// `JobStarted`, and `JobCompleted`. We project non-zero `runnerRequestId`
-/// when present, else hash `jobId` stably.
+/// when present, else hash `jobId` stably. A missing job ID is rejected
+/// instead of collapsing unrelated offers onto a sentinel key.
 #[must_use]
-pub fn resolve_job_request_id(base: &velnor_model::ScaleSetJobMessage) -> i64 {
+pub fn resolve_job_request_id(base: &velnor_model::ScaleSetJobMessage) -> Option<i64> {
+    resolve_job_request_identity(base).map(|(request_id, _)| request_id)
+}
+
+/// Resolve the durable ID plus the exact source identity used to derive it.
+/// The i64 fallback remains a lookup key for the existing schema, but the
+/// original job ID is stored beside it so a hash collision fails closed.
+#[must_use]
+pub fn resolve_job_request_identity(
+    base: &velnor_model::ScaleSetJobMessage,
+) -> Option<(i64, String)> {
     if base.runner_request_id != 0 {
-        base.runner_request_id
+        Some((
+            base.runner_request_id,
+            format!("runner-request:{}", base.runner_request_id),
+        ))
     } else if !base.job_id.is_empty() {
-        let val = crate::scaleset::intents::stable_i64(&base.job_id);
-        if val != 0 {
-            val
-        } else {
-            1
-        }
-    } else if base.workflow_run_id != 0 {
-        base.workflow_run_id
+        let request_id = crate::scaleset::intents::stable_i64(&base.job_id);
+        (request_id != 0).then(|| (request_id, format!("job-id:{}", base.job_id)))
     } else {
-        1
+        None
     }
 }
 
@@ -213,21 +448,20 @@ pub fn resolve_job_request_id(base: &velnor_model::ScaleSetJobMessage) -> i64 {
 /// offer, so the comparison is impossible, not merely skipped); anything
 /// else with a base repo → trusted.
 #[must_use]
-pub fn classify_offer(offer: &ScaleSetJobAvailable) -> OfferTrust {
-    classify_probe(&OfferProbe::from(offer))
+pub fn classify_offer(
+    offer: &ScaleSetJobAvailable,
+    admission: Option<&OfferAdmission>,
+) -> OfferTrust {
+    classify_probe(&OfferProbe::from(offer), admission)
 }
 
 /// Classify stored offer fields. The grant pass re-runs the gate over the
 /// durable row (not the submit-time verdict) so stale-reset rows and
 /// policy changes re-evaluate from the same inputs.
 #[must_use]
-pub fn classify_probe(probe: &OfferProbe<'_>) -> OfferTrust {
+pub fn classify_probe(probe: &OfferProbe<'_>, admission: Option<&OfferAdmission>) -> OfferTrust {
     let event = probe.event_name.trim();
-    if event.is_empty()
-        || !event
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
+    if !valid_event_name(event) {
         return OfferTrust::Unknown {
             reason: "event-unparseable",
         };
@@ -242,7 +476,28 @@ pub fn classify_probe(probe: &OfferProbe<'_>) -> OfferTrust {
             reason: "trust-inputs-missing",
         };
     }
-    OfferTrust::Trusted
+    let Some(admission) = admission else {
+        return OfferTrust::Unknown {
+            reason: "admission-missing",
+        };
+    };
+    if admission.validate().is_err() {
+        return OfferTrust::Unknown {
+            reason: "admission-missing",
+        };
+    }
+    let Some(identity) = parse_offer_identity(probe) else {
+        return OfferTrust::Unknown {
+            reason: "workflow-inputs-missing",
+        };
+    };
+    if admission.allows(&identity) {
+        OfferTrust::Trusted
+    } else {
+        OfferTrust::Unknown {
+            reason: "admission-denied",
+        }
+    }
 }
 
 /// Durable demand store over `scaleset_demand`.
@@ -256,16 +511,29 @@ pub fn classify_probe(probe: &OfferProbe<'_>) -> OfferTrust {
 #[derive(Debug)]
 pub struct DemandStore {
     conn: Connection,
+    admission: Option<OfferAdmission>,
 }
 
 impl DemandStore {
     /// Open the demand store at the state database path.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_inner(path, None)
+    }
+
+    /// Open the demand store with the explicit trusted-offer admission policy.
+    pub fn open_with_admission(path: &Path, admission: OfferAdmission) -> Result<Self> {
+        admission
+            .validate()
+            .context("validate scale-set admission")?;
+        Self::open_inner(path, Some(admission))
+    }
+
+    fn open_inner(path: &Path, admission: Option<OfferAdmission>) -> Result<Self> {
         velnor_control::store::Store::open(path).context("migrate scale-set demand schema")?;
         let conn = Connection::open(path).context("open scale-set demand database")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .context("set demand store busy timeout")?;
-        Ok(Self { conn })
+        Ok(Self { conn, admission })
     }
 
     fn now_rfc3339() -> String {
@@ -293,7 +561,25 @@ impl DemandStore {
             generation: generation_raw.max(0) as u64,
             updated_at: row.get(10)?,
             event_name: row.get(11)?,
+            job_workflow_ref: row.get(12)?,
+            request_identity: row.get(13)?,
         })
+    }
+
+    fn classify_offer(&self, offer: &ScaleSetJobAvailable) -> OfferTrust {
+        classify_offer(offer, self.admission.as_ref())
+    }
+
+    fn classify_demand(&self, demand: &Demand) -> OfferTrust {
+        classify_probe(
+            &OfferProbe {
+                event_name: &demand.event_name,
+                owner_name: &demand.repo_owner,
+                repository_name: &demand.repo_name,
+                job_workflow_ref: &demand.job_workflow_ref,
+            },
+            self.admission.as_ref(),
+        )
     }
 
     /// Insert one offer, or retain the existing row on redelivery.
@@ -307,8 +593,17 @@ impl DemandStore {
         offer: &ScaleSetJobAvailable,
         generation: u64,
     ) -> Result<SubmitOutcome> {
-        let request_id = offer.base.runner_request_id;
+        let (request_id, request_identity) = resolve_job_request_identity(&offer.base)
+            .context("scale-set offer has no canonical request identity")?;
         if let Some(existing) = self.get(request_id)? {
+            if existing.scale_set_id != scale_set_id
+                || existing.request_identity.is_empty()
+                || existing.request_identity != request_identity
+            {
+                anyhow::bail!(
+                    "request identity collision for scale-set request {request_id}; refusing to merge offers"
+                );
+            }
             if existing.state == DemandState::Terminal {
                 return Ok(SubmitOutcome::ReofferedTerminal);
             }
@@ -316,11 +611,12 @@ impl DemandStore {
                 state: existing.state,
             });
         }
-        let initial = match classify_offer(offer) {
+        let trust = self.classify_offer(offer);
+        let initial = match trust {
             OfferTrust::Trusted => DemandState::Eligible,
             OfferTrust::Unknown { .. } => DemandState::Observed,
         };
-        let reason: Option<String> = match classify_offer(offer) {
+        let reason: Option<String> = match trust {
             OfferTrust::Trusted => None,
             OfferTrust::Unknown { reason } => Some(reason.to_owned()),
         };
@@ -342,8 +638,9 @@ impl DemandStore {
             .execute(
                 "INSERT OR IGNORE INTO scaleset_demand
                  (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-                  repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name,
+                  job_workflow_ref, request_identity)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     request_id,
                     scale_set_id,
@@ -358,15 +655,23 @@ impl DemandStore {
                     i64::try_from(generation).unwrap_or(i64::MAX),
                     now,
                     offer.base.event_name,
+                    offer.base.job_workflow_ref,
+                    request_identity,
                 ],
             )
             .context("insert demand row")?;
         tx.commit().context("commit demand submit")?;
         if inserted == 0 {
             // Lost a submit race; the winner's row (original age) stands.
-            let state = self
+            let row = self
                 .get(request_id)?
-                .map_or(DemandState::Observed, |row| row.state);
+                .context("demand row vanished after offer race")?;
+            if row.scale_set_id != scale_set_id || row.request_identity != request_identity {
+                anyhow::bail!(
+                    "request identity collision for scale-set request {request_id}; refusing to merge offers"
+                );
+            }
+            let state = row.state;
             if state == DemandState::Terminal {
                 return Ok(SubmitOutcome::ReofferedTerminal);
             }
@@ -378,18 +683,33 @@ impl DemandStore {
     /// Record an assigned job directly into `scaleset_demand`.
     ///
     /// When GitHub directly assigns a job (`JobAssigned`) without a prior
-    /// `JobAvailable` offer, the row is recorded in `DemandState::Acquired`
-    /// so that the provision pass can provision an ephemeral runner for it.
+    /// `JobAvailable` offer, the row is recorded as acquired only after the
+    /// same admission gate used by offers passes. A denied or incomplete
+    /// assignment is durable observation only and never owns a permit.
     pub fn submit_assigned(
         &mut self,
         scale_set_id: i32,
         assigned: &velnor_model::ScaleSetJobAssigned,
         generation: u64,
     ) -> Result<(i64, DemandState)> {
-        let request_id = resolve_job_request_id(&assigned.base);
+        let (request_id, request_identity) = resolve_job_request_identity(&assigned.base)
+            .context("scale-set assignment has no canonical request identity")?;
         if let Some(existing) = self.get(request_id)? {
+            if existing.scale_set_id != scale_set_id
+                || existing.request_identity.is_empty()
+                || existing.request_identity != request_identity
+            {
+                anyhow::bail!(
+                    "request identity collision for scale-set request {request_id}; refusing to merge assignment"
+                );
+            }
             return Ok((request_id, existing.state));
         }
+        let trust = classify_probe(&OfferProbe::from(assigned), self.admission.as_ref());
+        let (state, decline_reason) = match trust {
+            OfferTrust::Trusted => (DemandState::Acquired, None),
+            OfferTrust::Unknown { reason } => (DemandState::Observed, Some(reason.to_owned())),
+        };
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -404,30 +724,46 @@ impl DemandStore {
         let now = Self::now_rfc3339();
         let labels_hash = crate::scaleset::intents::labels_hash(&assigned.base.request_labels);
         let job_id_hash = crate::scaleset::intents::stable_i64(&assigned.base.job_id);
-        tx.execute(
-            "INSERT OR IGNORE INTO scaleset_demand
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO scaleset_demand
              (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-              repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                request_id,
-                scale_set_id,
-                now,
-                sequence,
-                DemandState::Acquired.as_str(),
-                Option::<String>::None,
-                assigned.base.owner_name,
-                assigned.base.repository_name,
-                job_id_hash,
-                labels_hash,
-                i64::try_from(generation).unwrap_or(i64::MAX),
-                now,
-                assigned.base.event_name,
-            ],
-        )
-        .context("insert demand row for assigned job")?;
+              repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name,
+              job_workflow_ref, request_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    request_id,
+                    scale_set_id,
+                    now,
+                    sequence,
+                    state.as_str(),
+                    decline_reason,
+                    assigned.base.owner_name,
+                    assigned.base.repository_name,
+                    job_id_hash,
+                    labels_hash,
+                    i64::try_from(generation).unwrap_or(i64::MAX),
+                    now,
+                    assigned.base.event_name,
+                    assigned.base.job_workflow_ref,
+                    request_identity,
+                ],
+            )
+            .context("insert demand row for assigned job")?;
         tx.commit().context("commit demand submit_assigned")?;
-        Ok((request_id, DemandState::Acquired))
+        if inserted == 0 {
+            let row = self
+                .get(request_id)?
+                .context("demand row vanished after assignment race")?;
+            if row.scale_set_id != scale_set_id || row.request_identity != request_identity {
+                anyhow::bail!(
+                    "request identity collision for scale-set request {request_id}; refusing to merge assignment"
+                );
+            }
+            let state = row.state;
+            return Ok((request_id, state));
+        }
+        Ok((request_id, state))
     }
 
     /// Fetch one demand row by request ID.
@@ -435,7 +771,8 @@ impl DemandStore {
         self.conn
             .query_row(
                 "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-                        repo_owner, repo_name, job_id, generation, updated_at, event_name
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        job_workflow_ref, request_identity
                  FROM scaleset_demand WHERE request_id = ?1",
                 params![request_id],
                 Self::row_to_demand,
@@ -450,7 +787,8 @@ impl DemandStore {
             .conn
             .prepare(
                 "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-                        repo_owner, repo_name, job_id, generation, updated_at, event_name
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        job_workflow_ref, request_identity
                  FROM scaleset_demand
                  WHERE scale_set_id = ?1 AND state = 'eligible'
                  ORDER BY first_seen_at, sequence LIMIT ?2",
@@ -472,7 +810,8 @@ impl DemandStore {
             .conn
             .prepare(
                 "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-                        repo_owner, repo_name, job_id, generation, updated_at, event_name
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        job_workflow_ref, request_identity
                  FROM scaleset_demand
                  WHERE scale_set_id = ?1 AND state = 'granted'
                  ORDER BY first_seen_at, sequence LIMIT ?2",
@@ -489,6 +828,11 @@ impl DemandStore {
     }
 
     /// Move one row to a new state, recording the acting generation.
+    ///
+    /// This compatibility API is itself fenced: a stale generation or a
+    /// terminal/declined row is a durable no-op. New lifecycle code should
+    /// use [`compare_and_set_state`] so the observed state is part of the
+    /// precondition too.
     pub fn set_state(
         &mut self,
         request_id: i64,
@@ -496,26 +840,71 @@ impl DemandStore {
         decline_reason: Option<&str>,
         generation: u64,
     ) -> Result<()> {
-        let now = Self::now_rfc3339();
+        let Some(current) = self.get(request_id)? else {
+            anyhow::bail!("demand holds no row for request {request_id}");
+        };
+        if current.generation > generation
+            || matches!(current.state, DemandState::Terminal | DemandState::Declined)
+        {
+            return Ok(());
+        }
+        if current.state == state && current.generation == generation {
+            return Ok(());
+        }
+        let _ = self.compare_and_set_state(
+            request_id,
+            current.state,
+            current.generation,
+            state,
+            decline_reason,
+            generation,
+        )?;
+        Ok(())
+    }
+
+    /// Compare-and-set one demand row. A request can advance its recorded
+    /// generation, but never move backwards; the observed state must still be
+    /// exactly the state read by the caller. This is the durable fence used by
+    /// the acquire path to reject stale processors without overwriting newer
+    /// or terminal work.
+    pub fn compare_and_set_state(
+        &mut self,
+        request_id: i64,
+        expected_state: DemandState,
+        expected_generation: u64,
+        state: DemandState,
+        decline_reason: Option<&str>,
+        generation: u64,
+    ) -> Result<bool> {
+        if generation < expected_generation {
+            return Ok(false);
+        }
+        if matches!(
+            expected_state,
+            DemandState::Terminal | DemandState::Declined
+        ) && expected_state != state
+        {
+            return Ok(false);
+        }
         let updated = self
             .conn
             .execute(
                 "UPDATE scaleset_demand
                  SET state = ?1, decline_reason = ?2, generation = ?3, updated_at = ?4
-                 WHERE request_id = ?5",
+                 WHERE request_id = ?5 AND state = ?6 AND generation = ?7
+                   AND generation <= ?3",
                 params![
                     state.as_str(),
                     decline_reason,
                     i64::try_from(generation).unwrap_or(i64::MAX),
-                    now,
+                    Self::now_rfc3339(),
                     request_id,
+                    expected_state.as_str(),
+                    i64::try_from(expected_generation).unwrap_or(i64::MAX),
                 ],
             )
-            .context("update demand state")?;
-        if updated == 0 {
-            anyhow::bail!("demand holds no row for request {request_id}");
-        }
-        Ok(())
+            .context("compare-and-set demand state")?;
+        Ok(updated == 1)
     }
 
     /// Void stale-epoch grants: `granted`/`acquire_intent` rows recorded
@@ -660,20 +1049,27 @@ pub fn grant_oldest(
     let candidates = store.oldest_eligible(scale_set_id, 512)?;
     let mut granted = Vec::new();
     for candidate in candidates {
-        let probe = OfferProbe {
-            event_name: &candidate.event_name,
-            owner_name: &candidate.repo_owner,
-            repository_name: &candidate.repo_name,
-        };
-        match classify_probe(&probe) {
+        match store.classify_demand(&candidate) {
             OfferTrust::Trusted => {
-                store.set_state(candidate.request_id, DemandState::Granted, None, generation)?;
-                metrics.add_offers_granted(1);
-                granted.push(candidate);
+                if store.compare_and_set_state(
+                    candidate.request_id,
+                    DemandState::Eligible,
+                    candidate.generation,
+                    DemandState::Granted,
+                    None,
+                    generation,
+                )? {
+                    metrics.add_offers_granted(1);
+                    if let Some(row) = store.get(candidate.request_id)? {
+                        granted.push(row);
+                    }
+                }
             }
             OfferTrust::Unknown { reason } => {
-                store.set_state(
+                let _ = store.compare_and_set_state(
                     candidate.request_id,
+                    DemandState::Eligible,
+                    candidate.generation,
                     DemandState::Observed,
                     Some(reason),
                     generation,
@@ -731,10 +1127,33 @@ mod tests {
         }
     }
 
+    fn admission() -> OfferAdmission {
+        OfferAdmission {
+            owner: vec!["tailrocks".to_owned()],
+            repository: vec!["tailrocks/velnor".to_owned()],
+            git_ref: vec!["main".to_owned()],
+            source: vec!["tailrocks/velnor".to_owned()],
+            workflow: vec![".github/workflows/ci.yml".to_owned()],
+            event: vec![
+                "push".to_owned(),
+                "workflow_dispatch".to_owned(),
+                "pull_request".to_owned(),
+                "pull_request_target".to_owned(),
+                "workflow_run".to_owned(),
+            ],
+        }
+    }
+
+    fn assigned(request_id: i64, event: &str) -> ScaleSetJobAssigned {
+        let mut base = offer(request_id, event).base;
+        base.message_type = velnor_model::ScaleSetJobMessageType::JobAssigned;
+        ScaleSetJobAssigned { base }
+    }
+
     #[test]
     fn submit_assigns_sequence_and_redelivery_keeps_age() {
         let path = temp_path("submit");
-        let mut store = DemandStore::open(&path).unwrap();
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
         let first = store.submit_offer(7, &offer(101, "push"), 3).unwrap();
         let sequence = match first {
             SubmitOutcome::Inserted { sequence } => sequence,
@@ -757,7 +1176,7 @@ mod tests {
     #[test]
     fn trust_gate_grants_push_and_parks_pr_without_blocking() {
         let path = temp_path("grant");
-        let mut store = DemandStore::open(&path).unwrap();
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
         // PR offer submitted first: it must not head-of-line block the push.
         store
             .submit_offer(7, &offer(201, "pull_request"), 5)
@@ -782,7 +1201,7 @@ mod tests {
     #[test]
     fn stale_generation_grants_reset_to_eligible_with_age_kept() {
         let path = temp_path("stale");
-        let mut store = DemandStore::open(&path).unwrap();
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
         store.submit_offer(7, &offer(301, "push"), 5).unwrap();
         let metrics = crate::scaleset::metrics::Metrics::new();
         assert_eq!(grant_oldest(&mut store, 7, 5, &metrics).unwrap().len(), 1);
@@ -802,7 +1221,7 @@ mod tests {
     #[test]
     fn terminal_rows_never_revive_on_reoffer() {
         let path = temp_path("terminal");
-        let mut store = DemandStore::open(&path).unwrap();
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
         store.submit_offer(7, &offer(401, "push"), 5).unwrap();
         store
             .set_state(401, DemandState::Terminal, None, 5)
@@ -818,38 +1237,85 @@ mod tests {
     }
 
     #[test]
+    fn stale_state_cas_cannot_overwrite_terminal_or_new_generation() {
+        let path = temp_path("state-cas");
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
+        store.submit_offer(7, &offer(450, "push"), 4).unwrap();
+        assert!(store
+            .compare_and_set_state(450, DemandState::Eligible, 4, DemandState::Granted, None, 4,)
+            .unwrap());
+        assert!(store
+            .compare_and_set_state(450, DemandState::Granted, 4, DemandState::Terminal, None, 5,)
+            .unwrap());
+        assert!(!store
+            .compare_and_set_state(450, DemandState::Granted, 4, DemandState::Eligible, None, 4,)
+            .unwrap());
+        store
+            .set_state(450, DemandState::Eligible, None, 4)
+            .unwrap();
+        let row = store.get(450).unwrap().unwrap();
+        assert_eq!(row.state, DemandState::Terminal);
+        assert_eq!(row.generation, 5);
+    }
+
+    #[test]
+    fn incomplete_request_identity_fails_closed_on_redelivery() {
+        let path = temp_path("identity-fence");
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
+        store.submit_offer(7, &offer(451, "push"), 4).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE scaleset_demand SET request_identity = '' WHERE request_id = 451",
+                [],
+            )
+            .unwrap();
+        assert!(store.submit_offer(7, &offer(451, "push"), 4).is_err());
+    }
+
+    #[test]
     fn classify_offer_fails_closed_on_unknown_inputs() {
-        assert_eq!(classify_offer(&offer(1, "push")), OfferTrust::Trusted);
+        let policy = admission();
         assert_eq!(
-            classify_offer(&offer(1, "workflow_dispatch")),
+            classify_offer(&offer(1, "push"), None),
+            OfferTrust::Unknown {
+                reason: "admission-missing"
+            }
+        );
+        assert_eq!(
+            classify_offer(&offer(1, "push"), Some(&policy)),
             OfferTrust::Trusted
         );
         assert_eq!(
-            classify_offer(&offer(1, "pull_request")),
+            classify_offer(&offer(1, "workflow_dispatch"), Some(&policy)),
+            OfferTrust::Trusted
+        );
+        assert_eq!(
+            classify_offer(&offer(1, "pull_request"), Some(&policy)),
             OfferTrust::Unknown {
                 reason: "trust-inputs-missing"
             }
         );
         assert_eq!(
-            classify_offer(&offer(1, "pull_request_target")),
+            classify_offer(&offer(1, "pull_request_target"), Some(&policy)),
             OfferTrust::Unknown {
                 reason: "trust-inputs-missing"
             }
         );
         assert_eq!(
-            classify_offer(&offer(1, "workflow_run")),
+            classify_offer(&offer(1, "workflow_run"), Some(&policy)),
             OfferTrust::Unknown {
                 reason: "trust-inputs-missing"
             }
         );
         assert_eq!(
-            classify_offer(&offer(1, "")),
+            classify_offer(&offer(1, ""), Some(&policy)),
             OfferTrust::Unknown {
                 reason: "event-unparseable"
             }
         );
         assert_eq!(
-            classify_offer(&offer(1, "push;rm")),
+            classify_offer(&offer(1, "push;rm"), Some(&policy)),
             OfferTrust::Unknown {
                 reason: "event-unparseable"
             }
@@ -857,10 +1323,47 @@ mod tests {
         let mut no_repo = offer(1, "push");
         no_repo.base.owner_name.clear();
         assert_eq!(
-            classify_offer(&no_repo),
+            classify_offer(&no_repo, Some(&policy)),
             OfferTrust::Unknown {
                 reason: "repo-missing"
             }
         );
+    }
+
+    #[test]
+    fn assigned_path_applies_admission_before_acquired_state() {
+        let path = temp_path("assigned-admission");
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
+
+        let mut denied = assigned(501, "push");
+        denied.base.repository_name = "other-repository".to_owned();
+        let (request_id, state) = store.submit_assigned(7, &denied, 1).unwrap();
+        assert_eq!(request_id, 501);
+        assert_eq!(state, DemandState::Observed);
+        let row = store.get(request_id).unwrap().unwrap();
+        assert_eq!(row.state, DemandState::Observed);
+        assert_eq!(row.decline_reason.as_deref(), Some("admission-denied"));
+        assert_eq!(
+            store
+                .count_in_states(7, &[DemandState::Acquired, DemandState::Granted])
+                .unwrap(),
+            0
+        );
+
+        let (_, state) = store.submit_assigned(7, &assigned(502, "push"), 1).unwrap();
+        assert_eq!(state, DemandState::Acquired);
+    }
+
+    #[test]
+    fn assignment_without_identity_fails_before_persisting_or_mutating_permits() {
+        let path = temp_path("assigned-no-identity");
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
+        let mut missing = assigned(0, "push");
+        missing.base.job_id.clear();
+        assert!(store.submit_assigned(7, &missing, 1).is_err());
+        assert!(store
+            .list_in_states_all(&[DemandState::Acquired])
+            .unwrap()
+            .is_empty());
     }
 }

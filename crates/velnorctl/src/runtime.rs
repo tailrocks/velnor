@@ -13,6 +13,8 @@ use anyhow::Context;
 use clap::{Args, Subcommand};
 use velnor_runner::args as rt;
 
+use crate::commands::HostMode;
+
 pub use velnor_runner::scaffold::{dispatch, enforce_admission, init_telemetry, telemetry_dir};
 
 fn github_pat_from_environment() -> Option<String> {
@@ -68,6 +70,14 @@ pub struct DaemonArgs {
     pub dump_job_message: Option<PathBuf>,
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
+    /// Host execution topology. Defaults to native-only.
+    #[arg(
+        long,
+        value_enum,
+        env = "VELNOR_HOST_MODE",
+        default_value = "native-only"
+    )]
+    pub mode: HostMode,
     /// Host-wide maximum concurrent jobs. Native and Scale Set lanes share
     /// one permit ledger capped at this N. Must match `velnor_runner::service`.
     #[arg(long, env = "VELNOR_MAX_JOBS")]
@@ -372,6 +382,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             dry_run_jobs: args.dry_run_jobs,
             dump_job_message: args.dump_job_message,
             docker_image: args.docker_image,
+            mode: args.mode.into(),
             max_jobs: args.max_jobs,
             permit_ledger: args.permit_ledger,
             scale_set_config: args.scale_set_config,

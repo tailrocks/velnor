@@ -415,6 +415,9 @@ fn selected_unit(app: &App, system: &DesignSystem) -> Vec<Line<'static>> {
 }
 
 fn cli_providers_summary(cli: &crate::s2::Cli) -> String {
+    if let Some(mode) = cli.provider_mode {
+        return format!("provider mode: {mode}");
+    }
     cli.providers.as_ref().map_or_else(
         || "(config default)".to_owned(),
         |providers| {
@@ -681,6 +684,7 @@ mod tests {
                 default_branch: None,
                 output: None,
                 providers: None,
+                provider_mode: None,
                 dry_run: false,
                 check: false,
                 force: false,
@@ -852,6 +856,8 @@ mod tests {
         assert!(all.contains("github-hosted"));
         assert!(all.contains("github-self-hosted"));
         assert!(all.contains("velnor"));
+        app.cli.provider_mode = Some(crate::s2::provider::ProviderMode::ScaleSetOnly);
+        assert!(render_text(&mut app, 80, 24).contains("provider mode: scale-set-only"));
     }
 
     #[test]

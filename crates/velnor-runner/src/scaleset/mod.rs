@@ -56,8 +56,8 @@ pub use daemon::{
     ScaleSetDaemon, ScaleSetFileConfig, StartReport,
 };
 pub use demand::{
-    classify_offer, grant_oldest, resolve_job_request_id, DemandState, DemandStore, OfferTrust,
-    SubmitOutcome,
+    classify_offer, grant_oldest, resolve_job_request_id, DemandState, DemandStore, OfferAdmission,
+    OfferTrust, SubmitOutcome,
 };
 pub use errors::{ActionsApiException, RequestFailure, ScaleSetError, ScaleSetFault};
 pub use fixtures::{
