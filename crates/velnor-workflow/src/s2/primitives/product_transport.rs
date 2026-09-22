@@ -29,11 +29,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::s2::platform::{valid_env_name, valid_product_output, NamedProduct};
+use crate::s2::platform::{
+    valid_env_name, valid_product_output, NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA,
+};
 use crate::s2::{shell_quote, GeneratorError};
 
 /// The manifest schema the producer writes and the consumer requires.
-pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/1";
+pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/2";
 /// The manifest filename inside the staged artifact directory.
 pub(crate) const MANIFEST_FILE: &str = "velnor-product-manifest.json";
 /// The artifact-internal directory holding the copied output trees.
@@ -42,6 +44,10 @@ pub(crate) const STAGED_OUTPUTS_DIR: &str = "outputs";
 pub(crate) const OUTPUTS_ENV: &str = "VELNOR_TRANSPORT_OUTPUTS";
 /// Newline-separated declared structural files for `verify-product`.
 pub(crate) const OUTPUT_FILES_ENV: &str = "VELNOR_TRANSPORT_OUTPUT_FILES";
+/// Typed product identity is transported through a YAML block scalar and
+/// expanded by the shell. Keeping JSON out of a plain `run:` scalar prevents
+/// JSON mapping punctuation from becoming workflow YAML syntax.
+const PRODUCT_IDENTITY_ENV: &str = "VELNOR_PRODUCT_IDENTITY";
 /// Same-run artifacts live only for the consuming jobs.
 const ARTIFACT_RETENTION_DAYS: u32 = 1;
 
@@ -51,6 +57,42 @@ const ARTIFACT_RETENTION_DAYS: u32 = 1;
 #[must_use]
 pub(crate) fn transport_eligible(product: &NamedProduct) -> bool {
     !product.outputs.is_empty()
+}
+
+/// Whether a product has enough identity for an exact cross-run cache hit.
+/// Same-run transport deliberately has the weaker [`transport_eligible`]
+/// contract; this predicate is the fail-closed boundary for the native
+/// product cache and is separate so an optional cache never becomes the data
+/// bus for required consumers.
+#[must_use]
+pub(crate) fn exact_product_reuse_eligible(
+    producer: &str,
+    product: &NamedProduct,
+    identity: &ProductIdentity,
+) -> bool {
+    !product.outputs.is_empty()
+        && product.inputs_unknown.is_empty()
+        && product.inputs_digest.is_some()
+        && identity.producer == producer
+        && identity.product == product.name
+        && identity.inputs_digest == product.inputs_digest
+        && super::cache::native_product_cache_key(identity).is_ok()
+}
+
+/// Return the exact cache key only for a product whose complete identity and
+/// closure are mutually consistent. This key is an optional acceleration
+/// hint; transport readiness still comes only from verified same-run product
+/// transport.
+#[must_use]
+pub(crate) fn exact_product_cache_key(
+    producer: &str,
+    product: &NamedProduct,
+    identity: &ProductIdentity,
+) -> Option<String> {
+    if !exact_product_reuse_eligible(producer, product, identity) {
+        return None;
+    }
+    super::cache::native_product_cache_key(identity).ok()
 }
 
 /// The workflow input record identifying one transported edge.
@@ -117,6 +159,8 @@ struct ProductManifest {
     producer: String,
     product: String,
     inputs_digest: String,
+    identity: Option<ProductIdentity>,
+    identity_digest: Option<String>,
     files: BTreeMap<String, String>,
     links: BTreeMap<String, LinkEntry>,
     dirs: Vec<String>,
@@ -127,6 +171,7 @@ pub(crate) struct StageRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) stage: PathBuf,
 }
@@ -138,11 +183,74 @@ pub(crate) struct VerifyRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) output_files: Vec<String>,
     pub(crate) stage: PathBuf,
     pub(crate) marker: String,
     pub(crate) env_file: PathBuf,
+}
+
+fn identity_digest(identity: &ProductIdentity) -> Result<String, GeneratorError> {
+    let bytes = serde_json::to_vec(identity)
+        .map_err(|error| GeneratorError::usage(format!("serialize product identity: {error}")))?;
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    Ok(output)
+}
+
+fn identity_json(identity: &ProductIdentity) -> Option<String> {
+    serde_json::to_string(identity).ok()
+}
+
+fn identity_env_and_arg(identity: Option<&ProductIdentity>) -> (String, String) {
+    let Some(json) = identity.and_then(identity_json) else {
+        return (String::new(), String::new());
+    };
+    (
+        format!("          {PRODUCT_IDENTITY_ENV}: |\n            {json}\n"),
+        format!(" --identity \"${PRODUCT_IDENTITY_ENV}\""),
+    )
+}
+
+fn parse_identity(
+    options: &BTreeMap<String, String>,
+    command: &str,
+) -> Result<Option<ProductIdentity>, GeneratorError> {
+    options
+        .get("identity")
+        .map(|raw| {
+            serde_json::from_str(raw).map_err(|error| {
+                GeneratorError::usage(format!("{command} --identity is not valid JSON: {error}"))
+            })
+        })
+        .transpose()
+}
+
+fn check_identity_shape(
+    identity: &ProductIdentity,
+    context: &str,
+    producer: &str,
+    product: &str,
+) -> Result<(), GeneratorError> {
+    identity.validate_for(context, producer, product)?;
+    if identity.schema != PRODUCT_IDENTITY_SCHEMA {
+        return Err(GeneratorError::usage(format!(
+            "{context} product identity schema mismatch: {:?} != {:?}",
+            identity.schema, PRODUCT_IDENTITY_SCHEMA
+        )));
+    }
+    Ok(())
+}
+
+fn identity_digest_matches_input(identity: &ProductIdentity, inputs_digest: &str) -> bool {
+    identity
+        .inputs_digest
+        .as_deref()
+        .map_or(inputs_digest.is_empty(), |digest| digest == inputs_digest)
 }
 
 fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
@@ -331,6 +439,19 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             "stage-product needs a non-empty --producer and --product",
         ));
     }
+    if let Some(identity) = &request.identity {
+        check_identity_shape(
+            identity,
+            "stage-product",
+            &request.producer,
+            &request.product,
+        )?;
+        if !identity_digest_matches_input(identity, &request.inputs_digest) {
+            return Err(GeneratorError::usage(
+                "stage-product product identity inputs_digest does not match --digest",
+            ));
+        }
+    }
     let stage = root.join(&request.stage);
     if fs::symlink_metadata(&stage).is_ok() {
         fs::remove_dir_all(&stage)
@@ -370,6 +491,8 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
         producer: request.producer.clone(),
         product: request.product.clone(),
         inputs_digest: request.inputs_digest.clone(),
+        identity_digest: request.identity.as_ref().map(identity_digest).transpose()?,
+        identity: request.identity.clone(),
         files,
         links,
         dirs,
@@ -460,7 +583,8 @@ fn load_manifest(stage: &Path) -> Result<ProductManifest, GeneratorError> {
 }
 
 /// The manifest must name the expected schema, producer, product, and
-/// inputs digest, and it must list at least one file.
+/// inputs digest. Typed identity presence and bytes must match exactly before
+/// any staged path is installed, and the manifest must list at least one file.
 fn check_manifest_identity(
     manifest: &ProductManifest,
     request: &VerifyRequest,
@@ -487,6 +611,44 @@ fn check_manifest_identity(
             return Err(GeneratorError::usage(format!(
                 "product manifest {field} mismatch: {got:?} != {want:?}"
             )));
+        }
+    }
+    match (&manifest.identity, &request.identity) {
+        (None, None) => {
+            if manifest.identity_digest.is_some() {
+                return Err(GeneratorError::usage(
+                    "product manifest carries an identity digest without a typed identity"
+                        .to_owned(),
+                ));
+            }
+        }
+        (Some(got), Some(want)) => {
+            check_identity_shape(got, "product manifest", &request.producer, &request.product)?;
+            check_identity_shape(want, "verify-product", &request.producer, &request.product)?;
+            if got != want {
+                return Err(GeneratorError::usage(
+                    "product manifest typed identity mismatch".to_owned(),
+                ));
+            }
+            let got_digest = identity_digest(got)?;
+            let want_digest = identity_digest(want)?;
+            if manifest.identity_digest.as_deref() != Some(got_digest.as_str())
+                || got_digest != want_digest
+            {
+                return Err(GeneratorError::usage(
+                    "product manifest typed identity digest mismatch".to_owned(),
+                ));
+            }
+            if !identity_digest_matches_input(got, &request.inputs_digest) {
+                return Err(GeneratorError::usage(
+                    "product manifest typed identity inputs_digest mismatch".to_owned(),
+                ));
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(GeneratorError::usage(
+                "product manifest typed identity presence mismatch".to_owned(),
+            ));
         }
     }
     if manifest.files.is_empty() {
@@ -635,8 +797,10 @@ fn env_list(name: &str) -> Vec<String> {
 /// Run `stage-product` from the runtime CLI: `root` is the repository
 /// checkout, the outputs arrive via [`OUTPUTS_ENV`].
 pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options =
-        crate::s2::runtime::parse_options(arguments, &["producer", "product", "digest", "stage"])?;
+    let options = crate::s2::runtime::parse_options(
+        arguments,
+        &["producer", "product", "digest", "identity", "stage"],
+    )?;
     let missing = ["producer", "product", "stage"]
         .into_iter()
         .find(|name| !options.contains_key(*name));
@@ -649,6 +813,7 @@ pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        identity: parse_identity(&options, "stage-product")?,
         outputs: env_list(OUTPUTS_ENV),
         stage: PathBuf::from(&options["stage"]),
     };
@@ -670,7 +835,9 @@ pub(crate) fn verify_product_cli(
 ) -> Result<(), GeneratorError> {
     let options = crate::s2::runtime::parse_options(
         arguments,
-        &["producer", "product", "digest", "stage", "marker"],
+        &[
+            "producer", "product", "digest", "identity", "stage", "marker",
+        ],
     )?;
     let missing = ["producer", "product", "stage", "marker"]
         .into_iter()
@@ -687,6 +854,7 @@ pub(crate) fn verify_product_cli(
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        identity: parse_identity(&options, "verify-product")?,
         outputs: env_list(OUTPUTS_ENV),
         output_files: env_list(OUTPUT_FILES_ENV),
         stage: PathBuf::from(&options["stage"]),
@@ -702,17 +870,20 @@ pub(crate) fn verify_product_cli(
 }
 
 /// The producer block for one product: stage the declared outputs with the
-/// runtime, then upload the staging directory as one artifact.
-/// Single-directory upload keeps the artifact layout deterministic —
-/// multi-path uploads would re-anchor on a least common ancestor.
+/// runtime, then upload the staging directory as one artifact. Single-
+/// directory upload keeps the artifact layout deterministic; multi-path
+/// uploads would re-anchor on a least common ancestor. The optional typed
+/// identity is staged into the manifest for exact consumer verification.
 #[must_use]
-pub(crate) fn render_producer_block(
+pub(crate) fn render_producer_block_with_identity(
     upload_artifact_pin: &str,
     producer: &str,
     product: &NamedProduct,
+    identity: Option<&ProductIdentity>,
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
     let digest = product.inputs_digest.clone().unwrap_or_default();
+    let (identity_env, identity_arg) = identity_env_and_arg(identity);
     let mut command = format!(
         "velnor-workflow stage-product --producer {} --product {}",
         shell_quote(producer),
@@ -721,28 +892,30 @@ pub(crate) fn render_producer_block(
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
     }
+    command.push_str(&identity_arg);
     let _ = write!(
         command,
         " --stage \"$RUNNER_TEMP/velnor-products/{artifact}\""
     );
     format!(
-        "      - name: Stage product {artifact}\n        env:\n          {OUTPUTS_ENV}: |\n{}\n        run: {command}\n      - name: Upload product {artifact}\n        uses: {upload_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n          if-no-files-found: error\n          retention-days: {ARTIFACT_RETENTION_DAYS}\n",
+        "      - name: Stage product {artifact}\n        env:\n          {OUTPUTS_ENV}: |\n{}\n{identity_env}        run: {command}\n      - name: Upload product {artifact}\n        uses: {upload_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n          if-no-files-found: error\n          retention-days: {ARTIFACT_RETENTION_DAYS}\n",
         indent_block(&product.outputs.join("\n"), "            "),
     )
 }
 
-/// The consumer block for one edge: download the artifact, then verify the
-/// manifest and install the outputs. The verify step exports the ready
-/// marker, which the consumer's guarded rebuild reads.
+/// Render the consumer transport block with the exact typed identity the
+/// consumer expects before installing any downloaded file.
 #[must_use]
-pub(crate) fn render_consumer_block(
+pub(crate) fn render_consumer_block_with_identity(
     download_artifact_pin: &str,
     producer: &str,
     product: &NamedProduct,
     marker: &str,
+    identity: Option<&ProductIdentity>,
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
     let digest = product.inputs_digest.clone().unwrap_or_default();
+    let (identity_env, identity_arg) = identity_env_and_arg(identity);
     let mut command = format!(
         "velnor-workflow verify-product --producer {} --product {}",
         shell_quote(producer),
@@ -751,6 +924,7 @@ pub(crate) fn render_consumer_block(
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
     }
+    command.push_str(&identity_arg);
     let _ = write!(
         command,
         " --stage \"$RUNNER_TEMP/velnor-products/{artifact}\" --marker {marker}"
@@ -768,7 +942,7 @@ pub(crate) fn render_consumer_block(
         )
     };
     format!(
-        "      - name: Download product {artifact}\n        uses: {download_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n      - name: Verify product {artifact}\n        env:\n{outputs_value}{files_value}        run: {command}\n",
+        "      - name: Download product {artifact}\n        uses: {download_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n      - name: Verify product {artifact}\n        env:\n{outputs_value}{files_value}{identity_env}        run: {command}\n",
     )
 }
 
@@ -780,14 +954,134 @@ fn indent_block(value: &str, indent: &str) -> String {
         .join("\n")
 }
 
+fn native_product_cache_step_id(key: &str) -> String {
+    let suffix = key
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("native-product-cache-{suffix}")
+}
+
+/// Render an optional exact native-product cache restore and verification.
+///
+/// The cache is not a transport edge: restore failures and misses are
+/// reported and ignored, while corrupt or wrong-identity entries are removed
+/// without installation. A valid entry uses the same manifest verifier as
+/// same-run product transport. No restore prefix is emitted.
+#[must_use]
+pub(crate) fn render_native_product_cache_restore_block(
+    cache_restore_pin: &str,
+    producer: &str,
+    product: &NamedProduct,
+    identity: Option<&ProductIdentity>,
+    marker: &str,
+) -> Option<String> {
+    let identity = identity?;
+    let key = exact_product_cache_key(producer, product, identity)?;
+    let restore_id = native_product_cache_step_id(&key);
+    let verify_id = format!("{restore_id}-verify");
+    let artifact = artifact_name(producer, &product.name);
+    let action_path = format!("${{{{ runner.temp }}}}/velnor-native-product-cache/{artifact}");
+    let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
+    let digest = product.inputs_digest.as_deref().unwrap_or_default();
+    let identity_json = identity_json(identity)?;
+    let identity_env =
+        format!("          {PRODUCT_IDENTITY_ENV}: |\n            {identity_json}\n");
+    let mut command = format!(
+        "velnor-workflow verify-product --producer {} --product {}",
+        shell_quote(producer),
+        shell_quote(&product.name),
+    );
+    if !digest.is_empty() {
+        let _ = write!(command, " --digest {}", shell_quote(digest));
+    }
+    let _ = write!(
+        command,
+        " --identity \"${PRODUCT_IDENTITY_ENV}\" --stage \"{shell_path}\" --marker {}",
+        shell_quote(marker)
+    );
+    let outputs_value = format!(
+        "          {OUTPUTS_ENV}: |\n{}\n",
+        indent_block(&product.outputs.join("\n"), "            ")
+    );
+    let files_value = if product.output_files.is_empty() {
+        format!("          {OUTPUT_FILES_ENV}: \"\"\n")
+    } else {
+        format!(
+            "          {OUTPUT_FILES_ENV}: |\n{}\n",
+            indent_block(&product.output_files.join("\n"), "            ")
+        )
+    };
+    Some(format!(
+        "      - name: Restore exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Verify exact native product cache {artifact}\n        id: {verify_id}\n        if: steps.{restore_id}.outputs.cache-hit == 'true'\n        continue-on-error: true\n        env:\n{outputs_value}{files_value}{identity_env}        run: |\n          set -o pipefail\n          stage=\"{shell_path}\"\n          log=\"$RUNNER_TEMP/{artifact}-cache-verify.log\"\n          if [[ ! -f \"$stage/{MANIFEST_FILE}\" ]]; then\n            outcome=corrupt\n          else\n            rc=0\n            {command} 2>&1 | tee \"$log\" || rc=$?\n            if (( rc == 0 )); then\n              outcome=hit\n            elif grep -Eiq 'identity|schema mismatch|owner mismatch|inputs_digest' \"$log\"; then\n              outcome=wrong-identity\n            else\n              outcome=corrupt\n            fi\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n          echo \"outcome=$outcome\" >> \"$GITHUB_OUTPUT\"\n          echo \"usable=$([[ $outcome == hit ]] && echo true || echo false)\" >> \"$GITHUB_OUTPUT\"\n          if [[ \"$outcome\" != hit ]]; then\n            rm -rf -- \"$stage\"\n          fi\n      - name: Report exact native product cache {artifact}\n        if: always()\n        env:\n          RESTORE_OUTCOME: ${{{{ steps.{restore_id}.outcome }}}}\n          CACHE_HIT: ${{{{ steps.{restore_id}.outputs.cache-hit }}}}\n          VERIFY_OUTCOME: ${{{{ steps.{verify_id}.outputs.outcome }}}}\n        run: |\n          if [[ \"$RESTORE_OUTCOME\" != success || \"$CACHE_HIT\" != true ]]; then\n            outcome=miss\n          else\n            outcome=$VERIFY_OUTCOME\n            [[ -n \"$outcome\" ]] || outcome=corrupt\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n"
+    ))
+}
+
+/// Render the trusted producer-side save for an exact native-product cache.
+///
+/// The staged manifest is built from the product transport contract. The
+/// caller supplies the existing trusted/main cache gate; this function adds
+/// exact-restore miss and successful-staging guards. Cache failures remain
+/// optional and cannot replace same-run product transport.
+#[must_use]
+pub(crate) fn render_native_product_cache_save_block(
+    cache_restore_pin: &str,
+    cache_save_pin: &str,
+    producer: &str,
+    product: &NamedProduct,
+    identity: Option<&ProductIdentity>,
+    trusted_save_gate: &str,
+) -> Option<String> {
+    let identity = identity?;
+    let key = exact_product_cache_key(producer, product, identity)?;
+    let restore_id = native_product_cache_step_id(&key);
+    let stage_id = format!("{restore_id}-stage");
+    let artifact = artifact_name(producer, &product.name);
+    let action_path = format!("${{{{ runner.temp }}}}/velnor-native-product-cache/{artifact}");
+    let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
+    let digest = product.inputs_digest.as_deref().unwrap_or_default();
+    let identity_json = identity_json(identity)?;
+    let identity_env =
+        format!("          {PRODUCT_IDENTITY_ENV}: |\n            {identity_json}\n");
+    let mut command = format!(
+        "velnor-workflow stage-product --producer {} --product {}",
+        shell_quote(producer),
+        shell_quote(&product.name),
+    );
+    if !digest.is_empty() {
+        let _ = write!(command, " --digest {}", shell_quote(digest));
+    }
+    let _ = write!(
+        command,
+        " --identity \"${PRODUCT_IDENTITY_ENV}\" --stage \"{shell_path}\""
+    );
+    let save_gate = format!(
+        "({trusted_save_gate}) && steps.{restore_id}.outputs.cache-hit != 'true' && steps.{stage_id}.outcome == 'success'"
+    );
+    let outputs_value = format!(
+        "          {OUTPUTS_ENV}: |\n{}\n",
+        indent_block(&product.outputs.join("\n"), "            ")
+    );
+    Some(format!(
+        "      - name: Probe exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Stage exact native product cache {artifact}\n        id: {stage_id}\n        continue-on-error: true\n        env:\n{outputs_value}{identity_env}        run: {command}\n      - name: Save exact native product cache {artifact}\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: {action_path}\n          key: {key}\n"
+    ))
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        artifact_name, ready_records, stage_product, transport_eligible, verify_product,
-        StageRequest, VerifyRequest,
+        artifact_name, exact_product_cache_key, exact_product_reuse_eligible, ready_records,
+        render_native_product_cache_restore_block, render_native_product_cache_save_block,
+        stage_product, transport_eligible, verify_product, StageRequest, VerifyRequest,
     };
-    use crate::s2::platform::NamedProduct;
+    use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
 
     fn product(outputs: &[&str]) -> NamedProduct {
         NamedProduct {
@@ -797,10 +1091,145 @@ mod tests {
         }
     }
 
+    fn identity(product: &str, inputs_digest: &str) -> ProductIdentity {
+        ProductIdentity {
+            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            producer: "rust-ffi".to_owned(),
+            product: product.to_owned(),
+            adapter: "fixture-adapter@1".to_owned(),
+            source: "fixture/native/recipe".to_owned(),
+            inputs_digest: Some(inputs_digest.to_owned()),
+            host_abi: "fixture-host-abi".to_owned(),
+            target: "fixture-target".to_owned(),
+            target_triple: "fixture-target-triple".to_owned(),
+            architectures: vec!["fixture-arch".to_owned()],
+            sdk: "fixture-sdk@1".to_owned(),
+            deployment_target: "1.0".to_owned(),
+            toolchain: [("rust.channel".to_owned(), "1.90.0".to_owned())]
+                .into_iter()
+                .collect(),
+            profile: "fixture-profile".to_owned(),
+            features: Vec::new(),
+            flags: vec!["--locked".to_owned()],
+            generation: [("framework".to_owned(), "BridgeCore".to_owned())]
+                .into_iter()
+                .collect(),
+        }
+    }
+
     #[test]
     fn transport_eligible_requires_declared_outputs() {
         assert!(transport_eligible(&product(&["out/Foo.xcframework"])));
         assert!(!transport_eligible(&product(&[])));
+    }
+
+    #[test]
+    fn exact_product_cache_requires_complete_matching_identity() {
+        let digest = "a".repeat(64);
+        let mut full = product(&["out/Foo.xcframework"]);
+        full.inputs_digest = Some(digest.clone());
+        let complete = identity("xcframework-bridgecore", &digest);
+        assert!(exact_product_reuse_eligible("rust-ffi", &full, &complete));
+        let key = exact_product_cache_key("rust-ffi", &full, &complete)
+            .expect("complete identity gets key");
+        assert!(key.starts_with("velnor-native-product-cache/1-"), "{key}");
+        assert_eq!(key.len(), "velnor-native-product-cache/1-".len() + 64);
+
+        let mut incomplete = complete.clone();
+        incomplete.sdk.clear();
+        assert!(!exact_product_reuse_eligible(
+            "rust-ffi",
+            &full,
+            &incomplete
+        ));
+        assert!(exact_product_cache_key("rust-ffi", &full, &incomplete).is_none());
+
+        let mut unknown_inputs = full.clone();
+        unknown_inputs.inputs_unknown = vec!["scanner gap".to_owned()];
+        assert!(!exact_product_reuse_eligible(
+            "rust-ffi",
+            &unknown_inputs,
+            &complete
+        ));
+
+        let mut wrong_product = complete.clone();
+        wrong_product.product = "other".to_owned();
+        assert!(!exact_product_reuse_eligible(
+            "rust-ffi",
+            &full,
+            &wrong_product
+        ));
+    }
+
+    #[test]
+    fn exact_native_cache_gates_are_verified_and_prefix_free() {
+        let digest = "b".repeat(64);
+        let mut full = product(&["out/Foo.xcframework"]);
+        full.inputs_digest = Some(digest.clone());
+        full.output_files = vec!["out/Foo.xcframework/fixture-arch/lib.a".to_owned()];
+        let complete = identity("xcframework-bridgecore", &digest);
+        let restored = render_native_product_cache_restore_block(
+            "actions/cache/restore@pinned",
+            "rust-ffi",
+            &full,
+            Some(&complete),
+            "VELNOR_PRODUCT_READY",
+        )
+        .expect("complete identity renders cache restore");
+        assert!(
+            restored.contains("uses: actions/cache/restore@pinned"),
+            "{restored}"
+        );
+        assert!(restored.contains("verify-product"), "{restored}");
+        assert!(restored.contains("--identity"), "{restored}");
+        assert!(restored.contains("outcome=wrong-identity"), "{restored}");
+        assert!(restored.contains("outcome=corrupt"), "{restored}");
+        assert!(!restored.contains("restore-keys:"), "{restored}");
+
+        let saved = render_native_product_cache_save_block(
+            "actions/cache/restore@pinned",
+            "actions/cache/save@pinned",
+            "rust-ffi",
+            &full,
+            Some(&complete),
+            "always() && github.ref == 'refs/heads/main'",
+        )
+        .expect("complete identity renders cache save");
+        assert!(saved.contains("stage-product"), "{saved}");
+        assert!(
+            saved.contains("Probe exact native product cache"),
+            "{saved}"
+        );
+        assert!(saved.contains("cache-hit != 'true'"), "{saved}");
+        assert!(saved.contains("outcome == 'success'"), "{saved}");
+        assert!(saved.contains("github.ref == 'refs/heads/main'"), "{saved}");
+        assert!(!saved.contains("restore-keys:"), "{saved}");
+    }
+
+    #[test]
+    fn incomplete_identity_renders_no_exact_cache_steps() {
+        let digest = "c".repeat(64);
+        let mut full = product(&["out/Foo.xcframework"]);
+        full.inputs_digest = Some(digest.clone());
+        let mut incomplete = identity("xcframework-bridgecore", &digest);
+        incomplete.adapter.clear();
+        assert!(render_native_product_cache_restore_block(
+            "actions/cache/restore@pinned",
+            "rust-ffi",
+            &full,
+            Some(&incomplete),
+            "VELNOR_PRODUCT_READY",
+        )
+        .is_none());
+        assert!(render_native_product_cache_save_block(
+            "actions/cache/restore@pinned",
+            "actions/cache/save@pinned",
+            "rust-ffi",
+            &full,
+            Some(&incomplete),
+            "always()",
+        )
+        .is_none());
     }
 
     #[test]
@@ -839,7 +1268,8 @@ mod tests {
         let mut full = product(&["target/xcframework/BridgeCore.xcframework"]);
         full.inputs_digest = Some("abc123".to_owned());
         full.output_files = vec!["target/xcframework/BridgeCore.xcframework/Info.plist".to_owned()];
-        let produced = super::render_producer_block("upload@pinned", "rust-ffi", &full);
+        let produced =
+            super::render_producer_block_with_identity("upload@pinned", "rust-ffi", &full, None);
         assert!(produced.contains("uses: upload@pinned"), "{produced}");
         assert!(produced.contains("if-no-files-found: error"), "{produced}");
         assert!(produced.contains("retention-days: 1"), "{produced}");
@@ -856,11 +1286,12 @@ mod tests {
             produced.contains("velnor-product-rust-ffi--xcframework-bridgecore"),
             "{produced}"
         );
-        let consumed = super::render_consumer_block(
+        let consumed = super::render_consumer_block_with_identity(
             "download@pinned",
             "rust-ffi",
             &full,
             "VELNOR_PRODUCT_RUST_FFI__READY",
+            None,
         );
         assert!(consumed.contains("uses: download@pinned"), "{consumed}");
         assert!(
@@ -883,7 +1314,13 @@ mod tests {
         // An empty digest omits the flag instead of rendering an empty value.
         let mut bare = product(&["out/Foo.xcframework"]);
         bare.output_files = Vec::new();
-        let bare_block = super::render_consumer_block("download@pinned", "rust-ffi", &bare, "M");
+        let bare_block = super::render_consumer_block_with_identity(
+            "download@pinned",
+            "rust-ffi",
+            &bare,
+            "M",
+            None,
+        );
         assert!(!bare_block.contains("--digest"), "{bare_block}");
         assert!(
             bare_block.contains("VELNOR_TRANSPORT_OUTPUT_FILES: \"\""),
@@ -919,6 +1356,7 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             stage: stage.to_path_buf(),
         }
@@ -929,6 +1367,7 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
             stage: stage.to_path_buf(),
@@ -994,6 +1433,74 @@ mod tests {
         let env = std::fs::read_to_string(&env_file).expect("marker file");
         assert!(env.contains("EXISTING=1\n"), "markers append: {env}");
         assert!(env.contains("VELNOR_PRODUCT_MARKER=1\n"), "{env}");
+    }
+
+    #[test]
+    fn typed_identity_mismatch_rejects_before_install() {
+        let producer = scratch("typed-identity-producer");
+        stage_fixture(&producer);
+        let digest = "d".repeat(64);
+        let expected = identity("xcframework-foo", &digest);
+        let stage = producer.join("stage");
+        stage_product(
+            &producer,
+            &StageRequest {
+                producer: "rust-ffi".to_owned(),
+                product: "xcframework-foo".to_owned(),
+                inputs_digest: digest.clone(),
+                identity: Some(expected.clone()),
+                outputs: vec!["out/Foo.xcframework".to_owned()],
+                stage: stage.clone(),
+            },
+        )
+        .expect("stage typed product");
+
+        let consumer = scratch("typed-identity-consumer");
+        let env_file = consumer.join("github-env");
+        let mut wrong = expected;
+        wrong.target_triple = "fixture-other-triple".to_owned();
+        let result = verify_product(
+            &consumer,
+            &VerifyRequest {
+                producer: "rust-ffi".to_owned(),
+                product: "xcframework-foo".to_owned(),
+                inputs_digest: digest,
+                identity: Some(wrong),
+                outputs: vec!["out/Foo.xcframework".to_owned()],
+                output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
+                stage,
+                marker: "VELNOR_PRODUCT_MARKER".to_owned(),
+                env_file,
+            },
+        );
+        let message = format!("{}", result.expect_err("identity mismatch must fail"));
+        assert!(message.contains("typed identity mismatch"), "{message}");
+        assert!(
+            !consumer.join("out/Foo.xcframework").exists(),
+            "identity mismatch installs nothing"
+        );
+    }
+
+    #[test]
+    fn typed_identity_owner_mismatch_is_rejected_before_staging() {
+        let root = scratch("typed-owner");
+        stage_fixture(&root);
+        let digest = "e".repeat(64);
+        let mut wrong_owner = identity("xcframework-foo", &digest);
+        wrong_owner.producer = "other-producer".to_owned();
+        let result = stage_product(
+            &root,
+            &StageRequest {
+                producer: "rust-ffi".to_owned(),
+                product: "xcframework-foo".to_owned(),
+                inputs_digest: digest,
+                identity: Some(wrong_owner),
+                outputs: vec!["out/Foo.xcframework".to_owned()],
+                stage: root.join("stage"),
+            },
+        );
+        let message = format!("{}", result.expect_err("wrong owner must fail"));
+        assert!(message.contains("owner mismatch"), "{message}");
     }
 
     #[test]
