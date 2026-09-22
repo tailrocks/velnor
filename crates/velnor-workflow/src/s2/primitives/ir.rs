@@ -19,7 +19,7 @@ use super::{
     MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::s2::config::{MiseInstallDeps, NpmPackageManager};
-use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap};
+use crate::s2::provider::{Platform, ProviderId, ProviderSet, SelectorMap};
 use crate::s2::reuse::REQUIRED_CHECK;
 use crate::s2::scan::swift::XCODEGEN_TOOL;
 use crate::s2::{
@@ -203,9 +203,10 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        explicit_toolchain_step_id, provider_input, unit_owns_workflow_crate, GraphNode, Pins,
-        ProviderAdmission, ProviderId, ProviderSet, RequiredCaller, RustNeeds, RustToolchain, Unit,
-        UnitKind, WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
+        explicit_toolchain_step_id, provider_input, snapshot_compatibility,
+        unit_owns_workflow_crate, CacheReportFacts, GraphNode, Pins, Platform, ProviderAdmission,
+        ProviderId, ProviderSet, ReportedCacheLayer, RequiredCaller, RustNeeds, RustToolchain,
+        ToolRequirement, Unit, UnitKind, WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
     };
     use crate::s2::config::MiseInstallDeps;
     use crate::s2::platform::{NamedProduct, Prerequisite};
@@ -2308,6 +2309,56 @@ mod tests {
                 && !rust_workflow.contains("runs-on: macos-26"),
             "{rust_workflow}"
         );
+    }
+
+    #[test]
+    fn rust_mold_setup_linker_and_cache_are_linux_only() {
+        let mut apple = rust_unit("rust-apple", "native");
+        apple.platform = Platform::MacosArm64;
+        let mut apple_ir = owner_test_ir("example/apple-mold", vec![apple.clone()]);
+        apple_ir.mise_present = true;
+        let apple_workflow = must_some(
+            must_ok(
+                apple_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "Apple Rust kind reusable renders",
+            ),
+            "Apple Rust kind has members",
+        )
+        .1;
+        let apple_tools = WorkflowIr::tools_for_unit(&apple, true, false);
+        let apple_facts = snapshot_compatibility(&apple_ir, &apple, ProviderId::GithubHosted, &[]);
+        let apple_cache = CacheReportFacts::for_unit(ProviderId::GithubHosted, &apple, &apple_ir);
+        assert!(!apple_tools.contains(&ToolRequirement::Mold));
+        assert!(
+            !apple_workflow.contains("Set up mold 2.42.0"),
+            "{apple_workflow}"
+        );
+        assert_eq!(apple_facts.linker, "");
+        assert_eq!(apple_facts.rustflags, "");
+        assert!(!apple_cache.layers.contains(&ReportedCacheLayer::Mold));
+
+        let linux = rust_unit("rust-linux", "crates/linux");
+        let mut linux_ir = owner_test_ir("example/linux-mold", vec![linux.clone()]);
+        linux_ir.mise_present = true;
+        let linux_workflow = must_some(
+            must_ok(
+                linux_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "Linux Rust kind reusable renders",
+            ),
+            "Linux Rust kind has members",
+        )
+        .1;
+        let linux_tools = WorkflowIr::tools_for_unit(&linux, true, false);
+        let linux_facts = snapshot_compatibility(&linux_ir, &linux, ProviderId::GithubHosted, &[]);
+        let linux_cache = CacheReportFacts::for_unit(ProviderId::GithubHosted, &linux, &linux_ir);
+        assert!(linux_tools.contains(&ToolRequirement::Mold));
+        assert!(
+            linux_workflow.contains("Set up mold 2.42.0"),
+            "{linux_workflow}"
+        );
+        assert_eq!(linux_facts.linker, "mold");
+        assert_eq!(linux_facts.rustflags, "-C link-arg=-fuse-ld=mold");
+        assert!(linux_cache.layers.contains(&ReportedCacheLayer::Mold));
     }
 
     /// One macOS Rust member (a `BoltFFI` producer) beside Linux Rust
@@ -4432,6 +4483,11 @@ fn snapshot_state_files(members: &[&Unit], unit: &Unit) -> Vec<String> {
     files
 }
 
+fn uses_mold(unit: &Unit) -> bool {
+    unit.kind == UnitKind::Rust
+        && matches!(unit.platform, Platform::LinuxX64 | Platform::LinuxArm64)
+}
+
 /// The snapshot identity a static template consumes: the compatibility token
 /// (`<schema>-<digest>`) a template renders into its keys and restore
 /// prefixes, and the freshness expression it appends to its primary keys.
@@ -4446,6 +4502,7 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         .iter()
         .filter(|unit| unit.kind == UnitKind::Rust)
         .collect();
+    let has_linux_rust = rust_units.iter().any(|unit| uses_mold(unit));
     let mise_present = config
         .analysis
         .detected
@@ -4468,8 +4525,12 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         trust: crate::s2::provider::TrustReq::UntrustedOk
             .as_str()
             .to_owned(),
-        linker: "mold".to_owned(),
-        rustflags: if mise_present {
+        linker: if has_linux_rust {
+            "mold".to_owned()
+        } else {
+            String::new()
+        },
+        rustflags: if mise_present && has_linux_rust {
             "-C link-arg=-fuse-ld=mold".to_owned()
         } else {
             String::new()
@@ -4499,6 +4560,7 @@ fn snapshot_compatibility(
     provider: ProviderId,
     dependency_inputs: &[String],
 ) -> CompatibilityFacts {
+    let mold = uses_mold(unit);
     CompatibilityFacts {
         schema: SNAPSHOT_SCHEMA,
         payload: if unit.kind == UnitKind::Docker {
@@ -4517,12 +4579,12 @@ fn snapshot_compatibility(
         provider: provider.as_str().to_owned(),
         platform: unit.platform.as_str().to_owned(),
         trust: unit.trust.as_str().to_owned(),
-        linker: if ir.tools.contains(&ToolRequirement::Mold) {
+        linker: if mold {
             "mold".to_owned()
         } else {
             String::new()
         },
-        rustflags: if ir.mise_present {
+        rustflags: if ir.mise_present && mold {
             "-C link-arg=-fuse-ld=mold".to_owned()
         } else {
             String::new()
@@ -7683,6 +7745,8 @@ impl WorkflowIr {
             } else {
                 tools.insert(ToolRequirement::Sccache);
             }
+        }
+        if config.units.iter().any(uses_mold) {
             tools.insert(ToolRequirement::Mold);
         }
         // The detection fact only says mise is configured; the renderer needs
@@ -10180,7 +10244,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 } else {
                     tools.insert(ToolRequirement::Sccache);
                 }
-                tools.insert(ToolRequirement::Mold);
+                if uses_mold(unit) {
+                    tools.insert(ToolRequirement::Mold);
+                }
                 if needs_nextest(unit) {
                     tools.insert(ToolRequirement::Nextest);
                 }
