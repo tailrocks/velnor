@@ -11697,6 +11697,24 @@ mod tests {
             xcode.phases,
             vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
         );
+        for pin in ["mise.lock", ".swift-version", ".xcode-version"] {
+            for (label, unit) in [("Swift package", package), ("Xcode scheme", xcode)] {
+                assert!(unit.cache.is_some(), "{label} must have a cache contract");
+                let Some(cache) = unit.cache.as_ref() else {
+                    continue;
+                };
+                assert!(
+                    unit.watch.iter().any(|path| path == pin),
+                    "{label} watch set must include {pin}: {:?}",
+                    unit.watch
+                );
+                assert!(
+                    cache.key_files.iter().any(|path| path == pin),
+                    "{label} cache key files must include {pin}: {:?}",
+                    cache.key_files
+                );
+            }
+        }
         let build_only = must_some(
             config
                 .units
@@ -11720,6 +11738,51 @@ mod tests {
         assert!(both_workflow.contains("github-swift-xcodeproj-app"));
         assert!(!both_workflow.contains("velnor-swift-xcodeproj-app"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema1_refuses_swift_surfaces_without_phase_parity() {
+        let executable_root = temporary_repository("swift-executable-product");
+        must(
+            fs::write(
+                executable_root.join("Package.swift"),
+                r#"let package = Package(
+    products: [.executable(name: "App", targets: ["App"])],
+    targets: [.executableTarget(name: "App")]
+)
+"#,
+            ),
+            "write executable Package.swift",
+        );
+        let executable_error = must_fail(
+            scan_repository(&executable_root, RunnerMode::Github),
+            "schema 1 must reject executable Swift products",
+        );
+        assert!(executable_error
+            .to_string()
+            .contains("schema-1 Swift limitation"));
+        assert!(executable_error.to_string().contains("swift-run"));
+        assert!(executable_error.to_string().contains("phase selection"));
+        let _ = fs::remove_dir_all(executable_root);
+
+        let xcodegen_root = temporary_repository("swift-xcodegen");
+        must(
+            fs::write(
+                xcodegen_root.join("project.yml"),
+                "name: App\ntargets:\n  App:\n    type: application\n    platform: macOS\n",
+            ),
+            "write XcodeGen project spec",
+        );
+        let xcodegen_error = must_fail(
+            scan_repository(&xcodegen_root, RunnerMode::Github),
+            "schema 1 must reject XcodeGen specs",
+        );
+        assert!(xcodegen_error
+            .to_string()
+            .contains("schema-1 Swift limitation"));
+        assert!(xcodegen_error.to_string().contains("XcodeGen"));
+        assert!(xcodegen_error.to_string().contains("phase and selection"));
+        let _ = fs::remove_dir_all(xcodegen_root);
     }
 
     #[test]
