@@ -1857,6 +1857,7 @@ fn schema_one_unknown_mise_backend(
 ) -> Option<String> {
     const KNOWN_BARE: &[&str] = &[
         "aube",
+        "bun",
         "cargo-binstall",
         "dotnet",
         "elixir",
@@ -1911,17 +1912,32 @@ fn schema_one_mise_dependency_matches(name: &str, member: &str) -> bool {
             value => value.strip_prefix("core:").unwrap_or(value),
         }
     }
-    if normalize(name) == normalize(member) {
-        return true;
+    fn canonical(value: &str) -> &str {
+        match normalize(value) {
+            "asdf:code-lever/asdf-rust" => "rust",
+            "aqua:cargo-bins/cargo-binstall" | "cargo:cargo-binstall" => "cargo-binstall",
+            "aqua:mozilla/sccache" | "asdf:emersonmx/asdf-sccache" | "cargo:sccache" => "sccache",
+            "aqua:pypa/pipx" | "asdf:mise-plugins/mise-pipx" => "pipx",
+            "aqua:astral-sh/uv" | "asdf:asdf-community/asdf-uv" | "pipx:uv" => "uv",
+            "aqua:npm/cli" | "npm:npm" => "npm",
+            "aqua:pnpm/pnpm" | "npm:pnpm" => "pnpm",
+            "packslip:github.com/aubepkg/aube"
+            | "aqua:jdx/aube"
+            | "github:jdx/aube"
+            | "cargo:aube" => "aube",
+            "vfox:mise-plugins/vfox-dotnet" | "asdf:mise-plugins/mise-dotnet" => "dotnet",
+            value => value,
+        }
     }
-    let name = normalize(name);
-    let member = normalize(member);
-    member
-        .rsplit_once(':')
-        .is_some_and(|(_, short)| short == name)
+    let name = canonical(name);
+    let member = canonical(member);
+    name == member
+        || member
+            .rsplit_once(':')
+            .is_some_and(|(_, short)| short.rsplit('/').next() == Some(name))
         || name
             .rsplit_once(':')
-            .is_some_and(|(_, short)| short == member)
+            .is_some_and(|(_, short)| short.rsplit('/').next() == Some(member))
 }
 
 pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
