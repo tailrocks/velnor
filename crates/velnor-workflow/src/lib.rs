@@ -1784,45 +1784,73 @@ fn close_unit_mise_tools_for_target(
         .map_err(|error| GeneratorError::usage(error.to_string()))?;
     let install_deps = crate::s2::mise_install_deps_for_root(root)
         .map_err(|error| GeneratorError::usage(error.to_string()))?;
-    for unit in &mut config.units {
+    // Build the same lane-specific tool vectors the S1 renderer consumes.
+    // Materialize only their closure additions into the real Unit so the
+    // renderer's existing implicit roots (nextest on both lanes, cargo-deny
+    // on Velnor) stay lane-specific while their dependencies become shared
+    // inputs to every later IR/render call.
+    let raw_ir = WorkflowIr::from_config(config);
+    for index in 0..config.units.len() {
+        let unit = &config.units[index];
+        let contract = raw_ir.default_unit_contract(unit, false);
+        let mut final_tools = raw_ir
+            .unit_lane_facts(unit, &contract, RunnerMode::Github)
+            .mise_tools;
+        for tool in raw_ir
+            .unit_lane_facts(unit, &contract, RunnerMode::Velnor)
+            .mise_tools
+        {
+            if !final_tools.iter().any(|existing| existing == &tool) {
+                final_tools.push(tool);
+            }
+        }
+        // These roots are already added by the S1 renderer itself. Do not
+        // persist them as declarations: that would make GitHub install the
+        // Velnor-only cargo-deny tool through both provisioning paths.
+        let renderer_implicit_roots = final_tools
+            .iter()
+            .filter(|tool| !unit.mise_tools.iter().any(|declared| declared == *tool))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         crate::s2::close_mise_tool_subset(
-            &mut unit.mise_tools,
+            &mut final_tools,
             lock_keys,
             &lock_backends,
             &install_deps,
         );
+        let unit = &mut config.units[index];
+        for tool in final_tools {
+            if !renderer_implicit_roots.contains(&tool)
+                && !unit.mise_tools.iter().any(|existing| existing == &tool)
+            {
+                unit.mise_tools.push(tool);
+            }
+        }
     }
-    let declared_install_deps = install_deps.depends.clone();
+    // Rebuild the IR after materialization. Validation now inspects the exact
+    // per-lane facts that subsequent S1 rendering will use, rather than a
+    // validator-only vector that rendering never sees.
+    let final_ir = WorkflowIr::from_config(config);
     validate_mise_install_deps_are_closed(
-        config,
+        &final_ir,
         lock_keys,
         &lock_backends,
-        &declared_install_deps,
-        |tools| {
-            crate::s2::close_mise_tool_subset(tools, lock_keys, &lock_backends, &install_deps);
-        },
+        &install_deps.depends,
     )?;
     Ok(())
 }
 
-/// Refuse an S1 unit whose post-closure `mise_tools` subset is not provably
-/// installable. S1 and S2 keep separate `Unit` types, so this adapter checks
-/// the same parsed dependency graph at the S1 scan boundary instead of
-/// weakening the contract or converting a whole S1 project into an S2 model.
+/// Refuse an S1 unit whose actual post-materialization lane subsets are not
+/// provably installable. S1 and S2 keep separate `Unit` types, so this
+/// adapter validates the exact S1 `WorkflowIr` facts while delegating backend
+/// and alias semantics to S2's canonical tables.
 fn validate_mise_install_deps_are_closed(
-    config: &ProjectConfig,
+    ir: &WorkflowIr,
     lock_keys: &BTreeSet<String>,
     lock_backends: &BTreeMap<String, String>,
     install_deps: &BTreeMap<String, Vec<String>>,
-    close_subset: impl Fn(&mut Vec<String>),
 ) -> Result<(), GeneratorError> {
-    // Validate the same final per-lane tool subsets the schema-1 IR renders:
-    // `mise_tool_ids` adds nextest, while the Velnor subset also adds
-    // cargo-deny. The union proves both provider lanes, including units whose
-    // declared `mise_tools` vector is empty. Close once more after those
-    // implicit additions, matching schema-2's structural ordering.
-    let ir = WorkflowIr::from_config(config);
-    for unit in &config.units {
+    for unit in &ir.units {
         let contract = ir.default_unit_contract(unit, false);
         let mut tools = ir
             .unit_lane_facts(unit, &contract, RunnerMode::Github)
@@ -1835,7 +1863,6 @@ fn validate_mise_install_deps_are_closed(
                 tools.push(tool);
             }
         }
-        close_subset(&mut tools);
         if tools.is_empty() {
             continue;
         }
@@ -1854,13 +1881,22 @@ fn validate_mise_install_deps_are_closed(
                 continue;
             };
             for name in names {
-                if !tools
-                    .iter()
-                    .any(|member| schema_one_mise_dependency_matches(name, member))
-                {
+                let resolved = schema_one_resolve_install_dep_names(name, lock_keys);
+                if resolved.is_empty() {
                     return Err(GeneratorError::usage(format!(
                         "unit {} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
                         unit.id,
+                        known()
+                    )));
+                }
+                if resolved
+                    .iter()
+                    .any(|member| !tools.iter().any(|installed| installed == member))
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "unit {} installs {tool}, whose mise.toml `depends` names `{name}`, but the rendered install subset omits its resolved lock key(s) {}; close the subset before rendering, known keys: {}",
+                        unit.id,
+                        resolved.join(", "),
                         known()
                     )));
                 }
@@ -1870,9 +1906,116 @@ fn validate_mise_install_deps_are_closed(
     Ok(())
 }
 
-/// The backends mise defines for locked tool ids. Unknown plugin backends are
-/// not statically safe: their dependency metadata lives outside the scanned
-/// repository and the closure cannot prove their install subsets complete.
+/// Exact alias table shared with schema-2's Mise dependency closure. A
+/// dependency may resolve only to spellings Mise's registry actually treats
+/// as the same tool; arbitrary suffix matches such as `github:sccache` for
+/// `sccache` are intentionally rejected.
+const SCHEMA_ONE_MISE_DEP_SPELLINGS: &[(&str, &[&str])] = &[
+    ("rust", &["rust", "core:rust", "asdf:code-lever/asdf-rust"]),
+    (
+        "cargo-binstall",
+        &[
+            "cargo-binstall",
+            "aqua:cargo-bins/cargo-binstall",
+            "cargo:cargo-binstall",
+        ],
+    ),
+    (
+        "sccache",
+        &[
+            "sccache",
+            "aqua:mozilla/sccache",
+            "asdf:emersonmx/asdf-sccache",
+            "cargo:sccache",
+        ],
+    ),
+    (
+        "pipx",
+        &["pipx", "aqua:pypa/pipx", "asdf:mise-plugins/mise-pipx"],
+    ),
+    ("python", &["python", "core:python"]),
+    (
+        "uv",
+        &[
+            "uv",
+            "aqua:astral-sh/uv",
+            "asdf:asdf-community/asdf-uv",
+            "pipx:uv",
+        ],
+    ),
+    ("node", &["node", "core:node"]),
+    ("npm", &["npm", "aqua:npm/cli", "npm:npm"]),
+    ("bun", &["bun", "core:bun"]),
+    ("pnpm", &["pnpm", "aqua:pnpm/pnpm", "npm:pnpm"]),
+    (
+        "aube",
+        &[
+            "aube",
+            "packslip:github.com/aubepkg/aube",
+            "aqua:jdx/aube",
+            "github:jdx/aube",
+            "cargo:aube",
+        ],
+    ),
+    ("ruby", &["ruby", "core:ruby"]),
+    ("go", &["go", "core:go"]),
+    (
+        "dotnet",
+        &[
+            "dotnet",
+            "core:dotnet",
+            "vfox:mise-plugins/vfox-dotnet",
+            "asdf:mise-plugins/mise-dotnet",
+        ],
+    ),
+    ("swift", &["swift", "core:swift"]),
+    ("erlang", &["erlang", "core:erlang"]),
+];
+
+fn schema_one_mise_unalias(name: &str) -> &str {
+    match name {
+        "dotnet-core" => "dotnet",
+        "nodejs" => "node",
+        "golang" => "go",
+        _ => name.trim_start_matches("core:"),
+    }
+}
+
+fn schema_one_install_dep_spellings(name: &str) -> Vec<&str> {
+    let short = schema_one_mise_unalias(name);
+    if let Some((_, spellings)) = SCHEMA_ONE_MISE_DEP_SPELLINGS
+        .iter()
+        .find(|(row, _)| *row == short)
+    {
+        return spellings.to_vec();
+    }
+    if short.contains(':')
+        && let Some((_, spellings)) = SCHEMA_ONE_MISE_DEP_SPELLINGS
+            .iter()
+            .find(|(_, spellings)| spellings.contains(&short))
+    {
+        return spellings.to_vec();
+    }
+    vec![short]
+}
+
+fn schema_one_mise_dep_matches_lock_key(name: &str, lock_key: &str) -> bool {
+    let key = schema_one_mise_unalias(lock_key);
+    schema_one_install_dep_spellings(name)
+        .iter()
+        .any(|spelling| schema_one_mise_unalias(spelling) == key)
+}
+
+fn schema_one_resolve_install_dep_names(name: &str, lock_keys: &BTreeSet<String>) -> Vec<String> {
+    lock_keys
+        .iter()
+        .filter(|key| schema_one_mise_dep_matches_lock_key(name, key))
+        .cloned()
+        .collect()
+}
+
+/// Delegate backend classification to S2 so S1 cannot drift from the strict
+/// backend table used by the schema-2 closure and validator.
 fn schema_one_unknown_mise_backend(
     tool: &str,
     lock_backends: &BTreeMap<String, String>,
@@ -1921,46 +2064,6 @@ fn schema_one_unknown_mise_backend(
         ),
         _ => None,
     }
-}
-
-/// Match the same short and qualified mise dependency spellings used by the
-/// closure: a dependency may resolve to a backend-qualified lock key, while
-/// `core:` aliases compare by their registry short name.
-fn schema_one_mise_dependency_matches(name: &str, member: &str) -> bool {
-    fn normalize(value: &str) -> &str {
-        match value {
-            "dotnet-core" => "dotnet",
-            "nodejs" => "node",
-            "golang" => "go",
-            value => value.strip_prefix("core:").unwrap_or(value),
-        }
-    }
-    fn canonical(value: &str) -> &str {
-        match normalize(value) {
-            "asdf:code-lever/asdf-rust" => "rust",
-            "aqua:cargo-bins/cargo-binstall" | "cargo:cargo-binstall" => "cargo-binstall",
-            "aqua:mozilla/sccache" | "asdf:emersonmx/asdf-sccache" | "cargo:sccache" => "sccache",
-            "aqua:pypa/pipx" | "asdf:mise-plugins/mise-pipx" => "pipx",
-            "aqua:astral-sh/uv" | "asdf:asdf-community/asdf-uv" | "pipx:uv" => "uv",
-            "aqua:npm/cli" | "npm:npm" => "npm",
-            "aqua:pnpm/pnpm" | "npm:pnpm" => "pnpm",
-            "packslip:github.com/aubepkg/aube"
-            | "aqua:jdx/aube"
-            | "github:jdx/aube"
-            | "cargo:aube" => "aube",
-            "vfox:mise-plugins/vfox-dotnet" | "asdf:mise-plugins/mise-dotnet" => "dotnet",
-            value => value,
-        }
-    }
-    let name = canonical(name);
-    let member = canonical(member);
-    name == member
-        || member
-            .rsplit_once(':')
-            .is_some_and(|(_, short)| short.rsplit('/').next() == Some(name))
-        || name
-            .rsplit_once(':')
-            .is_some_and(|(_, short)| short.rsplit('/').next() == Some(member))
 }
 
 pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
@@ -14443,6 +14546,129 @@ lockfile = true
         assert!(
             message.contains("aqua:EmbarkStudios/cargo-deny") && message.contains("example-ghost"),
             "error names the implicit cargo-deny dependency edge: {message}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_renders_the_closed_implicit_nextest_subset() {
+        let root = nextest_fixture_repository("mise-schema-one-rendered-nextest-closure");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[settings]\nlockfile = true\n\n[tools]\n\"aqua:nextest-rs/nextest/cargo-nextest\" = { version = \"0.9.0\", depends = [\"cargo-binstall\"] }\ncargo-binstall = \"1.0.0\"\n",
+            ),
+            "write rendered nextest dependency fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"aqua:nextest-rs/nextest/cargo-nextest\"]]\nversion = \"0.9.0\"\nbackend = \"aqua:nextest-rs/nextest/cargo-nextest\"\n\n[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n",
+            ),
+            "write rendered nextest dependency lock",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan rendered nextest dependency fixture",
+        );
+        let unit = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "Rust unit",
+        );
+        assert!(
+            unit.mise_tools.iter().any(|tool| tool == "cargo-binstall"),
+            "closure additions must be materialized on the rendered unit: {:?}",
+            unit.mise_tools
+        );
+        let workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(unit, WorkflowKind::PullRequest);
+        assert!(
+            workflow.contains("install_args: aqua:nextest-rs/nextest/cargo-nextest cargo-binstall"),
+            "rendered nextest install args must carry its closed dependency: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_renders_the_closed_implicit_cargo_deny_subset() {
+        let root = configured_repository("mise-schema-one-rendered-cargo-deny-closure", None);
+        must(
+            fs::write(root.join("deny.toml"), "[advisories]\n"),
+            "write rendered cargo-deny policy fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[settings]\nlockfile = true\n\n[tools]\n\"aqua:EmbarkStudios/cargo-deny\" = { version = \"0.18.3\", depends = [\"cargo-binstall\"] }\ncargo-binstall = \"1.0.0\"\n",
+            ),
+            "write rendered cargo-deny dependency fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"aqua:EmbarkStudios/cargo-deny\"]]\nversion = \"0.18.3\"\nbackend = \"aqua:EmbarkStudios/cargo-deny\"\n\n[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n",
+            ),
+            "write rendered cargo-deny dependency lock",
+        );
+        let mut config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan rendered cargo-deny dependency fixture",
+        );
+        // Scan validation derives both lane subsets. Select the Velnor lane
+        // only for this direct IR assertion so the fixture needs no runner
+        // label declaration unrelated to the closure contract.
+        config.runners = RunnerMode::Velnor;
+        let unit = must_some(
+            config.units.iter().find(|unit| unit.id == "rust-policy"),
+            "policy unit",
+        );
+        assert!(
+            unit.mise_tools.iter().any(|tool| tool == "cargo-binstall"),
+            "empty declared tool sets must receive closure additions: {:?}",
+            unit.mise_tools
+        );
+        let workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(unit, WorkflowKind::Main);
+        let install_line = workflow
+            .lines()
+            .find(|line| line.contains("mise --yes install"))
+            .unwrap_or_default();
+        assert!(
+            install_line.contains("aqua:EmbarkStudios/cargo-deny")
+                && install_line.contains("cargo-binstall"),
+            "rendered cargo-deny install args must carry its closed dependency: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_rejects_an_unlisted_qualified_mise_dependency_alias() {
+        let root = configured_repository("mise-schema-one-unlisted-alias", None);
+        let unit = scanned_rust_unit_id(&root);
+        write_generation_config(&root, &unit, "\"cargo:boltffi_cli\"");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[tools]\n\"cargo:boltffi_cli\" = { version = \"0.30.1\", depends = [\"sccache\"] }\n",
+            ),
+            "write unlisted alias fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"cargo:boltffi_cli\"]]\nversion = \"0.30.1\"\nbackend = \"cargo:boltffi_cli\"\n\n[[tools.\"github:sccache\"]]\nversion = \"0.10.0\"\nbackend = \"github:sccache\"\n",
+            ),
+            "write unlisted alias lock",
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "schema-1 must reject an unlisted qualified alias",
+        );
+        let message = error.to_string();
+        assert!(message.contains(&unit), "error names the unit: {message}");
+        assert!(
+            message.contains("sccache") && message.contains("mise.lock pins no such key"),
+            "error rejects the arbitrary qualified alias: {message}"
         );
         let _ = fs::remove_dir_all(root);
     }
