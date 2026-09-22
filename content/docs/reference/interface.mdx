@@ -91,7 +91,7 @@ at `crates/velnor-workflow/src/s2/runtime.rs:1851-1886`):
 | `units` | CSV unit ids (schema-1) or plan JSON (schema-2) | Verify set that must run: changed units plus dependents. |
 | `unit_ids` | CSV unit ids (schema-2 only) | Same verify set as CSV for the selection file. |
 | `full_units` | CSV unit ids | The verify set; every scheduled unit runs full scope. |
-| `plan_digest` | digest (schema-2 only) | Stable identity over the planned units and exclusions. |
+| `plan_digest` | lowercase 64-hex SHA-256 digest (schema-2 only) | Stable identity over the planned units and exclusions. |
 | `excluded` | JSON (schema-2 only) | Units excluded with per-unit provider and reason. |
 | `<kind>_matrix` | JSON array of `{unit, label}` | Per-kind caller matrix; empty for unselected kinds. |
 | `fallback_reason` | string, on fallback and opaque-narrowed selections | Why a fallback widened the selection: the full set, or the openly-opaque subset an unmatched path conservatively selects; unmatched-path reasons also name the missing narrowing contract. Absent for proven-narrow plans. |

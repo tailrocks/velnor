@@ -238,6 +238,11 @@ struct WorkflowSection {
     profile: Option<String>,
     /// The review flag recorded in the generated `project.toml`.
     verified: Option<bool>,
+    /// Emit and enforce per-unit result-artifact provenance. Absent or false
+    /// preserves the existing workflow/runtime surface until the published
+    /// runtime supports the capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provenance: Option<bool>,
     /// The owned workflow file list, replacing the generator's default list.
     /// Declaring it is what makes the surface authoritative over whatever is
     /// checked in under `.github/workflows`.
@@ -1802,6 +1807,11 @@ impl RepoGenerationConfig {
     /// The declared review flag.
     pub(crate) fn verified(&self) -> Option<bool> {
         self.workflow.verified
+    }
+
+    /// Whether per-unit result-artifact provenance is explicitly enabled.
+    pub(crate) fn provenance(&self) -> Option<bool> {
+        self.workflow.provenance
     }
 
     /// The declared owned workflow file list.

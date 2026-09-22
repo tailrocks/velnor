@@ -6377,6 +6377,11 @@ pub(crate) fn render_tree(
             "scanner found no supported manifest or project shape; add project.toml manually only after defining a safe command",
         ));
     }
+    let provenance = scanned
+        .generation
+        .as_ref()
+        .and_then(config::RepoGenerationConfig::provenance)
+        .unwrap_or(false);
     let mut config = scanned.config;
     let surface = primitives::generate(root, &scanned.shape, &config, scanned.generation.as_ref())?;
     config.units.clone_from(&surface.units);
@@ -6387,7 +6392,7 @@ pub(crate) fn render_tree(
             config.workflow_files.push(file.clone());
         }
     }
-    let files = generated_files_with_surface(&config, Some(&surface))?;
+    let files = generated_files_with_provenance(&config, Some(&surface), provenance)?;
     let inputs = scanned.inputs;
     Ok(RenderedTree {
         config,
@@ -6482,19 +6487,27 @@ fn add_owner_runtime_products_file(config: &mut ProjectConfig) {
     }
 }
 
+fn generated_files_with_surface(
+    config: &ProjectConfig,
+    surface: Option<&primitives::Surface>,
+) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
+    generated_files_with_provenance(config, surface, false)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "surface assembly keeps every unconditional file emission inline"
 )]
-fn generated_files_with_surface(
+fn generated_files_with_provenance(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
+    provenance: bool,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     let mut config = config.clone();
     add_owner_runtime_products_file(&mut config);
     provider::require_selectors_for(&config.selectors, &config.providers)?;
     provider::validate_selector_disjointness(&config.selectors)?;
-    let workflow = WorkflowIr::from_config(&config);
+    let workflow = WorkflowIr::from_config_with_provenance(&config, provenance);
     primitives::validate_cache_transports(&workflow)?;
     // The toolchain contract is a generation precondition, checked here so no
     // rendering path — scanned or declared — can emit a Rust job without a

@@ -2298,6 +2298,19 @@ pub(crate) struct ExpectedWorkFile {
     /// The head SHA the plan selected for, exactly as the planner saw it.
     #[serde(default)]
     pub(crate) head_sha: Option<String>,
+    /// The candidate SHA the unit jobs checked out. It is separate in the
+    /// artifact contract even when a provider uses the plan head directly.
+    #[serde(default)]
+    pub(crate) candidate_sha: Option<String>,
+    /// The frozen plan digest every unit result must carry.
+    #[serde(default)]
+    pub(crate) plan_digest: Option<String>,
+    /// The immutable generator revision that rendered the callers.
+    #[serde(default)]
+    pub(crate) generator_revision: Option<String>,
+    /// Whether the opt-in provenance contract was active for this plan.
+    #[serde(default)]
+    pub(crate) provenance: Option<bool>,
 }
 
 /// One expected unit in the planner's file.
@@ -2313,6 +2326,10 @@ pub(crate) struct ExpectedUnitFile {
     pub(crate) required: bool,
     #[serde(default)]
     pub(crate) planned_skip: Option<String>,
+    /// The complete phase identity rendered for this unit. `unphased` is an
+    /// explicit identity for a unit that uses the single checks step.
+    #[serde(default)]
+    pub(crate) phase: Option<String>,
 }
 
 fn default_required() -> bool {
@@ -2343,6 +2360,20 @@ pub(crate) struct ReportedResultFile {
     pub(crate) reason: Option<String>,
     #[serde(default)]
     pub(crate) reused_from: Option<String>,
+    #[serde(default)]
+    pub(crate) candidate_sha: Option<String>,
+    #[serde(default)]
+    pub(crate) head_sha: Option<String>,
+    #[serde(default)]
+    pub(crate) base_sha: Option<String>,
+    #[serde(default)]
+    pub(crate) plan_digest: Option<String>,
+    #[serde(default)]
+    pub(crate) generator_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) phase: Option<String>,
 }
 
 /// Parse an expected-work file and a results file, then [`aggregate`] them.
@@ -2357,28 +2388,151 @@ pub(crate) struct ReportedResultFile {
 /// stale upload, a mis-threaded artifact, or a forged identity never
 /// scores. In particular a stale `planned_no_work` marker with zero units
 /// passes only when its SHAs prove it is this plan's file.
+#[allow(
+    dead_code,
+    reason = "the strict adapter is exercised by provenance unit tests"
+)]
 pub(crate) fn aggregate_files(
     expected_json: &str,
     results_json: &str,
     base_sha: &str,
     head_sha: &str,
+    plan_digest: &str,
+    generator_revision: &str,
+) -> Result<AggregateVerdict, String> {
+    let provenance = serde_json::from_str::<serde_json::Value>(expected_json)
+        .ok()
+        .is_some_and(|document| {
+            document
+                .get("provenance")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || ["candidate_sha", "plan_digest", "generator_revision"]
+                    .iter()
+                    .any(|field| document.get(*field).is_some())
+        });
+    aggregate_files_with_mode(
+        expected_json,
+        results_json,
+        base_sha,
+        head_sha,
+        plan_digest,
+        generator_revision,
+        provenance,
+    )
+}
+
+/// Aggregate with the generated workflow's provenance capability mode.
+/// Legacy plans omit the marker and keep the pre-capability result schema;
+/// opted-in plans require every identity field below before scoring.
+#[expect(
+    clippy::too_many_lines,
+    reason = "strict aggregation keeps all fail-closed identity checks together"
+)]
+pub(crate) fn aggregate_files_with_mode(
+    expected_json: &str,
+    results_json: &str,
+    base_sha: &str,
+    head_sha: &str,
+    plan_digest: &str,
+    generator_revision: &str,
+    provenance: bool,
 ) -> Result<AggregateVerdict, String> {
     let expected_file: ExpectedWorkFile = serde_json::from_str(expected_json)
         .map_err(|error| format!("the expected-work file is not valid JSON: {error}"))?;
     let results_file: ResultsFile = serde_json::from_str(results_json)
         .map_err(|error| format!("the results file is not valid JSON: {error}"))?;
+    if !provenance && expected_file.provenance == Some(true) {
+        return Err(
+            "the expected-work file requires provenance, but this aggregate has it disabled"
+                .to_owned(),
+        );
+    }
     let file_base = expected_file.base_sha.as_deref().ok_or_else(|| {
         "the expected-work file is missing base_sha: refusing an unbound plan".to_owned()
     })?;
     let file_head = expected_file.head_sha.as_deref().ok_or_else(|| {
         "the expected-work file is missing head_sha: refusing an unbound plan".to_owned()
     })?;
+    let file_candidate = if provenance {
+        Some(expected_file.candidate_sha.as_deref().ok_or_else(|| {
+            "the expected-work file is missing candidate_sha: refusing an unbound plan".to_owned()
+        })?)
+    } else {
+        None
+    };
+    let file_plan_digest = if provenance {
+        Some(expected_file.plan_digest.as_deref().ok_or_else(|| {
+            "the expected-work file is missing plan_digest: refusing an unbound plan".to_owned()
+        })?)
+    } else {
+        None
+    };
+    let file_generator_revision = if provenance {
+        Some(expected_file.generator_revision.as_deref().ok_or_else(|| {
+            "the expected-work file is missing generator_revision: refusing an unbound plan"
+                .to_owned()
+        })?)
+    } else {
+        None
+    };
+    if let (Some(file_candidate), Some(file_plan_digest), Some(file_generator_revision)) =
+        (file_candidate, file_plan_digest, file_generator_revision)
+    {
+        if file_candidate.is_empty() || file_head.is_empty() {
+            return Err(
+                "the expected-work file has an empty candidate/head SHA: refusing an unbound plan"
+                    .to_owned(),
+            );
+        }
+        if file_plan_digest.is_empty() || file_generator_revision.is_empty() {
+            return Err("the expected-work file has an empty plan or generator identity: refusing an unbound plan".to_owned());
+        }
+        if file_candidate != file_head {
+            return Err(format!(
+                "the expected-work file candidate SHA `{file_candidate}` does not equal its head SHA `{file_head}`"
+            ));
+        }
+        if file_plan_digest != plan_digest {
+            return Err(format!(
+                "the expected-work file plan digest `{file_plan_digest}` does not match this aggregate `{plan_digest}`"
+            ));
+        }
+        if file_generator_revision != generator_revision {
+            return Err(format!(
+                "the expected-work file generator revision `{file_generator_revision}` does not match this aggregate `{generator_revision}`"
+            ));
+        }
+    }
     if file_head != head_sha || (!base_sha.is_empty() && file_base != base_sha) {
         return Err(format!(
             "the expected-work file does not match this aggregate checkout: plan base SHA `{file_base}` vs aggregate base SHA `{base_sha}`; plan head SHA `{file_head}` vs aggregate head SHA `{head_sha}`"
         ));
     }
+    let expected_candidate = match file_candidate {
+        Some(value) => value,
+        None if provenance => {
+            return Err("provenance candidate identity is unavailable".to_owned());
+        }
+        None => "",
+    };
+    let expected_plan_digest = match file_plan_digest {
+        Some(value) => value,
+        None if provenance => {
+            return Err("provenance plan identity is unavailable".to_owned());
+        }
+        None => "",
+    };
+    let expected_generator_revision = match file_generator_revision {
+        Some(value) => value,
+        None if provenance => {
+            return Err("provenance generator identity is unavailable".to_owned());
+        }
+        None => "",
+    };
     let mut units = BTreeMap::new();
+    let mut lanes = BTreeMap::new();
+    let mut phases = BTreeMap::new();
     for unit in expected_file.units {
         if unit.id.is_empty() {
             return Err("the expected-work file names a unit with an empty id".to_owned());
@@ -2386,6 +2540,33 @@ pub(crate) fn aggregate_files(
         if unit.lanes.is_empty() {
             return Err(format!("expected unit `{}` names no lanes", unit.id));
         }
+        if provenance {
+            let phase = unit.phase.as_deref().ok_or_else(|| {
+                format!(
+                    "expected unit `{}` is missing phase identity: refusing an unbound plan",
+                    unit.id
+                )
+            })?;
+            if phase.is_empty() {
+                return Err(format!(
+                    "expected unit `{}` has an empty phase identity: refusing an unbound plan",
+                    unit.id
+                ));
+            }
+            for lane in &unit.lanes {
+                if lane.is_empty() {
+                    return Err(format!(
+                        "expected unit `{}` names an empty lane/provider",
+                        unit.id
+                    ));
+                }
+                phases.insert((unit.id.clone(), lane.clone()), phase.to_owned());
+            }
+        }
+        lanes.insert(
+            unit.id.clone(),
+            unit.lanes.iter().cloned().collect::<BTreeSet<_>>(),
+        );
         if units
             .insert(
                 unit.id.clone(),
@@ -2403,6 +2584,81 @@ pub(crate) fn aggregate_files(
     }
     let mut results = Vec::with_capacity(results_file.results.len());
     for result in results_file.results {
+        if provenance {
+            let candidate_sha = result
+                .candidate_sha
+                .as_deref()
+                .ok_or_else(|| format!("result `{}` is missing candidate_sha", result.unit))?;
+            let result_head_sha = result
+                .head_sha
+                .as_deref()
+                .ok_or_else(|| format!("result `{}` is missing head_sha", result.unit))?;
+            let result_base_sha = result
+                .base_sha
+                .as_deref()
+                .ok_or_else(|| format!("result `{}` is missing base_sha", result.unit))?;
+            let result_plan_digest = result
+                .plan_digest
+                .as_deref()
+                .ok_or_else(|| format!("result `{}` is missing plan_digest", result.unit))?;
+            let result_generator_revision = result
+                .generator_revision
+                .as_deref()
+                .ok_or_else(|| format!("result `{}` is missing generator_revision", result.unit))?;
+            let provider = result
+                .provider
+                .as_deref()
+                .ok_or_else(|| format!("result `{}` is missing provider", result.unit))?;
+            let phase = result
+                .phase
+                .as_deref()
+                .ok_or_else(|| format!("result `{}` is missing phase identity", result.unit))?;
+            if candidate_sha != expected_candidate
+                || result_head_sha != file_head
+                || result_base_sha != file_base
+                || result_plan_digest != expected_plan_digest
+                || result_generator_revision != expected_generator_revision
+            {
+                return Err(format!(
+                    "result `{}` does not match the expected candidate/base/plan/generator identity",
+                    result.unit
+                ));
+            }
+            if phase.is_empty() {
+                return Err(format!(
+                    "result `{}` has an empty phase identity",
+                    result.unit
+                ));
+            }
+            if result.lane.is_empty() || provider.is_empty() || provider != result.lane {
+                return Err(format!(
+                    "result `{}` has mismatched lane/provider identity: lane `{}` provider `{provider}`",
+                    result.unit, result.lane
+                ));
+            }
+            if let Some(expected_lanes) = lanes.get(&result.unit) {
+                if !expected_lanes.contains(&result.lane) {
+                    return Err(format!(
+                        "result `{}` names lane/provider `{}` outside the expected unit lanes",
+                        result.unit, result.lane
+                    ));
+                }
+                let expected_phase = phases
+                    .get(&(result.unit.clone(), result.lane.clone()))
+                    .ok_or_else(|| {
+                        format!(
+                            "expected unit `{}` lane `{}` is missing phase identity",
+                            result.unit, result.lane
+                        )
+                    })?;
+                if phase != expected_phase {
+                    return Err(format!(
+                        "result `{}` on `{}` has phase `{phase}`, expected `{expected_phase}`",
+                        result.unit, result.lane
+                    ));
+                }
+            }
+        }
         results.push(ReportedResult {
             unit_id: result.unit,
             lane: result.lane,
@@ -4826,34 +5082,156 @@ mod tests {
         let expected = r#"{
             "base_sha": "base-sha",
             "head_sha": "head-sha",
+            "candidate_sha": "head-sha",
+            "plan_digest": "plan-digest",
+            "generator_revision": "generator-revision",
             "units": [
-                {"id": "rust-alpha", "lanes": ["github"]},
-                {"id": "node-beta", "lanes": ["github"], "planned_skip": "lane cannot run kind"}
+                {"id": "rust-alpha", "lanes": ["github"], "phase": "unphased"},
+                {"id": "node-beta", "lanes": ["github"], "phase": "unphased", "planned_skip": "lane cannot run kind"}
             ],
             "prerequisites": {"node-beta": ["rust-alpha"]}
         }"#;
         let results = r#"{
             "results": [
-                {"unit": "rust-alpha", "lane": "github", "outcome": "success"},
-                {"unit": "node-beta", "lane": "github", "outcome": "skipped", "reason": "lane gate closed"}
+                {"unit": "rust-alpha", "lane": "github", "provider": "github", "candidate_sha": "head-sha", "head_sha": "head-sha", "base_sha": "base-sha", "plan_digest": "plan-digest", "generator_revision": "generator-revision", "phase": "unphased", "outcome": "success"},
+                {"unit": "node-beta", "lane": "github", "provider": "github", "candidate_sha": "head-sha", "head_sha": "head-sha", "base_sha": "base-sha", "plan_digest": "plan-digest", "generator_revision": "generator-revision", "phase": "unphased", "outcome": "skipped", "reason": "lane gate closed"}
             ]
         }"#;
-        let verdict = aggregate_files(expected, results, "base-sha", "head-sha")?;
+        let verdict = aggregate_files(
+            expected,
+            results,
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision",
+        )?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
-        assert!(aggregate_files("bogus", results, "base-sha", "head-sha").is_err());
-        assert!(aggregate_files(expected, "bogus", "base-sha", "head-sha").is_err());
+        assert!(aggregate_files(
+            "bogus",
+            results,
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision"
+        )
+        .is_err());
+        assert!(aggregate_files(
+            expected,
+            "bogus",
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision"
+        )
+        .is_err());
         let missing_reason = r#"{
             "results": [
-                {"unit": "rust-alpha", "lane": "github", "outcome": "skipped"}
+                {"unit": "rust-alpha", "lane": "github", "provider": "github", "candidate_sha": "head-sha", "head_sha": "head-sha", "base_sha": "base-sha", "plan_digest": "plan-digest", "generator_revision": "generator-revision", "phase": "unphased", "outcome": "skipped"}
             ]
         }"#;
-        assert!(aggregate_files(expected, missing_reason, "base-sha", "head-sha").is_err());
+        assert!(aggregate_files(
+            expected,
+            missing_reason,
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision"
+        )
+        .is_err());
         let unknown_field = r#"{
             "base_sha": "base-sha",
             "head_sha": "head-sha",
             "units": [{"id": "rust-alpha", "lanes": ["github"], "bogus": true}]
         }"#;
-        assert!(aggregate_files(unknown_field, results, "base-sha", "head-sha").is_err());
+        assert!(aggregate_files(
+            unknown_field,
+            results,
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision"
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn result_artifact_provenance_is_required_and_bound() -> Result<(), String> {
+        let expected = serde_json::json!({
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
+            "candidate_sha": "head-sha",
+            "plan_digest": "plan-digest",
+            "generator_revision": "generator-revision",
+            "units": [{"id": "rust-alpha", "lanes": ["github"], "phase": "fmt,test"}],
+            "prerequisites": {}
+        });
+        let expected_json = serde_json::to_string(&expected).map_err(|error| error.to_string())?;
+        let valid = serde_json::json!({
+            "unit": "rust-alpha",
+            "lane": "github",
+            "provider": "github",
+            "candidate_sha": "head-sha",
+            "head_sha": "head-sha",
+            "base_sha": "base-sha",
+            "plan_digest": "plan-digest",
+            "generator_revision": "generator-revision",
+            "phase": "fmt,test",
+            "outcome": "success"
+        });
+        let score = |result: serde_json::Value| {
+            let results = serde_json::json!({"results": [result]});
+            let results_json =
+                serde_json::to_string(&results).map_err(|error| error.to_string())?;
+            aggregate_files(
+                &expected_json,
+                &results_json,
+                "base-sha",
+                "head-sha",
+                "plan-digest",
+                "generator-revision",
+            )
+        };
+        assert!(score(valid.clone())?.passed);
+        for field in [
+            "candidate_sha",
+            "head_sha",
+            "base_sha",
+            "plan_digest",
+            "generator_revision",
+            "provider",
+            "phase",
+        ] {
+            let mut mismatched = valid.clone();
+            mismatched[field] = serde_json::Value::String("wrong".to_owned());
+            assert!(
+                score(mismatched).is_err(),
+                "mismatched {field} must fail closed"
+            );
+        }
+        let mut wrong_lane = valid.clone();
+        wrong_lane["lane"] = serde_json::Value::String("velnor".to_owned());
+        wrong_lane["provider"] = serde_json::Value::String("velnor".to_owned());
+        assert!(score(wrong_lane).is_err(), "wrong lane must fail closed");
+        let mut empty_phase = valid.clone();
+        empty_phase["phase"] = serde_json::Value::String(String::new());
+        assert!(score(empty_phase).is_err(), "empty phase must fail closed");
+        for field in [
+            "candidate_sha",
+            "head_sha",
+            "base_sha",
+            "plan_digest",
+            "generator_revision",
+            "provider",
+            "phase",
+        ] {
+            let mut missing = valid.clone();
+            missing
+                .as_object_mut()
+                .ok_or_else(|| "result must be a JSON object".to_owned())?
+                .remove(field);
+            assert!(score(missing).is_err(), "missing {field} must fail closed");
+        }
         Ok(())
     }
 
@@ -4863,7 +5241,14 @@ mod tests {
         // A file without identity is unbound and fails — including the stale
         // no-work shape: marker plus zero units plus zero results.
         let unbound = r#"{"planned_no_work": true, "units": []}"#;
-        let Err(error) = aggregate_files(unbound, results, "base-sha", "head-sha") else {
+        let Err(error) = aggregate_files(
+            unbound,
+            results,
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision",
+        ) else {
             return Err("an unbound expected-work file must fail".to_owned());
         };
         assert!(
@@ -4877,9 +5262,19 @@ mod tests {
             "units": [],
             "prerequisites": {},
             "base_sha": "earlier-base",
-            "head_sha": "earlier-head"
+            "head_sha": "earlier-head",
+            "candidate_sha": "earlier-head",
+            "plan_digest": "plan-digest",
+            "generator_revision": "generator-revision"
         }"#;
-        let Err(error) = aggregate_files(stale, results, "base-sha", "head-sha") else {
+        let Err(error) = aggregate_files(
+            stale,
+            results,
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision",
+        ) else {
             return Err("a stale expected-work file must fail".to_owned());
         };
         assert!(
@@ -4893,17 +5288,42 @@ mod tests {
             "units": [],
             "prerequisites": {},
             "base_sha": "base-sha",
-            "head_sha": "head-sha"
+            "head_sha": "head-sha",
+            "candidate_sha": "head-sha",
+            "plan_digest": "plan-digest",
+            "generator_revision": "generator-revision"
         }"#;
-        let verdict = aggregate_files(current, results, "base-sha", "head-sha")?;
+        let verdict = aggregate_files(
+            current,
+            results,
+            "base-sha",
+            "head-sha",
+            "plan-digest",
+            "generator-revision",
+        )?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         // An aggregate job without a base (workflow_dispatch leaves BASE_SHA
         // empty) still binds the head: the base check is skipped, the head
         // check is not.
-        let verdict = aggregate_files(current, results, "", "head-sha")?;
+        let verdict = aggregate_files(
+            current,
+            results,
+            "",
+            "head-sha",
+            "plan-digest",
+            "generator-revision",
+        )?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(
-            aggregate_files(current, results, "", "other-head").is_err(),
+            aggregate_files(
+                current,
+                results,
+                "",
+                "other-head",
+                "plan-digest",
+                "generator-revision"
+            )
+            .is_err(),
             "the head binding holds without a job base"
         );
         Ok(())

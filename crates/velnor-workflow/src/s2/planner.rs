@@ -475,6 +475,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.digest, reordered.digest);
+        assert_eq!(first.digest.len(), 64);
+        assert!(
+            first
+                .digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+            "plan digest must be lowercase SHA-256 hex: {}",
+            first.digest
+        );
+        assert!(!first.digest.is_empty());
         let changed = fanout(
             &[
                 PlannedUnit {

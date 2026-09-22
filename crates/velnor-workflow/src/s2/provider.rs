@@ -518,8 +518,7 @@ pub(crate) fn plan_digest(
             reason.as_str()
         );
     }
-    let digest = crate::s2::content_digest_bytes(digest_input.as_bytes());
-    format!("{digest:016x}")
+    crate::s2::reuse::hex_sha256(digest_input.as_bytes())
 }
 
 /// Full result identity (spec §2): repository + sha + run + attempt +
@@ -930,6 +929,25 @@ mod tests {
             "unbounded subset",
         );
         assert!(error.contains("automatic_providers"), "{error}");
+    }
+
+    #[test]
+    fn plan_digest_is_stable_full_sha256_hex() {
+        let units = vec![(
+            "unit".to_owned(),
+            ProviderSet::from([ProviderId::GithubHosted]),
+            "command-digest".to_owned(),
+        )];
+        let exclusions = Vec::new();
+
+        let first = plan_digest(&units, &exclusions);
+        let second = plan_digest(&units, &exclusions);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
     }
 
     #[test]

@@ -94,9 +94,24 @@ fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
 /// Velnor). The results download tolerates zero artifacts — a no-work plan
 /// runs no unit jobs — because the aggregate fails a real-work plan with
 /// zero records anyway; every other step fails the check.
-fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
+fn render_aggregate_score_steps(
+    runtime_steps: &str,
+    download_artifact_pin: &str,
+    provenance: bool,
+) -> String {
+    let provenance_env = if provenance {
+        "          PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}\n          GENERATOR_REVISION: ${{ needs.plan.outputs.generator_revision }}\n          VELNOR_RESULT_PROVENANCE: \"1\"\n"
+    } else {
+        ""
+    };
     format!(
         "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+    )
+    .replace(
+        "          HEAD_SHA: ${{ needs.plan.outputs.head_sha }}\n",
+        &format!(
+            "          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n{provenance_env}"
+        ),
     )
 }
 
@@ -120,9 +135,29 @@ fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str
 /// unless the plan expected no work. Records carry no `matrix` (the planner
 /// writes empty matrices: one unmatrixed verdict per lane) and no
 /// `reused_from` (no live reuse path; collection rejects any).
-fn render_unit_result_steps(upload_artifact_pin: &str, lane: &str, record_gate: &str) -> String {
+fn render_unit_result_steps(
+    upload_artifact_pin: &str,
+    lane: &str,
+    record_gate: &str,
+    provenance: bool,
+) -> String {
+    let upload_step = if provenance {
+        format!(
+            "{}      - name: Upload unit result",
+            render_result_provenance_step(record_gate, lane),
+        )
+    } else {
+        "      - name: Upload unit result".to_owned()
+    };
     format!(
         "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {lane}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          mkdir -p {RESULT_DIR}\n          jq -n --arg unit \"$VELNOR_RESULT_UNIT\" --arg lane \"$VELNOR_RESULT_LANE\" --arg outcome \"$outcome\" '{{results: [{{unit: $unit, lane: $lane, outcome: $outcome}}]}}' > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{lane}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{lane}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
+    )
+    .replace("      - name: Upload unit result", &upload_step)
+}
+
+fn render_result_provenance_step(record_gate: &str, lane: &str) -> String {
+    format!(
+        "      - name: Bind unit result provenance\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_FILE: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{lane}.json\n          VELNOR_RESULT_PROVIDER: {lane}\n          VELNOR_RESULT_CANDIDATE_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_RESULT_BASE_SHA: ${{{{ inputs.base_sha }}}}\n          VELNOR_RESULT_PLAN_DIGEST: ${{{{ inputs.plan_digest }}}}\n          VELNOR_RESULT_GENERATOR_REVISION: ${{{{ inputs.generator_revision }}}}\n          VELNOR_RESULT_PHASE: ${{{{ inputs.phase_identity }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          jq --arg provider \"$VELNOR_RESULT_PROVIDER\" --arg candidate_sha \"$VELNOR_RESULT_CANDIDATE_SHA\" --arg base_sha \"$VELNOR_RESULT_BASE_SHA\" --arg plan_digest \"$VELNOR_RESULT_PLAN_DIGEST\" --arg generator_revision \"$VELNOR_RESULT_GENERATOR_REVISION\" --arg phase \"$VELNOR_RESULT_PHASE\" '.results[0] += {{provider: $provider, candidate_sha: $candidate_sha, head_sha: $candidate_sha, base_sha: $base_sha, plan_digest: $plan_digest, generator_revision: $generator_revision, phase: $phase}}' \"$VELNOR_RESULT_FILE\" > \"$VELNOR_RESULT_FILE.tmp\"\n          mv \"$VELNOR_RESULT_FILE.tmp\" \"$VELNOR_RESULT_FILE\"\n"
     )
 }
 
@@ -344,6 +379,7 @@ mod tests {
             macos_runner: "macos-15".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned()],
             ci_required: true,
+            provenance: true,
             velnor_runner_group: None,
             velnor_trusted_label: None,
             velnor_trusted_runner_online: true,
@@ -1540,6 +1576,13 @@ mod tests {
             plan.contains("no_work_reason: ${{ steps.plan.outputs.no_work_reason }}"),
             "the plan job maps the no-work reason output: {plan}"
         );
+        assert!(
+            plan.contains("plan_digest: ${{ steps.plan.outputs.plan_digest }}")
+                && plan
+                    .contains("generator_revision: ${{ steps.plan.outputs.generator_revision }}")
+                && plan.contains("GENERATOR_REVISION:"),
+            "the plan job publishes and feeds both provenance identities: {plan}"
+        );
     }
 
     #[test]
@@ -1659,7 +1702,10 @@ mod tests {
         );
         assert!(
             rendered.contains("BASE_SHA: ${{ needs.plan.outputs.base_sha }}")
-                && rendered.contains("HEAD_SHA: ${{ needs.plan.outputs.head_sha }}"),
+                && rendered.contains("HEAD_SHA: ${{ needs.plan.outputs.head_sha }}")
+                && rendered.contains("PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}")
+                && rendered
+                    .contains("GENERATOR_REVISION: ${{ needs.plan.outputs.generator_revision }}"),
             "the aggregate binds the plan identity from this run's plan outputs: {rendered}"
         );
         let aggregate = must_some(
@@ -1682,8 +1728,12 @@ mod tests {
 
     #[test]
     fn record_step_creates_result_dir_before_first_write() {
-        let steps =
-            super::render_unit_result_steps("actions/upload-artifact@pinned", "github", "always()");
+        let steps = super::render_unit_result_steps(
+            "actions/upload-artifact@pinned",
+            "github",
+            "always()",
+            true,
+        );
         let mkdir = must_some(
             steps.find("mkdir -p .velnor-ci-results"),
             "result dir creation",
@@ -1700,11 +1750,32 @@ mod tests {
             steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github.json"),
             "the upload publishes exactly what the record step wrote: {steps}"
         );
+        for field in [
+            "Bind unit result provenance",
+            "VELNOR_RESULT_CANDIDATE_SHA: ${{ inputs.head_sha }}",
+            "VELNOR_RESULT_BASE_SHA: ${{ inputs.base_sha }}",
+            "VELNOR_RESULT_PLAN_DIGEST: ${{ inputs.plan_digest }}",
+            "VELNOR_RESULT_GENERATOR_REVISION: ${{ inputs.generator_revision }}",
+            "VELNOR_RESULT_PHASE: ${{ inputs.phase_identity }}",
+            "provider: $provider",
+            "candidate_sha: $candidate_sha",
+            "head_sha: $candidate_sha",
+            "base_sha: $base_sha",
+            "plan_digest: $plan_digest",
+            "generator_revision: $generator_revision",
+            "phase: $phase",
+        ] {
+            assert!(
+                steps.contains(field),
+                "result producer omits `{field}`: {steps}"
+            );
+        }
     }
 
     #[test]
     fn collect_step_creates_result_dir_before_first_read() {
-        let steps = super::render_aggregate_score_steps("", "actions/download-artifact@pinned");
+        let steps =
+            super::render_aggregate_score_steps("", "actions/download-artifact@pinned", true);
         let mkdir = must_some(
             steps.find("mkdir -p .velnor-ci-results"),
             "result dir creation",
@@ -3369,6 +3440,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) macos_runner: String,
     pub(crate) velnor_labels: Vec<String>,
     pub(crate) ci_required: bool,
+    pub(crate) provenance: bool,
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) velnor_trusted_label: Option<String>,
     pub(crate) velnor_trusted_runner_online: bool,
@@ -3834,6 +3906,8 @@ pub(crate) mod lane_input {
     /// (`fmt,clippy,test,doctest`); empty when the unit keeps the single
     /// legacy checks step.
     pub(crate) const VALIDATION_PHASES: &str = "validation_phases";
+    /// Complete phase identity, including `unphased` for legacy units.
+    pub(crate) const PHASE_IDENTITY: &str = "phase_identity";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -3883,6 +3957,9 @@ pub(crate) mod lane_input {
 
     /// The `workflow_call` declaration lines of one optional input.
     pub(crate) fn declaration(name: &str) -> String {
+        if name == PHASE_IDENTITY {
+            return format!("      {name}:\n        required: true\n        type: string");
+        }
         if is_flag(name) {
             format!("      {name}:\n        required: false\n        type: boolean\n        default: false")
         } else {
@@ -3939,6 +4016,8 @@ pub(crate) struct SnapshotFacts {
     reason = "each flag is one independent `type: boolean` workflow_call input"
 )]
 pub(crate) struct LaneStepFacts {
+    /// Whether the caller/callee carries the opt-in result provenance contract.
+    pub(crate) provenance: bool,
     pub(crate) mise_tools: Vec<String>,
     pub(crate) mise_runner: bool,
     pub(crate) mbx_enabled: bool,
@@ -4053,6 +4132,16 @@ impl LaneStepFacts {
             values.push((
                 lane_input::VALIDATION_PHASES,
                 ValidationPhase::id_list(&self.validation_phases).join(","),
+            ));
+        }
+        if self.provenance {
+            values.push((
+                lane_input::PHASE_IDENTITY,
+                if self.validation_phases.is_empty() {
+                    "unphased".to_owned()
+                } else {
+                    ValidationPhase::id_list(&self.validation_phases).join(",")
+                },
             ));
         }
         values
@@ -4182,6 +4271,10 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
 #[allow(dead_code)]
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
+        Self::from_config_with_provenance(config, false)
+    }
+
+    pub(crate) fn from_config_with_provenance(config: &ProjectConfig, provenance: bool) -> Self {
         let mut tools = BTreeSet::new();
         let mr_boxington = config
             .units
@@ -4251,6 +4344,7 @@ impl WorkflowIr {
             macos_runner: config.macos_runner.clone(),
             velnor_labels: config.velnor_labels.clone(),
             ci_required: config.ci_required,
+            provenance,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
             velnor_trusted_label: config.velnor_trusted_label.clone(),
             velnor_trusted_runner_online: trusted_runner.online,
@@ -4524,15 +4618,21 @@ impl WorkflowIr {
                 "contains(format(',{{0}},', needs.plan.outputs.units), ',{},')",
                 unit.id
             ));
+            let provenance_inputs = if self.provenance {
+                "      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      generator_revision: ${{{{ needs.plan.outputs.generator_revision }}}}\n"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 output,
-                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: {}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
+                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: {}\n{provenance_inputs}      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
                 yaml_scalar(&name),
                 conditions.join(" && "),
                 needs.join(", "),
                 nested_unit_workflow_file(unit),
                 yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id),
+                provenance_inputs = provenance_inputs,
             );
         }
     }
@@ -4636,14 +4736,20 @@ impl WorkflowIr {
             "({})",
             self.lane_admission_expression(caller.admission)
         ));
+        let provenance_inputs = if self.provenance {
+            "      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      generator_revision: ${{{{ needs.plan.outputs.generator_revision }}}}\n"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      lane: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
+            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      lane: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n{provenance_inputs}      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
             caller.job_id,
             crate::control_job_name("Prepare Cargo"),
             conditions.join(" && "),
             needs.join(", "),
             yaml_scalar(sample_unit),
+            provenance_inputs = provenance_inputs,
         );
     }
 
@@ -4697,9 +4803,14 @@ impl WorkflowIr {
             "({})",
             self.lane_admission_expression(LaneAdmission::for_unit(lane, unit))
         ));
+        let provenance_inputs = if self.provenance {
+            "      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      generator_revision: ${{{{ needs.plan.outputs.generator_revision }}}}\n"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      lane: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}{}",
+            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      lane: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n{provenance_inputs}      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}{}",
             caller.job_id,
             yaml_scalar(&caller.name),
             conditions.join(" && "),
@@ -4708,6 +4819,7 @@ impl WorkflowIr {
             yaml_scalar(&caller.unit_id),
             caller.lane.as_str(),
             render_caller_inputs(&caller.inputs),
+            provenance_inputs = provenance_inputs,
         );
     }
 
@@ -4856,6 +4968,7 @@ impl WorkflowIr {
         output.push_str(&render_aggregate_score_steps(
             &runtime_steps,
             self.pins.download_artifact,
+            self.provenance,
         ));
         let _ = write!(
             output,
@@ -5017,6 +5130,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string",
             yaml_scalar(&sidebar_group_name(unit))
         );
+        if self.provenance {
+            output.push_str(
+                "      plan_digest:\n        required: true\n        type: string\n      generator_revision:\n        required: true\n        type: string\n",
+            );
+        }
         self.render_workflow_env(&mut output, unit);
         output.push_str("\njobs:\n");
         for job in &contract.lanes {
@@ -5047,6 +5165,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         kind: UnitKind,
         members: &[&Unit],
         env: &BTreeMap<String, String>,
+        provenance: bool,
     ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
@@ -5054,6 +5173,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n      lane:\n        required: true\n        type: string",
             yaml_scalar(unit_group(kind))
         );
+        if provenance {
+            output.push_str(
+                "      plan_digest:\n        required: true\n        type: string\n      generator_revision:\n        required: true\n        type: string\n",
+            );
+        }
+        if provenance {
+            let _ = writeln!(
+                output,
+                "{}",
+                lane_input::declaration(lane_input::PHASE_IDENTITY)
+            );
+        }
         for name in lane_input::ALL {
             // The prepared-tools input is declared only when a member needs
             // it: an unconditional declaration would rewrite every kind
@@ -5108,7 +5239,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             return Ok(None);
         }
         let env = crate::platform::agreed_env(&members, kind)?;
-        let mut output = Self::render_kind_units_header(kind, &members, &env);
+        let mut output = Self::render_kind_units_header(kind, &members, &env, self.provenance);
         self.append_lane_cargo_prep_jobs(&mut output, &members, contracts);
         self.render_collapsed_kind_verify_job(&mut output, &members, contracts)?;
         Ok(Some((kind_unit_workflow_file(kind), output)))
@@ -5365,6 +5496,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.pins.upload_artifact,
             lane.as_str(),
             &record_gate,
+            self.provenance,
         ));
         output.push('\n');
         Ok(())
@@ -5448,6 +5580,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 .as_ref()
                 .is_some_and(cache_is_velnor_host_persistent);
         LaneStepFacts {
+            provenance: self.provenance,
             mise_tools,
             mise_runner,
             mbx_enabled,
@@ -6472,10 +6605,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // expression collapses to the static scope there; a smuggled
         // foreign value plans entries no lane job reports, and the
         // aggregate fails those closed.
-        let lanes_env = format!(
-            "          VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}\n",
-            self.automatic.as_str()
-        );
+        let lanes_env = if self.provenance {
+            format!(
+                "          GENERATOR_REVISION: {}\n          VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}\n",
+                yaml_scalar(&self.workflow_revision),
+                self.automatic.as_str()
+            )
+        } else {
+            format!(
+                "          VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}\n",
+                self.automatic.as_str()
+            )
+        };
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
             "      base_sha: ${{ steps.plan.outputs.base_sha }}".to_owned(),
@@ -6483,6 +6624,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
         ];
+        if self.provenance {
+            outputs.insert(
+                3,
+                "      plan_digest: ${{ steps.plan.outputs.plan_digest }}".to_owned(),
+            );
+            outputs.insert(
+                4,
+                "      generator_revision: ${{ steps.plan.outputs.generator_revision }}".to_owned(),
+            );
+        }
         let mut matrices = BTreeSet::new();
         for unit in &self.units {
             matrices.insert(kind_matrix_output(unit.kind));
@@ -6512,6 +6663,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
+            lanes_env = lanes_env,
             expected_work_env = EXPECTED_WORK_FILE_ENV,
             expected_work_file = EXPECTED_WORK_FILE,
             expected_work_dir = EXPECTED_WORK_DIR,
