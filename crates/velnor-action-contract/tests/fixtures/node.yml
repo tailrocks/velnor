@@ -1,0 +1,26 @@
+name: Fixture action
+description: 7
+inputs:
+  version:
+    default: 7
+    deprecationMessage: "false"
+  empty:
+    default: null
+  small:
+    default: 0.00001234
+  large:
+    default: 100000000000000000000
+outputs:
+  result:
+    description: true
+    value: ${{ steps.build.outputs.result }}
+vendor-extension:
+  arbitrary:
+    - accepted
+runs:
+  using: node20
+  main: dist/index.js
+  pre: dist/pre.js
+  pre-if: ${{ inputs.version }}
+  post: dist/post.js
+  post-if: success()

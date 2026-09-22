@@ -1,0 +1,24 @@
+name: Composite fixture
+inputs:
+  greeting:
+    default: hello
+outputs:
+  result:
+    value: ${{ steps.build.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: build
+      name: Build
+      shell: bash
+      run: echo "$GREETING" >> "$GITHUB_OUTPUT"
+      env:
+        GREETING: ${{ inputs.greeting }}
+      continue-on-error: ${{ inputs.allow_failure }}
+      working-directory: ${{ github.workspace }}
+    - id: nested
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+      env:
+        FLAG: true
