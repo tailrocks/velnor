@@ -836,6 +836,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
         "{command_prefix}xcodegen generate --spec {}",
         shell_quote(spec_file)
     )];
+    let mut phases = vec![ValidationPhase::XcodegenGenerate];
     let mut label = format!("Apple project ({}, XcodeGen generate)", spec.name);
     let mut id_part = "generate".to_owned();
     if apps.len() == 1 {
@@ -853,7 +854,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
             ));
             return (
                 Some(xcodegen_generate_unit(
-                    spec, &root, spec_file, commands, label, &id_part,
+                    spec, &root, spec_file, commands, phases, label, &id_part,
                 )),
                 notes,
             );
@@ -866,10 +867,12 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
             commands.push(format!(
                 "{command_prefix}xcodebuild -project {project} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
             ));
+            phases.push(ValidationPhase::SwiftBuild);
             if testable {
                 commands.push(format!(
                     "{command_prefix}xcodebuild -project {project} -scheme {scheme_quoted}{test_destination} CODE_SIGNING_ALLOWED=NO test"
                 ));
+                phases.push(ValidationPhase::SwiftTest);
             }
             label = format!("Apple app ({scheme}, XcodeGen)");
             id_part = identifier_suffix(&scheme);
@@ -895,7 +898,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
     }
     (
         Some(xcodegen_generate_unit(
-            spec, &root, spec_file, commands, label, &id_part,
+            spec, &root, spec_file, commands, phases, label, &id_part,
         )),
         notes,
     )
@@ -906,6 +909,7 @@ fn xcodegen_generate_unit(
     root: &str,
     spec_file: &str,
     commands: Vec<String>,
+    phases: Vec<ValidationPhase>,
     label: String,
     id_part: &str,
 ) -> Unit {
@@ -943,7 +947,7 @@ fn xcodegen_generate_unit(
         watch,
         pr_commands: commands.clone(),
         full_commands: commands,
-        phases: Vec::new(),
+        phases,
         check_commands: Vec::new(),
         depends_on: Vec::new(),
         pinned_lockfile: false,
@@ -1200,7 +1204,7 @@ fn xcode_scheme_unit(
         ],
         pr_commands: commands.clone(),
         full_commands: commands,
-        phases: Vec::new(),
+        phases: vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest],
         check_commands: Vec::new(),
         depends_on: Vec::new(),
         pinned_lockfile: false,
@@ -1586,6 +1590,14 @@ mod tests {
         assert!(unit.pr_commands[1].contains("-scheme 'WidgetApp'"));
         assert!(unit.pr_commands[1].contains("CODE_SIGNING_ALLOWED=NO build"));
         assert_eq!(
+            unit.phases,
+            vec![
+                ValidationPhase::XcodegenGenerate,
+                ValidationPhase::SwiftBuild
+            ]
+        );
+        assert_eq!(unit.pr_commands.len(), unit.phases.len());
+        assert_eq!(
             unit.mise_tools,
             vec![XCODEGEN_TOOL.to_owned()],
             "the unit carries the generator CLI its own recipe invokes: {:?}",
@@ -1739,7 +1751,10 @@ mod tests {
                 .any(|note| note.contains("Alpha") && note.contains("Beta")),
             "{notes:?}"
         );
-        assert_eq!(must_some(unit, "unit").pr_commands.len(), 1);
+        let unit = must_some(unit, "unit");
+        assert_eq!(unit.pr_commands.len(), 1);
+        assert_eq!(unit.phases, vec![ValidationPhase::XcodegenGenerate]);
+        assert_eq!(unit.pr_commands.len(), unit.phases.len());
     }
 
     #[test]
@@ -2772,6 +2787,11 @@ mod tests {
                 .find(|unit| unit.id.starts_with("swift-xcodeproj-")),
             "xcode scheme unit",
         );
+        assert_eq!(
+            unit.phases,
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        );
+        assert_eq!(unit.pr_commands.len(), unit.phases.len());
         let cache = must_some(unit.cache.as_ref(), "scheme unit declares a cache");
         assert_eq!(
             cache.purpose,

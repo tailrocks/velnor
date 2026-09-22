@@ -747,8 +747,8 @@ impl UnitKind {
 }
 
 /// One typed validation phase of a unit's commands. The scan tags each
-/// command it structures (Rust fmt/clippy/test/doctest and SwiftPM
-/// build/test); generated jobs run
+/// command it structures (Rust fmt/clippy/test/doctest, XcodeGen generation,
+/// and Swift build/test); generated jobs run
 /// one step per runnable phase behind `--phase`, and the prerequisite tier
 /// selects the check phase. Phase membership is positional data, never
 /// substring detection on command text.
@@ -759,6 +759,8 @@ pub enum ValidationPhase {
     Clippy,
     Test,
     Doctest,
+    #[serde(rename = "xcodegen-generate")]
+    XcodegenGenerate,
     #[serde(rename = "swift-build")]
     SwiftBuild,
     #[serde(rename = "swift-test")]
@@ -768,13 +770,15 @@ pub enum ValidationPhase {
 
 impl ValidationPhase {
     /// The runnable phases in step order: formatting first, then lints, then
-    /// tests, then doctests, then SwiftPM build and tests. `Check` is
-    /// prerequisite-only and never renders a validation step.
-    pub(crate) const RUNNABLE: [Self; 6] = [
+    /// tests, then doctests, then XcodeGen generation, then Swift builds and
+    /// tests. `Check` is prerequisite-only and never renders a validation
+    /// step.
+    pub(crate) const RUNNABLE: [Self; 7] = [
         Self::Fmt,
         Self::Clippy,
         Self::Test,
         Self::Doctest,
+        Self::XcodegenGenerate,
         Self::SwiftBuild,
         Self::SwiftTest,
     ];
@@ -786,6 +790,7 @@ impl ValidationPhase {
             "clippy" => Self::Clippy,
             "test" => Self::Test,
             "doctest" => Self::Doctest,
+            "xcodegen-generate" => Self::XcodegenGenerate,
             "swift-build" => Self::SwiftBuild,
             "swift-test" => Self::SwiftTest,
             "check" => Self::Check,
@@ -801,6 +806,7 @@ impl ValidationPhase {
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doctest => "doctest",
+            Self::XcodegenGenerate => "xcodegen-generate",
             Self::SwiftBuild => "swift-build",
             Self::SwiftTest => "swift-test",
             Self::Check => "check",
@@ -814,6 +820,7 @@ impl ValidationPhase {
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
             Self::Doctest => "Doctests",
+            Self::XcodegenGenerate => "XcodeGen project generation",
             Self::SwiftBuild => "Swift build",
             Self::SwiftTest => "Swift tests",
             Self::Check => "Prerequisite check",

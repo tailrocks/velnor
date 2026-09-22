@@ -558,7 +558,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, swift-build, swift-test, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-test, or check"
                         ))
                     })
                 })
@@ -6509,6 +6509,55 @@ workspace_check = true
             .is_empty(),
             "SwiftPM phases have no Rust-style prerequisite"
         );
+
+        let mut xcodegen = swift.clone();
+        xcodegen.id = "swift-xcodegen-app".to_owned();
+        xcodegen.github_pr_commands = vec![
+            "cd app && xcodegen generate --spec project.yml".to_owned(),
+            "cd app && xcodebuild -project App.xcodeproj -scheme App build".to_owned(),
+            "cd app && xcodebuild -project App.xcodeproj -scheme App test".to_owned(),
+        ];
+        xcodegen.github_full_commands = xcodegen.github_pr_commands.clone();
+        xcodegen.velnor_pr_commands = xcodegen.github_pr_commands.clone();
+        xcodegen.velnor_full_commands = xcodegen.github_pr_commands.clone();
+        xcodegen.phases = vec![
+            ValidationPhase::XcodegenGenerate,
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftTest,
+        ];
+        assert_eq!(
+            must(
+                xcodegen.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::XcodegenGenerate,
+                ),
+                "XcodeGen generation selection",
+            ),
+            vec!["cd app && xcodegen generate --spec project.yml".to_owned()]
+        );
+        assert_eq!(
+            must(
+                xcodegen.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftBuild,
+                ),
+                "Xcode build selection",
+            ),
+            vec!["cd app && xcodebuild -project App.xcodeproj -scheme App build".to_owned()]
+        );
+        assert_eq!(
+            must(
+                xcodegen.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftTest,
+                ),
+                "Xcode test selection",
+            ),
+            vec!["cd app && xcodebuild -project App.xcodeproj -scheme App test".to_owned()]
+        );
     }
 
     #[test]
@@ -6521,7 +6570,7 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, swift-build, swift-test, or check"),
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-test, or check"),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,

@@ -216,7 +216,28 @@ impl CiUnit {
                     self.id
                 )));
             }
+            let commands = self.commands(scope);
+            if commands.len() != self.phases.len() {
+                return Err(GeneratorError::usage(format!(
+                    "CI unit `{}` carries {} validation phases for {} commands; refusing a misaligned --phase selection",
+                    self.id,
+                    self.phases.len(),
+                    commands.len()
+                )));
+            }
             if self.check_commands.is_empty() {
+                if self.kind == "swift"
+                    && self.phases.iter().all(|phase| {
+                        matches!(
+                            phase,
+                            ValidationPhase::XcodegenGenerate
+                                | ValidationPhase::SwiftBuild
+                                | ValidationPhase::SwiftTest
+                        )
+                    })
+                {
+                    return Ok(Vec::new());
+                }
                 return Err(GeneratorError::usage(format!(
                     "CI unit `{}` carries validation phases without prerequisite check commands",
                     self.id
@@ -467,7 +488,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-test, or check"
                         ))
                     })
                 })
@@ -6927,6 +6948,123 @@ workspace_check = true
                 .contains("without prerequisite check commands"),
             "a phased unit without a check fails closed: {error}"
         );
+
+        let mut swift = unit.clone();
+        swift.id = "swift-xcodegen-app".to_owned();
+        swift.kind = "swift".to_owned();
+        swift.pr_commands = vec![
+            "true # xcodegen generate".to_owned(),
+            "true # xcodebuild build".to_owned(),
+            "true # xcodebuild test".to_owned(),
+        ];
+        swift.full_commands = swift.pr_commands.clone();
+        swift.phases = vec![
+            ValidationPhase::XcodegenGenerate,
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftTest,
+        ];
+        swift.check_commands.clear();
+        assert_eq!(
+            must(
+                swift.commands_for_phase(Scope::Affected, ValidationPhase::XcodegenGenerate),
+                "XcodeGen generation selection",
+            ),
+            vec!["true # xcodegen generate".to_owned()]
+        );
+        assert_eq!(
+            must(
+                swift.commands_for_phase(Scope::Affected, ValidationPhase::SwiftBuild),
+                "Xcode build selection",
+            ),
+            vec!["true # xcodebuild build".to_owned()]
+        );
+        assert_eq!(
+            must(
+                swift.commands_for_phase(Scope::Affected, ValidationPhase::SwiftTest),
+                "Xcode test selection",
+            ),
+            vec!["true # xcodebuild test".to_owned()]
+        );
+        assert!(
+            must(
+                prerequisite_commands(&swift, Scope::Affected, None),
+                "typed Swift prerequisite",
+            )
+            .is_empty(),
+            "typed Swift units do not invent a Rust prerequisite"
+        );
+        assert!(
+            must(
+                prerequisite_commands(&swift, Scope::Affected, Some(ValidationPhase::Check)),
+                "typed Swift check phase",
+            )
+            .is_empty(),
+            "typed Swift --phase check is an explicit empty tier"
+        );
+
+        let mut invalid_swift = swift.clone();
+        invalid_swift.phases = vec![
+            ValidationPhase::Fmt,
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftTest,
+        ];
+        let error = must_fail(
+            invalid_swift.commands_for_phase(Scope::Affected, ValidationPhase::Check),
+            "untyped Swift phases without a prerequisite",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without prerequisite check commands"),
+            "empty prerequisites are only valid for typed Swift phases: {error}"
+        );
+    }
+
+    #[test]
+    fn typed_swift_phase_executes_the_selected_generated_command() {
+        let marker = std::env::temp_dir().join(format!(
+            "velnor-workflow-swift-phase-{}",
+            crate::unique_suffix()
+        ));
+        let marker_command = format!(
+            "touch -- {}",
+            crate::s2::shell_quote(&marker.to_string_lossy())
+        );
+        let unit = CiUnit {
+            id: "swift-app".to_owned(),
+            label: "swift-app".to_owned(),
+            kind: "swift".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["app/**".to_owned()],
+            pr_commands: vec![marker_command.clone()],
+            full_commands: vec![marker_command],
+            phases: vec![ValidationPhase::XcodegenGenerate],
+            check_commands: Vec::new(),
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            platform: "macos-arm64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities {
+                native_macos_arm64: true,
+                ..RuntimeCapabilities::default()
+            },
+            workspace_check: false,
+            reads_closed: false,
+        };
+        let full_units = BTreeSet::from([unit.id.clone()]);
+        must(
+            run_layers(
+                Path::new("."),
+                &[&unit],
+                Scope::Affected,
+                &full_units,
+                Some(ValidationPhase::XcodegenGenerate),
+            ),
+            "selected typed Swift phase executes",
+        );
+        assert!(marker.is_file(), "selected phase command ran: {:?}", marker);
+        let _ = std::fs::remove_file(marker);
     }
 
     #[test]
@@ -6939,7 +7077,7 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, or check"),
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-test, or check"),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,
