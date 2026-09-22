@@ -26,9 +26,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Args)]
 pub struct LaneCompareArgs {
@@ -254,11 +254,17 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     }
 
     // Lane content: GitHub jobs expose a per-job log download; Velnor V2 jobs
-    // do not (no v1 archive), so read the Velnor lane's job-log artifact(s).
-    let velnor_content =
-        fetch_velnor_job_log_artifacts(&args.repo, run_id).unwrap_or_else(|error| {
+    // do not (no v1 archive), so read the matching Velnor job-log artifact for
+    // each paired job. A single aggregate would give every pair the union of
+    // every job's timestamp/group/ANSI affordances.
+    let expected_velnor_job_ids = pairs
+        .iter()
+        .map(|(_, velnor)| velnor.id)
+        .collect::<Vec<_>>();
+    let velnor_logs = fetch_velnor_job_log_artifacts(&args.repo, run_id, &expected_velnor_job_ids)
+        .unwrap_or_else(|error| {
             eprintln!("warning: velnor job-log artifacts unavailable: {error:#}");
-            String::new()
+            BTreeMap::new()
         });
     if let Some(class) = args.class {
         writeln!(report)?;
@@ -305,7 +311,16 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
                 eprintln!("warning: github job log {}: {error:#}", github.id);
                 LaneLogStats::default()
             });
-        let velnor_stats = analyze_lane_log(&velnor_content);
+        let velnor_stats = velnor_logs
+            .get(&velnor.id)
+            .map(|content| {
+                let _ = fs::write(
+                    run_dir.join(format!("velnor-job-{}.log", velnor.id)),
+                    content,
+                );
+                analyze_lane_log(content)
+            })
+            .unwrap_or_default();
         let (section, worse) = compare_pair(
             github,
             velnor,
@@ -317,11 +332,6 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         worse_total += worse;
         report.push_str(&section);
     }
-    if !velnor_content.is_empty() {
-        fs::write(run_dir.join("velnor-job-log.log"), &velnor_content)
-            .context("save velnor job-log artifact content")?;
-    }
-
     writeln!(report, "\n## Result")?;
     writeln!(report)?;
     if worse_total == 0 && budget_failures == 0 {
@@ -375,7 +385,11 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
         bail!("--regress-threshold must be non-negative");
     }
 
-    let run_ids = recent_completed_run_ids(&args.repo, &args.workflow, args.since)?;
+    let run_items = recent_complete_both_lane_runs(&args.repo, &args.workflow, args.since)?;
+    let run_ids = run_items
+        .iter()
+        .map(|run| run.database_id)
+        .collect::<Vec<_>>();
     if run_ids.len() < 2 {
         bail!(
             "need at least two completed both-lane runs for --watch; found {}",
@@ -424,27 +438,34 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RunListItem {
     #[serde(rename = "databaseId")]
     database_id: u64,
     status: String,
+    conclusion: Option<String>,
 }
 
-fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<Vec<u64>> {
+fn recent_run_args(repo: &str, workflow: &str, limit: usize) -> Vec<String> {
+    vec![
+        "run".to_owned(),
+        "list".to_owned(),
+        "--repo".to_owned(),
+        repo.to_owned(),
+        "--workflow".to_owned(),
+        workflow.to_owned(),
+        "--status".to_owned(),
+        "success".to_owned(),
+        "--limit".to_owned(),
+        limit.max(2).to_string(),
+        "--json".to_owned(),
+        "databaseId,status,conclusion".to_owned(),
+    ]
+}
+
+fn recent_run_items(repo: &str, workflow: &str, limit: usize) -> Result<Vec<RunListItem>> {
     let output = Command::new("gh")
-        .args([
-            "run",
-            "list",
-            "--repo",
-            repo,
-            "--workflow",
-            workflow,
-            "--limit",
-            &limit.max(2).to_string(),
-            "--json",
-            "databaseId,status",
-        ])
+        .args(recent_run_args(repo, workflow, limit))
         .output()
         .with_context(|| format!("spawn gh run list for {repo} {workflow}"))?;
     if !output.status.success() {
@@ -453,13 +474,60 @@ fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let runs: Vec<RunListItem> =
-        serde_json::from_slice(&output.stdout).context("parse gh run list output")?;
-    Ok(runs
-        .into_iter()
-        .filter(|run| run.status == "completed")
-        .map(|run| run.database_id)
-        .collect())
+    serde_json::from_slice(&output.stdout).context("parse gh run list output")
+}
+
+fn recent_complete_both_lane_runs(
+    repo: &str,
+    workflow: &str,
+    limit: usize,
+) -> Result<Vec<RunListItem>> {
+    let target = limit.max(2);
+    let mut fetch_limit = target;
+    let mut inspected = BTreeSet::new();
+    let mut selected = Vec::new();
+    loop {
+        let candidates = recent_run_items(repo, workflow, fetch_limit)?;
+        let mut new_candidate = false;
+        for run in &candidates {
+            if !inspected.insert(run.database_id) {
+                continue;
+            }
+            new_candidate = true;
+            if !run.status.eq_ignore_ascii_case("completed")
+                || !run
+                    .conclusion
+                    .as_deref()
+                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+            {
+                continue;
+            }
+            let jobs = fetch_run_jobs(repo, run.database_id).with_context(|| {
+                format!(
+                    "inspect both-lane census for successful run {}",
+                    run.database_id
+                )
+            })?;
+            if has_complete_both_lane_census(&jobs) {
+                selected.push(run.clone());
+                if selected.len() == target {
+                    return Ok(selected);
+                }
+            }
+        }
+        if candidates.len() < fetch_limit || !new_candidate {
+            return Ok(selected);
+        }
+        let Some(next_limit) = fetch_limit.checked_mul(2) else {
+            return Ok(selected);
+        };
+        fetch_limit = next_limit;
+    }
+}
+
+fn has_complete_both_lane_census(jobs: &[Job]) -> bool {
+    let census = pair_lane_census(jobs);
+    !census.matched.is_empty() && !census.has_parity_failures()
 }
 
 fn save_jobs_json(run_dir: &Path, jobs: &[Job]) -> Result<()> {
@@ -532,17 +600,65 @@ fn fetch_github_job_log(repo: &str, job_id: u64) -> Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Job page HTML via curl (public page; `gh api` cannot fetch web routes —
+fn github_auth_token() -> Result<String> {
+    for variable in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(token) = std::env::var(variable) {
+            let token = token.trim();
+            if !token.is_empty() {
+                return Ok(token.to_owned());
+            }
+        }
+    }
+    let output = Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .context("read GitHub CLI authentication token")?;
+    if !output.status.success() {
+        bail!(
+            "gh auth token failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if token.is_empty() {
+        bail!("GitHub authentication token is empty");
+    }
+    Ok(token)
+}
+
+/// Job page HTML via authenticated curl (`gh api` cannot fetch web routes —
 /// curl also sidesteps the reqwest TLS-fingerprint throttle).
 fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
     let url = job
         .html_url
         .as_deref()
         .with_context(|| format!("job {} has no html_url", job.id))?;
-    let output = Command::new("curl")
-        .args(["-fsSL", url])
-        .output()
+    let token = github_auth_token()?;
+    fetch_job_html_steps_with_token(job.id, url, &token)
+}
+
+fn fetch_job_html_steps_with_token(
+    job_id: u64,
+    url: &str,
+    token: &str,
+) -> Result<BTreeMap<u64, HtmlStep>> {
+    if token.trim().is_empty() {
+        bail!("GitHub authentication token is empty");
+    }
+    let mut child = Command::new("curl")
+        .args(["-fsSL", "-H", "@-", url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("spawn curl {url}"))?;
+    let mut stdin = child.stdin.take().context("open curl header input")?;
+    writeln!(stdin, "Authorization: Bearer {}", token.trim())
+        .context("write curl authorization header")?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait for curl {url}"))?;
     if !output.status.success() {
         bail!(
             "curl {url} failed: {}",
@@ -550,7 +666,11 @@ fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
         );
     }
     let html = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_check_steps(&html))
+    let steps = parse_check_steps(&html);
+    if steps.is_empty() {
+        bail!("job {job_id} page contained no check-step evidence");
+    }
+    Ok(steps)
 }
 
 /// Extract `<check-step …>` elements: `data-number` plus whether
@@ -593,32 +713,65 @@ fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// Download every per-job `job-log-*` artifact of the run and concatenate
-/// their text content. Legacy runs may still contain the unsuffixed `job-log`
-/// name, so the prefix also preserves backwards compatibility.
-fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
-    let payload = gh_api_bytes(&format!(
-        "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
-    ))?;
-    let response: serde_json::Value =
-        serde_json::from_slice(&payload).context("parse artifacts response")?;
-    let artifacts = response
-        .get("artifacts")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut content = String::new();
+/// Download the exact per-job `job-log-<job-id>` artifacts needed by this
+/// comparison. Keeping the result keyed by job prevents one pair from
+/// inheriting another pair's log affordances.
+fn fetch_velnor_job_log_artifacts(
+    repo: &str,
+    run_id: u64,
+    expected_job_ids: &[u64],
+) -> Result<BTreeMap<u64, String>> {
+    let mut artifacts = Vec::new();
+    let mut page = 1_u64;
+    loop {
+        let payload = gh_api_bytes(&format!(
+            "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100&page={page}"
+        ))?;
+        let response: serde_json::Value =
+            serde_json::from_slice(&payload).context("parse artifacts response")?;
+        let page_artifacts = response
+            .get("artifacts")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let fetched = page_artifacts.len();
+        let total_count = response.get("total_count").and_then(|value| value.as_u64());
+        artifacts.extend(page_artifacts);
+        if fetched == 0
+            || fetched < 100
+            || total_count.is_some_and(|total| artifacts.len() as u64 >= total)
+        {
+            break;
+        }
+        page += 1;
+    }
+    let mut artifact_ids = BTreeMap::new();
     for artifact in artifacts {
         let name = artifact.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if !name.starts_with("job-log") {
-            continue;
-        }
-        let Some(id) = artifact.get("id").and_then(|v| v.as_u64()) else {
+        let Some(job_id) = expected_job_ids
+            .iter()
+            .copied()
+            .find(|job_id| name == format!("job-log-{job_id}"))
+        else {
             continue;
         };
-        let zip_bytes = gh_api_bytes(&format!("repos/{repo}/actions/artifacts/{id}/zip"))?;
+        let artifact_id = artifact
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .with_context(|| format!("job-log-{job_id} artifact has no id"))?;
+        if artifact_ids.insert(job_id, artifact_id).is_some() {
+            bail!("duplicate job-log-{job_id} artifacts in run {run_id}");
+        }
+    }
+    let mut content_by_job = BTreeMap::new();
+    for job_id in expected_job_ids {
+        let artifact_id = artifact_ids
+            .get(job_id)
+            .with_context(|| format!("missing job-log-{job_id} artifact in run {run_id}"))?;
+        let zip_bytes = gh_api_bytes(&format!("repos/{repo}/actions/artifacts/{artifact_id}/zip"))?;
         let cursor = std::io::Cursor::new(zip_bytes);
         let mut zip = zip::ZipArchive::new(cursor).context("open job-log artifact zip")?;
+        let mut content = String::new();
         for index in 0..zip.len() {
             let mut file = zip.by_index(index).context("read artifact entry")?;
             if file.is_dir() {
@@ -629,11 +782,17 @@ fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
             content.push_str(&String::from_utf8_lossy(&bytes));
             content.push('\n');
         }
+        if content.trim().is_empty() {
+            bail!("job-log-{job_id} artifact in run {run_id} is empty");
+        }
+        if content_by_job.insert(*job_id, content).is_some() {
+            bail!("duplicate Velnor job-log content for job {job_id}");
+        }
     }
-    if content.is_empty() {
-        bail!("no job-log artifacts found in run {run_id}");
+    if content_by_job.is_empty() {
+        bail!("no Velnor job-log artifacts requested for run {run_id}");
     }
-    Ok(content)
+    Ok(content_by_job)
 }
 
 /// Test-only view of [`classify_job_name`]: the lane of a comparison job.
@@ -1493,7 +1652,7 @@ fn compare_pair(
             AlignedRow::VelnorOnly(vl_step) => {
                 writeln!(
                     section,
-                    "| —/{} | — | {} | — | {} | — | {} | — | {} | velnor-only |",
+                    "| —/{} | — | {} | — | {} | — | {} | — | {} | ok (Velnor-only informational step) |",
                     vl_step.number,
                     vl_step.name,
                     vl_step.conclusion.as_deref().unwrap_or("-"),
@@ -1621,6 +1780,114 @@ mod tests {
             pair_key(r#"compat (app-a, github, "ubuntu-latest")"#),
             pair_key(r#"compat (app-b, github, "ubuntu-latest")"#)
         );
+    }
+
+    #[test]
+    fn recent_run_query_limits_successful_runs() {
+        let args = recent_run_args("tailrocks/velnor", "compat.yml", 1);
+        assert_eq!(
+            args,
+            vec![
+                "run".to_owned(),
+                "list".to_owned(),
+                "--repo".to_owned(),
+                "tailrocks/velnor".to_owned(),
+                "--workflow".to_owned(),
+                "compat.yml".to_owned(),
+                "--status".to_owned(),
+                "success".to_owned(),
+                "--limit".to_owned(),
+                "2".to_owned(),
+                "--json".to_owned(),
+                "databaseId,status,conclusion".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn complete_both_lane_census_rejects_missing_or_skipped_counterparts() {
+        let complete = vec![
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job(2, "Rust · rust-policy / Velnor"),
+        ];
+        assert!(has_complete_both_lane_census(&complete));
+
+        let github_only = vec![complete[0].clone()];
+        assert!(!has_complete_both_lane_census(&github_only));
+
+        let skipped = vec![
+            complete[0].clone(),
+            named_job_status(
+                2,
+                "Rust · rust-policy / Velnor",
+                "completed",
+                Some("skipped"),
+            ),
+        ];
+        assert!(!has_complete_both_lane_census(&skipped));
+    }
+
+    #[test]
+    fn private_job_html_fetch_sends_bearer_header() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 1024];
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line == "Authorization: Bearer fixture-token"),
+                "missing bearer header in request: {request}"
+            );
+            let body = b"<check-step data-number=\"1\" data-log-url=\"/log\"></check-step>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let steps =
+            fetch_job_html_steps_with_token(42, &format!("http://{address}/job"), "fixture-token")
+                .unwrap();
+        server.join().unwrap();
+        assert_eq!(steps.keys().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn velnor_only_steps_are_informational_for_step_comparison() {
+        let github = job(vec![step(1, "common", "success")]);
+        let mut velnor = job(vec![
+            step(1, "common", "success"),
+            step(2, "native evidence", "success"),
+        ]);
+        velnor.name = "compat (app-a, velnor)".to_owned();
+        let (section, worse) = compare_pair(
+            &github,
+            &velnor,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            LaneLogStats::default(),
+            LaneLogStats::default(),
+        )
+        .unwrap();
+        assert_eq!(worse, 0);
+        assert!(section.contains("Velnor-only informational step"));
     }
 
     #[test]
