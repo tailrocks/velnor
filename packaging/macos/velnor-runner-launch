@@ -2,8 +2,9 @@
 # Velnor macOS launchd entrypoint.
 #
 # launchd invokes this one stable wrapper. The operator env file is the only
-# source of host mode and scale-set inputs. Package-owned paths and transport
-# remain immutable. Every mode is validated before the runner is exec'd;
+# source of host mode and scale-set inputs. Package-owned paths remain
+# immutable; transport defaults to curl but may be set by the env file. Every
+# mode is validated before the runner is exec'd;
 # missing or invalid inputs fail closed and never become native-only.
 set -eu
 
@@ -446,6 +447,9 @@ set -a
 # shellcheck disable=SC1090
 . "$package_env_file"
 set +a
+
+VELNOR_GITHUB_HTTP_TRANSPORT=${VELNOR_GITHUB_HTTP_TRANSPORT-curl}
+export VELNOR_GITHUB_HTTP_TRANSPORT
 
 # Docker selection is operator input. Capture it before replacing package-owned
 # variables; the resolver validates it against Docker context metadata and the

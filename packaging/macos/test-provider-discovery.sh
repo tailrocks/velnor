@@ -101,7 +101,7 @@ cat > "$tmp/bin/velnor-runner" <<'FAKE_RUNNER'
 set -eu
 {
   printf 'args=%s\n' "$*"
-  env | sort | grep -E '^(DOCKER_CONTEXT|DOCKER_HOST|VELNOR_DOCKER_CONTEXT|VELNOR_DOCKER_HOST|PATH)=' || true
+  env | sort | grep -E '^(DOCKER_CONTEXT|DOCKER_HOST|VELNOR_DOCKER_CONTEXT|VELNOR_DOCKER_HOST|VELNOR_GITHUB_HTTP_TRANSPORT|PATH)=' || true
 } > "$FAKE_RUNNER_ENV"
 FAKE_RUNNER
 chmod 755 "$tmp/bin/velnor-runner"
@@ -186,8 +186,13 @@ grep -F "DOCKER_HOST=unix://$socket_path" "$tmp/success.runner-env" >/dev/null
 grep -F "VELNOR_DOCKER_HOST=unix://$socket_path" "$tmp/success.runner-env" >/dev/null
 grep -F 'VELNOR_DOCKER_CONTEXT=desktop-linux' "$tmp/success.runner-env" >/dev/null
 grep -F "PATH=$tmp/bin:/usr/bin:/bin:$provider_root/bin" "$tmp/success.runner-env" >/dev/null
+grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=curl' "$tmp/success.runner-env" >/dev/null
 ! grep -F 'DOCKER_CONTEXT=' "$tmp/success.runner-env"
 ! test -e "$tmp/success.context-use"
+
+run_launcher explicit_native 'VELNOR_DOCKER_CONTEXT=desktop-linux
+VELNOR_GITHUB_HTTP_TRANSPORT=native'
+grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=native' "$tmp/explicit_native.runner-env" >/dev/null
 
 run_failure() {
   case_name=$1
