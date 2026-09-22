@@ -1010,6 +1010,7 @@ mod tests {
             automatic_providers: ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             ci_required: true,
+            empty_selection_proof: false,
             repository: repository.to_owned(),
             workflow_revision: "0".repeat(40),
             rust_needs: RustNeeds::Parallel,
@@ -1888,6 +1889,19 @@ mod tests {
                 .args(["-euo", "pipefail", "-c", script])
                 .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
                 .env("SELECTED_UNITS", selected_units)
+                .env("PLAN_SCOPE", "affected")
+                .env(
+                    "PLANNED_NO_WORK",
+                    if nonempty_selection { "" } else { "true" },
+                )
+                .env(
+                    "NO_WORK_REASON",
+                    if nonempty_selection {
+                        ""
+                    } else {
+                        "empty diff selects no workload units"
+                    },
+                )
                 .env("PLAN_DIGEST", "synthetic-plan-digest")
                 .env("EXCLUDED", "[]")
                 .env(
@@ -1977,6 +1991,122 @@ mod tests {
 
         let pull_request_script = required_gate_script(&ir, &nodes, false);
         assert!(!pull_request_script.contains("result_for_job policy"));
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the shell fixture covers every accepted and rejected proof combination"
+    )]
+    #[test]
+    fn required_gate_rejects_unproven_empty_json_selection() {
+        let unit = rust_unit("rust", "crates/rust");
+        let mut ir = owner_test_ir("example/empty-selection-proof", vec![unit.clone()]);
+        ir.empty_selection_proof = true;
+        let nodes = vec![GraphNode::Unit {
+            unit_id: unit.id.clone(),
+            job_id: stack_group_job_id(unit.kind),
+            name: sidebar_group_name(&unit),
+            file: nested_unit_workflow_file(&unit),
+        }];
+        let callers = ir.required_callers(&nodes, None);
+        let script = required_gate_script(&ir, &nodes, true);
+        assert!(script.contains("if [[ ( \"$PLANNED_NO_WORK\" != \"true\" )"));
+
+        let run = |selected: &str,
+                   scope: &str,
+                   planned_no_work: &str,
+                   reason: &str,
+                   omit_callers: bool| {
+            let mut needs = serde_json::Map::new();
+            needs.insert("plan".to_owned(), serde_json::json!({"result": "success"}));
+            needs.insert(
+                "policy".to_owned(),
+                serde_json::json!({"result": "success"}),
+            );
+            if !omit_callers {
+                for caller in &callers {
+                    needs.insert(
+                        caller.job_id.clone(),
+                        serde_json::json!({"result": "skipped"}),
+                    );
+                }
+            }
+            must_ok(
+                Command::new("bash")
+                    .args(["-euo", "pipefail", "-c", &script])
+                    .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
+                    .env("SELECTED_UNITS", selected)
+                    .env("PLAN_SCOPE", scope)
+                    .env("PLANNED_NO_WORK", planned_no_work)
+                    .env("NO_WORK_REASON", reason)
+                    .env("PLAN_DIGEST", "synthetic-plan-digest")
+                    .env("EXCLUDED", "[]")
+                    .env(
+                        "EXPECTED_CALLERS",
+                        super::required_execution_contract(&callers),
+                    )
+                    .env("PROVIDER_ADMITTED_GITHUB_HOSTED", "true")
+                    .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED", "true")
+                    .env("PROVIDER_ADMITTED_VELNOR", "true")
+                    .env("PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED", "true")
+                    .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED", "true")
+                    .env("PROVIDER_ADMITTED_VELNOR_TRUSTED", "true")
+                    .env("PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED", "true")
+                    .output(),
+                "bash and jq execute empty-selection gate fixture",
+            )
+            .status
+            .success()
+        };
+
+        for reason in [
+            "empty diff selects no workload units",
+            "no changed path selected a workload unit",
+            "no selected workload unit runs on the admitted lanes",
+        ] {
+            assert!(
+                run("[]", "affected", "true", reason, false),
+                "proven affected no-work selection passes: {reason}"
+            );
+        }
+        assert!(run(
+            "[]",
+            "full",
+            "true",
+            "no selected workload unit runs on the admitted lanes",
+            false,
+        ));
+        assert!(!run(
+            "[]",
+            "affected",
+            "true",
+            "unrecognized no-work reason",
+            false,
+        ));
+        assert!(!run(
+            "[]",
+            "full",
+            "true",
+            "empty diff selects no workload units",
+            false,
+        ));
+        assert!(!run(
+            "[]",
+            "affected",
+            "",
+            "empty diff selects no workload units",
+            false,
+        ));
+        assert!(
+            !run(
+                "[]",
+                "affected",
+                "true",
+                "empty diff selects no workload units",
+                true,
+            ),
+            "a proven empty selection still rejects a missing caller result"
+        );
     }
 
     /// One job's body from a rendered workflow. Job bodies indent past two
@@ -3407,29 +3537,30 @@ mod tests {
     }
 
     #[test]
-    fn no_work_branch_contract_is_presence_only() {
-        let ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
+    fn no_work_branch_contract_binds_empty_selection_proof() {
+        let mut ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
+        ir.empty_selection_proof = true;
         let nodes = aggregate_fixture_nodes(&ir);
         for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
             let surface = ir.render_nested(kind, &nodes, None);
             assert!(
-                surface.contains("never `false`"),
+                surface.contains("never `false`")
+                    && surface.contains("PLAN_SCOPE: ${{ needs.plan.outputs.scope }}")
+                    && surface
+                        .contains("PLANNED_NO_WORK: ${{ needs.plan.outputs.planned_no_work }}")
+                    && surface.contains("NO_WORK_REASON: ${{ needs.plan.outputs.no_work_reason }}"),
                 "{kind:?} documents the presence-only marker contract: {surface}"
             );
-            // The contract comment itself names the legal comparison; only
-            // code lines count as branches.
+            // The required gate branches only on its shell-bound proof, never
+            // on a literal `false` plan output.
             let code = surface
                 .lines()
                 .filter(|line| !line.trim_start().starts_with('#'))
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
-                !code.contains("planned_no_work == 'false'"),
-                "{kind:?} never branches on the impossible `false` value: {surface}"
-            );
-            assert!(
-                !code.contains("planned_no_work ==") && !code.contains("planned_no_work !="),
-                "{kind:?} branches nowhere on the marker: the aggregate tolerates no-work itself: {surface}"
+                code.contains("$PLANNED_NO_WORK") && !code.contains("planned_no_work == 'false'"),
+                "{kind:?} binds no-work proof without a literal false branch: {surface}"
             );
         }
     }
@@ -6207,6 +6338,7 @@ pub(crate) struct WorkflowIr {
     // static universe; there is no dispatch-side provider input to default.
     pub(crate) selectors: SelectorMap,
     pub(crate) ci_required: bool,
+    pub(crate) empty_selection_proof: bool,
     pub(crate) repository: String,
     /// The D19 generator pin (`ProjectConfig::workflow_revision`).
     pub(crate) workflow_revision: String,
@@ -7122,6 +7254,29 @@ fn render_required_admission_env(workflow: &WorkflowIr, callers: &[RequiredCalle
     output
 }
 
+/// The planner proof the required aggregate must inspect when no unit was
+/// selected. The planner emits the marker only for a proven no-work plan;
+/// the aggregate additionally binds the scope and reason so an empty caller
+/// set cannot become a vacuous PASS.
+fn render_required_no_work_env() -> String {
+    format!(
+        "          PLAN_SCOPE: {}\n          PLANNED_NO_WORK: {}\n          NO_WORK_REASON: {}\n",
+        github_expression("needs.plan.outputs.scope"),
+        github_expression("needs.plan.outputs.planned_no_work"),
+        github_expression("needs.plan.outputs.no_work_reason"),
+    )
+}
+
+/// Reject an empty JSON selection unless the planner proved the legitimate
+/// affected no-work or lane-filtered case. The caller verdicts still render
+/// after this guard, so missing, skipped, and incomplete results retain their
+/// existing fail-closed behavior.
+fn render_required_empty_selection_guard(output: &mut String) {
+    output.push_str(
+        "          if jq -e 'type == \"array\" and length == 0' <<<\"$SELECTED_UNITS\" >/dev/null; then\n            if [[ ( \"$PLANNED_NO_WORK\" != \"true\" ) || ( \"$PLAN_SCOPE\" != \"affected\" && \"$NO_WORK_REASON\" != \"no selected workload unit runs on the admitted lanes\" ) || ( \"$NO_WORK_REASON\" != \"empty diff selects no workload units\" && \"$NO_WORK_REASON\" != \"no changed path selected a workload unit\" && \"$NO_WORK_REASON\" != \"no selected workload unit runs on the admitted lanes\" ) ]]; then\n              echo \"required CI gate rejected empty selection: expected affected no-work proof or admitted-lane proof (scope=$PLAN_SCOPE, planned_no_work=$PLANNED_NO_WORK, reason=$NO_WORK_REASON)\" >&2\n              exit 1\n            fi\n            echo \"required CI gate accepted explicit no-work plan: scope=$PLAN_SCOPE reason=$NO_WORK_REASON\"\n          fi\n",
+    );
+}
+
 /// The canonical execution obligations the aggregate check may validate. The
 /// plan is untrusted workflow output, so the gate must reject a unit/provider
 /// pair that the renderer did not emit a caller for instead of silently
@@ -7270,6 +7425,7 @@ impl WorkflowIr {
             automatic_providers: config.automatic_providers.clone(),
             selectors: config.selectors.clone(),
             ci_required: config.ci_required,
+            empty_selection_proof: config.empty_selection_proof,
             repository: config.repository.clone(),
             workflow_revision: config.workflow_revision.clone(),
             declared_ruleset_contexts: crate::s2::declared_ruleset_contexts_literal(config),
@@ -7769,10 +7925,16 @@ impl WorkflowIr {
             &runtime_steps,
             self.pins.download_artifact,
         ));
+        let no_work_env = if self.empty_selection_proof {
+            render_required_no_work_env()
+        } else {
+            String::new()
+        };
         let _ = write!(
             output,
-            "      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
+            "      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}{}",
             yaml_scalar(&expected_callers),
+            no_work_env,
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -7815,6 +7977,9 @@ impl WorkflowIr {
                 output,
                 "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
+        }
+        if self.empty_selection_proof {
+            render_required_empty_selection_guard(output);
         }
         render_required_caller_verdicts(output, &callers);
         if check_name == REQUIRED_CHECK {
