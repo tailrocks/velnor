@@ -2400,9 +2400,8 @@ pub(crate) fn aggregate_files(
     plan_digest: &str,
     generator_revision: &str,
 ) -> Result<AggregateVerdict, String> {
-    let provenance = serde_json::from_str::<serde_json::Value>(expected_json)
-        .ok()
-        .is_some_and(|document| {
+    let provenance =
+        serde_json::from_str::<serde_json::Value>(expected_json).is_ok_and(|document| {
             document
                 .get("provenance")
                 .and_then(serde_json::Value::as_bool)

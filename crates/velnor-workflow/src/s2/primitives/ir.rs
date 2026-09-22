@@ -3619,8 +3619,23 @@ mod tests {
             plan.contains("plan_digest: ${{ steps.plan.outputs.plan_digest }}")
                 && plan
                     .contains("generator_revision: ${{ steps.plan.outputs.generator_revision }}")
-                && plan.contains("GENERATOR_REVISION:"),
+                && plan.contains("GENERATOR_REVISION:")
+                && plan.contains("VELNOR_RESULT_PROVENANCE: \"1\""),
             "the plan job publishes and feeds both provenance identities: {plan}"
+        );
+    }
+
+    #[test]
+    fn provenance_prepare_cargo_caller_passes_required_phase_identity() {
+        let ir = owner_test_ir(
+            "example/s4-prepare-cargo-provenance",
+            vec![rust_unit("rust", ".")],
+        );
+        let mut rendered = String::new();
+        ir.render_prepare_cargo_caller(&mut rendered, "ci-unit-rust.yml", "rust", false, false);
+        assert!(
+            rendered.contains("phase_identity: unphased\n"),
+            "the provenance prepare-cargo caller passes the required phase identity: {rendered}"
         );
     }
 
@@ -7946,7 +7961,7 @@ impl WorkflowIr {
             self.provider_admission_expression(caller.admission)
         ));
         let provenance_inputs = if self.provenance {
-            "      generator_revision: ${{{{ needs.plan.outputs.generator_revision }}}}\n"
+            "      phase_identity: unphased\n      generator_revision: ${{{{ needs.plan.outputs.generator_revision }}}}\n"
         } else {
             ""
         };
@@ -9875,6 +9890,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .map(ProviderId::as_str)
             .collect::<Vec<_>>()
             .join(",");
+        let generator_revision = if self.provenance {
+            format!(
+                "{}\n          VELNOR_RESULT_PROVENANCE: \"1\"",
+                yaml_scalar(&self.workflow_revision)
+            )
+        } else {
+            yaml_scalar(&self.workflow_revision)
+        };
         // A local control plane never plans untrusted events: fork and bot
         // pull requests skip planning (and therefore the whole aggregate),
         // exactly like any other local job without a trusted event.
@@ -9924,7 +9947,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
-            generator_revision = yaml_scalar(&self.workflow_revision),
+            generator_revision = generator_revision,
             trusted = Self::trusted_event_expression(),
             expected_work_env = EXPECTED_WORK_FILE_ENV,
             expected_work_file = EXPECTED_WORK_FILE,

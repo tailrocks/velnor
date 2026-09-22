@@ -1735,6 +1735,10 @@ fn scan_target(
     // `config::mise_lock_keys_for_root` for the per-unit-lock gap.
     let mise_lock_keys = config::mise_lock_keys_for_root(root)?;
     config.mise_lock_keys.clone_from(&mise_lock_keys);
+    // S1 units carry declared mise ids directly, so close each unit's install
+    // subset over the same lock dependency graph S2 uses before any renderer
+    // derives install args.
+    close_unit_mise_tools_for_target(&mut config, root, &mise_lock_keys)?;
     validate_actionlint_pin_coherence(root)?;
     // The repo-owned config is validated against the resolved surface before
     // it can influence anything: a declared unit the scan did not find, or a
@@ -1792,6 +1796,32 @@ fn scan_target(
         generation,
         inputs,
     })
+}
+
+/// Close S1's declared per-unit mise subset over the root lock dependency
+/// graph. The S1 renderer stores declared ids on each unit, unlike S2's
+/// provider config, so this boundary must run after generation overrides and
+/// before any hosted or Velnor lane derives its install args. Otherwise a
+/// declared cargo backend can omit a locked helper such as `cargo-binstall`
+/// and fail during runner setup before checks begin.
+fn close_unit_mise_tools_for_target(
+    config: &mut ProjectConfig,
+    root: &Path,
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    let lock_backends = crate::s2::config::mise_lock_backends_for_root(root)
+        .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    let install_deps = crate::s2::config::mise_install_deps_for_root(root)
+        .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    for unit in &mut config.units {
+        crate::s2::primitives::close_mise_tool_subset(
+            &mut unit.mise_tools,
+            lock_keys,
+            &lock_backends,
+            &install_deps,
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
@@ -13846,7 +13876,7 @@ lockfile = true
         write_generation_config(
             &root,
             &swift.id,
-            "\"cargo-binstall\", \"rust\", \"cargo:sccache\", \"cargo:boltffi_cli\"",
+            "\"rust\", \"cargo:sccache\", \"cargo:boltffi_cli\"",
         );
         let config = must(
             scan_repository(&root, RunnerMode::Github),
@@ -13862,7 +13892,7 @@ lockfile = true
         let workflow =
             WorkflowIr::from_config(&config).render_nested_unit(swift, WorkflowKind::PullRequest);
         assert!(
-            workflow.contains("install_args: cargo-binstall rust cargo:sccache cargo:boltffi_cli"),
+            workflow.contains("install_args: rust cargo:sccache cargo:boltffi_cli cargo-binstall"),
             "Swift units with declared mise tools must provision them on GitHub: {workflow}"
         );
         let _ = fs::remove_dir_all(root);
