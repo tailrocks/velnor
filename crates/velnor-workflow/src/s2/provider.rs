@@ -497,19 +497,37 @@ pub(crate) fn is_github_owned_label(label: &str) -> bool {
     label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
 }
 
-/// Stable plan digest over sorted unit IDs × sorted providers × exclusion
-/// declarations × command/profile/features/fixture digests.
+/// One unit's canonical plan-digest input. Platform and trust are explicit
+/// identity fields: changing either must invalidate every candidate plan and
+/// result derived from the old unit contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PlanUnitIdentity {
+    pub(crate) unit_id: String,
+    pub(crate) providers: ProviderSet,
+    pub(crate) platform: Platform,
+    pub(crate) trust: TrustReq,
+    pub(crate) command_digest: String,
+}
+
+/// Stable plan digest over sorted unit IDs × sorted providers × platform ×
+/// trust × exclusion declarations × command/profile/features/fixture digests.
 pub(crate) fn plan_digest(
-    units: &[(String, ProviderSet, String)],
+    units: &[PlanUnitIdentity],
     exclusions: &[(String, ProviderId, ExclusionReason)],
 ) -> String {
     let mut digest_input = String::new();
-    for (unit_id, providers, command_digest) in units {
-        let _ = write!(digest_input, "unit:{unit_id}");
-        for provider in providers {
+    for unit in units {
+        let _ = write!(
+            digest_input,
+            "unit:{}:platform:{}:trust:{}",
+            unit.unit_id,
+            unit.platform,
+            unit.trust.as_str()
+        );
+        for provider in &unit.providers {
             let _ = write!(digest_input, ":{provider}");
         }
-        let _ = writeln!(digest_input, ":{command_digest}");
+        let _ = writeln!(digest_input, ":{}", unit.command_digest);
     }
     for (unit_id, provider, reason) in exclusions {
         let _ = writeln!(
@@ -522,31 +540,36 @@ pub(crate) fn plan_digest(
     format!("{digest:016x}")
 }
 
-/// Full result identity (spec §2): repository + sha + run + attempt +
-/// plan digest + unit + provider + platform + command/profile/features/fixture.
+/// The typed identity frozen for one unit in a run. Platform, trust, and the
+/// command digest are unit identity, not provider labels; every provider lane
+/// must report the same values.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "D2 part-A strict-results API; no schema-2 caller yet"
-)]
+pub(crate) struct UnitIdentity {
+    pub(crate) platform: Platform,
+    pub(crate) trust: TrustReq,
+    pub(crate) command_digest: String,
+}
+
+/// Full result identity (schema-2): common run binding + unit/provider
+/// binding + platform/trust/command identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResultIdentity {
     pub(crate) repository_id: String,
     pub(crate) source_sha: String,
+    pub(crate) audited_sha: String,
+    pub(crate) base_sha: String,
     pub(crate) run_id: String,
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
     pub(crate) unit_id: String,
     pub(crate) provider: ProviderId,
     pub(crate) platform: Platform,
+    pub(crate) trust: TrustReq,
     pub(crate) command_digest: String,
 }
 
 /// One observed result record keyed by its identity tuple.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "D2 part-A strict-results API; no schema-2 caller yet"
-)]
 pub(crate) struct ObservedResult {
     pub(crate) identity: ResultIdentity,
     pub(crate) outcome: ObservedOutcome,
@@ -554,10 +577,6 @@ pub(crate) struct ObservedResult {
 
 /// The outcome an observed record carries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "D2 part-A strict-results API; no schema-2 caller yet"
-)]
 pub(crate) enum ObservedOutcome {
     Success,
     Failed,
@@ -568,10 +587,6 @@ pub(crate) enum ObservedOutcome {
 
 /// Why one expected result failed the strict verdict.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "D2 part-A strict-results API; no schema-2 caller yet"
-)]
 pub(crate) enum VerdictFailure {
     Missing {
         unit_id: String,
@@ -616,10 +631,6 @@ pub(crate) enum VerdictFailure {
 
 impl VerdictFailure {
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "D2 part-A strict-results API; no schema-2 caller yet"
-    )]
     pub(crate) fn class(&self) -> &'static str {
         match self {
             Self::Missing { .. } => "missing",
@@ -644,10 +655,6 @@ impl VerdictFailure {
 /// outcomes fail as duplicate-conflicting. Excluded pairs are not in the
 /// expected set and are never success.
 #[allow(
-    dead_code,
-    reason = "D2 part-A strict-results API; no schema-2 caller yet"
-)]
-#[allow(
     clippy::too_many_lines,
     reason = "d2a shape: one complete verdict evaluator"
 )]
@@ -663,12 +670,16 @@ pub(crate) fn evaluate_verdict(
         let key = (identity.unit_id.clone(), identity.provider);
         if identity.repository_id != run.repository_id
             || identity.source_sha != run.source_sha
+            || identity.audited_sha != run.audited_sha
+            || identity.base_sha != run.base_sha
             || identity.run_id != run.run_id
         {
             failures.push(VerdictFailure::IdentityMismatch {
                 unit_id: identity.unit_id.clone(),
                 provider: identity.provider,
-                reason: "repository, sha, or run id does not match this run".to_owned(),
+                reason:
+                    "repository, source, audited, base, or run identity does not match this run"
+                        .to_owned(),
             });
             continue;
         }
@@ -688,11 +699,23 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
-        if identity.command_digest != run.command_digest_for(&identity.unit_id) {
+        let Some(unit_identity) = run.unit_identities.get(&identity.unit_id) else {
             failures.push(VerdictFailure::IdentityMismatch {
                 unit_id: identity.unit_id.clone(),
                 provider: identity.provider,
-                reason: "command digest does not match the planned unit".to_owned(),
+                reason: "unit is not present in the frozen unit identity map".to_owned(),
+            });
+            continue;
+        };
+        if identity.platform != unit_identity.platform
+            || identity.trust != unit_identity.trust
+            || identity.command_digest != unit_identity.command_digest
+        {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "platform, trust, or command identity does not match the planned unit"
+                    .to_owned(),
             });
             continue;
         }
@@ -772,30 +795,15 @@ pub(crate) fn evaluate_verdict(
 
 /// The run the verdict binds every observed record to.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "D2 part-A strict-results API; no schema-2 caller yet"
-)]
 pub(crate) struct RunIdentity {
     pub(crate) repository_id: String,
     pub(crate) source_sha: String,
+    pub(crate) audited_sha: String,
+    pub(crate) base_sha: String,
     pub(crate) run_id: String,
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
-    pub(crate) command_digests: BTreeMap<String, String>,
-}
-
-impl RunIdentity {
-    #[allow(
-        dead_code,
-        reason = "D2 part-A strict-results API; no schema-2 caller yet"
-    )]
-    fn command_digest_for(&self, unit_id: &str) -> String {
-        self.command_digests
-            .get(unit_id)
-            .cloned()
-            .unwrap_or_default()
-    }
+    pub(crate) unit_identities: BTreeMap<String, UnitIdentity>,
 }
 
 /// Per-(unit, provider) job id: `{provider}-{unit}`.
@@ -951,6 +959,35 @@ mod tests {
             let error = must_fail(TrustReq::parse(unknown), "unknown trust");
             assert!(error.contains("unknown trust requirement"), "{error}");
         }
+    }
+
+    #[test]
+    fn plan_digest_binds_platform_and_trust() {
+        let providers = ProviderSet::from([ProviderId::GithubHosted]);
+        let base = PlanUnitIdentity {
+            unit_id: "rust-a".to_owned(),
+            providers: providers.clone(),
+            platform: Platform::LinuxX64,
+            trust: TrustReq::UntrustedOk,
+            command_digest: "cmd-rust-a".to_owned(),
+        };
+        let mut different_platform = base.clone();
+        different_platform.platform = Platform::LinuxArm64;
+        let mut different_trust = base.clone();
+        different_trust.trust = TrustReq::TrustedOnly;
+
+        let exclusions = Vec::new();
+        let base_digest = plan_digest(&[base], &exclusions);
+        assert_ne!(
+            base_digest,
+            plan_digest(&[different_platform], &exclusions),
+            "platform is part of the plan identity"
+        );
+        assert_ne!(
+            base_digest,
+            plan_digest(&[different_trust], &exclusions),
+            "trust is part of the plan identity"
+        );
     }
 
     #[test]

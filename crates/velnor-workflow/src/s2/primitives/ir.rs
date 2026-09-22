@@ -71,6 +71,41 @@ pub(crate) const RESULT_DIR: &str = ".velnor-ci-results";
 /// merge of every downloaded record, or the empty set when no unit ran.
 pub(crate) const COLLECTED_RESULTS_FILE: &str = ".velnor-ci-results.json";
 
+/// The canonical command identity used in schema-2 receipts. Runtime
+/// planning hashes the selected command vector with the generator's stable
+/// content digest; the generated plan envelope carries both scope variants so
+/// the job can bind the one it actually selected without trusting a unit job.
+fn command_digest(commands: &[String]) -> String {
+    let mut input = String::new();
+    for command in commands {
+        input.push_str(command);
+        input.push('\n');
+    }
+    format!("{:016x}", crate::s2::content_digest_bytes(input.as_bytes()))
+}
+
+fn command_digest_output_name(unit_id: &str) -> String {
+    format!("command_digest_{unit_id}")
+}
+
+fn unit_identity_map(units: &[Unit]) -> String {
+    let mut identities = BTreeMap::new();
+    for unit in units {
+        identities.insert(
+            unit.id.clone(),
+            serde_json::json!({
+                "platform": unit.platform.as_str(),
+                "trust": unit.trust.as_str(),
+                "scope_digests": {
+                    "affected": command_digest(&unit.pr_commands),
+                    "full": command_digest(&unit.full_commands),
+                },
+            }),
+        );
+    }
+    serde_json::to_string(&identities).expect("unit identity map is serializable")
+}
+
 /// The plan job's expected-work upload: the aggregate's half of the
 /// plan/aggregate cut. `if-no-files-found: error` keeps a plan that wrote no
 /// file (an older runtime, a truncated step) red instead of silently
@@ -79,6 +114,30 @@ fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
     format!(
         "      - name: Publish expected work\n        uses: {upload_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_FILE}\n          if-no-files-found: error\n          retention-days: 7\n"
     )
+}
+
+/// Bind the runtime plan output to the immutable event/run identity before
+/// uploading it. The plan binary remains responsible for selection; this
+/// generated step adds the generator-owned unit metadata and the GitHub run
+/// fields that the aggregate later compares against every receipt.
+fn render_expected_work_identity_step(unit_identities: &str, units: &[Unit]) -> String {
+    let mut output = format!(
+        "      - name: Bind schema-2 plan identity\n        id: identity\n        env:\n          VELNOR_REPOSITORY_ID: ${{{{ github.repository }}}}\n          VELNOR_SOURCE_SHA: ${{{{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}}}\n          VELNOR_AUDITED_SHA: ${{{{ github.sha }}}}\n          VELNOR_BASE_SHA: ${{{{ steps.plan.outputs.base_sha }}}}\n          VELNOR_RUN_ID: ${{{{ github.run_id }}}}\n          VELNOR_RUN_ATTEMPT: ${{{{ github.run_attempt }}}}\n          VELNOR_PLAN_DIGEST: ${{{{ steps.plan.outputs.plan_digest }}}}\n          VELNOR_SCOPE: ${{{{ steps.plan.outputs.scope }}}}\n          VELNOR_UNIT_IDENTITIES: {}\n        shell: bash\n        run: |\n          set -euo pipefail\n          test \"$VELNOR_PLAN_DIGEST\" != \"\" || {{ echo \"::error::plan emitted no plan digest\" >&2; exit 1; }}\n          test \"$VELNOR_SCOPE\" = affected || test \"$VELNOR_SCOPE\" = full || {{ echo \"::error::plan emitted an unknown scope: $VELNOR_SCOPE\" >&2; exit 1; }}\n          jq -e \\\n            --arg repository_id \"$VELNOR_REPOSITORY_ID\" \\\n            --arg source_sha \"$VELNOR_SOURCE_SHA\" \\\n            --arg audited_sha \"$VELNOR_AUDITED_SHA\" \\\n            --arg base_sha \"$VELNOR_BASE_SHA\" \\\n            --arg run_id \"$VELNOR_RUN_ID\" \\\n            --arg run_attempt \"$VELNOR_RUN_ATTEMPT\" \\\n            --arg plan_digest \"$VELNOR_PLAN_DIGEST\" \\\n            --arg scope \"$VELNOR_SCOPE\" \\\n            --argjson identities \"$VELNOR_UNIT_IDENTITIES\" \\\n            '.schema = 2 | .identity = {{repository_id: $repository_id, source_sha: $source_sha, audited_sha: $audited_sha, base_sha: $base_sha, run_id: $run_id, run_attempt: $run_attempt, plan_digest: $plan_digest}} | .units |= map(. + {{identity: (($identities[.id] // error(\"unit metadata missing\")) | {{command_digest: .scope_digests[$scope], platform, trust}})}})' \\\n            {EXPECTED_WORK_FILE} > {EXPECTED_WORK_FILE}.tmp\n          mv {EXPECTED_WORK_FILE}.tmp {EXPECTED_WORK_FILE}\n          printf 'source_sha=%s\\n' \"$VELNOR_SOURCE_SHA\" >> \"$GITHUB_OUTPUT\"\n"
+        ,
+        yaml_scalar(unit_identities)
+
+    );
+
+    for unit in units {
+        let output_name = command_digest_output_name(&unit.id);
+        let unit_id = crate::s2::shell_quote(&unit.id);
+        writeln!(
+            output,
+            "          digest=\"$(jq -er --arg unit {unit_id} --arg scope \"$VELNOR_SCOPE\" '.[$unit].scope_digests[$scope] // error(\"unit command digest missing\")' <<<\"$VELNOR_UNIT_IDENTITIES\")\" || {{ echo \"::error::missing command identity for {unit_id}\" >&2; exit 1; }}\n          printf '{output_name}=%s\\n' \"$digest\" >> \"$GITHUB_OUTPUT\""
+        )
+        .expect("command digest output is writable");
+    }
+    output
 }
 
 /// The `ci-required` aggregate steps, rendered before the shell verdict step.
@@ -93,12 +152,14 @@ fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
 /// so no previously-failing case newly passes.
 ///
 /// `runtime_steps` provisions the `velnor-workflow` binary via the verified
-/// plan-artifact download. The results download tolerates zero artifacts — a
-/// no-work plan runs no unit jobs — because the aggregate fails a real-work
-/// plan with zero records anyway; every other step fails the check.
+/// plan-artifact download. The result download is skipped only when the plan
+/// positively reports `planned_no_work == 'true'`; every real-work transport
+/// failure remains fatal. Collection still creates an empty result set for the
+/// explicitly proven no-work case, which the aggregate validates against the
+/// signed expected-work artifact.
 fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
     format!(
-        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan has no result artifacts. Skip this transport only\n        # for the planner's positive no-work proof; all real-work download\n        # failures remain fatal.\n        if: ${{{{ needs.plan.outputs.planned_no_work != 'true' }}}}\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
     )
 }
 
@@ -128,8 +189,17 @@ fn render_unit_result_steps(
     record_gate: &str,
 ) -> String {
     format!(
-        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          mkdir -p {RESULT_DIR}\n          jq -n --arg unit \"$VELNOR_RESULT_UNIT\" --arg lane \"$VELNOR_RESULT_LANE\" --arg outcome \"$outcome\" '{{results: [{{unit: $unit, lane: $lane, outcome: $outcome}}]}}' > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
+        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_SOURCE_SHA: ${{{{ inputs.source_sha }}}}\n          VELNOR_RESULT_PLAN_DIGEST: ${{{{ inputs.plan_digest }}}}\n          VELNOR_RESULT_PLATFORM: ${{{{ inputs.unit_platform }}}}\n          VELNOR_RESULT_TRUST: ${{{{ inputs.unit_trust }}}}\n          VELNOR_RESULT_COMMAND_DIGEST: ${{{{ inputs.command_digest }}}}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          test \"$VELNOR_RESULT_COMMAND_DIGEST\" != \"\" || {{ echo \"::error::missing command identity for $VELNOR_RESULT_UNIT\" >&2; exit 1; }}\n          mkdir -p {RESULT_DIR}\n          jq -n \\\n            --arg repository_id \"$GITHUB_REPOSITORY\" \\\n            --arg source_sha \"$VELNOR_RESULT_SOURCE_SHA\" \\\n            --arg audited_sha \"$HEAD_SHA\" \\\n            --arg base_sha \"$BASE_SHA\" \\\n            --arg run_id \"$GITHUB_RUN_ID\" \\\n            --arg run_attempt \"$GITHUB_RUN_ATTEMPT\" \\\n            --arg plan_digest \"$VELNOR_RESULT_PLAN_DIGEST\" \\\n            --arg unit_id \"$VELNOR_RESULT_UNIT\" \\\n            --arg provider \"$VELNOR_RESULT_LANE\" \\\n            --arg platform \"$VELNOR_RESULT_PLATFORM\" \\\n            --arg trust \"$VELNOR_RESULT_TRUST\" \\\n            --arg command_digest \"$VELNOR_RESULT_COMMAND_DIGEST\" \\\n            --arg outcome \"$outcome\" \\\n            '{{results: [{{identity: {{repository_id: $repository_id, source_sha: $source_sha, audited_sha: $audited_sha, base_sha: $base_sha, run_id: $run_id, run_attempt: $run_attempt, plan_digest: $plan_digest, unit_id: $unit_id, provider: $provider, platform: $platform, trust: $trust, command_digest: $command_digest}}, outcome: $outcome}}]}}' \\\n            > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
     )
+}
+
+/// Identity and selection values shared by every step in one collapsed
+/// provider job. Keep them at job scope: phase-heavy kinds otherwise repeat
+/// the same typed event identity once per phase in every reusable load.
+fn render_collapsed_provider_job_env(output: &mut String) {
+    output.push_str(
+        "    env:\n          CI_SCOPE: ${{ inputs.scope }}\n          CI_UNIT_ID: ${{ inputs.unit }}\n          EVENT_NAME: ${{ github.event_name }}\n          BASE_SHA: ${{ inputs.base_sha }}\n          HEAD_SHA: ${{ inputs.head_sha }}\n          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n",
+    );
 }
 
 /// The snapshot namespace the unit-provider compiler snapshots live in.
@@ -174,7 +244,8 @@ mod tests {
         explicit_toolchain_step_id, provider_input, snapshot_compatibility,
         unit_owns_workflow_crate, CacheReportFacts, GraphNode, Pins, Platform, ProviderAdmission,
         ProviderId, ProviderSet, ReportedCacheLayer, RequiredCaller, RustNeeds, RustToolchain,
-        ToolRequirement, Unit, UnitKind, WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
+        ToolRequirement, Unit, UnitKind, ValidationPhase, WorkflowIr, WorkflowKind, XcodeToolchain,
+        REQUIRED_CHECK,
     };
     use crate::s2::config::MiseInstallDeps;
     use crate::s2::platform::{NamedProduct, Prerequisite};
@@ -187,9 +258,9 @@ mod tests {
     fn dispatch_admission_selects_the_static_universe_without_an_input() {
         let mut ir = owner_test_ir("example/owner", Vec::new());
         ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
-        // A manual provider admits dispatches only, with no provider input
-        // to match: the comma boundary the old matcher needed is gone with
-        // the input.
+        // The generic provider class carries only the event half. Local
+        // callers use the trusted class below, which adds the shared
+        // protected-default-branch predicate.
         for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
             let expression =
                 ir.provider_admission_expression(ProviderAdmission::Provider(provider));
@@ -202,6 +273,14 @@ mod tests {
                 "{provider:?} matches no input: {expression}"
             );
         }
+        let trusted = ir
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert!(
+            trusted.contains(
+                "github.ref != format('refs/heads/{0}', github.event.repository.default_branch)"
+            ),
+            "local dispatch admission uses the shared protected-default-branch predicate: {trusted}"
+        );
         let hosted =
             ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::GithubHosted));
         assert_eq!(
@@ -268,6 +347,12 @@ mod tests {
         assert!(
             trusted.contains("github.event_name == 'workflow_dispatch'"),
             "a manual trusted-only class still admits dispatches only: {trusted}"
+        );
+        assert!(
+            trusted.contains(
+                "github.ref != format('refs/heads/{0}', github.event.repository.default_branch)"
+            ),
+            "local dispatch admission is protected-default-branch-gated: {trusted}"
         );
     }
 
@@ -1093,6 +1178,41 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_aggregate_covers_merge_group_with_the_same_obligation_graph() {
+        let ir = owner_test_ir(
+            "example/merge-queue",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let rendered = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+
+        assert!(
+            rendered.contains("on:\n  pull_request:\n  merge_group:\n"),
+            "GitHub PR aggregation also listens for merge-queue validation: {rendered}"
+        );
+        assert!(
+            rendered.contains("github.event.merge_group.base_sha"),
+            "merge-group planning binds the prospective base SHA: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "github.event_name == 'merge_group' && github.event.merge_group.head_sha"
+            ),
+            "merge-group planning binds the source SHA: {rendered}"
+        );
+
+        let required = job_block(&rendered, REQUIRED_CHECK);
+        assert!(
+            required.contains("needs: [plan") && required.contains("skipped)"),
+            "merge-group runs the required obligation graph, including skip rejection: {required}"
+        );
+        assert!(
+            required.contains("cancelled)") && required.contains("expected CI job"),
+            "merge-group runs the failed/cancelled obligation checks: {required}"
+        );
+    }
+
+    #[test]
     fn tool_provisioning_renders_declared_prepared_tools() {
         let mut unit = rust_unit("rust", ".");
         unit.prepared_tools = vec![crate::s2::primitives::prepared_tools::PreparedToolNeed {
@@ -1534,7 +1654,6 @@ mod tests {
             "the consumer caller waits on the artifact producer: {consumer}"
         );
     }
-
 
     #[test]
     fn transport_facts_pass_records_only_on_hosted() {
@@ -2172,12 +2291,12 @@ mod tests {
         );
         let default = job_block(&workflow, "verify-github-hosted");
         assert!(
-            default.contains("Download Velnor workflow runtime"),
-            "the Linux Rust job keeps consuming the plan artifact: {default}"
+            default.contains("setup-velnor-workflow"),
+            "the Linux Rust job consumes the published runtime through the setup action: {default}"
         );
         assert!(
-            !default.contains("setup-velnor-workflow"),
-            "the Linux Rust job needs no setup action: {default}"
+            !default.contains("Download Velnor workflow runtime"),
+            "the Linux Rust job must not download a plan artifact: {default}"
         );
         // A uniform Apple kind keeps the setup acquisition it always had.
         let uniform = owner_test_ir(
@@ -2790,39 +2909,6 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_callee_records_dependencies_from_inputs() {
-        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
-        leaf.depends_on = vec!["rust-root".to_owned()];
-        let ir = owner_test_ir(
-            "example/fixture",
-            vec![rust_unit("rust-root", "crates/root"), leaf],
-        );
-        let callee = must_render_kind(&ir);
-        for declaration in [
-            "      unit_dependencies:\n        required: false\n        type: string\n        default: \"\"\n",
-            "      unit_admission:\n        required: false\n        type: string\n        default: \"\"\n",
-        ] {
-            assert!(callee.contains(declaration), "{callee}");
-        }
-        assert!(
-            callee.contains("- name: Record unit dependencies\n"),
-            "{callee}"
-        );
-        assert!(
-            callee.contains("UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}"),
-            "{callee}"
-        );
-        assert!(
-            callee.contains("UNIT_ADMISSION: ${{ inputs.unit_admission }}"),
-            "{callee}"
-        );
-        assert!(
-            !callee.contains("rust-root"),
-            "the callee reads the closure through inputs, never as a literal: {callee}"
-        );
-    }
-
-    #[test]
     fn github_lane_fetches_pin_history_for_check_running_units() {
         let owner = workflow_setup_action_repository().to_owned();
         let mut checker = rust_unit("rust-generator-crate", "crates/velnor-workflow");
@@ -2863,6 +2949,29 @@ mod tests {
         assert!(
             step.contains("git fetch --no-tags --depth 1"),
             "a shallow checkout gains the pin commit: {step}"
+        );
+    }
+
+    #[test]
+    fn hosted_run_steps_bind_the_plan_source_sha_for_phase_and_check_blocks() {
+        let mut phased = rust_unit("rust-phased", "crates/phased");
+        phased.phases = vec![ValidationPhase::Fmt, ValidationPhase::Test];
+        let ir = owner_test_ir(
+            "example/source-sha",
+            vec![phased, rust_unit("rust-unphased", "crates/unphased")],
+        );
+        let rendered = must_render_kind(&ir);
+        let hosted = job_block(&rendered, "verify-github-hosted");
+        let source_sha = "SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}";
+        let run_steps = hosted.matches("velnor-workflow run").count();
+        assert_eq!(
+            run_steps, 3,
+            "the fixture renders two phase steps and one unphased check step: {hosted}"
+        );
+        assert_eq!(
+            hosted.matches(source_sha).count(),
+            1,
+            "the hosted job binds one typed source identity shared by every run step: {hosted}"
         );
     }
 
@@ -2988,6 +3097,65 @@ mod tests {
     }
 
     #[test]
+    fn command_digest_wiring_is_singular_per_unit_across_the_plan_boundary() {
+        let ir = owner_test_ir(
+            "example/command-digest-wiring",
+            vec![
+                rust_unit("rust-alpha", "crates/alpha"),
+                rust_unit("rust-beta", "crates/beta"),
+            ],
+        );
+        let mut plan = String::new();
+        ir.render_plan(&mut plan);
+        for unit in ["rust-alpha", "rust-beta"] {
+            let output_name = super::command_digest_output_name(unit);
+            assert!(
+                plan.contains(&format!(
+                    "      {output_name}: ${{{{ steps.identity.outputs.{output_name} }}}}"
+                )),
+                "the plan exposes one output for {unit}: {plan}"
+            );
+            assert!(
+                plan.contains(&format!("printf '{output_name}=%s\\n'")),
+                "the identity step emits {output_name}: {plan}"
+            );
+        }
+        assert!(
+            !plan.contains("command_digests"),
+            "the plan has no plural digest output: {plan}"
+        );
+
+        let nodes = aggregate_fixture_nodes(&ir);
+        let mut callers = String::new();
+        ir.render_node_callers(&nodes, &mut callers, false, false, None);
+        assert!(
+            callers.contains("command_digest: ${{ needs.plan.outputs.command_digest_rust-alpha }}"),
+            "callers pass only the selected unit digest: {callers}"
+        );
+        assert!(
+            !callers.contains("command_digests"),
+            "callers do not pass a repeated digest map: {callers}"
+        );
+
+        let kind = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "command digest kind renders",
+            ),
+            "command digest kind has members",
+        )
+        .1;
+        assert!(
+            kind.contains("      command_digest:\n"),
+            "the reusable declares the singular input: {kind}"
+        );
+        assert!(
+            !kind.contains("command_digests"),
+            "the reusable has no plural input alias: {kind}"
+        );
+    }
+
+    #[test]
     fn plan_job_scopes_expected_work_providers_to_scheduled_universe() {
         // The plan scope must equal the scheduled provider scope: a narrowed
         // universe that plans unfiltered writes phantom entries for
@@ -3044,7 +3212,7 @@ mod tests {
     }
 
     #[test]
-    fn no_work_branch_contract_is_presence_only() {
+    fn no_work_branch_contract_allows_only_result_transport_gate() {
         let ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
         let nodes = aggregate_fixture_nodes(&ir);
         for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
@@ -3064,9 +3232,16 @@ mod tests {
                 !code.contains("planned_no_work == 'false'"),
                 "{kind:?} never branches on the impossible `false` value: {surface}"
             );
+            let transport_gate = "needs.plan.outputs.planned_no_work != 'true'";
             assert!(
-                !code.contains("planned_no_work ==") && !code.contains("planned_no_work !="),
-                "{kind:?} branches nowhere on the marker: the aggregate tolerates no-work itself: {surface}"
+                code.contains(transport_gate),
+                "{kind:?} gates result transport on the positive no-work proof: {surface}"
+            );
+            let code_without_transport_gate = code.replace(transport_gate, "");
+            assert!(
+                !code_without_transport_gate.contains("planned_no_work ==")
+                    && !code_without_transport_gate.contains("planned_no_work !="),
+                "{kind:?} has no no-work branch outside result transport: {surface}"
             );
         }
     }
@@ -3162,6 +3337,11 @@ mod tests {
             "the receipt binds to the enclosing job status: {steps}"
         );
         assert!(
+            steps.contains("VELNOR_RESULT_COMMAND_DIGEST: ${{ inputs.command_digest }}")
+                && !steps.contains("command_digests"),
+            "the receipt binds one singular caller digest: {steps}"
+        );
+        assert!(
             steps.contains("*) outcome=failure ;;"),
             "setup, execution, and any other non-green job state records failure: {steps}"
         );
@@ -3189,6 +3369,26 @@ mod tests {
         assert!(
             mkdir < glob,
             "the collect step creates the result dir before globbing: {steps}"
+        );
+    }
+
+    #[test]
+    fn result_download_failure_is_fatal_except_explicit_no_work() {
+        let steps = super::render_aggregate_score_steps("", "actions/download-artifact@pinned");
+        let start = must_some(
+            steps.find("- name: Download reported unit results"),
+            "reported result download",
+        );
+        let block = &steps[start..];
+        let end = block.find("\n      - name: ").unwrap_or(block.len());
+        let block = &block[..end];
+        assert!(
+            block.contains("if: ${{ needs.plan.outputs.planned_no_work != 'true' }}"),
+            "real-work result transport runs; only explicit no-work skips it: {block}"
+        );
+        assert!(
+            !block.contains("continue-on-error"),
+            "result transport failures cannot be masked: {block}"
         );
     }
 
@@ -3226,6 +3426,7 @@ mod tests {
         let check = job_block(&rendered, REQUIRED_CHECK);
         for step in [
             "Download expected work",
+            "Download reported unit results",
             "Collect reported unit results",
             "Score expected work against reported results",
         ] {
@@ -5801,7 +6002,10 @@ pub(crate) enum WorkflowKind {
 /// tree for drift between the three surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ProviderAdmission {
-    /// The provider on any event it is statically eligible for.
+    /// The provider on any event it is statically eligible for. Local
+    /// execution is never assigned this class; local callers use
+    /// `ProviderTrusted`, whose shared predicate includes the protected
+    /// default-branch requirement for dispatch.
     Provider(ProviderId),
     /// The provider gated to trusted events (local providers, trusted-only
     /// units).
@@ -5998,13 +6202,21 @@ fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
 fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
+    automatic_providers: &ProviderSet,
 ) -> (&'static str, &'static str, String, bool) {
+    let include_merge_group = kind == WorkflowKind::PullRequest
+        && automatic_providers.contains(&ProviderId::GithubHosted);
     match kind {
         WorkflowKind::PullRequest => (
             "CI / PR",
             "CI / PR",
             format!(
-                "on:\n  pull_request:\n{}",
+                "on:\n  pull_request:\n{}{}",
+                if include_merge_group {
+                    "  merge_group:\n"
+                } else {
+                    ""
+                },
                 workflow_dispatch_inputs("affected", default_branch, "",)
             ),
             true,
@@ -6145,6 +6357,10 @@ pub(crate) mod provider_input {
     pub(crate) const UNIT_DEPENDENCIES: &str = "unit_dependencies";
     /// The provider admission class id the nested job records.
     pub(crate) const UNIT_ADMISSION: &str = "unit_admission";
+    /// The event source revision, distinct from the audited checkout SHA.
+    pub(crate) const SOURCE_SHA: &str = "source_sha";
+    /// The singular command digest selected by plan for this caller's unit.
+    pub(crate) const COMMAND_DIGEST: &str = "command_digest";
     /// Comma-separated prepared-tool need records (`tool:digest:producers`)
     /// the provider restores for the unit; empty when it needs none.
     pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
@@ -6194,6 +6410,8 @@ pub(crate) mod provider_input {
         UNIT_TRUST,
         UNIT_DEPENDENCIES,
         UNIT_ADMISSION,
+        SOURCE_SHA,
+        COMMAND_DIGEST,
         PREPARED_TOOLS,
         PRODUCT_PROVIDES,
         PRODUCT_TRANSPORT_READY,
@@ -6777,7 +6995,7 @@ impl WorkflowIr {
     ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch);
+            aggregate_triggers(kind, &self.default_branch, &self.automatic_providers);
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
             output,
@@ -6829,8 +7047,11 @@ impl WorkflowIr {
     /// `workflow_dispatch` on ci-main is trusted for mbx saves; schedule alone is not.
     pub(crate) fn render_nightly_dispatcher(&self) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, _) =
-            aggregate_triggers(WorkflowKind::Nightly, &self.default_branch);
+        let (workflow_name, run_name, triggers, _) = aggregate_triggers(
+            WorkflowKind::Nightly,
+            &self.default_branch,
+            &self.automatic_providers,
+        );
         let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
         let runner = self.runs_on_yaml(self.control_plane_provider());
@@ -6983,6 +7204,12 @@ impl WorkflowIr {
             needs.join(", "),
             yaml_scalar(sample_unit),
         );
+        output.push_str(
+            &format!(
+                "      source_sha: ${{{{ needs.plan.outputs.source_sha }}}}\n      command_digest: ${{{{ needs.plan.outputs.{} }}}}\n",
+                command_digest_output_name(sample_unit)
+            ),
+        );
     }
 
     fn render_unit_provider_caller(
@@ -7055,6 +7282,12 @@ impl WorkflowIr {
             yaml_scalar(&caller.unit_id),
             caller.provider.as_str(),
             render_caller_inputs(&caller.inputs),
+        );
+        output.push_str(
+            &format!(
+                "      source_sha: ${{{{ needs.plan.outputs.source_sha }}}}\n      command_digest: ${{{{ needs.plan.outputs.{} }}}}\n",
+                command_digest_output_name(&unit.id)
+            ),
         );
     }
 
@@ -7621,15 +7854,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         Ok(())
     }
 
-    /// The step-summary record of one unit's dependency closure: the unit,
-    /// the provider it runs on, its admission class, and the dependency
-    /// list, all read from the caller's inputs.
-    fn render_unit_dependency_info_step(output: &mut String) {
-        output.push_str(
-            "      - name: Record unit dependencies\n        env:\n          UNIT_ID: ${{ inputs.unit }}\n          UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}\n          UNIT_ADMISSION: ${{ inputs.unit_admission }}\n          UNIT_PROVIDER: ${{ inputs.provider }}\n        run: |\n          {\n            echo '## Unit dependencies'\n            echo\n            echo \"- Unit: $UNIT_ID\"\n            echo \"- Provider: $UNIT_PROVIDER\"\n            echo \"- Admission: $UNIT_ADMISSION\"\n            if [[ -z \"$UNIT_DEPENDENCIES\" ]]; then\n              echo '- Dependencies: none'\n            else\n              echo \"- Dependencies: $UNIT_DEPENDENCIES\"\n            fi\n          } >> \"$GITHUB_STEP_SUMMARY\"\n",
-        );
-    }
-
     /// One collapsed provider job: the job header, the shared runner setup, and
     /// exactly one step block that reads every unit-specific value from the
     /// caller's inputs.
@@ -7662,6 +7886,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "  {job_id}:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    runs-on: {runs_on}\n    timeout-minutes: {}",
             Self::collapsed_timeout_minutes(members, contracts),
         );
+        render_collapsed_provider_job_env(output);
         output.push_str("    steps:\n");
         render_ci_job_started_marker(output);
         // The caller invokes once per (unit, provider) and passes
@@ -7681,7 +7906,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}{fetch_depth}",
             self.pins.checkout
         );
-        Self::render_unit_dependency_info_step(output);
         if provider == ProviderId::GithubHosted {
             self.render_unit_runtime(output, provider, members[0]);
         }
@@ -8622,6 +8846,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let token_env = docker_build_token_env_for_members(members);
+        let checks_step_env = format!("\n        env:{checks_env}{token_env}");
         let phased = FeatureCoverage::over(&facts, |facts| !facts.validation_phases.is_empty());
         let rendered_phases = ValidationPhase::RUNNABLE
             .iter()
@@ -8651,7 +8876,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let mut block = String::new();
             let _ = writeln!(
                 block,
-                "      - name: {}\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{started}          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --phase {} 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{ended}          exit $rc",
+                "      - name: {}{checks_step_env}\n        run: |\n          set -o pipefail\n{started}          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --phase {} 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{ended}          exit $rc",
                 phase.step_name(),
                 phase.as_str(),
             );
@@ -8664,7 +8889,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let mut block = String::new();
             let _ = writeln!(
                 block,
-                "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+                "      - name: Run unit checks{checks_step_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
             );
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
@@ -8943,8 +9168,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      unit_ids: ${{ steps.plan.outputs.unit_ids }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
             "      plan_digest: ${{ steps.plan.outputs.plan_digest }}".to_owned(),
+            "      source_sha: ${{ steps.identity.outputs.source_sha }}".to_owned(),
             "      excluded: ${{ steps.plan.outputs.excluded }}".to_owned(),
         ];
+        for unit in &self.units {
+            let output_name = command_digest_output_name(&unit.id);
+            outputs.push(format!(
+                "      {output_name}: ${{{{ steps.identity.outputs.{output_name} }}}}"
+            ));
+        }
         let mut matrices = BTreeSet::new();
         for unit in &self.units {
             matrices.insert(kind_matrix_output(unit.kind));
@@ -8958,8 +9190,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // absent, never `false`. Consumers MUST branch
         // `needs.plan.outputs.planned_no_work == 'true'` for the no-work
         // path; any other value (including absent) means the plan selected
-        // work. Nothing branches yet: the aggregate tolerates explicit
-        // no-work itself, so the marker is proof, not control flow.
+        // work. The aggregate uses the inverse comparison only to skip the
+        // result-artifact transport for an explicitly proven no-work plan;
+        // its expected-work scoring remains the final proof.
         outputs.push(
             "      # Presence-only no-work marker: `planned_no_work` is `true` or absent,\n      # never `false`. Consumers MUST branch\n      # `needs.plan.outputs.planned_no_work == 'true'` for the no-work path;\n      # any other value (including absent) means the plan selected work."
                 .to_owned(),
@@ -8968,7 +9201,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
         let _ = writeln!(
             output,
-            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          SOURCE_SHA: ${{{{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          SOURCE_SHA: ${{{{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::s2::control_job_name("Planning"),
             self.runs_on_yaml(self.control_plane_provider()),
             outputs.join("\n"),
@@ -8979,6 +9212,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             expected_work_file = EXPECTED_WORK_FILE,
             expected_work_dir = EXPECTED_WORK_DIR,
         );
+        let unit_identities = unit_identity_map(&self.units);
+        output.push_str(&render_expected_work_identity_step(
+            &unit_identities,
+            &self.units,
+        ));
         output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
     }
 
@@ -9033,20 +9271,19 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
-    /// A `workflow_dispatch` selecting `provider`, on any ref.
+    /// The event half of a `workflow_dispatch` selecting `provider`.
     ///
-    /// Dispatch is not ref-gated: GitHub only accepts a dispatch from an
-    /// actor with write access and only onto a ref of this repository, which
-    /// is the same authorship a same-repository pull-request head carries.
-    /// There is no provider input to match: dispatches select the static
-    /// universe.
+    /// This selector carries no ref authorization. Local callers conjoin the
+    /// shared trusted-event predicate, which rejects bot dispatches and any
+    /// ref other than the protected default branch. There is no provider input
+    /// to match: dispatches select the static universe.
     fn dispatch_provider_expression() -> &'static str {
         "github.event_name == 'workflow_dispatch'"
     }
 
     fn base_sha_expression(&self) -> String {
         format!(
-            "github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
+            "github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
             self.default_branch
         )
     }
@@ -9088,7 +9325,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             | ProviderAdmission::ProviderTrusted(provider) => {
                 // Dispatches select the static universe, so the event side is
                 // a tautology for automatic providers and dispatch-only
-                // otherwise. Render the collapsed form, never `(A) || (!A)`.
+                // otherwise. Trusted local classes conjoin the shared
+                // protected-default-branch predicate below. Render the
+                // collapsed form, never `(A) || (!A)`.
                 let event = if self.automatic_providers.contains(&provider) {
                     "true".to_owned()
                 } else {

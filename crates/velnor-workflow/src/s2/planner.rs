@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::s2::provider::{
     plan_digest, unit_job_display_name, unit_job_id, validate_selector_disjointness, Capabilities,
-    ExclusionReason, Platform, ProviderId, ProviderSet, SelectorMap, TrustReq,
+    ExclusionReason, PlanUnitIdentity, Platform, ProviderId, ProviderSet, SelectorMap, TrustReq,
 };
 use crate::s2::routing::{route_unit, RouteDecision, UnitRequirements};
 use crate::s2::GeneratorError;
@@ -190,7 +190,7 @@ pub(crate) fn fanout(
     };
     let mut executions = Vec::new();
     let mut exclusions = Vec::new();
-    let mut digest_units: Vec<(String, ProviderSet, String)> = Vec::new();
+    let mut digest_units: Vec<PlanUnitIdentity> = Vec::new();
     for unit in &units {
         let selected = affected.is_none_or(|ids| ids.contains(&unit.unit_id));
         if !selected {
@@ -232,7 +232,13 @@ pub(crate) fn fanout(
                 }),
             }
         }
-        digest_units.push((unit.unit_id.clone(), routed, unit.command_digest.clone()));
+        digest_units.push(PlanUnitIdentity {
+            unit_id: unit.unit_id.clone(),
+            providers: routed,
+            platform: unit.platform,
+            trust: unit.trust,
+            command_digest: unit.command_digest.clone(),
+        });
     }
     exclusions.sort_by(|left, right| {
         (&left.unit_id, left.provider).cmp(&(&right.unit_id, right.provider))

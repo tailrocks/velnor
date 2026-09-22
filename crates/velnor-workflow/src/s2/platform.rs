@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::s2::provider::{provider_caps, ProviderId};
 use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
 
 /// Versioned identity of a produced native artifact.
@@ -677,6 +678,184 @@ fn validate_rebuild(unit: &Unit, product: &NamedProduct) -> Result<(), Generator
     Ok(())
 }
 
+/// Whether two repo-relative roots claim overlapping trees. A textual prefix
+/// is only a path prefix when it ends at a segment boundary: `out/lib` and
+/// `out/library` are distinct roots, while `out/lib` and `out/lib/headers`
+/// are not.
+fn output_roots_overlap(left: &str, right: &str) -> bool {
+    fn is_root_of(root: &str, path: &str) -> bool {
+        path.len() > root.len()
+            && path.starts_with(root)
+            && path.as_bytes().get(root.len()) == Some(&b'/')
+    }
+
+    left == right || is_root_of(left, right) || is_root_of(right, left)
+}
+
+/// Validate that every referenced product can actually be materialized. An
+/// unreferenced scanner product may be metadata-only, but a prerequisite needs
+/// both a declared output tree and either an edge task, product task, or
+/// recorded rebuild recipe.
+fn validate_required_products(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for consumer in &config.units {
+        for prerequisite in &consumer.prerequisites {
+            let Some(producer) = config
+                .units
+                .iter()
+                .find(|unit| unit.id == prerequisite.producer)
+            else {
+                // Preserve the detailed unknown-producer diagnostic from
+                // materialize_prerequisites.
+                continue;
+            };
+            let Some(product) = producer
+                .products
+                .iter()
+                .find(|product| product.name == prerequisite.product)
+            else {
+                // Preserve the detailed unknown-product diagnostic from
+                // materialize_prerequisites.
+                continue;
+            };
+
+            if product.outputs.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` requires product `{}` from `{}`, but the required product declares no output roots; required products must produce at least one output",
+                    consumer.id, prerequisite.product, prerequisite.producer,
+                )));
+            }
+            if prerequisite.effective_task(product).is_none() && product.rebuild.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` requires product `{}` from `{}`, but it declares no build recipe; provide an edge task, product task, or recorded rebuild recipe",
+                    consumer.id, prerequisite.product, prerequisite.producer,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the env bindings inherited from all products consumed by one
+/// unit. First-wins merging is unsafe: the same name must carry one value at
+/// every edge, and an explicit consumer binding cannot override a product's
+/// output contract with a different value.
+fn validate_inherited_env(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for consumer in &config.units {
+        let mut inherited: BTreeMap<&str, (&str, &str, &str)> = BTreeMap::new();
+        for prerequisite in &consumer.prerequisites {
+            let Some(producer) = config
+                .units
+                .iter()
+                .find(|unit| unit.id == prerequisite.producer)
+            else {
+                continue;
+            };
+            let Some(product) = producer
+                .products
+                .iter()
+                .find(|product| product.name == prerequisite.product)
+            else {
+                continue;
+            };
+            for (name, value) in &product.env {
+                if let Some((previous_producer, previous_product, previous_value)) =
+                    inherited.get(name.as_str())
+                {
+                    if *previous_value != value {
+                        return Err(GeneratorError::usage(format!(
+                            "unit `{}` inherits conflicting values for env `{name}` from products `{}:{}` and `{}:{}`; product bindings must agree",
+                            consumer.id,
+                            previous_producer,
+                            previous_product,
+                            producer.id,
+                            product.name,
+                        )));
+                    }
+                } else {
+                    inherited.insert(
+                        name.as_str(),
+                        (producer.id.as_str(), product.name.as_str(), value.as_str()),
+                    );
+                }
+                if let Some(existing) = consumer.env.get(name)
+                    && existing != value
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares env `{name}` with a value conflicting with inherited product `{}:{}`; consumer and product bindings must agree",
+                        consumer.id, producer.id, product.name,
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether one provider can execute a unit in a trusted event. Generation has
+/// no event verdict, so trust is evaluated at its strongest possible point;
+/// untrusted-event exclusion remains the planner's job. The intersection is
+/// still required because a prerequisite edge needs one provider that can
+/// execute both producer and consumer.
+fn provider_can_execute(unit: &Unit, provider: ProviderId) -> bool {
+    let offered = provider_caps(provider);
+    offered.platforms.contains(&unit.platform)
+        && (!matches!(unit.trust, crate::s2::provider::TrustReq::TrustedOnly) || offered.trusted)
+        && unit.capabilities.missing_in(offered.caps).is_empty()
+}
+
+/// Validate that every known prerequisite has at least one common provider.
+/// Provider, trust, platform, and capability constraints are edge constraints
+/// rather than independent unit facts: a producer and consumer with disjoint
+/// eligible provider sets cannot satisfy the dependency graph.
+fn validate_edge_provider_compatibility(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for consumer in &config.units {
+        for prerequisite in &consumer.prerequisites {
+            let Some(producer) = config
+                .units
+                .iter()
+                .find(|unit| unit.id == prerequisite.producer)
+            else {
+                continue;
+            };
+            let Some(_product) = producer
+                .products
+                .iter()
+                .find(|product| product.name == prerequisite.product)
+            else {
+                continue;
+            };
+            let common = config
+                .providers
+                .iter()
+                .copied()
+                .filter(|provider| {
+                    provider_can_execute(producer, *provider)
+                        && provider_can_execute(consumer, *provider)
+                })
+                .collect::<Vec<_>>();
+            if common.is_empty() {
+                let configured = config
+                    .providers
+                    .iter()
+                    .map(ProviderId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` requires product `{}` from `{}`, but producer and consumer have no common eligible provider in [{configured}] (producer: platform `{}`, trust `{}`; consumer: platform `{}`, trust `{}`)",
+                    consumer.id,
+                    prerequisite.product,
+                    prerequisite.producer,
+                    producer.platform,
+                    producer.trust.as_str(),
+                    consumer.platform,
+                    consumer.trust.as_str(),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate the product graph before compilation: every declared output is a
 /// normal-form repo-relative path claimed by exactly one product, every
 /// expected output file is a duplicate-free normal-form path under a claimed
@@ -685,9 +864,11 @@ fn validate_rebuild(unit: &Unit, product: &NamedProduct) -> Result<(), Generator
 /// declared input is a normal-form path or glob without duplicates, closure
 /// gaps stay printable diagnostics, a claimed inputs digest is a hex SHA-256
 /// on a gap-free closure, no unit requires its own product, and the
-/// consumer-to-producer edges are acyclic. Unknown producers and products
-/// stay `materialize_prerequisites` errors, which already name the known
-/// units and offered products.
+/// consumer-to-producer edges are acyclic. Required products have non-empty
+/// outputs and a materialization recipe; inherited env bindings agree; and a
+/// known edge has at least one common eligible provider. Unknown producers and
+/// products stay `materialize_prerequisites` errors, which already name the
+/// known units and offered products.
 fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> {
     let mut owners: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
     for unit in &config.units {
@@ -736,9 +917,7 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
                         unit.id, product.name,
                     )));
                 }
-                if let Some((owner_unit, owner_product)) =
-                    owners.insert(output.as_str(), (unit.id.as_str(), product.name.as_str()))
-                {
+                if let Some(&(owner_unit, owner_product)) = owners.get(output.as_str()) {
                     if owner_unit == unit.id && owner_product == product.name {
                         return Err(GeneratorError::usage(format!(
                             "unit `{}` declares product `{}` output `{output}` twice; one entry per path",
@@ -750,6 +929,16 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
                         unit.id, product.name,
                     )));
                 }
+                if let Some((owner_output, &(owner_unit, owner_product))) = owners
+                    .iter()
+                    .find(|(owner_output, _)| output_roots_overlap(output, owner_output))
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` product `{}` claims output root `{output}`, which overlaps output root `{owner_output}` claimed by unit `{owner_unit}` product `{owner_product}`; output roots must be disjoint",
+                        unit.id, product.name,
+                    )));
+                }
+                owners.insert(output.as_str(), (unit.id.as_str(), product.name.as_str()));
             }
             validate_output_files(unit, product)?;
             validate_bindings(unit, product)?;
@@ -764,6 +953,9 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
             }
         }
     }
+    validate_required_products(config)?;
+    validate_inherited_env(config)?;
+    validate_edge_provider_compatibility(config)?;
     if let Some(cycle) = find_product_cycle(config) {
         return Err(GeneratorError::usage(format!(
             "prerequisite edges contain a cycle: {}; break the cycle so producers build before consumers",
@@ -1807,6 +1999,117 @@ mod tests {
         );
         assert!(
             error.to_string().contains("already claimed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_prefix_overlapping_output_roots() {
+        let mut first = unit("rust-ffi", UnitKind::Rust);
+        first.products = vec![product("headers", &["native/out"])];
+        let mut second = unit("other-ffi", UnitKind::Rust);
+        second.products = vec![product("library", &["native/out/lib"])];
+        let error = must_err(
+            resolve(&mut project_config(vec![first, second])),
+            "prefix-overlapping outputs fail closed",
+        );
+        assert!(
+            error.to_string().contains("output roots must be disjoint"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_accepts_textually_similar_disjoint_output_roots() {
+        let mut first = unit("rust-ffi", UnitKind::Rust);
+        first.products = vec![product("headers", &["native/out/lib"])];
+        let mut second = unit("other-ffi", UnitKind::Rust);
+        second.products = vec![product("library", &["native/out/library"])];
+        must_ok(
+            resolve(&mut project_config(vec![first, second])),
+            "segment-aware output ownership resolves",
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_required_outputless_product() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.products = vec![product("empty", &[])];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "empty")];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer, consumer])),
+            "required outputless product fails closed",
+        );
+        assert!(
+            error.to_string().contains("no output roots"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_required_product_without_recipe() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut empty_recipe = product("unbuilt", &["native/out/unbuilt.a"]);
+        empty_recipe.task = None;
+        producer.products = vec![empty_recipe];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "unbuilt")];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer, consumer])),
+            "required product without recipe fails closed",
+        );
+        assert!(
+            error.to_string().contains("no build recipe"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_conflicting_inherited_product_env() {
+        let mut first = unit("rust-ffi", UnitKind::Rust);
+        let mut first_product = product("headers", &["native/out/headers"]);
+        first_product
+            .env
+            .insert("PRODUCT_ROOT".to_owned(), "native/out/headers".to_owned());
+        first.products = vec![first_product];
+
+        let mut second = unit("other-ffi", UnitKind::Rust);
+        let mut second_product = product("library", &["native/out/library"]);
+        second_product
+            .env
+            .insert("PRODUCT_ROOT".to_owned(), "native/out/library".to_owned());
+        second.products = vec![second_product];
+
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![
+            requires("rust-ffi", "headers"),
+            requires("other-ffi", "library"),
+        ];
+        let error = must_err(
+            resolve(&mut project_config(vec![first, second, consumer])),
+            "conflicting inherited env fails closed",
+        );
+        assert!(
+            error.to_string().contains("conflicting values for env"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_edge_with_no_common_provider() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.platform = Platform::MacosArm64;
+        producer.products = vec![product("xcframework", &["native/out/framework"])];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.platform = Platform::LinuxArm64;
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer, consumer])),
+            "incompatible provider edge fails closed",
+        );
+        assert!(
+            error.to_string().contains("no common eligible provider"),
             "unexpected error: {error}"
         );
     }

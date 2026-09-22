@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::*;
-use crate::s2::{PolicyJobSpec, ProjectConfig};
+use crate::s2::{PolicyJobSpec, ProjectConfig, TRUSTED_EVENT_EXPRESSION};
 
 const PIN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PIN_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -683,7 +683,8 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
         declared_ruleset_contexts: "ci-required,Policy",
     });
     assert!(!job.contains("--pin-build"), "{job}");
-    assert!(job.contains("    if: ${{ github.event_name == 'pull_request_target' ||"));
+    let gate = crate::s2::control_plane_trusted_gate("main");
+    assert!(job.contains(&gate), "{job}");
     assert!(!job.contains("--ruleset-contexts"), "{job}");
 }
 
@@ -713,12 +714,11 @@ fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
 }
 
 /// A pull-request aggregate with a hosted required job and one Velnor job
-/// on the declared selector, carrying the generated provider admission: a
-/// provider-selecting dispatch on any ref or the automatic events, with the
-/// trusted-event conjunct.
+/// on the declared selector, carrying the generated provider admission and
+/// the canonical trusted-event conjunct.
 fn gated_trusted_job() -> String {
     format!(
-        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
+        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ ({TRUSTED_EVENT_EXPRESSION}) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
     )
 }
 
@@ -793,13 +793,13 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     let _ = fs::remove_dir_all(ungated);
 }
 
-/// The generated provider gate is the bare trusted-event conjunct for an
-/// automatic provider, conjoined with the dispatch predicate for a manual
-/// one: a dispatch selects the static universe on any ref — dispatch
-/// authorship is write-authorized — and no input match survives.
+/// The generated provider gate is the bare canonical trusted-event conjunct
+/// for an automatic provider, conjoined with the dispatch predicate for a
+/// manual one. The shared predicate restricts dispatch to a protected
+/// default branch and rejects bot senders; no input match survives.
 #[test]
-fn provider_gate_admits_dispatch_on_any_ref() {
-    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+fn provider_gate_admits_dispatch_on_protected_default_branch() {
+    let trusted = format!("({TRUSTED_EVENT_EXPRESSION})");
     // An automatic provider renders the bare trusted-event conjunct.
     let automatic = format!("${{{{ {trusted} }}}}");
     assert!(
@@ -807,7 +807,7 @@ fn provider_gate_admits_dispatch_on_any_ref() {
         "provider gate admitted: {automatic}"
     );
     // A manual provider conjoins it with the dispatch predicate: dispatches
-    // select the static universe on any ref, with no input to match.
+    // select the static universe only on the protected default branch.
     let manual = format!("${{{{ (github.event_name == 'workflow_dispatch') && {trusted} }}}}");
     assert!(
         is_generated_provider_gate(&manual, "velnor"),
@@ -829,7 +829,7 @@ fn provider_gate_admits_dispatch_on_any_ref() {
 /// not the predicate.
 #[test]
 fn trusted_conjunct_members_pass_and_near_misses_fail() {
-    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+    let trusted = format!("({TRUSTED_EVENT_EXPRESSION})");
     for gate in [
         format!("${{{{ {trusted} }}}}"),
         format!("${{{{ (needs.verify.outputs.mode == 'publish') && {trusted} }}}}"),
@@ -868,7 +868,7 @@ fn trusted_conjunct_members_pass_and_near_misses_fail() {
 #[test]
 fn maintenance_prune_gate_needs_the_trusted_conjunct_on_local_lanes() {
     let functional = "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')";
-    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+    let trusted = format!("({TRUSTED_EVENT_EXPRESSION})");
     let bare = format!("${{{{ {functional} }}}}");
     assert!(
         !has_exact_trusted_conjunct(&bare),

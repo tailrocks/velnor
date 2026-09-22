@@ -130,7 +130,7 @@ runs:
           --arg revision "$manifest_revision" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
           --arg asset "$asset" \
-          '.closure == $closure and .revision == $revision and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
+          '.closure == $closure and .revision == $revision and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == "velnor-workflow.runtime-build-identity.v1" and .source_revision == $revision and .platform == $platform and (.toolchain | (type == "string" and length > 0)) and (.rustc | (type == "string" and length > 0)) and (.target | (type == "string" and length > 0)) and (.host | (type == "string" and length > 0)) and .profile == "release" and .features == "" and (.rustflags | type == "string") and (.cargo_encoded_rustflags | type == "string") and (.linker | type == "string") and (.cc | type == "string") and (.cflags | type == "string"))' \
           "$temporary/manifest.json" >/dev/null
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         mkdir -p "$runtime"

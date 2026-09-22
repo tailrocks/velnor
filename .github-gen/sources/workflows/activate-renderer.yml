@@ -23,7 +23,7 @@ concurrency:
 jobs:
   activate:
     name: Verify product and prepare activation PR
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.ref_protected == true && github.event.sender.type == 'User'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -65,31 +65,201 @@ jobs:
           CLOSURE: ${{ steps.runtime.outputs.closure }}
         run: |
           set -euo pipefail
+          trusted_publisher_repository='tailrocks/velnor'
+          trusted_publisher_workflow="$trusted_publisher_repository/.github/workflows/ci-runtime-products.yml"
+          trusted_publisher_ref='refs/heads/main'
+          trusted_publisher_branch="${trusted_publisher_ref#refs/heads/}"
+          [[ "$GITHUB_REPOSITORY" == "$trusted_publisher_repository" ]] || {
+            echo "::error::activation cannot run from caller-selected repository $GITHUB_REPOSITORY; expected $trusted_publisher_repository" >&2
+            exit 1
+          }
+          [[ "$DEFAULT_BRANCH" == "$trusted_publisher_branch" ]] || {
+            echo "::error::publisher ref is caller-selected through default branch $DEFAULT_BRANCH; expected $trusted_publisher_branch" >&2
+            exit 1
+          }
           tag="velnor-workflow-runtime-v1-${CLOSURE:0:16}"
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir "$temporary"
-          product_revision="$(jq -er '.revision | select(test("^[0-9a-f]{40}$"))' "$temporary/manifest.json")"
+          manifest="$temporary/manifest.json"
+          readiness="$temporary/publication-readiness.json"
+          gh release download "$tag" --repo "$trusted_publisher_repository" \
+            --pattern manifest.json --pattern publication-readiness.json --dir "$temporary"
+          manifest_file_digest="$(sha256sum "$manifest" | awk '{print $1}')"
+          readiness_file_digest="$(sha256sum "$readiness" | awk '{print $1}')"
+          manifest_closure="$(jq -er '.closure | select(test("^[0-9a-f]{64}$"))' "$manifest")"
+          product_revision="$(jq -er '.revision | select(test("^[0-9a-f]{40}$"))' "$manifest")"
+          [[ "$manifest_closure" == "$CLOSURE" ]] || {
+            echo "::error::downloaded manifest closure $manifest_closure does not match resolved closure $CLOSURE" >&2
+            exit 1
+          }
+
+          # Extract publisher run identity only from the verified certificate.
+          # The run id/attempt are GitHub's publisher github.run_id and
+          # github.run_attempt; neither is a workflow-dispatch input.
+          attestation_identity() {
+            local attestation="$1"
+            local subject_name="$2"
+            local subject_digest="$3"
+            jq -cer \
+              --arg expected_repository "$trusted_publisher_repository" \
+              --arg expected_workflow "$trusted_publisher_workflow" \
+              --arg expected_ref "$trusted_publisher_ref" \
+              --arg subject_name "$subject_name" \
+              --arg subject_digest "$subject_digest" \
+              '
+                [
+                  .[]
+                  | .verificationResult as $result
+                  | $result.signature.certificate as $certificate
+                  | select(
+                      ($certificate.githubWorkflowRepository == $expected_repository)
+                      and ($certificate.githubWorkflowRef == $expected_ref)
+                      and ($certificate.subjectAlternativeName == ("https://github.com/" + $expected_workflow + "@" + $expected_ref))
+                      and ($certificate.githubWorkflowTrigger == "push" or $certificate.githubWorkflowTrigger == "workflow_dispatch")
+                      and (($certificate.runInvocationURI // "") | startswith("https://github.com/" + $expected_repository + "/actions/runs/"))
+                      and ((($result.statement.subject // []) | length) == 1)
+                      and ((($result.statement.subject // [])[0].name) == $subject_name)
+                      and ((($result.statement.subject // [])[0].digest.sha256) == $subject_digest)
+                    )
+                  | ($certificate.runInvocationURI | capture("/actions/runs/(?<run_id>[0-9]+)/attempts/(?<run_attempt>[0-9]+)$")) as $run
+                  | select(($run.run_id | tonumber) > 0 and ($run.run_attempt | tonumber) > 0)
+                  | {
+                      repository: $certificate.githubWorkflowRepository,
+                      workflow: $expected_workflow,
+                      run_id: ($run.run_id | tonumber),
+                      run_attempt: ($run.run_attempt | tonumber)
+                    }
+                ]
+                | if length != 1 then error("expected exactly one attested subject from the trusted publisher run") else .[0] end
+              ' "$attestation"
+          }
+
+          manifest_attestation="$temporary/manifest-attestation.json"
+          gh attestation verify "$manifest" \
+            --repo "$trusted_publisher_repository" \
+            --signer-workflow "$trusted_publisher_workflow" \
+            --source-ref "$trusted_publisher_ref" \
+            --source-digest "$product_revision" \
+            --format=json > "$manifest_attestation"
+          publisher_identity="$(attestation_identity "$manifest_attestation" manifest.json "$manifest_file_digest")"
+          readiness_attestation="$temporary/readiness-attestation.json"
+          gh attestation verify "$readiness" \
+            --repo "$trusted_publisher_repository" \
+            --signer-workflow "$trusted_publisher_workflow" \
+            --source-ref "$trusted_publisher_ref" \
+            --source-digest "$product_revision" \
+            --format=json > "$readiness_attestation"
+          readiness_publisher_identity="$(attestation_identity "$readiness_attestation" publication-readiness.json "$readiness_file_digest")"
+          [[ "$readiness_publisher_identity" == "$publisher_identity" ]] || {
+            echo "::error::publication readiness was not attested by the same trusted workflow run as manifest.json" >&2
+            exit 1
+          }
+          publisher_repository="$(jq -er '.repository' <<<"$publisher_identity")"
+          publisher_workflow="$(jq -er '.workflow' <<<"$publisher_identity")"
+          publisher_run_id="$(jq -er '.run_id | select(. > 0)' <<<"$publisher_identity")"
+          publisher_run_attempt="$(jq -er '.run_attempt | select(. > 0)' <<<"$publisher_identity")"
+          [[ "$publisher_repository" == "$trusted_publisher_repository" ]] || {
+            echo "::error::attestation selected publisher repository $publisher_repository" >&2
+            exit 1
+          }
+          [[ "$publisher_workflow" == "$trusted_publisher_workflow" ]] || {
+            echo "::error::attestation selected publisher workflow $publisher_workflow" >&2
+            exit 1
+          }
+          [[ "$publisher_run_id" =~ ^[1-9][0-9]*$ && "$publisher_run_attempt" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::attestation omitted a valid publisher run id/attempt" >&2
+            exit 1
+          }
+
+          jq -e --arg closure "$CLOSURE" --arg revision "$product_revision" '
+            .closure == $closure and
+            .revision == $revision and
+            .profile == "release" and
+            .features == "" and
+            ((.products | keys) == ["Linux-ARM64", "Linux-X64", "macOS-ARM64"])
+          ' "$manifest" >/dev/null
           git cat-file -e "$product_revision^{commit}" || { echo "::error::published product revision $product_revision is not in protected repository history" >&2; exit 1; }
           git merge-base --is-ancestor "$product_revision" "$MAIN_SHA" || {
             echo "::error::published product revision $product_revision is not an ancestor of protected main $MAIN_SHA" >&2
             exit 1
           }
-          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/$DEFAULT_BRANCH" --source-digest "$product_revision"
           for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
             asset="velnor-workflow-$platform"
-            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$temporary"
-            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/$DEFAULT_BRANCH" --source-digest "$product_revision"
+            gh release download "$tag" --repo "$trusted_publisher_repository" --pattern "$asset" --dir "$temporary"
             actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
-            expected="$(jq -er --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" 'select(.closure == $closure and .profile == "release" and .features == "" and .products[$platform].asset == $asset and (.products[$platform].binary | test("^[0-9a-f]{64}$"))) | .products[$platform].binary' "$temporary/manifest.json")"
+            asset_attestation="$temporary/$asset-attestation.json"
+            gh attestation verify "$temporary/$asset" \
+              --repo "$trusted_publisher_repository" \
+              --signer-workflow "$trusted_publisher_workflow" \
+              --source-ref "$trusted_publisher_ref" \
+              --source-digest "$product_revision" \
+              --format=json > "$asset_attestation"
+            asset_publisher_identity="$(attestation_identity "$asset_attestation" "$asset" "$actual")"
+            [[ "$asset_publisher_identity" == "$publisher_identity" ]] || {
+              echo "::error::$asset was not published by the same trusted workflow run as manifest.json" >&2
+              exit 1
+            }
+            expected="$(jq -er --arg closure "$CLOSURE" --arg revision "$product_revision" --arg platform "$platform" --arg asset "$asset" '
+              select(
+                .closure == $closure and
+                (.revision | test("^[0-9a-f]{40}$")) and
+                .profile == "release" and
+                .features == "" and
+                (.products[$platform].binary | test("^[0-9a-f]{64}$")) and
+                .products[$platform].asset == $asset and
+                (
+                  .products[$platform].build |
+                  .schema == "velnor-workflow.runtime-build-identity.v1" and
+                  .source_revision == $revision and
+                  .platform == $platform and
+                  (.toolchain | (type == "string" and length > 0)) and
+                  (.rustc | (type == "string" and length > 0)) and
+                  (.target | (type == "string" and length > 0)) and
+                  (.host | (type == "string" and length > 0)) and
+                  .profile == "release" and
+                  .features == "" and
+                  (.rustflags | type == "string") and
+                  (.cargo_encoded_rustflags | type == "string") and
+                  (.linker | type == "string") and
+                  (.cc | type == "string") and
+                  (.cflags | type == "string")
+                )
+              )
+              | .products[$platform].binary
+            ' "$manifest")"
             [[ "$actual" == "$expected" ]] || { echo "::error::published $platform product digest mismatch" >&2; exit 1; }
+            readiness_expected="$(jq -er --arg platform "$platform" '.products[] | select(.platform == $platform) | .digest' "$readiness")"
+            [[ "$readiness_expected" == "$expected" ]] || {
+              echo "::error::publication readiness digest for $platform does not match manifest.json" >&2
+              exit 1
+            }
           done
-          expiry="$(( $(date -u +%s) + 86400 ))"
-          jq -n --arg closure "$CLOSURE" --arg activation_revision "$REVISION" --arg product_revision "$product_revision" --arg expiry "$expiry" \
-            --arg linux_x64 "$(jq -er '.products["Linux-X64"].binary' "$temporary/manifest.json")" \
-            --arg linux_arm64 "$(jq -er '.products["Linux-ARM64"].binary' "$temporary/manifest.json")" \
-            --arg macos_arm64 "$(jq -er '.products["macOS-ARM64"].binary' "$temporary/manifest.json")" \
-            '{schema: "velnor-workflow.publication-readiness.v1", closure: $closure, activation_revision: $activation_revision, product_revision: $product_revision, products: [{platform: "Linux-X64", digest: $linux_x64, revoked: false, expires_at: ($expiry | tonumber)}, {platform: "Linux-ARM64", digest: $linux_arm64, revoked: false, expires_at: ($expiry | tonumber)}, {platform: "macOS-ARM64", digest: $macos_arm64, revoked: false, expires_at: ($expiry | tonumber)}]}' > "$RUNNER_TEMP/publication-readiness.json"
+          jq -e --arg schema 'velnor-workflow.publication-readiness.v2' \
+            --arg revision "$REVISION" --arg closure "$CLOSURE" \
+            --arg repository "$trusted_publisher_repository" \
+            --arg workflow "$trusted_publisher_workflow" \
+            --arg product_revision "$product_revision" \
+            --arg now "$(date -u +%s)" \
+            '.schema == $schema and
+             .activation_revision == $revision and
+             .publisher.repository == $repository and
+             .publisher.workflow == $workflow and
+             (.publisher.run_id | type == "number" and . > 0) and
+             (.publisher.run_attempt | type == "number" and . > 0) and
+             .product.closure == $closure and
+             .product.revision == $product_revision and
+             (.manifest_digest | test("^[0-9a-f]{64}$")) and
+             ((.products | map(.platform) | sort) == ["Linux-ARM64", "Linux-X64", "macOS-ARM64"]) and
+             (.products | length == 3) and
+             all(.products[]; .revoked == false and (.digest | test("^[0-9a-f]{64}$")) and (.expires_at | type == "number" and . > ($now | tonumber)))' \
+            "$readiness" >/dev/null
+          readiness_manifest_digest="$(jq -c 'del(.manifest_digest)' "$readiness" | tr -d '\n' | sha256sum | awk '{print $1}')"
+          readiness_declared_digest="$(jq -er '.manifest_digest' "$readiness")"
+          [[ "$readiness_manifest_digest" == "$readiness_declared_digest" ]] || {
+            echo "::error::publication readiness canonical digest mismatch" >&2
+            exit 1
+          }
+          cp "$readiness" "$RUNNER_TEMP/publication-readiness.json"
       - name: Promote on an activation branch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -127,7 +297,16 @@ jobs:
           fi
           git config user.name "velnor-workflow activation"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          velnor-workflow promote --rev "$REVISION" --publication-readiness "$RUNNER_TEMP/publication-readiness.json" --repo "$GITHUB_WORKSPACE" --generator-repo "$GITHUB_WORKSPACE"
+          velnor-workflow promote --rev "$REVISION" --publication-readiness "$RUNNER_TEMP/publication-readiness.json" --retire-runtime-bootstrap --repo "$GITHUB_WORKSPACE" --generator-repo "$GITHUB_WORKSPACE"
+          bootstrap_source=".github-gen/sources/workflows/runtime-products-bootstrap.yml"
+          [[ ! -e "$bootstrap_source" ]] || {
+            echo "::error::activation branch still contains the retired runtime bootstrap source $bootstrap_source" >&2
+            exit 1
+          }
+          if grep -Fq "$bootstrap_source" .github-gen/velnor-workflow.toml; then
+            echo "::error::activation branch still contains the retired runtime bootstrap static mapping" >&2
+            exit 1
+          fi
           test -s "$state" || { echo "::error::promotion did not leave generated ownership state" >&2; exit 1; }
           unexpected=""
           while IFS= read -r path; do

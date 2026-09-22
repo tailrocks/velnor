@@ -4,7 +4,8 @@
 //! Consumers never compile: the setup action and the Velnor policy provisioner
 //! download `velnor-workflow-<RUNNER_OS>-<RUNNER_ARCH>` plus `manifest.json`
 //! from the immutable release the closure names, then prove attestation,
-//! manifest, digest, and the binary's own `--closure` report. This module
+//! manifest, publication-readiness hand-off, digest, and the binary's own
+//! `--closure` report. This module
 //! renders the workflow that publishes those releases. The consumer contract
 //! is the specification: the tag scheme, the manifest shape, the attestation
 //! subject, and the acceptance filter below mirror the setup action byte for
@@ -22,9 +23,10 @@
 //! (unchanged closure, no rebuild); a `build` matrix compiles natively on one
 //! runner per consumer platform, proves each binary reports the tag closure,
 //! attests it, and uploads it; a `publish` job proves transport integrity,
-//! assembles the manifest, attests it, smoke-tests the exact consumer flow
-//! against those same bytes, and only then creates the release without ever
-//! overwriting — no consumer can see a product whose verification failed.
+//! assembles the manifest and the canonical publication-readiness hand-off,
+//! attests both, smoke-tests the exact consumer flow against those same bytes,
+//! and only then creates the release without ever overwriting — no consumer
+//! can see a product whose verification failed.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -214,7 +216,14 @@ pub(crate) struct RuntimeProductManifest {
 /// the consumer requested another. Both consumers bind the binary to the
 /// manifest instead, requiring its `--revision` report to equal the
 /// manifest's `revision`.
-const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == \"velnor-workflow.runtime-build-identity.v1\" and .source_revision == $revision and .platform == $platform and .toolchain != \"\" and .rustc != \"\" and .target != \"\" and .host != \"\" and .profile == \"release\" and .features == \"\" and (.rustflags | type == \"string\") and (.cargo_encoded_rustflags | type == \"string\") and (.linker | type == \"string\") and (.cc | type == \"string\") and (.cflags | type == \"string\"))";
+const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == \"velnor-workflow.runtime-build-identity.v1\" and .source_revision == $revision and .platform == $platform and (.toolchain | (type == \"string\" and length > 0)) and (.rustc | (type == \"string\" and length > 0)) and (.target | (type == \"string\" and length > 0)) and (.host | (type == \"string\" and length > 0)) and .profile == \"release\" and .features == \"\" and (.rustflags | type == \"string\") and (.cargo_encoded_rustflags | type == \"string\") and (.linker | type == \"string\") and (.cc | type == \"string\") and (.cflags | type == \"string\"))";
+
+/// The versioned hand-off consumed by `promote`. Its publisher identity is
+/// attested separately; this filter only proves the file is the exact shape
+/// the activation transaction accepts.
+const PUBLICATION_READINESS_SCHEMA: &str = "velnor-workflow.publication-readiness.v2";
+const PUBLICATION_READINESS_EXPIRY_SECONDS: u64 = 86_400;
+const READINESS_ACCEPT_FILTER: &str = ".schema == $schema and .activation_revision == $revision and .publisher.repository == $repository and .publisher.workflow == $workflow and (.publisher.run_id | type == \"number\" and . > 0) and (.publisher.run_attempt | type == \"number\" and . > 0) and .product.closure == $closure and .product.revision == $revision and ((.products | map(.platform) | sort) == [\"Linux-ARM64\", \"Linux-X64\", \"macOS-ARM64\"]) and (.products | length == 3) and all(.products[]; .revoked == false and (.digest | test(\"^[0-9a-f]{64}$\")) and (.expires_at | type == \"number\" and . > ($now | tonumber)))";
 
 /// The isolated Cargo home the producer steps build under, as a rendered
 /// step-level `env:` value. The `runner` context is unavailable in job-level
@@ -302,16 +311,19 @@ pub(crate) fn runtime_products_content(
     }
     let control_plane_runs_on = crate::s2::control_plane_runner(config)?;
     let gate = control_plane_gate(config);
-    // The closure job has no functional condition of its own: a local
-    // control plane gates it on trusted events, a hosted one renders no
-    // `if:` line at all rather than a vacuous `if: true`.
-    let closure_gate = gate
-        .is_local()
-        .then(|| gate.as_job_condition("true"))
-        .map(|condition| format!("    if: {condition}\n"))
-        .unwrap_or_default();
-    let build_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
-    let publish_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
+    let publisher_authority = format!(
+        "github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && github.ref_protected == true && github.event.sender.type == 'User'"
+    );
+    // Every publisher job admits only a protected default-branch ref and a
+    // human sender. Local control-plane routing conjoins its own trust
+    // predicate; hosted routing still keeps the explicit publisher authority.
+    let closure_gate = format!("    if: {}\n", gate.as_job_condition(&publisher_authority));
+    let build_gate = gate.as_job_condition(&format!(
+        "(needs.closure.outputs.exists != 'true') && ({publisher_authority})"
+    ));
+    let publish_gate = gate.as_job_condition(&format!(
+        "(needs.closure.outputs.exists != 'true') && ({publisher_authority})"
+    ));
     let repository = workflow_setup_action_repository();
     let owner = product_owner(repository);
     // The toolchain install is file-driven: the checkout's own
@@ -411,10 +423,12 @@ pub(crate) fn runtime_products_content(
 # `cargo build --locked --no-default-features --release`, proves the binary's
 # own `--closure` report equals the tag closure and its `--revision` report
 # equals the build commit, attests the asset, and uploads it; the publish
-# job proves transport integrity, assembles `manifest.json` (naming the
-# source revision it built from), attests it, smoke-tests the exact consumer
-# flow (attestation, manifest, digest, self-report) against those same bytes,
-# and only then creates the release. Verification precedes exposure: a
+# job proves transport integrity, assembles `manifest.json` and the
+# `publication-readiness.v2` hand-off (naming the exact source revision,
+# publisher run, typed build identities, platform closure, expiry, and
+# canonical digest), attests both, smoke-tests the exact consumer flow
+# (attestation, manifest, readiness, digest, self-report) against those same
+# bytes, and only then creates the release. Verification precedes exposure: a
 # product no consumer would accept never reaches a release.
 #
 # The workflow never overwrites: when the tag already exists the run skips,
@@ -492,9 +506,13 @@ jobs:
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
           release="$(gh release view "$TAG" --repo {repository} --json assets)"
-          jq -e '[.assets[].name] | index("manifest.json") != null' <<<"$release" >/dev/null
-          gh release download "$TAG" --repo {repository} --pattern manifest.json --dir "$temporary"
-          gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
+          jq -e '[.assets[].name] | index("manifest.json") != null and index("publication-readiness.json") != null' <<<"$release" >/dev/null
+          gh release download "$TAG" --repo {repository} --pattern manifest.json --pattern publication-readiness.json --dir "$temporary"
+          manifest_revision="$(jq -er '.revision | select(test("^[0-9a-f]{{40}}$"))' "$temporary/manifest.json")"
+          gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref} --source-digest "$manifest_revision"
+          gh attestation verify "$temporary/publication-readiness.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref} --source-digest "$manifest_revision"
+          jq -e --arg schema "{readiness_schema}" --arg closure "$CLOSURE" --arg revision "$manifest_revision" --arg repository "{repository}" --arg workflow "{repository}/.github/workflows/{workflow_file}" --arg now "$(date -u +%s)" \
+            '{readiness_filter}' "$temporary/publication-readiness.json" >/dev/null
           for platform in {platform_list}; do
             asset="velnor-workflow-$platform"
             checksum="$asset.sha256"
@@ -505,7 +523,7 @@ jobs:
               <<<"$release" >/dev/null
             gh release download "$TAG" --repo {repository} \
               --pattern "$asset" --pattern "$checksum" --dir "$temporary"
-            gh attestation verify "$temporary/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
+            gh attestation verify "$temporary/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref} --source-digest "$manifest_revision"
             jq -e --arg closure "$CLOSURE" --arg revision "$(jq -er '.revision' "$temporary/manifest.json")" --arg platform "$platform" --arg asset "$asset" \
               '{accept_filter}' "$temporary/manifest.json" >/dev/null
             expected="$(cat "$temporary/$checksum")"
@@ -626,6 +644,8 @@ jobs:
         env:
           CLOSURE: ${{{{ needs.closure.outputs.closure }}}}
           HEAD_SHA: ${{{{ needs.closure.outputs.head-sha }}}}
+          RUN_ID: ${{{{ github.run_id }}}}
+          RUN_ATTEMPT: ${{{{ github.run_attempt }}}}
         run: |
           set -euo pipefail
           # The build jobs proved each binary's identity on its native runner;
@@ -660,15 +680,42 @@ jobs:
           done
           manifest_revision="$(jq -er '.revision' dist/manifest.json)"
           [[ "$manifest_revision" == "$HEAD_SHA" ]] || {{ echo "::error::assembled manifest names revision $manifest_revision, expected $HEAD_SHA" >&2; exit 1; }}
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ && "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {{ echo "::error::publisher run identity is malformed" >&2; exit 1; }}
+          expiry="$(( $(date -u +%s) + {readiness_expiry_seconds} ))"
+          workflow="{repository}/.github/workflows/{workflow_file}"
+          jq -cn \
+            --arg schema "{readiness_schema}" \
+            --arg activation_revision "$HEAD_SHA" \
+            --arg workflow "$workflow" \
+            --arg repository "{repository}" \
+            --argjson run_id "$RUN_ID" \
+            --argjson run_attempt "$RUN_ATTEMPT" \
+            --arg closure "$CLOSURE" \
+            --arg revision "$HEAD_SHA" \
+            --arg linux_x64 "$(jq -er '.products[\"Linux-X64\"].binary' dist/manifest.json)" \
+            --arg linux_arm64 "$(jq -er '.products[\"Linux-ARM64\"].binary' dist/manifest.json)" \
+            --arg macos_arm64 "$(jq -er '.products[\"macOS-ARM64\"].binary' dist/manifest.json)" \
+            --arg expiry "$expiry" \
+            '{{schema: $schema, activation_revision: $activation_revision, publisher: {{workflow: $workflow, repository: $repository, run_id: $run_id, run_attempt: $run_attempt}}, product: {{closure: $closure, revision: $revision}}, products: [{{platform: "Linux-X64", digest: $linux_x64, revoked: false, expires_at: ($expiry | tonumber)}}, {{platform: "Linux-ARM64", digest: $linux_arm64, revoked: false, expires_at: ($expiry | tonumber)}}, {{platform: "macOS-ARM64", digest: $macos_arm64, revoked: false, expires_at: ($expiry | tonumber)}}]}}' \
+            | tr -d '\n' > "$RUNNER_TEMP/publication-readiness-canonical.json"
+          manifest_digest="$(sha256sum "$RUNNER_TEMP/publication-readiness-canonical.json" | awk '{{print $1}}')"
+          jq --arg manifest_digest "$manifest_digest" '. + {{manifest_digest: $manifest_digest}}' "$RUNNER_TEMP/publication-readiness-canonical.json" > dist/publication-readiness.json
+          jq -e --arg schema "{readiness_schema}" --arg closure "$CLOSURE" --arg revision "$HEAD_SHA" --arg repository "{repository}" --arg workflow "$workflow" --arg now "$(date -u +%s)" \
+            '{readiness_filter}' dist/publication-readiness.json >/dev/null
       - name: Attest release manifest
         uses: {attest}
         with:
           subject-path: dist/manifest.json
+      - name: Attest publication readiness
+        uses: {attest}
+        with:
+          subject-path: dist/publication-readiness.json
       - name: Smoke-test the release
         shell: bash
         env:
           GH_TOKEN: ${{{{ github.token }}}}
           CLOSURE: ${{{{ needs.closure.outputs.closure }}}}
+          HEAD_SHA: ${{{{ needs.closure.outputs.head-sha }}}}
         run: |
           set -euo pipefail
           # The exact consumer flow, against the local bytes the release will
@@ -677,13 +724,16 @@ jobs:
           # only after this flow passes, so a product no consumer would
           # accept fails the publish instead of shipping silently.
           asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
-          gh attestation verify "dist/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
-          gh attestation verify "dist/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
+          gh attestation verify "dist/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref} --source-digest "$HEAD_SHA"
+          gh attestation verify "dist/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref} --source-digest "$HEAD_SHA"
+          gh attestation verify "dist/publication-readiness.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref} --source-digest "$HEAD_SHA"
           jq -e --arg closure "$CLOSURE" --arg revision "$(jq -er '.revision' "dist/manifest.json")" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
             '{accept_filter}' "dist/manifest.json" >/dev/null
           actual="$(sha256sum "dist/$asset" | awk '{{print $1}}')"
           expected="$(jq -er --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" '.products[$platform].binary' "dist/manifest.json")"
           [[ "$actual" == "$expected" ]] || {{ echo "::error::smoke-test digest mismatch" >&2; exit 1; }}
+          jq -e --arg schema "{readiness_schema}" --arg closure "$CLOSURE" --arg revision "$HEAD_SHA" --arg repository "{repository}" --arg workflow "{repository}/.github/workflows/{workflow_file}" --arg now "$(date -u +%s)" \
+            '{readiness_filter}' dist/publication-readiness.json >/dev/null
           runtime="{runtime_home}/$CLOSURE"
           mkdir -p "$runtime/bin"
           cp "dist/$asset" "$runtime/bin/velnor-workflow"
@@ -713,7 +763,7 @@ jobs:
           fi
           gh release create "$TAG" --repo {repository} --target "$HEAD_SHA" --title "$TAG" \
             --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
-            {release_assets} dist/manifest.json
+            {release_assets} dist/manifest.json dist/publication-readiness.json
 "#,
         header = GENERATED_HEADER,
         example_tag = example_tag(),
@@ -741,6 +791,9 @@ jobs:
         platform_list = platform_list,
         release_assets = release_assets,
         accept_filter = MANIFEST_ACCEPT_FILTER,
+        readiness_schema = PUBLICATION_READINESS_SCHEMA,
+        readiness_expiry_seconds = PUBLICATION_READINESS_EXPIRY_SECONDS,
+        readiness_filter = READINESS_ACCEPT_FILTER,
         cargo_home = PRODUCER_CARGO_HOME_VALUE,
     )))
 }
@@ -1154,6 +1207,11 @@ mod tests {
             "push gates on the configured default branch: {content}"
         );
         assert!(content.contains("workflow_dispatch:"), "{content}");
+        assert!(
+            content.contains("github.ref_protected == true")
+                && content.contains("github.event.sender.type == 'User'"),
+            "all publisher jobs require a protected branch and human sender: {content}"
+        );
         for event in ["pull_request", "schedule:", "tags:", "merge_group"] {
             assert!(
                 !content.contains(event),
@@ -1365,9 +1423,35 @@ mod tests {
     fn manifest_shape_matches_the_consumer_contract() {
         let content = owner_content(&[]);
         let action = setup_action_source();
+        for field in [
+            ".products[$platform].build",
+            ".schema == \"velnor-workflow.runtime-build-identity.v1\"",
+            ".source_revision == $revision",
+            ".platform == $platform",
+            ".toolchain",
+            ".rustc",
+            ".target",
+            ".host",
+            ".profile",
+            ".features",
+            ".rustflags",
+            ".cargo_encoded_rustflags",
+            ".linker",
+            ".cc",
+            ".cflags",
+        ] {
+            assert!(
+                MANIFEST_ACCEPT_FILTER.contains(field),
+                "the producer filter requires typed build field {field}"
+            );
+            assert!(
+                action.contains(field),
+                "the setup action filter requires typed build field {field}"
+            );
+        }
         assert!(
-            action.contains(MANIFEST_ACCEPT_FILTER),
-            "the acceptance filter is the setup action's own"
+            action.contains(".revision == $revision"),
+            "the setup action binds the manifest revision to the requested source revision"
         );
         assert_eq!(
             content.matches(MANIFEST_ACCEPT_FILTER).count(),
@@ -1430,10 +1514,28 @@ mod tests {
         // The Velnor policy provisioner is the second consumer: it must accept
         // the same manifest and the same attestation the setup action does.
         let velnor = crate::s2::workflow_pinned_policy_runtime_local(FIXTURE_REVISION, "checkout");
-        assert!(
-            velnor.contains(MANIFEST_ACCEPT_FILTER),
-            "the Velnor consumer evaluates the same filter"
-        );
+        for field in [
+            ".products[$platform].build",
+            ".schema == \"velnor-workflow.runtime-build-identity.v1\"",
+            ".source_revision == $revision",
+            ".platform == $platform",
+            ".toolchain",
+            ".rustc",
+            ".target",
+            ".host",
+            ".profile",
+            ".features",
+            ".rustflags",
+            ".cargo_encoded_rustflags",
+            ".linker",
+            ".cc",
+            ".cflags",
+        ] {
+            assert!(
+                velnor.contains(field),
+                "the Velnor consumer requires typed build field {field}"
+            );
+        }
         let repository = workflow_setup_action_repository();
         assert!(
             velnor.contains(&format!(
@@ -1457,8 +1559,8 @@ mod tests {
         let repository = workflow_setup_action_repository();
         assert_eq!(
             content.matches(ActionPin::Attest.reference()).count(),
-            2,
-            "the pinned attest action covers the asset and the manifest: {content}"
+            3,
+            "the pinned attest action covers the asset, manifest, and readiness: {content}"
         );
         assert!(
             content.contains("subject-path: ${{ steps.prove.outputs.asset }}"),
@@ -1477,6 +1579,10 @@ mod tests {
                 "the smoke test verifies {flag}: {content}"
             );
         }
+        assert!(
+            content.contains("subject-path: dist/publication-readiness.json"),
+            "the canonical readiness hand-off is attested: {content}"
+        );
         let action = setup_action_source();
         for flag in [&signer, &owner_flag] {
             assert!(
@@ -1525,8 +1631,40 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches(signer).count(),
-            4,
+            6,
             "existing-product verification and the producer smoke test pin every subject: {content}"
+        );
+    }
+
+    #[test]
+    fn publication_readiness_is_canonical_and_complete() {
+        let content = owner_content(&[]);
+        for marker in [
+            "velnor-workflow.publication-readiness.v2",
+            "RUN_ID: ${{ github.run_id }}",
+            "RUN_ATTEMPT: ${{ github.run_attempt }}",
+            "--source-digest \"$HEAD_SHA\"",
+            "publication-readiness-canonical.json",
+            "manifest_digest",
+            "expires_at",
+            "dist/publication-readiness.json",
+        ] {
+            assert!(
+                content.contains(marker),
+                "publisher readiness includes {marker}: {content}"
+            );
+        }
+        assert!(
+            content.contains("[\"Linux-ARM64\", \"Linux-X64\", \"macOS-ARM64\"]"),
+            "readiness requires the exact supported platform set: {content}"
+        );
+        assert!(
+            content.contains("dist/manifest.json dist/publication-readiness.json"),
+            "the immutable release carries readiness beside the manifest: {content}"
+        );
+        assert!(
+            content.matches("publication-readiness.json").count() >= 8,
+            "every readiness use is explicit and deterministic: {content}"
         );
     }
 
@@ -1643,7 +1781,7 @@ mod tests {
         );
         assert_eq!(
             content
-                .matches("if: needs.closure.outputs.exists != 'true'")
+                .matches("needs.closure.outputs.exists != 'true'")
                 .count(),
             2,
             "build and publish skip when the tag exists: {content}"
@@ -1707,7 +1845,7 @@ mod tests {
             pinned += 1;
         }
         assert_eq!(
-            pinned, 8,
+            pinned, 9,
             "every step the producer needs, pinned: {content}"
         );
         assert!(
@@ -1983,7 +2121,7 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches("--source-ref refs/heads/main").count(),
-            4,
+            6,
             "existing-product verification and the smoke test pin every subject: {content}"
         );
         let mut config = owner_config(&[]);
@@ -1997,7 +2135,7 @@ mod tests {
         );
         assert_eq!(
             content.matches("--source-ref refs/heads/trunk").count(),
-            4,
+            6,
             "existing-product verification and the smoke-test pin follow the configured default branch: {content}"
         );
     }
@@ -2122,7 +2260,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "c29cf0c981402acbb282ef1c8dae6eaf62ad26a7093862f563d21bd8d7439cb9";
+        const PINNED: &str = "b349823552238eb58313073deaf810ea1f1fe01ca820385b6aea5945feb29188";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
@@ -2145,8 +2283,8 @@ mod tests {
             "the owner renders the producer",
         );
         assert!(
-            content.contains("    if: (true) && ("),
-            "the closure job gains its only `if:` from the gate: {content}"
+            content.contains("    if: (github.ref == format('refs/heads/{0}'"),
+            "the closure job gains the protected-human gate: {content}"
         );
         assert_eq!(
             content

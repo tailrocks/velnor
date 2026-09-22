@@ -22,6 +22,31 @@ fn read(path: &str) -> String {
         .unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
+/// Return the indented YAML block below a top-level mapping key.
+///
+/// The contract crate intentionally has no YAML parser dependency. These
+/// workflows are generated from a fixed schema, so checking the indentation
+/// boundaries keeps the assertions about event and permission ownership
+/// structural without treating a substring elsewhere in the file as proof.
+fn top_level_block<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
+    let header = format!("{key}:");
+    let mut lines = workflow.lines();
+    lines
+        .by_ref()
+        .find(|line| *line == header)
+        .unwrap_or_else(|| panic!("top-level `{key}:` is missing"));
+    lines
+        .take_while(|line| line.is_empty() || line.starts_with(' ') || line.starts_with('\t'))
+        .collect()
+}
+
+fn top_level_block_text(workflow: &str, key: &str) -> String {
+    top_level_block(workflow, key)
+        .join("\n")
+        .trim_end()
+        .to_owned()
+}
+
 fn generated_files() -> Vec<(String, String)> {
     let workflows = repository_root().join(".github/workflows");
     let mut files: Vec<(String, String)> = fs::read_dir(&workflows)
@@ -175,7 +200,9 @@ fn the_setup_action_is_owned_verbatim() {
     );
     assert!(installed.contains("name: Set up Velnor workflow runtime"));
     assert_eq!(
-        source.matches("--source-digest \"$manifest_revision\"").count(),
+        source
+            .matches("--source-digest \"$manifest_revision\"")
+            .count(),
         2,
         "manifest and asset attestations must bind the authenticated product revision"
     );
@@ -183,39 +210,108 @@ fn the_setup_action_is_owned_verbatim() {
 
 /// Activation is a protected-main operation. Its requested renderer and
 /// published product must be in the dispatched main ancestry, the attestation
-/// must name the exact product source digest, and a reused branch must be
-/// current and contain only generated promotion output.
+/// must bind one publisher workflow/run/attempt to the canonical v2 readiness
+/// manifest and every build identity, and a reused branch must be current and
+/// contain only generated promotion output.
 #[test]
 fn activation_binds_provenance_and_rejects_stale_branch_content() {
     let source = read(".github-gen/sources/workflows/activate-renderer.yml");
     assert!(source.contains("ref: ${{ github.sha }}"), "{source}");
     assert!(
+        source.contains("github.ref_protected == true")
+            && source.contains("github.event.sender.type == 'User'"),
+        "activation must admit only protected human dispatches: {source}"
+    );
+    assert!(
         source.contains("git merge-base --is-ancestor \"$REVISION\" \"$MAIN_SHA\""),
         "renderer dispatch must be bound to protected-main ancestry: {source}"
     );
-    assert!(
-        source.contains("git merge-base --is-ancestor \"$product_revision\" \"$MAIN_SHA\""),
-        "published product provenance must be in protected-main ancestry: {source}"
-    );
+    for identity in [
+        "trusted_publisher_workflow",
+        "publisher_run_id",
+        "publisher_run_attempt",
+        "runInvocationURI",
+    ] {
+        assert!(
+            source.contains(identity),
+            "activation must bind the attestation to publisher {identity}: {source}"
+        );
+    }
     assert_eq!(
         source.matches("--source-digest \"$product_revision\"").count(),
-        2,
-        "the manifest and all supported assets must bind attestations to one exact source digest"
+        3,
+        "the manifest, readiness, and all supported assets must bind attestations to one exact product source digest"
+    );
+    for claim in [
+        "velnor-workflow.publication-readiness.v2",
+        "readiness=\"$temporary/publication-readiness.json\"",
+        "publication-readiness.json",
+        "readiness_publisher_identity",
+        "same trusted workflow run as manifest.json",
+        "manifest_digest",
+        "velnor-workflow.runtime-build-identity.v1",
+        ".products[$platform].build",
+        "publication readiness digest for $platform does not match manifest.json",
+        "readiness_manifest_digest",
+        "readiness_declared_digest",
+        ".source_revision == $revision",
+        ".platform == $platform",
+        ".toolchain",
+        ".rustc",
+        ".target",
+        ".host",
+        ".profile == \"release\"",
+        ".features == \"\"",
+        ".rustflags",
+        ".cargo_encoded_rustflags",
+        ".linker",
+        ".cc",
+        ".cflags",
+    ] {
+        assert!(
+            source.contains(claim),
+            "activation must validate the canonical publication claim {claim}: {source}"
+        );
+    }
+    for retired in ["canonical_claims=", "publication_manifest_digest", "revoked:false"] {
+        assert!(
+            !source.contains(retired),
+            "activation must consume publisher readiness instead of fabricating {retired}: {source}"
+        );
+    }
+    assert!(
+        !source.contains("velnor-workflow.publication-readiness.v1"),
+        "activation must not emit the retired readiness schema: {source}"
     );
     assert!(
-        source.contains(r#"protected_tip="$(git ls-remote --refs origin "refs/heads/$DEFAULT_BRANCH""#)
-            && source.contains("protected $DEFAULT_BRANCH advanced"),
+        source.contains(
+            r#"protected_tip="$(git ls-remote --refs origin "refs/heads/$DEFAULT_BRANCH""#
+        ) && source.contains("protected $DEFAULT_BRANCH advanced"),
         "activation must reject a main branch that moved while publication was checked: {source}"
     );
     assert!(
         source.contains(r#"parent="$(git rev-parse "$branch_tip^")"#)
-            && source.contains("activation branch $branch is stale or contains more than one activation commit"),
+            && source.contains(
+                "activation branch $branch is stale or contains more than one activation commit"
+            ),
         "activation must reject stale or multiply-parented reuse branches: {source}"
     );
     assert!(
         source.contains(r#"git diff --name-only "$MAIN_SHA" HEAD"#)
             && source.contains(r#"grep -Fq "^$path	" "$state""#),
         "activation branch content must be limited to generated ownership output: {source}"
+    );
+}
+
+#[test]
+fn runtime_product_bootstrap_admits_only_protected_human_main_dispatch() {
+    let source = read(".github-gen/sources/workflows/runtime-products-bootstrap.yml");
+    assert!(
+        source.contains(
+            "github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main'"
+        ) && source.contains("github.ref_protected == true")
+            && source.contains("github.event.sender.type == 'User'"),
+        "bootstrap publisher must reject bot, unprotected, and non-main dispatches before scheduling: {source}"
     );
 }
 

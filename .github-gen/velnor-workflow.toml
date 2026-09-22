@@ -297,6 +297,10 @@ source = ".github-gen/sources/workflows/activate-renderer.yml"
 file = ".github/workflows/candidate-qualification.yml"
 source = ".github-gen/sources/workflows/candidate-qualification.yml"
 
+[[static_files]]
+file = ".github/workflows/ci-runtime-products.yml"
+source = ".github-gen/sources/workflows/runtime-products-bootstrap.yml"
+
 [[declare]]
 primitive = "release"
 file = "release.yml"

@@ -12,10 +12,14 @@
     reason = "a test whose setup fails should panic loudly"
 )]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -90,6 +94,39 @@ fn promotable_tree(root: &Path, old_pin: &str) -> PathBuf {
     repo
 }
 
+fn bridge_tree(root: &Path, old_pin: &str, malformed: bool) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures-s2/promote-trust");
+    let repo = root.join("bridge-consumer");
+    copy_tree(&source, &repo);
+    let config = repo.join(".github-gen/velnor-workflow.toml");
+    let mut content = fs::read_to_string(&config).unwrap();
+    content = content.replace(
+        "[generator]\n",
+        &format!("[generator]\nrevision = \"{old_pin}\"\n"),
+    );
+    if malformed {
+        content = content.replace("[workflow]\n", "[workflow]\nunknown = true\n");
+    }
+    content.push_str(
+        "\n[[static_files]]\nfile = \".github/workflows/ci-runtime-products.yml\"\nsource = \".github-gen/sources/workflows/runtime-products-bootstrap.yml\"\n",
+    );
+    fs::write(&config, content).unwrap();
+    let bootstrap = repo.join(".github-gen/sources/workflows/runtime-products-bootstrap.yml");
+    fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+    fs::copy(
+        workspace_root().join(".github-gen/sources/workflows/runtime-products-bootstrap.yml"),
+        bootstrap,
+    )
+    .unwrap();
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    git(&repo, &["config", "user.email", "promote@test"]);
+    git(&repo, &["config", "user.name", "promote"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "--message", "consumer base"]);
+    repo
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -110,32 +147,101 @@ fn own_closure() -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
-fn readiness(root: &Path, closure: &str, revision: &str) -> PathBuf {
+#[derive(Clone, Serialize)]
+struct Publisher {
+    workflow: String,
+    repository: String,
+    run_id: u64,
+    run_attempt: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct ProductIdentity {
+    closure: String,
+    revision: String,
+}
+
+#[derive(Clone, Serialize)]
+struct Product {
+    platform: String,
+    digest: String,
+    revoked: bool,
+    expires_at: u64,
+}
+
+#[derive(Serialize)]
+struct CanonicalClaims {
+    schema: String,
+    activation_revision: String,
+    publisher: Publisher,
+    product: ProductIdentity,
+    products: Vec<Product>,
+}
+
+#[derive(Serialize)]
+struct ReadinessManifest {
+    schema: String,
+    activation_revision: String,
+    publisher: Publisher,
+    product: ProductIdentity,
+    manifest_digest: String,
+    products: Vec<Product>,
+}
+
+fn readiness(root: &Path, product_closure: &str, activation_revision: &str) -> PathBuf {
     let path = root.join("publication-readiness.json");
     let products = ["Linux-X64", "Linux-ARM64", "macOS-ARM64"]
         .into_iter()
-        .map(|platform| {
-            serde_json::json!({
-                "platform": platform,
-                "digest": "d".repeat(64),
-                "revoked": false,
-                "expires_at": 4_102_444_800_u64,
-            })
+        .map(|platform| Product {
+            platform: platform.to_owned(),
+            digest: "d".repeat(64),
+            revoked: false,
+            expires_at: 4_102_444_800_u64,
         })
         .collect::<Vec<_>>();
+    let publisher = Publisher {
+        workflow: "tailrocks/velnor/.github/workflows/ci-runtime-products.yml".to_owned(),
+        repository: "tailrocks/velnor".to_owned(),
+        run_id: 42,
+        run_attempt: 1,
+    };
+    let product = ProductIdentity {
+        closure: product_closure.to_owned(),
+        revision: "b".repeat(40),
+    };
+    let canonical = CanonicalClaims {
+        schema: "velnor-workflow.publication-readiness.v2".to_owned(),
+        activation_revision: activation_revision.to_owned(),
+        publisher: publisher.clone(),
+        product: product.clone(),
+        products: products.clone(),
+    };
+    let digest =
+        Sha256::digest(&serde_json::to_vec(&canonical).expect("canonical claims serialize"));
+    let mut manifest_digest = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(manifest_digest, "{byte:02x}");
+    }
+    let manifest = ReadinessManifest {
+        schema: "velnor-workflow.publication-readiness.v2".to_owned(),
+        activation_revision: activation_revision.to_owned(),
+        publisher,
+        product,
+        manifest_digest,
+        products,
+    };
     fs::write(
         &path,
-        serde_json::to_vec(&serde_json::json!({
-            "schema": "velnor-workflow.publication-readiness.v1",
-            "closure": closure,
-            "activation_revision": revision,
-            "product_revision": "b".repeat(40),
-            "products": products,
-        }))
-        .unwrap(),
+        serde_json::to_vec(&manifest).expect("readiness manifest serialize"),
     )
     .unwrap();
     path
+}
+
+fn content_digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 const OLD_PIN: &str = "0000000000000000000000000000000000000000";
@@ -527,6 +633,181 @@ fn promote_dry_run_verifies_without_writing() {
         !repo.join(".github").exists(),
         "rendered directories are pruned"
     );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn promote_restores_stale_output_after_post_write_verification_failure() {
+    let root = temporary_root("stale-output-rollback");
+    let repo = promotable_tree(&root, OLD_PIN);
+    let prior = binary()
+        .args([
+            "--plain",
+            "--default-branch",
+            "main",
+            "--runners",
+            "both",
+            repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        prior.status.success(),
+        "prior render succeeds: {}",
+        String::from_utf8_lossy(&prior.stderr)
+    );
+    let stale_path = repo.join(".github/workflows/retired-stale.yml");
+    let stale_bytes = b"# Generated by the prior renderer.\nretired\n";
+    fs::write(&stale_path, stale_bytes).unwrap();
+    let state_path = repo.join(".github/ci/.github-actions-generator-state");
+    let mut state = fs::read_to_string(&state_path).unwrap();
+    state.push_str(&format!(
+        ".github/workflows/retired-stale.yml\t{:016x}\n",
+        content_digest(stale_bytes)
+    ));
+    fs::write(&state_path, &state).unwrap();
+    git(&repo, &["add", "-A"]);
+    git(
+        &repo,
+        &["commit", "--quiet", "--message", "prior stale output"],
+    );
+    let before_state = fs::read(&state_path).unwrap();
+    let revision = own_revision();
+    let readiness = readiness(&root, &own_closure(), &revision);
+
+    let outcome = binary()
+        .env("VELNOR_TEST_PROMOTE_FAIL_AFTER_WRITE", "1")
+        .args([
+            "promote",
+            "--rev",
+            &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--generator-repo",
+            workspace_root().to_str().unwrap(),
+            "--default-branch",
+            "main",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(
+        !outcome.status.success(),
+        "injected verification failure fails"
+    );
+    assert!(
+        stderr.contains("injected post-write verification failure"),
+        "failure is injected after the writer: {stderr}"
+    );
+    assert_eq!(fs::read(&stale_path).unwrap(), stale_bytes);
+    assert_eq!(fs::read(&state_path).unwrap(), before_state);
+    assert!(
+        git(&repo, &["status", "--porcelain"]).is_empty(),
+        "the complete committed tree is restored"
+    );
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]).trim(), "2");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn promote_refuses_partial_runtime_bootstrap_state_before_mutation() {
+    for missing in ["mapping", "source"] {
+        let root = temporary_root(&format!("partial-{missing}"));
+        let repo = bridge_tree(&root, OLD_PIN, false);
+        let source = repo.join(".github-gen/sources/workflows/runtime-products-bootstrap.yml");
+        let config_path = repo.join(".github-gen/velnor-workflow.toml");
+        if missing == "source" {
+            fs::remove_file(&source).unwrap();
+        } else {
+            let config = fs::read_to_string(&config_path).unwrap();
+            let mapping = "\n[[static_files]]\nfile = \".github/workflows/ci-runtime-products.yml\"\nsource = \".github-gen/sources/workflows/runtime-products-bootstrap.yml\"\n";
+            fs::write(&config_path, config.replace(mapping, "")).unwrap();
+        }
+        git(&repo, &["add", "-A"]);
+        git(
+            &repo,
+            &["commit", "--quiet", "--message", "partial bridge state"],
+        );
+        let before_config = fs::read_to_string(&config_path).unwrap();
+        let before_source = fs::read(&source).ok();
+        let revision = own_revision();
+        let readiness = readiness(&root, &own_closure(), &revision);
+        let outcome = binary()
+            .args([
+                "promote",
+                "--retire-runtime-bootstrap",
+                "--rev",
+                &revision,
+                "--publication-readiness",
+                readiness.to_str().unwrap(),
+                "--repo",
+                repo.to_str().unwrap(),
+                "--generator-repo",
+                workspace_root().to_str().unwrap(),
+                "--default-branch",
+                "main",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&outcome.stderr);
+        assert!(
+            !outcome.status.success(),
+            "partial {missing} state is refused"
+        );
+        assert!(
+            stderr.contains("partial retirement"),
+            "the refusal names the partial bridge state: {stderr}"
+        );
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), before_config);
+        assert_eq!(fs::read(&source).ok(), before_source);
+        assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]).trim(), "2");
+        assert!(git(&repo, &["status", "--porcelain"]).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[test]
+fn promote_rolls_back_runtime_bootstrap_retirement_when_final_render_fails() {
+    let root = temporary_root("bridge-rollback");
+    let repo = bridge_tree(&root, OLD_PIN, true);
+    let config_path = repo.join(".github-gen/velnor-workflow.toml");
+    let source_path = repo.join(".github-gen/sources/workflows/runtime-products-bootstrap.yml");
+    let before_config = fs::read_to_string(&config_path).unwrap();
+    let before_source = fs::read(&source_path).unwrap();
+    let revision = own_revision();
+    let readiness = readiness(&root, &own_closure(), &revision);
+    let outcome = binary()
+        .args([
+            "promote",
+            "--retire-runtime-bootstrap",
+            "--rev",
+            &revision,
+            "--publication-readiness",
+            readiness.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--generator-repo",
+            workspace_root().to_str().unwrap(),
+            "--default-branch",
+            "main",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(
+        !outcome.status.success(),
+        "the malformed final render is refused"
+    );
+    assert!(
+        stderr.contains("unknown field") || stderr.contains("unknown"),
+        "the render failure is reported: {stderr}"
+    );
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), before_config);
+    assert_eq!(fs::read(&source_path).unwrap(), before_source);
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert!(git(&repo, &["status", "--porcelain"]).is_empty());
     let _ = fs::remove_dir_all(&root);
 }
 

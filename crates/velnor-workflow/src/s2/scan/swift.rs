@@ -2229,7 +2229,7 @@ mod tests {
         must_ok(
             super::super::scan_shape(
                 root,
-                &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
+                &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::GithubHosted]),
                 "main",
                 &[],
                 &crate::s2::scan::rust::AppleNativePolicy::default(),
