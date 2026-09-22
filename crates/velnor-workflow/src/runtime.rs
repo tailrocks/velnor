@@ -564,7 +564,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, swift-format, swift-lint, xcodegen-generate, swift-build, swift-run, swift-test, or check"
                         ))
                     })
                 })
@@ -6605,7 +6605,7 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"),
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, swift-format, swift-lint, xcodegen-generate, swift-build, swift-run, swift-test, or check"),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,
