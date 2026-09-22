@@ -22,7 +22,9 @@ use std::path::{Component, Path};
 use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
-use crate::s2::provider::{parse_provider_set, parse_selectors, ProviderId, ProviderSelector};
+use crate::s2::provider::{
+    parse_provider_set, parse_selectors, ProviderId, ProviderMode, ProviderSelector,
+};
 use crate::s2::{content_digest_bytes, GeneratorError};
 
 /// Location of the repository-owned generation config, relative to the
@@ -214,21 +216,22 @@ struct GeneratorSection {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkflowSection {
+    /// The local host lane for automatic events. The generated universe stays
+    /// all three canonical providers so manual dispatch remains complete;
+    /// hosted is always automatic for independent recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_mode: Option<ProviderMode>,
     /// The provider universe for this repo. Non-empty. Absent keeps the
     /// generator default (all three providers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     providers: Option<Vec<String>>,
-    /// Providers that run on `pull_request`/`push`/`schedule`. Under the
-    /// visibility-based runner policy this must equal the visibility
-    /// singleton; absent keeps the universe. Pure event-to-provider routing,
-    /// never trust gating.
+    /// Providers that run on `pull_request`/`push`/`schedule`. A typed
+    /// `provider_mode` supplies this set; declaring both is ambiguous and is
+    /// rejected. Pure event-to-provider routing, never trust gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_providers: Option<Vec<String>>,
-    // NOTE: no `default_dispatch_providers`. Manual dispatches select the
-    // static universe; a dispatch-side provider default would be an
-    // alternate-provider input, which the visibility policy forbids. The
-    // runtime contract still carries the key (rendered from the universe)
-    // so pinned runtimes keep parsing it.
+    // There is no `default_dispatch_providers`: dispatches use the complete
+    // static provider universe.
     /// Per-provider `runs-on` routing, keyed by provider ID. The only place
     /// labels live; local providers need disjoint dedicated selectors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1766,14 +1769,15 @@ impl RepoGenerationConfig {
         self.workflow.providers.as_deref()
     }
 
+    /// The typed automatic host mode, if declared.
+    pub(crate) fn provider_mode(&self) -> Option<ProviderMode> {
+        self.workflow.provider_mode
+    }
+
     /// The declared automatic providers, if any.
     pub(crate) fn automatic_providers(&self) -> Option<&[String]> {
         self.workflow.automatic_providers.as_deref()
     }
-
-    // NOTE: no `default_dispatch_providers` accessor. The workflow
-    // `providers:` dispatch input is removed; dispatches select the static
-    // universe.
 
     /// The declared per-provider selectors, keyed by provider id string.
     pub(crate) fn selectors(&self) -> &BTreeMap<String, ProviderSelector> {
@@ -2142,16 +2146,38 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             "[workflow] default_branch renders into trigger branches and `github.ref` guards; `{branch}` is outside the branch alphabet"
         )));
     }
-    let universe = workflow
-        .providers
-        .as_deref()
-        .map(|providers| parse_provider_set(providers, "[workflow] providers"))
-        .transpose()?
-        .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
+    if workflow.provider_mode.is_some() && workflow.providers.is_some() {
+        return Err(GeneratorError::usage(
+            "[workflow] provider_mode and providers are mutually exclusive; use one typed provider selection",
+        ));
+    }
+    if workflow.provider_mode.is_some() && workflow.automatic_providers.is_some() {
+        return Err(GeneratorError::usage(
+            "[workflow] provider_mode and automatic_providers are mutually exclusive; the mode defines automatic providers",
+        ));
+    }
+    let universe = if workflow.provider_mode.is_some() {
+        ProviderId::ALL.into_iter().collect()
+    } else {
+        workflow
+            .providers
+            .as_deref()
+            .map(|providers| parse_provider_set(providers, "[workflow] providers"))
+            .transpose()?
+            .unwrap_or_else(|| ProviderId::ALL.into_iter().collect())
+    };
     if workflow.providers.is_some() {
         require_non_empty(&universe, "[workflow] providers")?;
     }
-    if let Some(automatic) = workflow.automatic_providers.as_deref() {
+    if let Some(mode) = workflow.provider_mode {
+        let automatic = mode.automatic_providers();
+        require_subset(
+            &automatic,
+            &universe,
+            "[workflow] provider_mode",
+            "[workflow] providers",
+        )?;
+    } else if let Some(automatic) = workflow.automatic_providers.as_deref() {
         let automatic = parse_provider_set(automatic, "[workflow] automatic_providers")?;
         require_subset(
             &automatic,

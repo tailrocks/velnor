@@ -76,7 +76,9 @@ impl Fixture {
             .current_dir(&self.root)
             .env("EVENT_NAME", "pull_request")
             .env("BASE_SHA", base)
+            .env("SOURCE_SHA", head)
             .env("HEAD_SHA", head)
+            .env("VELNOR_EVENT_TRUSTED", "false")
             .env("GITHUB_OUTPUT", github_output)
             .args(["plan", "--config", ".github/ci/project.toml"]);
         command
@@ -88,7 +90,9 @@ impl Fixture {
             .current_dir(&self.root)
             .env("EVENT_NAME", "pull_request")
             .env("BASE_SHA", base)
+            .env("SOURCE_SHA", head)
             .env("HEAD_SHA", head)
+            .env("VELNOR_EVENT_TRUSTED", "false")
             .env("VELNOR_SELECTION_FILE", selection)
             .args([
                 "run",
@@ -267,7 +271,6 @@ verified = true
 default_branch = "main"
 providers = ["github-hosted"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted"]
 
 [[unit]]
 id = "selected"
