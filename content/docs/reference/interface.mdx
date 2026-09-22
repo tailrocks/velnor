@@ -153,7 +153,7 @@ does not accept a command-line credential argument. Relevant options are:
 | `--dry-run` | Validate registration inputs without writing credentials. |
 | `--config-dir` | Store runner identity/configuration in this directory. |
 
-Labels are sorted and deduplicated. macOS labels are rejected; execution is Linux-only. The target MVP label additions are `hetzner-sentry-ci`, `ubuntu-24.04`, `ubuntu-latest`, and `velnor-target-mvp`.
+Labels are sorted and deduplicated. macOS labels are rejected; execution is Linux-only. The target MVP label additions are `hetzner-sentry-ci`, `ubuntu-latest`, and `velnor-target-mvp`; `ubuntu-24.04` is reserved for GitHub-hosted workflow selection and rejected on Velnor self-hosted runners.
 
 Other current setup commands are `auth status`, `auth check`, `context list/current/use/set/delete`, `config view/validate/diff/sources`, `instance init/install/apply/delete`, `adapter list/describe/check`, `workflow check`, `remove`, `status`, and `preflight`. `instance` and `workflow check` are local planning/input checks, not proof of a remote mutation or complete workflow compatibility.
 

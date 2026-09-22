@@ -37,6 +37,7 @@ use super::{GeneratorError, UnitKind, ValidationPhase};
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+const REVISION_FALLBACK_REASON: &str = "identical or unresolvable revisions; fell back to full";
 
 #[expect(
     dead_code,
@@ -1284,17 +1285,28 @@ fn select_command(
             "no affected base; fell back to full",
         ));
     }
+    print_selection(&select_affected_for_revisions(root, &watched, base, head)?)
+}
+
+fn select_affected_for_revisions(
+    root: &Path,
+    watched: &[crate::s2::reuse::WatchedUnit],
+    base: &str,
+    head: &str,
+) -> Result<crate::s2::reuse::AffectedSelection, GeneratorError> {
+    if git_revisions_same(root, base, head)? {
+        return Ok(crate::s2::reuse::fallback_selection(
+            watched,
+            REVISION_FALLBACK_REASON,
+        ));
+    }
     let Some(changes) = changed_paths_for_diff(root, base, head)? else {
-        return print_selection(&crate::s2::reuse::fallback_selection(
-            &watched,
+        return Ok(crate::s2::reuse::fallback_selection(
+            watched,
             "git diff unavailable or unparseable; fell back to full",
         ));
     };
-    print_selection(&crate::s2::reuse::select_affected(
-        &watched,
-        &changes,
-        crate::s2::reuse::FULL_SELECTION_PREFIXES,
-    )?)
+    crate::s2::reuse::select_affected(watched, &changes, crate::s2::reuse::FULL_SELECTION_PREFIXES)
 }
 
 fn print_selection(selection: &crate::s2::reuse::AffectedSelection) -> Result<(), GeneratorError> {
@@ -2888,6 +2900,10 @@ fn selection_for_diff_with_closed_excluded<'a>(
         return full_selection(config, Some("no affected base; fell back to full"))
             .map(|selection| (selection, BTreeSet::new()));
     }
+    if git_revisions_same(root, base, head)? {
+        return full_selection(config, Some(REVISION_FALLBACK_REASON))
+            .map(|selection| (selection, BTreeSet::new()));
+    }
     let Some(changes) = changed_paths_for_diff(root, base, head)? else {
         return full_selection(
             config,
@@ -2982,6 +2998,35 @@ fn selection_for_diff_with_closed_excluded<'a>(
         },
         closed_excluded,
     ))
+}
+
+fn git_revisions_same(root: &Path, base: &str, head: &str) -> Result<bool, GeneratorError> {
+    let (Some(base), Some(head)) = (
+        resolve_git_revision(root, base)?,
+        resolve_git_revision(root, head)?,
+    ) else {
+        return Ok(true);
+    };
+    Ok(base == head)
+}
+
+fn resolve_git_revision(root: &Path, revision: &str) -> Result<Option<String>, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify"])
+        .arg(format!("{revision}^{{commit}}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("resolve git revision: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 /// Fold one non-contract changed file into the affected set: owned units join
@@ -7125,8 +7170,15 @@ workspace_check = true
             );
             std::fs::remove_dir_all(root)?;
         }
-        let (root, base, _) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
-        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let (root, _, head) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let runtime_selection =
+            selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         let model = crate::s2::reuse::select_affected(
             &watched,
             &[],
@@ -7366,9 +7418,15 @@ workspace_check = true
 
     #[test]
     fn affected_selection_is_empty_for_an_empty_diff() -> Result<(), Box<dyn Error>> {
-        let (root, base, _) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+        let (root, _, head) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
         let config = selection_config();
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         assert!(selection.units.is_empty());
         assert!(selection.full_units.is_empty());
         std::fs::remove_dir_all(root)?;
@@ -9884,9 +9942,15 @@ trust = "untrusted-ok"
 
     #[test]
     fn empty_diff_carries_a_reason_while_unproven_empty_errors() -> Result<(), Box<dyn Error>> {
-        let (root, base, _) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
+        let (root, _, head) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
         let config = selection_config();
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         assert!(selection.units.is_empty());
         assert_eq!(
             must(
@@ -9930,6 +9994,60 @@ trust = "untrusted-ok"
             "real work carries no no-work reason"
         )
         .is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn revision_fallback_reason_is_shared_by_plan_and_select() -> Result<(), Box<dyn Error>> {
+        // `select` is the why-run oracle, while `plan` adds provider and
+        // workspace policy. Both must treat identical or unresolved
+        // revisions as a full fallback with the same auditable reason.
+        let (root, _, head) = selection_git_fixture("revision-fallback", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let watched = watched_units(&config.unit);
+        for (label, base, candidate_head) in [
+            ("identical", head.as_str(), head.as_str()),
+            ("unresolved base", "missing-base", head.as_str()),
+            ("unresolved head", head.as_str(), "missing-head"),
+        ] {
+            let planned =
+                selection_for_diff(&root, &config, Scope::Affected, base, candidate_head)?;
+            assert_eq!(planned.units.len(), config.unit.len(), "{label} plan units");
+            assert_eq!(
+                planned.fallback_reason.as_deref(),
+                Some(REVISION_FALLBACK_REASON),
+                "{label} plan reason"
+            );
+
+            let selected = select_affected_for_revisions(&root, &watched, base, candidate_head)?;
+            assert!(selected.fallback_full, "{label} select fallback");
+            assert_eq!(
+                selected.required.len(),
+                config.unit.len(),
+                "{label} select units"
+            );
+            assert_eq!(
+                selected.fallback_reason.as_deref(),
+                Some(REVISION_FALLBACK_REASON),
+                "{label} select reason"
+            );
+        }
+
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let planned = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
+        assert!(planned.units.is_empty());
+        assert!(planned.fallback_reason.is_none());
+        let selected = select_affected_for_revisions(&root, &watched, &head, &no_op_head)?;
+        assert!(selected.required.is_empty());
+        assert!(!selected.fallback_full);
+        assert!(selected.fallback_reason.is_none());
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
