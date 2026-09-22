@@ -1040,11 +1040,7 @@ where
         builder: required("GITHUB_WORKFLOW_REF")?,
         run_id: required("GITHUB_RUN_ID")?,
         run_attempt: required("GITHUB_RUN_ATTEMPT")?,
-        platform: format!(
-            "{}-{}",
-            required("RUNNER_OS")?,
-            required("RUNNER_ARCH")?
-        ),
+        platform: format!("{}-{}", required("RUNNER_OS")?, required("RUNNER_ARCH")?),
     };
     provenance.validate()?;
     Ok(provenance)
@@ -1373,10 +1369,12 @@ mod tests {
     use super::{
         artifact_name, exact_product_cache_key, exact_product_reuse_eligible, ready_records,
         render_native_product_cache_restore_block, render_native_product_cache_save_block,
-        stage_product, transport_contract, transport_eligible, verify_product,
-        ProductTransportContract, StageRequest, VerifyRequest,
+        runtime_provenance_from, stage_product, transport_contract, transport_eligible,
+        verify_product, ProductTransportContract, ProductTransportProvenance, StageRequest,
+        TransportMode, VerifyRequest,
     };
     use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
+    use std::collections::BTreeMap;
 
     fn product(outputs: &[&str]) -> NamedProduct {
         NamedProduct {
@@ -1384,6 +1382,33 @@ mod tests {
             outputs: outputs.iter().map(ToString::to_string).collect(),
             ..NamedProduct::default()
         }
+    }
+
+    fn provenance() -> ProductTransportProvenance {
+        ProductTransportProvenance {
+            source: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            builder: "tailrocks/velnor/.github/workflows/ci.yml@refs/heads/main".to_owned(),
+            run_id: "12345".to_owned(),
+            run_attempt: "1".to_owned(),
+            platform: "Linux-X64".to_owned(),
+        }
+    }
+
+    fn runtime_env() -> BTreeMap<&'static str, String> {
+        BTreeMap::from([
+            (
+                "GITHUB_SHA",
+                "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            ),
+            (
+                "GITHUB_WORKFLOW_REF",
+                "tailrocks/velnor/.github/workflows/ci.yml@refs/heads/main".to_owned(),
+            ),
+            ("GITHUB_RUN_ID", "12345".to_owned()),
+            ("GITHUB_RUN_ATTEMPT", "1".to_owned()),
+            ("RUNNER_OS", "Linux".to_owned()),
+            ("RUNNER_ARCH", "X64".to_owned()),
+        ])
     }
 
     fn identity(product: &str, inputs_digest: &str) -> ProductIdentity {
@@ -1480,6 +1505,7 @@ mod tests {
             &full,
             Some(&complete),
             "VELNOR_PRODUCT_READY",
+            TransportMode::NativeCache,
         )
         .expect("complete identity renders cache restore");
         assert!(
@@ -1487,6 +1513,7 @@ mod tests {
             "{restored}"
         );
         assert!(restored.contains("verify-product"), "{restored}");
+        assert!(restored.contains("--transport native-cache"), "{restored}");
         assert!(restored.contains("--identity"), "{restored}");
         assert!(restored.contains("outcome=wrong-identity"), "{restored}");
         assert!(restored.contains("outcome=corrupt"), "{restored}");
@@ -1499,9 +1526,11 @@ mod tests {
             &full,
             Some(&complete),
             "always() && github.ref == 'refs/heads/main'",
+            TransportMode::NativeCache,
         )
         .expect("complete identity renders cache save");
         assert!(saved.contains("stage-product"), "{saved}");
+        assert!(saved.contains("--transport native-cache"), "{saved}");
         assert!(
             saved.contains("Probe exact native product cache"),
             "{saved}"
@@ -1525,6 +1554,7 @@ mod tests {
             &full,
             Some(&incomplete),
             "VELNOR_PRODUCT_READY",
+            TransportMode::NativeCache,
         )
         .is_none());
         assert!(render_native_product_cache_save_block(
@@ -1534,6 +1564,7 @@ mod tests {
             &full,
             Some(&incomplete),
             "always()",
+            TransportMode::NativeCache,
         )
         .is_none());
     }
@@ -1574,8 +1605,13 @@ mod tests {
         let mut full = product(&["target/xcframework/BridgeCore.xcframework"]);
         full.inputs_digest = Some("abc123".to_owned());
         full.output_files = vec!["target/xcframework/BridgeCore.xcframework/Info.plist".to_owned()];
-        let produced =
-            super::render_producer_block_with_identity("upload@pinned", "rust-ffi", &full, None);
+        let produced = super::render_producer_block_with_identity(
+            "upload@pinned",
+            "rust-ffi",
+            &full,
+            None,
+            TransportMode::SameRun,
+        );
         assert!(produced.contains("uses: upload@pinned"), "{produced}");
         assert!(produced.contains("if-no-files-found: error"), "{produced}");
         assert!(produced.contains("retention-days: 1"), "{produced}");
@@ -1583,6 +1619,7 @@ mod tests {
             produced.contains("velnor-workflow stage-product --producer"),
             "{produced}"
         );
+        assert!(produced.contains("--transport same-run"), "{produced}");
         assert!(produced.contains("--digest"), "{produced}");
         assert!(
             produced.contains("VELNOR_TRANSPORT_OUTPUTS: |"),
@@ -1598,12 +1635,14 @@ mod tests {
             &full,
             "VELNOR_PRODUCT_RUST_FFI__READY",
             None,
+            TransportMode::SameRun,
         );
         assert!(consumed.contains("uses: download@pinned"), "{consumed}");
         assert!(
             consumed.contains("velnor-workflow verify-product --producer"),
             "{consumed}"
         );
+        assert!(consumed.contains("--transport same-run"), "{consumed}");
         assert!(
             consumed.contains("--marker VELNOR_PRODUCT_RUST_FFI__READY"),
             "{consumed}"
@@ -1626,12 +1665,138 @@ mod tests {
             &bare,
             "M",
             None,
+            TransportMode::SameRun,
         );
         assert!(!bare_block.contains("--digest"), "{bare_block}");
         assert!(
             bare_block.contains("VELNOR_TRANSPORT_OUTPUT_FILES: \"\""),
             "{bare_block}"
         );
+    }
+
+    #[test]
+    fn runtime_provenance_rejects_missing_environment_fields() {
+        for name in [
+            "GITHUB_SHA",
+            "GITHUB_WORKFLOW_REF",
+            "GITHUB_RUN_ID",
+            "GITHUB_RUN_ATTEMPT",
+            "RUNNER_OS",
+            "RUNNER_ARCH",
+        ] {
+            let mut env = runtime_env();
+            env.remove(name);
+            let message = format!(
+                "{}",
+                runtime_provenance_from(|key| env.get(key).cloned())
+                    .expect_err("missing runtime provenance must fail")
+            );
+            assert!(message.contains(name), "{name}: {message}");
+        }
+    }
+
+    #[test]
+    fn runtime_provenance_rejects_malformed_environment_fields() {
+        for (name, value, error_field) in [
+            ("GITHUB_SHA", "not-a-revision", "source"),
+            ("GITHUB_WORKFLOW_REF", "workflow\nref", "builder"),
+            ("GITHUB_RUN_ID", "12x", "run_id"),
+            ("GITHUB_RUN_ATTEMPT", "1.0", "run_attempt"),
+            ("RUNNER_OS", "Linux/unsafe", "platform"),
+            ("RUNNER_ARCH", "X64/unsafe", "platform"),
+        ] {
+            let mut env = runtime_env();
+            env.insert(name, value.to_owned());
+            let message = format!(
+                "{}",
+                runtime_provenance_from(|key| env.get(key).cloned())
+                    .expect_err("malformed runtime provenance must fail")
+            );
+            assert!(message.contains(error_field), "{name}: {message}");
+        }
+    }
+
+    #[test]
+    fn same_run_rejects_each_provenance_mismatch() {
+        let stage = staged(&scratch("provenance-producer"));
+        for field in ["source", "builder", "run_id", "run_attempt", "platform"] {
+            let consumer = scratch(&format!("provenance-consumer-{field}"));
+            let env_file = consumer.join("github-env");
+            let mut request = verify_request(&stage, &env_file);
+            match field {
+                "source" => {
+                    request.provenance.source =
+                        "fedcba9876543210fedcba9876543210fedcba98".to_owned();
+                }
+                "builder" => {
+                    request.provenance.builder =
+                        "tailrocks/velnor/.github/workflows/other.yml@refs/heads/main".to_owned();
+                }
+                "run_id" => request.provenance.run_id = "54321".to_owned(),
+                "run_attempt" => request.provenance.run_attempt = "2".to_owned(),
+                "platform" => request.provenance.platform = "MacOS-ARM64".to_owned(),
+                _ => unreachable!("test case is exhaustive"),
+            }
+            let message = format!(
+                "{}",
+                verify_product(&consumer, &request)
+                    .expect_err("same-run provenance mismatch must fail")
+            );
+            assert!(
+                message.contains(&format!("product manifest {field} mismatch")),
+                "{field}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_cache_requires_typed_identity_for_stage_and_verify() {
+        let producer = scratch("native-cache-identity-producer");
+        stage_fixture(&producer);
+        let stage = producer.join("stage");
+        let missing_stage_identity = stage_product(
+            &producer,
+            &StageRequest {
+                mode: TransportMode::NativeCache,
+                ..stage_request(&stage)
+            },
+        );
+        let message = format!(
+            "{}",
+            missing_stage_identity.expect_err("native-cache staging needs identity")
+        );
+        assert!(message.contains("native-cache"), "{message}");
+        assert!(message.contains("typed product identity"), "{message}");
+
+        let digest = "digest-1";
+        let typed_stage = producer.join("typed-stage");
+        stage_product(
+            &producer,
+            &StageRequest {
+                mode: TransportMode::NativeCache,
+                identity: Some(identity("xcframework-foo", digest)),
+                stage: typed_stage.clone(),
+                ..stage_request(&typed_stage)
+            },
+        )
+        .expect("native-cache staging with identity");
+
+        let consumer = scratch("native-cache-identity-consumer");
+        let env_file = consumer.join("github-env");
+        let missing_verify_identity = verify_product(
+            &consumer,
+            &VerifyRequest {
+                mode: TransportMode::NativeCache,
+                stage: typed_stage,
+                ..verify_request(&stage, &env_file)
+            },
+        );
+        let message = format!(
+            "{}",
+            missing_verify_identity.expect_err("native-cache verification needs identity")
+        );
+        assert!(message.contains("native-cache"), "{message}");
+        assert!(message.contains("typed product identity"), "{message}");
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -1662,6 +1827,8 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            mode: TransportMode::SameRun,
+            provenance: provenance(),
             identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             stage: stage.to_path_buf(),
@@ -1673,6 +1840,8 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            mode: TransportMode::SameRun,
+            provenance: provenance(),
             identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
@@ -1754,6 +1923,8 @@ mod tests {
                 producer: "rust-ffi".to_owned(),
                 product: "xcframework-foo".to_owned(),
                 inputs_digest: digest.clone(),
+                mode: TransportMode::SameRun,
+                provenance: provenance(),
                 identity: Some(expected.clone()),
                 outputs: vec!["out/Foo.xcframework".to_owned()],
                 stage: stage.clone(),
@@ -1771,6 +1942,8 @@ mod tests {
                 producer: "rust-ffi".to_owned(),
                 product: "xcframework-foo".to_owned(),
                 inputs_digest: digest,
+                mode: TransportMode::SameRun,
+                provenance: provenance(),
                 identity: Some(wrong),
                 outputs: vec!["out/Foo.xcframework".to_owned()],
                 output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
@@ -1800,6 +1973,8 @@ mod tests {
                 producer: "rust-ffi".to_owned(),
                 product: "xcframework-foo".to_owned(),
                 inputs_digest: digest,
+                mode: TransportMode::SameRun,
+                provenance: provenance(),
                 identity: Some(wrong_owner),
                 outputs: vec!["out/Foo.xcframework".to_owned()],
                 stage: root.join("stage"),
