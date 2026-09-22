@@ -344,6 +344,7 @@ mod tests {
             macos_runner: "macos-15".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned()],
             ci_required: true,
+            merge_group: false,
             velnor_runner_group: None,
             velnor_trusted_label: None,
             velnor_trusted_runner_online: true,
@@ -3374,6 +3375,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) velnor_trusted_runner_online: bool,
     pub(crate) velnor_trusted_runner_skip_reason: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
+    pub(crate) merge_group: bool,
     pub(crate) repository: String,
     /// The D19 generator pin (`ProjectConfig::workflow_revision`).
     pub(crate) workflow_revision: String,
@@ -3610,6 +3612,11 @@ fn aggregate_concurrency_kind_suffix(kind: WorkflowKind) -> &'static str {
 }
 
 fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
+    let pull_request_identity = if kind == WorkflowKind::PullRequest && ir.merge_group {
+        "github.event_name == 'merge_group' && github.sha || github.event.pull_request.number || github.ref"
+    } else {
+        "github.event.pull_request.number || github.ref"
+    };
     ir.velnor_concurrency_group.as_deref().map_or_else(
         || match kind {
             // Main accepts both pushes and manual dispatches. A ref-based
@@ -3618,14 +3625,13 @@ fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
             // cancellation disabled so valid producers finish.
             WorkflowKind::Main => "ci-${{ github.workflow }}-${{ github.run_id }}".to_owned(),
             WorkflowKind::PullRequest | WorkflowKind::Nightly => {
-                "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
-                    .to_owned()
+                format!("ci-${{{{ github.workflow }}}}-${{{{ {pull_request_identity} }}}}")
             }
         },
         |base| match kind {
             WorkflowKind::Main => format!("{base}-main-${{{{ github.run_id }}}}"),
             WorkflowKind::PullRequest => format!(
-                "{base}-{}-${{{{ github.event.pull_request.number || github.ref }}}}",
+                "{base}-{}-${{{{ {pull_request_identity} }}}}",
                 aggregate_concurrency_kind_suffix(kind)
             ),
             WorkflowKind::Nightly => {
@@ -3641,7 +3647,14 @@ fn aggregate_concurrency_block(
     cancel_in_progress: bool,
 ) -> String {
     let group = aggregate_concurrency_group(ir, kind);
-    format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
+    let cancellation = if kind == WorkflowKind::PullRequest && ir.merge_group {
+        "${{ github.event_name == 'pull_request' }}"
+    } else if cancel_in_progress {
+        "true"
+    } else {
+        "false"
+    };
+    format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancellation}\n\n")
 }
 
 /// PR aggregates may be superseded while they are waiting on a dependency.
@@ -3662,13 +3675,15 @@ fn aggregate_triggers(
     runners: RunnerMode,
     automatic: RunnerMode,
     default_dispatch_runner: &str,
+    merge_group: bool,
 ) -> (&'static str, &'static str, String, bool) {
     match kind {
         WorkflowKind::PullRequest => (
             "CI / PR",
             "CI / PR",
             format!(
-                "on:\n  pull_request:\n{}",
+                "on:\n  pull_request:\n{}{}",
+                if merge_group { "  merge_group:\n" } else { "" },
                 workflow_dispatch_inputs(
                     "affected",
                     default_branch,
@@ -4182,6 +4197,10 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
 #[allow(dead_code)]
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
+        Self::from_config_with_merge_group(config, false)
+    }
+
+    pub(crate) fn from_config_with_merge_group(config: &ProjectConfig, merge_group: bool) -> Self {
         let mut tools = BTreeSet::new();
         let mr_boxington = config
             .units
@@ -4260,6 +4279,7 @@ impl WorkflowIr {
             } else {
                 VelnorPullRequest::TrustedOnly
             },
+            merge_group,
             repository: config.repository.clone(),
             workflow_revision: config.workflow_revision.clone(),
             declared_ruleset_contexts: crate::declared_ruleset_contexts_literal(config),
@@ -4290,6 +4310,7 @@ impl WorkflowIr {
             self.runners,
             self.automatic,
             &self.default_dispatch_runner,
+            self.merge_group,
         );
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
@@ -4318,7 +4339,12 @@ impl WorkflowIr {
         // Runner mode is global; every self-hosted job receives the lane
         // admission gate needed for Velnor execution.
         let runners = self.runners;
-        self.render_plan(&mut output, runners, runners == RunnerMode::Velnor);
+        self.render_plan_with_merge_group(
+            &mut output,
+            runners,
+            runners == RunnerMode::Velnor,
+            kind == WorkflowKind::PullRequest && self.merge_group,
+        );
         self.render_velnor_lane_admission(&mut output);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output, runners, runners == RunnerMode::Velnor);
@@ -4330,19 +4356,27 @@ impl WorkflowIr {
                 &mut output,
                 cache_save,
                 kind != WorkflowKind::PullRequest,
+                kind == WorkflowKind::PullRequest && self.merge_group,
             ),
             RunnerMode::Velnor => self.render_verify_velnor(
                 &mut output,
                 cache_save,
                 kind != WorkflowKind::PullRequest,
+                kind == WorkflowKind::PullRequest && self.merge_group,
             ),
             RunnerMode::Both => {
                 self.render_verify_github(
                     &mut output,
                     cache_save,
                     kind != WorkflowKind::PullRequest,
+                    kind == WorkflowKind::PullRequest && self.merge_group,
                 );
-                self.render_verify_velnor(&mut output, false, kind != WorkflowKind::PullRequest);
+                self.render_verify_velnor(
+                    &mut output,
+                    false,
+                    kind != WorkflowKind::PullRequest,
+                    kind == WorkflowKind::PullRequest && self.merge_group,
+                );
             }
         }
         // Auxiliary schedules must not create or satisfy the branch-protection
@@ -4404,6 +4438,7 @@ impl WorkflowIr {
             self.runners,
             self.automatic,
             &self.default_dispatch_runner,
+            self.merge_group,
         );
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
@@ -4414,7 +4449,12 @@ impl WorkflowIr {
         // keeps plan on the image runtime for every aggregate. GitHub-default
         // and both-mode repositories plan on GitHub-hosted runners.
         let mut plan = String::new();
-        self.render_plan(&mut plan, self.runners, self.runners == RunnerMode::Velnor);
+        self.render_plan_with_merge_group(
+            &mut plan,
+            self.runners,
+            self.runners == RunnerMode::Velnor,
+            kind == WorkflowKind::PullRequest && self.merge_group,
+        );
         output.push_str(&plan);
         self.render_velnor_lane_admission(&mut output);
         if kind != WorkflowKind::PullRequest {
@@ -4469,6 +4509,7 @@ impl WorkflowIr {
             self.runners,
             self.automatic,
             &self.default_dispatch_runner,
+            self.merge_group,
         );
         let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
@@ -6431,7 +6472,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
-    pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
+    pub(crate) fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
+        self.render_plan_with_merge_group(output, runners, trusted, false);
+    }
+
+    fn render_plan_with_merge_group(
+        &self,
+        output: &mut String,
+        _runners: RunnerMode,
+        _trusted: bool,
+        merge_group_base: bool,
+    ) {
         // Planning follows `[workflow] automatic`. `automatic = velnor` keeps
         // the control plane off GitHub-hosted runners. `automatic = both`
         // plans on GitHub so this repository can compare lanes. GitHub
@@ -6457,7 +6508,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &crate::workflow_setup_install_rev(&self.repository, &self.workflow_revision),
             )
         };
-        let base_sha = self.base_sha_expression();
+        let base_sha = self.base_sha_expression(merge_group_base);
         // Planning consumes the admitted lanes, so the expected-work scope
         // always equals the scheduled lane scope: a velnor-only dispatch
         // plans a velnor-only selection, so units the Velnor lane cannot
@@ -6629,9 +6680,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         )
     }
 
-    fn base_sha_expression(&self) -> String {
+    fn base_sha_expression(&self, merge_group: bool) -> String {
+        let merge_group_base = if merge_group {
+            " || github.event.merge_group.base_sha"
+        } else {
+            ""
+        };
         format!(
-            "github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
+            "github.event.pull_request.base.sha{merge_group_base} || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
             self.default_branch
         )
     }
@@ -6714,8 +6770,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output: &mut String,
         cache_save: bool,
         include_policy: bool,
+        merge_group_base: bool,
     ) {
-        self.render_verify_lane(output, RunnerMode::Github, cache_save, include_policy);
+        self.render_verify_lane(
+            output,
+            RunnerMode::Github,
+            cache_save,
+            include_policy,
+            merge_group_base,
+        );
     }
 
     pub(crate) fn render_verify_velnor(
@@ -6723,8 +6786,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output: &mut String,
         cache_save: bool,
         include_policy: bool,
+        merge_group_base: bool,
     ) {
-        self.render_verify_lane(output, RunnerMode::Velnor, cache_save, include_policy);
+        self.render_verify_lane(
+            output,
+            RunnerMode::Velnor,
+            cache_save,
+            include_policy,
+            merge_group_base,
+        );
     }
 
     pub(crate) fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
@@ -6783,6 +6853,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         lane: RunnerMode,
         cache_save: bool,
         include_policy: bool,
+        merge_group_base: bool,
     ) {
         for unit in self
             .units
@@ -6874,7 +6945,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 skip_when_offline_ready,
             );
             render_ci_cargo_fetch_end_marker(output);
-            let base_sha = self.base_sha_expression();
+            let base_sha = self.base_sha_expression(merge_group_base);
             let checks_started_marker =
                 render_epoch_marker_commands("CHECKS_STARTED", "          ");
             let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");

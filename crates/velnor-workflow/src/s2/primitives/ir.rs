@@ -1010,6 +1010,7 @@ mod tests {
             automatic_providers: ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             ci_required: true,
+            merge_group: false,
             repository: repository.to_owned(),
             workflow_revision: "0".repeat(40),
             rust_needs: RustNeeds::Parallel,
@@ -6214,6 +6215,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) declared_ruleset_contexts: String,
     pub(crate) rust_needs: RustNeeds,
     pub(crate) concurrency_group: Option<String>,
+    pub(crate) merge_group: bool,
     pub(crate) serial_stack_groups: bool,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
@@ -6425,6 +6427,11 @@ fn aggregate_concurrency_kind_suffix(kind: WorkflowKind) -> &'static str {
 }
 
 fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
+    let pull_request_identity = if kind == WorkflowKind::PullRequest && ir.merge_group {
+        "github.event_name == 'merge_group' && github.sha || github.event.pull_request.number || github.ref"
+    } else {
+        "github.event.pull_request.number || github.ref"
+    };
     ir.concurrency_group.as_deref().map_or_else(
         || match kind {
             // Main accepts both pushes and manual dispatches. A ref-based
@@ -6433,14 +6440,13 @@ fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
             // cancellation disabled so valid producers finish.
             WorkflowKind::Main => "ci-${{ github.workflow }}-${{ github.run_id }}".to_owned(),
             WorkflowKind::PullRequest | WorkflowKind::Nightly => {
-                "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
-                    .to_owned()
+                format!("ci-${{{{ github.workflow }}}}-${{{{ {pull_request_identity} }}}}")
             }
         },
         |base| match kind {
             WorkflowKind::Main => format!("{base}-main-${{{{ github.run_id }}}}"),
             WorkflowKind::PullRequest => format!(
-                "{base}-{}-${{{{ github.event.pull_request.number || github.ref }}}}",
+                "{base}-{}-${{{{ {pull_request_identity} }}}}",
                 aggregate_concurrency_kind_suffix(kind)
             ),
             WorkflowKind::Nightly => {
@@ -6456,7 +6462,14 @@ fn aggregate_concurrency_block(
     cancel_in_progress: bool,
 ) -> String {
     let group = aggregate_concurrency_group(ir, kind);
-    format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
+    let cancellation = if kind == WorkflowKind::PullRequest && ir.merge_group {
+        "${{ github.event_name == 'pull_request' }}"
+    } else if cancel_in_progress {
+        "true"
+    } else {
+        "false"
+    };
+    format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancellation}\n\n")
 }
 
 /// PR aggregates may be superseded while they are waiting on a dependency.
@@ -6474,13 +6487,15 @@ fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
 fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
+    merge_group: bool,
 ) -> (&'static str, &'static str, String, bool) {
     match kind {
         WorkflowKind::PullRequest => (
             "CI / PR",
             "CI / PR",
             format!(
-                "on:\n  pull_request:\n{}",
+                "on:\n  pull_request:\n{}{}",
+                if merge_group { "  merge_group:\n" } else { "" },
                 workflow_dispatch_inputs("affected", default_branch, "",)
             ),
             true,
@@ -7202,6 +7217,10 @@ struct CollapsedProviderJob<'a> {
 #[allow(dead_code)]
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
+        Self::from_config_with_merge_group(config, false)
+    }
+
+    pub(crate) fn from_config_with_merge_group(config: &ProjectConfig, merge_group: bool) -> Self {
         let mut tools = BTreeSet::new();
         let mr_boxington = config
             .units
@@ -7275,6 +7294,7 @@ impl WorkflowIr {
             declared_ruleset_contexts: crate::s2::declared_ruleset_contexts_literal(config),
             rust_needs: config.rust_needs,
             concurrency_group: config.concurrency_group.clone(),
+            merge_group,
             serial_stack_groups: config.serial_stack_groups,
             tools,
             mise_present,
@@ -7311,7 +7331,7 @@ impl WorkflowIr {
     ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch);
+            aggregate_triggers(kind, &self.default_branch, self.merge_group);
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
             output,
@@ -7319,7 +7339,10 @@ impl WorkflowIr {
         );
         // Planning and policy are control plane.
         let mut plan = String::new();
-        self.render_plan(&mut plan);
+        self.render_plan_with_merge_group(
+            &mut plan,
+            kind == WorkflowKind::PullRequest && self.merge_group,
+        );
         output.push_str(&plan);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output);
@@ -7363,8 +7386,11 @@ impl WorkflowIr {
     /// `workflow_dispatch` on ci-main is trusted for mbx saves; schedule alone is not.
     pub(crate) fn render_nightly_dispatcher(&self) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, _) =
-            aggregate_triggers(WorkflowKind::Nightly, &self.default_branch);
+        let (workflow_name, run_name, triggers, _) = aggregate_triggers(
+            WorkflowKind::Nightly,
+            &self.default_branch,
+            self.merge_group,
+        );
         let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
         let runner = self.runs_on_yaml(self.control_plane_provider());
@@ -9378,6 +9404,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn render_plan(&self, output: &mut String) {
+        self.render_plan_with_merge_group(output, false);
+    }
+
+    fn render_plan_with_merge_group(&self, output: &mut String, merge_group_base: bool) {
         // Planning is control plane. Hosted planning pins `uses:` to
         // SOURCE_REV. `rev:` uses a context-gated `${{ github.sha }}`
         // with a static fallback when this repository owns the setup action.
@@ -9388,7 +9418,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             &self.workflow_revision,
             &crate::s2::workflow_setup_install_rev(&self.repository, &self.workflow_revision),
         );
-        let base_sha = self.base_sha_expression();
+        let base_sha = self.base_sha_expression(merge_group_base);
         // Every event selects the static automatic set: there is no provider
         // input to read.
         let automatic = self
@@ -9519,9 +9549,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         "github.event_name == 'workflow_dispatch'"
     }
 
-    fn base_sha_expression(&self) -> String {
+    fn base_sha_expression(&self, merge_group: bool) -> String {
+        let merge_group_base = if merge_group {
+            " || github.event.merge_group.base_sha"
+        } else {
+            ""
+        };
         format!(
-            "github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
+            "github.event.pull_request.base.sha{merge_group_base} || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
             self.default_branch
         )
     }
@@ -9565,7 +9600,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 // a tautology for automatic providers and dispatch-only
                 // otherwise. Render the collapsed form, never `(A) || (!A)`.
                 let event = if self.automatic_providers.contains(&provider) {
-                    "true".to_owned()
+                    if self.merge_group {
+                        "github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'".to_owned()
+                    } else {
+                        "true".to_owned()
+                    }
                 } else {
                     Self::dispatch_provider_expression().to_owned()
                 };
