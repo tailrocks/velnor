@@ -63,7 +63,7 @@ jobs:
           command -v sha256sum >/dev/null 2>&1 || { echo "::error::sha256sum is required on the closure runner" >&2; exit 1; }
           head="$(git rev-parse HEAD)"
           [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::HEAD is not a commit SHA: $head" >&2; exit 1; }
-          listing="$(git ls-tree -r HEAD -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+          listing="$(git ls-tree -r HEAD -- crates/velnor-workflow crates/velnor-model Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
           test "$listing" != '' || { echo "::error::HEAD has no closure inputs" >&2; exit 1; }
           closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
           [[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }

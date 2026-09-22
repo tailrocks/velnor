@@ -2125,7 +2125,7 @@ jobs:
 
   release-github-hosted-rust-velnor-workflow:
     name: "github-hosted / Rust / rust-velnor-workflow"
-    needs: [verify, release-github-hosted-rust-velnor-runner]
+    needs: [verify, release-github-hosted-rust-velnor-model, release-github-hosted-rust-velnor-runner]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

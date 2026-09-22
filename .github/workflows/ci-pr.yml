@@ -865,7 +865,7 @@ jobs:
       candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: rust-velnor-runner
+      unit_dependencies: "rust-velnor-model,rust-velnor-runner"
       unit_admission: github-hosted
   github-hosted-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract"
