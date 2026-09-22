@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{Args, Primitive, RenderCtx, Rendered};
+use super::{Args, Primitive, ProviderAdmission, RenderCtx, Rendered, WorkflowIr};
 use crate::s2::provider::{runs_on_for, ProviderId};
 use crate::s2::{
     runs_on_labels_yaml, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError, ProjectConfig,
@@ -494,11 +494,9 @@ fn render_profile_job(
     // A Velnor profile mounts the checkout and runs named tasks, so it
     // skips fork and bot pull requests exactly like any other local job.
     if profile.runner.as_str() == "velnor" {
-        let _ = writeln!(
-            output,
-            "    if: ${{{{ ({}) }}}}",
-            super::ir::WorkflowIr::trusted_event_expression()
-        );
+        let admission = WorkflowIr::from_config(config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let _ = writeln!(output, "    if: ${{{{ ({}) }}}}", admission);
     }
     let runs_on = profile_runs_on(config, profile)?;
     let _ = writeln!(output, "    runs-on: {runs_on}");
@@ -1156,6 +1154,50 @@ mod tests {
             "a Velnor profile without a selector must fail",
         );
         assert!(error.to_string().contains("velnor"), "{error}");
+    }
+
+    #[test]
+    fn velnor_profile_uses_canonical_provider_admission() {
+        let mut fleet = profile("fleet");
+        fleet.runner = "velnor".to_owned();
+        let mut config = profile_config(vec![fleet.clone()]);
+
+        let admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert!(
+            admission.contains("github.event.pull_request.head.repo.fork"),
+            "Velnor profiles retain the canonical trusted-event/fork gate: {admission}"
+        );
+        let mut job = String::new();
+        must(
+            render_profile_job(&mut job, &config, &fleet),
+            "render the Velnor profile job",
+        );
+        assert!(
+            job.contains(&format!("    if: ${{{{ ({admission}) }}}}\n")),
+            "the profile job uses the canonical provider admission: {job}"
+        );
+
+        let hosted = profile("hosted");
+        let mut hosted_job = String::new();
+        must(
+            render_profile_job(&mut hosted_job, &config, &hosted),
+            "render the hosted profile job",
+        );
+        assert!(
+            !hosted_job.contains("    if:"),
+            "hosted profile admission stays unchanged: {hosted_job}"
+        );
+
+        config.automatic_providers.remove(&ProviderId::Velnor);
+        let disabled = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert_ne!(disabled, admission);
+        assert!(
+            disabled.contains("github.event_name == 'workflow_dispatch'")
+                && disabled.contains("github.event.pull_request.head.repo.fork"),
+            "a manual Velnor provider remains trusted-event gated: {disabled}"
+        );
     }
 
     #[test]
