@@ -414,13 +414,13 @@ mod tests {
 
     #[test]
     fn limit_parses_override_and_falls_back() {
-        assert_eq!(parse_limit_secs(None, 600), Duration::from_secs(600));
+        assert_eq!(parse_limit_secs(None, 600), Duration::from_mins(10));
         assert_eq!(parse_limit_secs(Some("30"), 600), Duration::from_secs(30));
         assert_eq!(parse_limit_secs(Some(" 120 "), 600), Duration::from_mins(2));
         for invalid in ["", "0", "-5", "ten", "1.5"] {
             assert_eq!(
                 parse_limit_secs(Some(invalid), 600),
-                Duration::from_secs(600),
+                Duration::from_mins(10),
                 "invalid override {invalid:?} must fall back to the default",
             );
         }
@@ -434,7 +434,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "echo hello",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -451,7 +451,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "exec sleep 2",
-            &limits(Duration::from_millis(200), Duration::from_secs(60)),
+            &limits(Duration::from_millis(200), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -467,7 +467,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "while true; do echo tick; sleep 0.05; done",
-            &limits(Duration::from_secs(60), Duration::from_millis(500)),
+            &limits(Duration::from_mins(1), Duration::from_millis(500)),
         );
         let message = failed_message(result);
         assert!(
@@ -493,7 +493,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "exec 1>&- 2>&-; exec sleep 30",
-            &limits(Duration::from_secs(60), Duration::from_millis(500)),
+            &limits(Duration::from_mins(1), Duration::from_millis(500)),
         );
         let message = failed_message(result);
         assert!(
@@ -515,7 +515,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "(sleep 5 &)",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -534,7 +534,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "exit 3",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         ));
         assert!(
             message.contains("CI command failed for unit test-unit"),
@@ -548,7 +548,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "printf 'partial'",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -572,7 +572,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             &script,
-            &limits(Duration::from_secs(60), Duration::from_secs(1)),
+            &limits(Duration::from_mins(1), Duration::from_secs(1)),
         ));
         assert!(
             message.contains("wall deadline"),
@@ -619,7 +619,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             &script,
-            &limits(Duration::from_secs(60), Duration::from_secs(1)),
+            &limits(Duration::from_mins(1), Duration::from_secs(1)),
         ));
         assert!(
             message.contains("wall deadline"),
