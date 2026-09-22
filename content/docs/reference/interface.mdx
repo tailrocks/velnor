@@ -80,21 +80,21 @@ velnor-workflow release verify-tag
 
 `plan` publishes the CI-selection plan to stdout and `$GITHUB_OUTPUT`, plus a
 selection file and an expected-work file when their environment paths are set.
-`CURRENT` output fields (`crates/velnor-workflow/src/runtime.rs:1739-1760,1774-1811`;
+`CURRENT` output fields (`crates/velnor-workflow/src/runtime.rs:1740-1761,1778-1822`;
 schema-2 runtime adds JSON `units`, `unit_ids`, `plan_digest`, and `excluded`
-at `crates/velnor-workflow/src/s2/runtime.rs:1841-1871`):
+at `crates/velnor-workflow/src/s2/runtime.rs:1851-1886`):
 
 | Field | Shape | Meaning |
 | --- | --- | --- |
 | `scope` | `affected` or `full` | Scope the event resolved to. |
 | `base_sha`, `head_sha` | SHAs | Diff range the plan selected for. |
-| `units` | CSV unit ids (schema-1) or plan JSON (schema-2) | Selected units that must run. |
-| `unit_ids` | CSV unit ids (schema-2 only) | Same affected set as CSV for the selection file. |
-| `full_units` | CSV unit ids | Changed-plus-dependents subset that runs full scope. |
+| `units` | CSV unit ids (schema-1) or plan JSON (schema-2) | Verify set that must run: changed units plus dependents. |
+| `unit_ids` | CSV unit ids (schema-2 only) | Same verify set as CSV for the selection file. |
+| `full_units` | CSV unit ids | The verify set; every scheduled unit runs full scope. |
 | `plan_digest` | digest (schema-2 only) | Stable identity over the planned units and exclusions. |
 | `excluded` | JSON (schema-2 only) | Units excluded with per-unit provider and reason. |
 | `<kind>_matrix` | JSON array of `{unit, label}` | Per-kind caller matrix; empty for unselected kinds. |
-| `fallback_reason` | string, on fallback and opaque-narrowed selections | Why a fallback widened the selection: the full set, or the opaque subset an unmatched path conservatively selects; unmatched-path reasons also name the missing narrowing contract. Absent for proven-narrow plans. |
+| `fallback_reason` | string, on fallback and opaque-narrowed selections | Why a fallback widened the selection: the full set, or the openly-opaque subset an unmatched path conservatively selects; unmatched-path reasons also name the missing narrowing contract. Absent for proven-narrow plans. |
 | `planned_no_work` | `true`, only on no-work | Presence-only marker: `true` or absent, never `false`. |
 | `no_work_reason` | string, only on no-work | Why zero units were selected. |
 

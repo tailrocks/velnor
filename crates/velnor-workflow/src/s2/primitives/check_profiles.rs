@@ -10,7 +10,7 @@
 //! the renderer refuses the mix instead of silently over-executing.
 //!
 //! A row may also declare file-level `events` (`push`, `pull_request`,
-//! `workflow_dispatch`): the file then renders those triggers alongside the
+//! `merge_group`, `workflow_dispatch`): the file then renders those triggers alongside the
 //! shared cron, and profiles in an evented file may omit `schedule` entirely
 //! for a cron-less evented file. One file carries one trigger set — scheduled
 //! and schedule-less profiles never mix in one file — and runners stay
@@ -72,6 +72,31 @@ impl Primitive for ScheduledChecks {
         )?;
         render_file(ctx, content)
     }
+}
+
+/// A profile with an extra repository token capability must never run from a
+/// pull-request trigger. Pull-request jobs execute contributor-controlled
+/// task code; granting that code access to Actions history would turn a
+/// read-only capability into an information-disclosure path. Scheduled and
+/// default-branch push/dispatch jobs remain eligible, while a mixed file fails
+/// closed instead of relying on a task author to remember an event distinction.
+fn validate_profile_permissions(
+    profiles: &[&CheckProfileSpec],
+    events: &[String],
+    file: &str,
+) -> Result<(), GeneratorError> {
+    if !events.iter().any(|event| event == "pull_request") {
+        return Ok(());
+    }
+    for profile in profiles {
+        if !profile.permissions.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "`{file}` cannot grant permissions to check profile `{}` because `pull_request` runs contributor-controlled tasks; place the read capability on a schedule/push/dispatch-only file",
+                profile.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The profiles one `scheduled-checks` row renders, in configuration order.
@@ -181,12 +206,12 @@ fn check_shared_cadence(
 }
 
 /// The event names a `scheduled-checks` row may declare in `events`.
-const ACCEPTED_EVENTS: [&str; 3] = ["push", "pull_request", "workflow_dispatch"];
+const ACCEPTED_EVENTS: [&str; 4] = ["push", "pull_request", "merge_group", "workflow_dispatch"];
 
 /// The declared events that render trigger keys, in render order.
 /// `workflow_dispatch` validates but renders nothing extra: every
 /// scheduled-checks file already carries that trigger unconditionally.
-const RENDERED_EVENT_ORDER: [&str; 2] = ["push", "pull_request"];
+const RENDERED_EVENT_ORDER: [&str; 3] = ["push", "pull_request", "merge_group"];
 
 /// The file-level event triggers one `scheduled-checks` row declares, in
 /// canonical render order. An absent `events` argument renders today's
@@ -360,6 +385,7 @@ fn render_checks_file(
     events: &[String],
     branches: &[String],
 ) -> Result<String, GeneratorError> {
+    validate_profile_permissions(profiles, events, file)?;
     let stem = file.strip_suffix(".yml").unwrap_or(file);
     let name = name.unwrap_or_else(|| stem.to_owned());
     let schedule = profiles
@@ -391,23 +417,47 @@ fn render_checks_file(
         let _ = writeln!(output, "    - cron: {}", yaml_scalar(schedule));
     }
     output.push_str("  workflow_dispatch:\n\npermissions:\n  contents: read\n\nconcurrency:\n");
-    let _ = writeln!(
-        output,
-        "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.ref }}}}"
-    );
-    if events.iter().any(|event| event == "pull_request") {
-        // PR-only cancel, like the docs-site and Renovate files:
-        // pull-request runs supersede each other for fast feedback, while
-        // push, schedule, and dispatch runs — the compliance signal on the
-        // default branch — always run to completion instead of cancelling a
-        // prior signal.
+    let has_pull_request = events.iter().any(|event| event == "pull_request");
+    let has_committed_event = events
+        .iter()
+        .any(|event| matches!(event.as_str(), "push" | "merge_group"));
+    if has_committed_event {
+        // GitHub keeps only one running and one pending run per concurrency
+        // group. A shared ref key therefore still loses an older pending
+        // commit even with cancellation disabled. Commit-scoping committed
+        // and merge-queue events makes each tree's evidence independently
+        // queueable; PR attempts remain supersedable by their ref.
+        if has_pull_request {
+            let _ = writeln!(
+                output,
+                "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.event_name == 'pull_request' && github.ref || github.sha }}}}"
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.sha }}}}"
+            );
+        }
+    } else {
+        let _ = writeln!(
+            output,
+            "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.ref }}}}"
+        );
+    }
+    if has_pull_request {
+        // PR attempts supersede each other for fast feedback. Committed and
+        // merge-queue evidence uses the non-canceling path above, so a later
+        // event cannot erase a predecessor's verdict.
         output.push_str(
             "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n",
         );
+    } else if has_committed_event {
+        // A push or merge-group run is evidence for a committed/candidate
+        // tree. The SHA-scoped group above prevents pending replacement.
+        output.push_str("  cancel-in-progress: false\n\njobs:\n");
     } else {
-        // No pull_request trigger: the PR expression would be constant-false,
-        // so stale runs would queue per-ref instead of superseding. Cancel
-        // like the cron-only files.
+        // A cron-only or dispatch-only file has no candidate/main event to
+        // preserve, so retain the historical supersession behavior.
         output.push_str("  cancel-in-progress: true\n\njobs:\n");
     }
     for profile in profiles {
@@ -455,6 +505,19 @@ fn render_profile_job(
     let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
     if profile.advisory {
         output.push_str("    continue-on-error: true\n");
+    }
+    if !profile.permissions.is_empty() {
+        // GitHub replaces a job-level permissions map instead of merging it
+        // with the workflow default. Keep checkout access explicit while
+        // adding only the validated read-only capabilities.
+        let mut permissions = profile.permissions.clone();
+        permissions
+            .entry("contents".to_owned())
+            .or_insert_with(|| "read".to_owned());
+        output.push_str("    permissions:\n");
+        for (scope, level) in &permissions {
+            let _ = writeln!(output, "      {scope}: {level}");
+        }
     }
     if !profile.env.is_empty() {
         output.push_str("    env:\n");
@@ -516,19 +579,77 @@ fn render_checkout_step(output: &mut String, full_history: bool) {
 /// installs with the preinstalled `mise` binary instead. Every profile runs
 /// named tasks, so hosted runners always set up even when no tool needs
 /// installing.
+/// Refuse a check profile whose closed tool subset planning cannot prove
+/// installable: the same promise as the unit validator, over the profile's
+/// own `tools` list. A member whose backend planning cannot model, or a
+/// `depends` name the lock does not pin, fails here with the exact missing
+/// edge instead of failing at install time on the runner.
+///
+/// # Errors
+/// Returns a usage error naming the first profile whose subset is not
+/// provably closed, with every key the lock does pin.
+pub(crate) fn validate_profile_install_deps_are_closed(
+    profiles: &[CheckProfileSpec],
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &std::collections::BTreeMap<String, String>,
+    install_deps: &crate::s2::config::MiseInstallDeps,
+) -> Result<(), GeneratorError> {
+    for profile in profiles {
+        let mut tools = profile.tools.clone();
+        super::close_mise_tool_subset(&mut tools, lock_keys, lock_backends, install_deps);
+        let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+        for tool in &tools {
+            if let Err(unknown) = super::member_backend_key(tool, lock_backends) {
+                let reason = super::unknown_backend_reason(&unknown, "tools");
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {} installs {tool}, {reason} (planning models mise {} install dependencies), known keys: {}",
+                    profile.id,
+                    super::MISE_INSTALL_DEPS_MODEL_VERSION,
+                    known()
+                )));
+            }
+        }
+        for tool in &tools {
+            let Some(names) = install_deps.depends.get(tool) else {
+                continue;
+            };
+            for name in names {
+                if super::resolve_install_dep_names(name, lock_keys).is_empty() {
+                    return Err(GeneratorError::usage(format!(
+                        "[[check_profile]] {} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
+                        profile.id,
+                        known()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &CheckProfileSpec) {
     let mise = ActionPin::Mise.reference();
+    // The declared subset closes over the root config's install edges like
+    // every derived subset: mise refuses a locked install that omits a
+    // configured dependency.
+    let mut tools = profile.tools.clone();
+    super::close_mise_tool_subset(
+        &mut tools,
+        &config.mise_lock_keys,
+        &config.mise_lock_backends,
+        &config.mise_install_deps,
+    );
     if profile.runner == "velnor" {
-        if !profile.tools.is_empty() {
+        if !tools.is_empty() {
             let _ = writeln!(
                 output,
                 "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes --locked install \"${{tools[@]}}\"",
-                yaml_scalar(&profile.tools.join(" "))
+                yaml_scalar(&tools.join(" "))
             );
         }
         return;
     }
-    if profile.tools.is_empty() {
+    if tools.is_empty() {
         let _ = writeln!(
             output,
             "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false"
@@ -538,7 +659,7 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
         let _ = writeln!(
             output,
             "      - name: Set up Mise\n        uses: {mise}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
-            yaml_scalar(&profile.tools.join(" "))
+            yaml_scalar(&tools.join(" "))
         );
     }
 }
@@ -564,7 +685,7 @@ mod tests {
         reason = "tests need setup failures to name their root cause"
     )]
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::s2::config;
@@ -596,6 +717,7 @@ mod tests {
             artifacts: Vec::new(),
             advisory: false,
             env: BTreeMap::new(),
+            permissions: BTreeMap::new(),
             full_history: false,
         }
     }
@@ -664,6 +786,8 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: true,
             mise_lock_keys: std::collections::BTreeSet::new(),
+            mise_lock_backends: std::collections::BTreeMap::new(),
+            mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),
         }
@@ -682,6 +806,40 @@ mod tests {
             render_scheduled_checks(config, "scheduled-daily.yml", name, profiles),
             "render scheduled checks",
         )
+    }
+
+    #[test]
+    fn profile_tool_subset_refuses_an_unknowable_backend() {
+        let mut plugin = profile("smoke");
+        plugin.tools = vec!["vfox:example/example-lint".to_owned()];
+        let lock = BTreeSet::from(["vfox:example/example-lint".to_owned()]);
+        let error = must_fail(
+            super::validate_profile_install_deps_are_closed(
+                std::slice::from_ref(&plugin),
+                &lock,
+                &BTreeMap::new(),
+                &config::MiseInstallDeps::default(),
+            ),
+            "a vfox profile tool must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("smoke"), "{message}");
+        assert!(message.contains("vfox:example/example-lint"), "{message}");
+        assert!(message.contains("plugin metadata"), "{message}");
+        // A closed backend-helper subset passes: the profile installs the
+        // `cargo:` tool beside its locked helper.
+        let mut closed = profile("smoke");
+        closed.tools = vec!["cargo:example-cli".to_owned()];
+        let lock = BTreeSet::from(["cargo:example-cli".to_owned(), "cargo:sccache".to_owned()]);
+        must(
+            super::validate_profile_install_deps_are_closed(
+                std::slice::from_ref(&closed),
+                &lock,
+                &BTreeMap::new(),
+                &config::MiseInstallDeps::default(),
+            ),
+            "a closable profile subset must pass",
+        );
     }
 
     #[test]
@@ -1059,6 +1217,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn actions_read_is_job_scoped_and_preserves_checkout_access() {
+        let mut collector = profile("collector");
+        collector
+            .permissions
+            .insert("actions".to_owned(), "read".to_owned());
+        let config = profile_config(vec![collector]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select the collector profile",
+        );
+        let workflow = render(&config, None, &selected);
+        assert!(
+            workflow.contains("    permissions:\n      actions: read\n      contents: read\n"),
+            "the capability must be scoped to the collector job and retain checkout access: {workflow}"
+        );
+        assert_eq!(
+            workflow.matches("permissions:\n").count(),
+            2,
+            "workflow and collector job each carry an explicit permission map: {workflow}"
+        );
+        assert_eq!(
+            workflow.matches("      actions: read\n").count(),
+            1,
+            "no unrelated job receives Actions history access: {workflow}"
+        );
+    }
+
+    #[test]
+    fn actions_read_is_rejected_on_pull_request_files() {
+        let mut collector = profile("collector");
+        collector
+            .permissions
+            .insert("actions".to_owned(), "read".to_owned());
+        let config = profile_config(vec![collector]);
+        let error = must_fail(
+            render_checks_file(
+                &config,
+                "collector.yml",
+                None,
+                &[&config.check_profiles[0]],
+                &["pull_request".to_owned()],
+                &[],
+            ),
+            "Actions history access on pull-request tasks must fail closed",
+        );
+        assert!(error.to_string().contains("pull_request"), "{error}");
+        assert!(
+            error.to_string().contains("contributor-controlled"),
+            "{error}"
+        );
+    }
+
     fn unscheduled(id: &str) -> CheckProfileSpec {
         let mut spec = profile(id);
         spec.schedule = String::new();
@@ -1099,7 +1311,7 @@ mod tests {
         let smoke = profile("smoke");
         let load = profile("load");
         let config = profile_config(vec![smoke, load]);
-        let map = args_for(r#"events = ["push", "pull_request"]"#);
+        let map = args_for(r#"events = ["push", "pull_request", "merge_group"]"#);
         let args = Args(&map);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
@@ -1109,10 +1321,11 @@ mod tests {
             select_events(&args, "scheduled-daily.yml"),
             "select the declared events",
         );
-        assert_eq!(events, vec!["push", "pull_request"]);
+        assert_eq!(events, vec!["push", "pull_request", "merge_group"]);
         let workflow = render_with_events(&config, None, &selected, &events);
         assert!(workflow.contains("  push:\n"), "{workflow}");
         assert!(workflow.contains("  pull_request:\n"), "{workflow}");
+        assert!(workflow.contains("  merge_group:\n"), "{workflow}");
         assert!(workflow.contains("- cron: \"23 2 * * *\""), "{workflow}");
         assert!(workflow.contains("workflow_dispatch:"), "{workflow}");
         let push = workflow.find("  push:\n").unwrap_or(usize::MAX);
@@ -1129,13 +1342,13 @@ mod tests {
     fn declared_events_canonicalize_to_push_then_pull_request() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
-        let map = args_for(r#"events = ["pull_request", "push"]"#);
+        let map = args_for(r#"events = ["merge_group", "pull_request", "push"]"#);
         let args = Args(&map);
         let events = must(
             select_events(&args, "scheduled-daily.yml"),
             "select the declared events",
         );
-        assert_eq!(events, vec!["push", "pull_request"]);
+        assert_eq!(events, vec!["push", "pull_request", "merge_group"]);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
             "select every profile",
@@ -1143,20 +1356,22 @@ mod tests {
         let workflow = render_with_events(&config, None, &selected, &events);
         let push = workflow.find("  push:\n").unwrap_or(usize::MAX);
         let pull = workflow.find("  pull_request:\n").unwrap_or(usize::MAX);
-        assert!(push < pull, "{workflow}");
+        let merge = workflow.find("  merge_group:\n").unwrap_or(usize::MAX);
+        assert!(push < pull && pull < merge, "{workflow}");
     }
 
     #[test]
     fn declared_workflow_dispatch_validates_without_rendering_twice() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
-        let map = args_for(r#"events = ["push", "pull_request", "workflow_dispatch"]"#);
+        let map =
+            args_for(r#"events = ["push", "pull_request", "merge_group", "workflow_dispatch"]"#);
         let args = Args(&map);
         let events = must(
             select_events(&args, "scheduled-daily.yml"),
             "dispatch is accepted",
         );
-        assert_eq!(events, vec!["push", "pull_request"]);
+        assert_eq!(events, vec!["push", "pull_request", "merge_group"]);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
             "select every profile",
@@ -1174,7 +1389,7 @@ mod tests {
         let smoke = unscheduled("smoke");
         let load = unscheduled("load");
         let config = profile_config(vec![smoke, load]);
-        let map = args_for(r#"events = ["push", "pull_request"]"#);
+        let map = args_for(r#"events = ["push", "pull_request", "merge_group"]"#);
         let args = Args(&map);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
@@ -1187,6 +1402,7 @@ mod tests {
         let workflow = render_with_events(&config, None, &selected, &events);
         assert!(workflow.contains("  push:\n"), "{workflow}");
         assert!(workflow.contains("  pull_request:\n"), "{workflow}");
+        assert!(workflow.contains("  merge_group:\n"), "{workflow}");
         assert!(workflow.contains("workflow_dispatch:"), "{workflow}");
         assert!(!workflow.contains("schedule:"), "{workflow}");
         assert!(!workflow.contains("cron:"), "{workflow}");
@@ -1292,20 +1508,23 @@ mod tests {
             "{evented}"
         );
         assert!(
-            evented.contains("group: scheduled-daily-${{ github.repository }}-${{ github.ref }}"),
+            evented.contains(
+                "group: scheduled-daily-${{ github.repository }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}"
+            ),
             "{evented}"
         );
     }
 
     #[test]
-    fn push_without_pr_cancels_like_cron_only() {
+    fn push_and_merge_group_runs_are_lossless() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
         for events_toml in [
             r#"events = ["push"]"#,
             r#"events = ["push"]
 branches = ["main"]"#,
-            r#"events = ["push", "workflow_dispatch"]"#,
+            r#"events = ["merge_group"]"#,
+            r#"events = ["push", "merge_group", "workflow_dispatch"]"#,
         ] {
             let map = args_for(events_toml);
             let args = Args(&map);
@@ -1324,14 +1543,36 @@ branches = ["main"]"#,
             let rendered =
                 render_with_events_and_branches(&config, None, &selected, &events, &branches);
             assert!(
-                rendered.contains("cancel-in-progress: true"),
-                "a file without a pull_request trigger cancels stale runs: {events_toml}\n{rendered}"
+                rendered.contains("cancel-in-progress: false"),
+                "a push/merge-group file must retain every committed/candidate verdict: {events_toml}\n{rendered}"
             );
             assert!(
                 !rendered.contains("cancel-in-progress: ${{"),
                 "the PR expression would be constant-false without the trigger: {events_toml}\n{rendered}"
             );
+            assert!(
+                rendered.contains("group: scheduled-daily-${{ github.repository }}-${{ github.sha }}"),
+                "committed/candidate evidence must use a SHA-scoped group: {events_toml}\n{rendered}"
+            );
         }
+    }
+
+    #[test]
+    fn dispatch_only_files_keep_supersession_without_commit_evidence() {
+        let smoke = profile("smoke");
+        let config = profile_config(vec![smoke]);
+        let map = args_for(r#"events = ["workflow_dispatch"]"#);
+        let args = Args(&map);
+        let selected = must(
+            select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
+            "select every profile",
+        );
+        let events = must(
+            select_events(&args, "scheduled-daily.yml"),
+            "select the declared events",
+        );
+        let rendered = render_with_events(&config, None, &selected, &events);
+        assert!(rendered.contains("cancel-in-progress: true"), "{rendered}");
     }
 
     #[test]

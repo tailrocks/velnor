@@ -4513,7 +4513,6 @@ on:
         type: string
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
@@ -4526,6 +4525,9 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
     runs-on: __MAINTENANCE_PRUNE_RUNNER__
     timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
     steps:
       - name: Delete merge-ref cache namespace
         env:
@@ -5546,6 +5548,16 @@ cp "$record" "$out"
     }
 
     fn assert_cache_retention_has_actions_write(workflow: &str) {
+        let workflow_permissions = workflow.split("jobs:").next().unwrap_or_default();
+        assert!(
+            !workflow_permissions.contains("actions: write"),
+            "maintenance must not grant cache mutation to every job: {workflow}"
+        );
+        let prune = yaml_job(workflow, "prune-pr-cache");
+        assert!(
+            prune.contains("permissions:\n      actions: write\n      contents: read"),
+            "closed-PR pruning must hold its own minimal cache mutation permission: {prune}"
+        );
         let job = yaml_job(workflow, "cache-budget");
         assert!(
             job.contains("name: Cache retention"),
@@ -5783,6 +5795,7 @@ cp "$record" "$out"
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -6096,11 +6109,11 @@ cp "$record" "$out"
             ),
             (
                 "maintenance.yml",
-                "41ef15b8f97eaa4503e592deb90be865cde0ef6b4912ef05c61cfc7c16f78dd7",
+                "42a7c619ecf999035d548734662ee0c465f74c81d50000fc1fedc3166a7317c7",
             ),
             (
                 "ci-release-package-signer.yml",
-                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+                "6b8532b90264f60a464f05462ea426c271e24507c1b732176b3b3bca0912daff",
             ),
         ];
         let root = scanned_root("default");
@@ -6215,7 +6228,7 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "aebcda490fb06b16894f4c2cc495ac87e82cc63a059eac21b3abc6f925622ec7",
+                "5bb7a1a0357af6b295d2c1a571b8d9e0d915d7e20168c90afa93735db7f41df1",
             ),
             (
                 "preview.yml",

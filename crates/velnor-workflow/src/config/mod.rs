@@ -367,6 +367,13 @@ pub(crate) struct CheckProfileSection {
     status: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
+    /// Job-level read-only GitHub token capabilities. The scheduled-check
+    /// renderer keeps the workflow default at `contents: read`; a profile may
+    /// request the Actions history read capability for collectors that query
+    /// the Actions API. Other scopes and levels are rejected below so a
+    /// scheduled profile cannot silently become a write-capable job.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    permissions: BTreeMap<String, String>,
 }
 
 /// One named-task job a `kind = "tasks"` release renders into `release.yml`.
@@ -668,8 +675,9 @@ pub(crate) struct UnitSection {
 }
 
 /// One named build product a `[[units]]` row declares: the product's name,
-/// the repository task that rebuilds it, and the task outputs consumers
-/// receive as environment.
+/// the repository task that rebuilds it, task outputs consumers receive as
+/// environment, and the repo-relative input closure that owns selection for
+/// the producer.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProductSection {
@@ -677,6 +685,8 @@ pub(crate) struct ProductSection {
     task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inputs: Option<Vec<String>>,
 }
 
 /// One prerequisite edge a `[[units]]` row declares: the producer unit, the
@@ -1106,6 +1116,10 @@ impl CheckProfileSection {
     pub(crate) fn env(&self) -> &BTreeMap<String, String> {
         &self.env
     }
+
+    pub(crate) fn permissions(&self) -> &BTreeMap<String, String> {
+        &self.permissions
+    }
 }
 
 impl UnitSection {
@@ -1330,10 +1344,27 @@ impl UnitSection {
             if let Some(env) = product.env.as_ref() {
                 crate::platform::validate_env(env, &format!("[[units]] {id} product `{name}`"))?;
             }
+            if let Some(inputs) = product.inputs.as_ref() {
+                let mut seen = std::collections::BTreeSet::new();
+                for input in inputs {
+                    if !crate::platform::valid_product_input(input) {
+                        return Err(GeneratorError::usage(format!(
+                            "[[units]] {id} declares product `{name}` with input `{input}`, which is not a repo-relative path or glob in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments"
+                        )));
+                    }
+                    if !seen.insert(input.as_str()) {
+                        return Err(GeneratorError::usage(format!(
+                            "[[units]] {id} declares product `{name}` input `{input}` twice; one entry per pattern"
+                        )));
+                    }
+                }
+            }
             products.push(crate::platform::NamedProduct {
                 name: name.to_owned(),
                 task: product.task.clone(),
                 env: product.env.clone().unwrap_or_default(),
+                inputs: product.inputs.clone().unwrap_or_default(),
+                inputs_unknown: Vec::new(),
             });
         }
         Ok(products)
@@ -2628,6 +2659,13 @@ pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
 /// The access levels a `[[release.job]]` permission override may grant.
 pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
 
+/// The only extra token capability a scheduled-check profile may request.
+/// `contents: read` is supplied by the workflow default and is added to any
+/// job-level override by the renderer because GitHub replaces, rather than
+/// merges, a job's permissions map.
+pub(crate) const CHECK_PROFILE_PERMISSIONS: &[&str] = &["actions"];
+pub(crate) const CHECK_PROFILE_PERMISSION_LEVELS: &[&str] = &["read"];
+
 /// The OCI platforms the `docker` publisher builds. Native builders exist
 /// for exactly these; anything else fails closed instead of silently
 /// emulating an architecture under QEMU.
@@ -3483,6 +3521,18 @@ fn validate_check_profile_result(
             )));
         }
     }
+    for (scope, level) in &row.permissions {
+        if !CHECK_PROFILE_PERMISSIONS.contains(&scope.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} permissions names `{scope}`, which is not an allowed scheduled-check capability; use `actions = \"read\"`"
+            )));
+        }
+        if !CHECK_PROFILE_PERMISSION_LEVELS.contains(&level.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} permissions `{scope}` must be `read`, found `{level}`"
+            )));
+        }
+    }
     match row.status.as_deref() {
         None | Some("required" | "advisory") => {}
         Some(status) => {
@@ -4185,6 +4235,76 @@ mod tests {
             toml::from_str::<RepoGenerationConfig>(text),
             "parse config under test",
         )
+    }
+
+    #[test]
+    fn schema_one_product_inputs_are_typed_and_validated() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-ffi\"\nkind = \"rust\"\n\n[[units.products]]\nname = \"xcframework\"\ntask = \"build-xcframework\"\ninputs = [\"libs/bridge-ffi/boltffi.toml\", \"libs/sibling/**/*.rs\"]\n",
+        );
+        let products = must(
+            config.units()[0].named_products("rust-ffi"),
+            "schema-one product inputs parse",
+        );
+        assert_eq!(
+            products[0].inputs,
+            vec![
+                "libs/bridge-ffi/boltffi.toml".to_owned(),
+                "libs/sibling/**/*.rs".to_owned(),
+            ]
+        );
+        let mut duplicate = config.units()[0].clone();
+        duplicate.products[0].inputs = Some(vec![
+            "libs/bridge-ffi/boltffi.toml".to_owned(),
+            "libs/bridge-ffi/boltffi.toml".to_owned(),
+        ]);
+        let error = must_fail(
+            duplicate.named_products("rust-ffi"),
+            "duplicate product input must fail",
+        );
+        assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn check_profile_actions_read_permission_is_typed() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[check_profile]]\nid = \"collector\"\ntasks = [\"collect\"]\n\n\
+             [check_profile.permissions]\nactions = \"read\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate the Actions history capability",
+        );
+        assert_eq!(
+            config.check_profiles()[0].permissions().get("actions"),
+            Some(&"read".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_profile_permissions_reject_write_and_unknown_scopes() {
+        for (declaration, expected) in [
+            ("actions = \"write\"", "must be `read`"),
+            (
+                "contents = \"read\"",
+                "not an allowed scheduled-check capability",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[check_profile]]\nid = \"collector\"\ntasks = [\"collect\"]\n\n\
+                 [check_profile.permissions]\n{declaration}\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "unsafe check-profile capability must fail closed",
+            );
+            assert!(
+                error.to_string().contains(expected),
+                "{declaration}: {error}"
+            );
+        }
     }
 
     /// A test-owned `package-update.yml` body: the grant rules are validated

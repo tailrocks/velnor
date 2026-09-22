@@ -171,6 +171,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            reads_closed: false,
             platform: crate::platform::PlatformRequirement::apple_xcode(),
             products: Vec::new(),
             prerequisites: Vec::new(),

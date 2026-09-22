@@ -243,6 +243,123 @@ fn generation_refuses_an_unpinned_xcodegen() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn install_subset_closes_over_backend_helpers() -> Result<(), Box<dyn Error>> {
+    // mise enforces the `cargo:` backend's helpers with no settings flag
+    // and no `depends` entry, so the subset closes over every helper the
+    // lock pins: the toolchain plus the binstall and sccache helpers.
+    let (scratch, root) = fixture_root("backend-helpers")?;
+    let lock = fs::read_to_string(root.join("mise.lock"))?;
+    fs::write(
+        root.join("mise.lock"),
+        format!(
+            "{lock}\n[[tools.cargo-binstall]]\nversion = \"1.21.1\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n\n[[tools.\"cargo:sccache\"]]\nversion = \"0.16.0\"\nbackend = \"cargo:sccache\"\n\n[[tools.rust]]\nversion = \"1.89.0\"\nbackend = \"core:rust\"\n"
+        ),
+    )?;
+    let out = scratch.join("out");
+    generate(&root, &out)?;
+    let ci_pr = fs::read_to_string(out.join(".github/workflows/ci-pr.yml"))?;
+    for id in [PRODUCER, CONSUMER] {
+        let caller = caller_block(&ci_pr, id)?;
+        assert!(
+            caller.contains("mise_tools: \"cargo:boltffi_cli rust cargo-binstall cargo:sccache\""),
+            "the {id} caller installs every backend helper beside the cargo tool:\n{caller}"
+        );
+    }
+    let app_caller = caller_block(&ci_pr, APP)?;
+    assert!(
+        app_caller.contains("mise_tools: xcodegen"),
+        "a subset with no cargo tool installs nothing extra:\n{app_caller}"
+    );
+    fs::remove_dir_all(&scratch)?;
+    Ok(())
+}
+
+#[test]
+fn generation_refuses_dangling_depends_edge() -> Result<(), Box<dyn Error>> {
+    let (scratch, root) = fixture_root("depends-dangling")?;
+    fs::write(
+        root.join("mise.toml"),
+        "[tools]\n\"cargo:boltffi_cli\" = { version = \"0.30.1\", depends = [\"example-ghost\"] }\n",
+    )?;
+    let out = scratch.join("out");
+    let result = generate(&root, &out);
+    let message = match &result {
+        Ok(()) => String::new(),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        result.is_err()
+            && message.contains(PRODUCER)
+            && message.contains("cargo:boltffi_cli")
+            && message.contains("example-ghost"),
+        "generation refuses naming the unit, the cargo tool, and the missing edge: {message}"
+    );
+    fs::remove_dir_all(&scratch)?;
+    Ok(())
+}
+
+#[test]
+fn xcodegen_framework_link_renders_product_transport_edge() -> Result<(), Box<dyn Error>> {
+    let (scratch, root) = fixture_root("xcodegen-edge")?;
+    let spec = fs::read_to_string(root.join("clients/apple/project.yml"))?;
+    let marker = "  BridgeAppTests:\n";
+    let start = spec
+        .find(marker)
+        .ok_or("the fixture spec names no BridgeAppTests target")?;
+    let mut patched = spec.clone();
+    patched.insert_str(
+        start,
+        "  BridgeLib:\n    type: library.static\n    platform: macOS\n    sources:\n      - BridgeLib\n    dependencies:\n      - framework: ../../target/xcframework/BridgeCore.xcframework\n",
+    );
+    fs::write(root.join("clients/apple/project.yml"), patched)?;
+    let out = scratch.join("out");
+    generate(&root, &out)?;
+    let project = fs::read_to_string(out.join(".github/ci/project.toml"))?;
+
+    let app = unit_block(&project, APP)?;
+    assert!(
+        app.contains(&format!("depends_on = [\"{PRODUCER}\"]")),
+        "the XcodeGen app selects the producer:\n{app}"
+    );
+    let rebuild = app
+        .find("VELNOR_PRODUCT_RUST_BRIDGE_CORE_FFI__XCFRAMEWORK_BRIDGECORE_READY")
+        .ok_or("the app guards on the XCFramework product")?;
+    let build = app
+        .find("xcodebuild")
+        .ok_or("the app builds via xcodebuild")?;
+    assert!(
+        rebuild < build,
+        "the producer materializes before `xcodebuild` consumes it:\n{app}"
+    );
+    assert!(
+        project.contains(
+            "XcodeGen spec clients/apple/project.yml consumes linked framework `BridgeCore`"
+        ),
+        "the join diagnostic names the spec and the bundle stem:\n{project}"
+    );
+
+    let ci_pr = fs::read_to_string(out.join(".github/workflows/ci-pr.yml"))?;
+    let job = format!("github-hosted-{APP}");
+    let job_start = ci_pr
+        .find(&format!("  {job}:\n"))
+        .ok_or_else(|| format!("ci-pr.yml declares no job {job}"))?;
+    let job_head = &ci_pr[job_start..(job_start + 1200).min(ci_pr.len())];
+    assert!(
+        job_head.contains("needs: [plan, github-hosted-rust-bridge-core-ffi]"),
+        "the app caller waits on the producer caller:\n{job_head}"
+    );
+    let app_caller = caller_block(&ci_pr, APP)?;
+    assert!(
+        app_caller
+            .contains("product_transport_ready: \"rust-bridge-core-ffi/xcframework-bridgecore:"),
+        "the app caller evaluates the transport verdict:\n{app_caller}"
+    );
+
+    fs::remove_dir_all(&scratch)?;
+    Ok(())
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
     let output = Command::new("git").current_dir(root).args(args).output()?;
     if !output.status.success() {

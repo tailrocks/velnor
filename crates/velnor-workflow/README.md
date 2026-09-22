@@ -154,3 +154,24 @@ instead of an inline `cargo install`, so toolchain setup stays centralized:
 The action isolates the install from job-level toolchain wrappers (for
 example an `RUSTC_WRAPPER` pointing at an `sccache` that is set up later in
 the job) and caches the cargo install keyed by revision and runner OS.
+
+## Scheduled-check token capabilities
+
+A scheduled check that reads GitHub Actions history may request the narrow
+job-level capability below:
+
+```toml
+[[check_profile]]
+id = "ci-evidence"
+tasks = ["ci-evidence"]
+
+[check_profile.permissions]
+actions = "read"
+```
+
+The generated job retains `contents: read`; no other scheduled-check token
+scope or write level is accepted. A profile requesting this capability cannot
+share a file with a `pull_request` trigger, because its task code would run
+with repository Actions-history access on contributor-controlled input. The
+maintenance workflow keeps cache mutation permissions job-scoped as well:
+only its cache-deletion jobs receive `actions: write`.

@@ -17,7 +17,7 @@ use super::{
     WorkflowIr, D19_PIN_FETCH_COMMANDS, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
     RELEASE_SIGNER, STATIC_WORKFLOW,
 };
-use crate::s2::provider::{runs_on_for, ProviderId, ProviderSet};
+use crate::s2::provider::{self, runs_on_for, ProviderId, ProviderSet};
 use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, runs_on_labels_yaml,
     selector_runs_on_yaml, shell_quote, unit_display_label, workflow_runtime_setup,
@@ -163,6 +163,7 @@ impl Primitive for Release {
             "source_repository",
             "tag_pattern",
             "targets",
+            "verification_providers",
             "version_gate_tasks",
             "version_manifest",
             "version_prefix",
@@ -187,8 +188,17 @@ impl Primitive for Release {
             let content = render_versioned_tool_release(ctx.config, &spec);
             return render_file(ctx, file, content);
         }
+        let declared = !args.keys().is_empty();
         let spec = declared_or_configured_spec(ctx, args)?;
-        let content = render_release(ctx.config, &spec);
+        if declared {
+            validate_declared_verification_providers(ctx.config, ctx.family, &spec)?;
+        }
+        let content = if declared {
+            let render_config = config_with_release_spec(ctx.config, &spec);
+            render_release(&render_config, &spec)
+        } else {
+            render_release(ctx.config, &spec)
+        };
         render_file(ctx, "release.yml", content)
     }
 }
@@ -214,6 +224,7 @@ impl Primitive for Preview {
             "producer_workflow_id",
             "producer_workflow_path",
             "targets",
+            "verification_providers",
         ]
     }
 
@@ -227,7 +238,9 @@ impl Primitive for Preview {
             if !release_contract_complete(&spec) {
                 return Err(incomplete_contract(ctx.family, &spec));
             }
-            render_preview(ctx.config, Some(&spec))
+            validate_declared_verification_providers(ctx.config, ctx.family, &spec)?;
+            let render_config = config_with_release_spec(ctx.config, &spec);
+            render_preview(&render_config, Some(&spec))
         };
         render_file(ctx, "preview.yml", content)
     }
@@ -328,7 +341,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
     )?;
     let spec = ReleaseSpec {
         kind,
-        verification_providers: None,
+        verification_providers: declared_verification_providers(family, args)?,
         package: args.string("package")?.unwrap_or_default(),
         packages: args.strings("packages")?.unwrap_or_default(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -462,7 +475,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
     )?;
     Ok(ReleaseSpec {
         kind: "rust-binary".to_owned(),
-        verification_providers: None,
+        verification_providers: declared_verification_providers(family, args)?,
         package: args.string("package")?.unwrap_or_default(),
         packages: Vec::new(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -517,6 +530,41 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         jobs: Vec::new(),
         images: Vec::new(),
     })
+}
+
+fn declared_verification_providers(
+    family: &str,
+    args: &Args<'_>,
+) -> Result<Option<ProviderSet>, GeneratorError> {
+    let Some(values) = args.strings("verification_providers")? else {
+        return Ok(None);
+    };
+    let field = format!("`{family}` verification_providers");
+    let providers = provider::parse_provider_set(&values, &field)?;
+    provider::require_non_empty(&providers, &field)?;
+    Ok(Some(providers))
+}
+
+fn validate_declared_verification_providers(
+    config: &ProjectConfig,
+    family: &str,
+    spec: &ReleaseSpec,
+) -> Result<(), GeneratorError> {
+    let Some(providers) = spec.verification_providers.as_ref() else {
+        return Ok(());
+    };
+    provider::require_subset(
+        providers,
+        &config.providers,
+        &format!("`{family}` verification_providers"),
+        "[workflow] providers",
+    )
+}
+
+fn config_with_release_spec(config: &ProjectConfig, spec: &ReleaseSpec) -> ProjectConfig {
+    let mut render_config = config.clone();
+    render_config.release = Some(spec.clone());
+    render_config
 }
 
 /// The main-branch-driven versioned publisher: a tool whose version comes
@@ -1841,16 +1889,22 @@ fn render_identity_debian_job(
         &versioned_stem,
         preview,
     ));
+    // Per-arch artifact names: same-name uploads from the twin matrix legs
+    // stay separate artifacts, and a bare-name download fetches only one of
+    // them. Each leg publishes `debian-packages-<arch>` for its own signer
+    // leg; the publishers merge the per-arch artifacts back by pattern.
     format!(
-        "  debian:\n    name: {name}\n    needs: [{needs}]\n{gate}    runs-on: {runner}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n{lane_env}    permissions:\n      contents: read\n    steps:\n{steps}      - name: Upload Debian packages\n        uses: {upload}\n        with:\n          name: debian-packages\n          path: |\n            dist/*.deb\n            dist/*.deb.sha256\n          if-no-files-found: error\n          retention-days: {retention}\n",
+        "  debian:\n    name: {name}\n    needs: [{needs}]\n{gate}    runs-on: {runner}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n{lane_env}    permissions:\n      contents: read\n    steps:\n{steps}      - name: Upload Debian packages\n        uses: {upload}\n        with:\n          name: debian-packages-${{{{ matrix.arch }}}}\n          path: |\n            dist/*.deb\n            dist/*.deb.sha256\n          if-no-files-found: error\n          retention-days: {retention}\n",
         runner = release_matrix_runner(config, &release.targets),
     )
 }
 
 /// One signer call per Debian architecture: the shared package signer
 /// attests the exact bytes the debian job uploaded, binding the lane's
-/// source ref. The consumer lane verifies these attestations before it
-/// binds any deb, so attestation never stays an inline afterthought.
+/// source ref. Each leg addresses its own per-arch artifact, matching the
+/// name the debian leg uploaded. The consumer lane verifies these
+/// attestations before it binds any deb, so attestation never stays an
+/// inline afterthought.
 fn render_sign_deb_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -1891,7 +1945,7 @@ fn render_sign_deb_job(
         )
     };
     Some(format!(
-        "  sign-deb:\n    name: {name}\n{needs}{gate}    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      artifact-name: debian-packages\n      subject-path: {stem}-{version}-${{{{ matrix.arch }}}}.deb\n      source-ref: {source_ref}\n"
+        "  sign-deb:\n    name: {name}\n{needs}{gate}    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      artifact-name: debian-packages-${{{{ matrix.arch }}}}\n      subject-path: {stem}-{version}-${{{{ matrix.arch }}}}.deb\n      source-ref: {source_ref}\n"
     ))
 }
 
@@ -2228,7 +2282,7 @@ fn render_native_publish_job(
         String::new()
     };
     format!(
-        "  publish:\n    name: Control / Publish\n    needs: [{needs}]\n{mode_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n      packages: read\n    env:\n      VERSION: {version}\n      SOURCE_REF: ${{{{ github.ref }}}}\n      SOURCE_COMMIT: ${{{{ github.sha }}}}\n      COMMIT: ${{{{ github.sha }}}}\n      INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n      MANIFEST_SHA256: ${{{{ needs.image.outputs.manifest_sha256 }}}}\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: {provider}-*\n          merge-multiple: true\n      - name: Download Debian packages\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n          path: artifacts\n      - name: Download image digests\n        uses: {download}\n        with:\n          name: image-digests\n          path: artifacts\n      - name: Verify tarball provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify deb provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.deb; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\"; done\n{record_assembly}{record_reverify}      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*.tar.gz artifacts/*.deb)\n          test \"${{#subjects[@]}}\" -eq {subject_count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {subject_count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n{manifest_step}      - name: Stage package subjects for hosted signer\n        run: |\n          set -euo pipefail\n          mkdir signer-input\n          cp artifacts/{binary}-*.tar.gz artifacts/{package}-*.deb signer-input/\n{packaged_identity}      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR for immutable image verification\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Verify OCI index stayed immutable before publication\n        env:\n          EXPECTED_INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > published-image.json\n          published_index=\"$(jq -er '.manifest.digest' published-image.json)\"\n          [ \"$published_index\" = \"$EXPECTED_INDEX_DIGEST\" ] || {{\n            echo \"::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication\" >&2\n            exit 1\n          }}\n{tag_check}{create_verify}      - name: Upload package subjects\n        uses: {upload}\n        with:\n          name: package-subjects\n          path: signer-input\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  publish:\n    name: Control / Publish\n    needs: [{needs}]\n{mode_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n      packages: read\n    env:\n      VERSION: {version}\n      SOURCE_REF: ${{{{ github.ref }}}}\n      SOURCE_COMMIT: ${{{{ github.sha }}}}\n      COMMIT: ${{{{ github.sha }}}}\n      INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n      MANIFEST_SHA256: ${{{{ needs.image.outputs.manifest_sha256 }}}}\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: {provider}-*\n          merge-multiple: true\n      - name: Download Debian packages\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: debian-packages-*\n          merge-multiple: true\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n          path: artifacts\n      - name: Download image digests\n        uses: {download}\n        with:\n          name: image-digests\n          path: artifacts\n      - name: Verify tarball provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify deb provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.deb; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\"; done\n{record_assembly}{record_reverify}      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*.tar.gz artifacts/*.deb)\n          test \"${{#subjects[@]}}\" -eq {subject_count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {subject_count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n{manifest_step}      - name: Stage package subjects for hosted signer\n        run: |\n          set -euo pipefail\n          mkdir signer-input\n          cp artifacts/{binary}-*.tar.gz artifacts/{package}-*.deb signer-input/\n{packaged_identity}      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR for immutable image verification\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Verify OCI index stayed immutable before publication\n        env:\n          EXPECTED_INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > published-image.json\n          published_index=\"$(jq -er '.manifest.digest' published-image.json)\"\n          [ \"$published_index\" = \"$EXPECTED_INDEX_DIGEST\" ] || {{\n            echo \"::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication\" >&2\n            exit 1\n          }}\n{tag_check}{create_verify}      - name: Upload package subjects\n        uses: {upload}\n        with:\n          name: package-subjects\n          path: signer-input\n          if-no-files-found: error\n          retention-days: 2\n",
         runner = selected_runner(config),
         provider = canonical_provider(config),
         image = yaml_scalar(&release.image),
@@ -2352,7 +2406,7 @@ fn render_preview_publish_job(
         )
     };
     format!(
-        "  publish:\n    needs: [{needs}]\n    name: Replace the rolling preview release\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{branch}' }}}}\n    timeout-minutes: 20\n    runs-on: {runner}\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.identity.outputs.version }}}}\n      NAME: ${{{{ needs.identity.outputs.name }}}}\n      COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      GH_REPO: ${{{{ github.repository }}}}\n    steps:\n      - name: Download preview debs\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download preview metadata\n        uses: {download}\n        with:\n          name: preview-metadata\n          path: preview-metadata\n      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*-preview-*.deb)\n          test \"${{#subjects[@]}}\" -eq {count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n          chmod +x preview-metadata/{binary}-release-tool\n          tmpdir=\"$(mktemp -d)\"\n          trap 'rm -rf -- \"$tmpdir\"' EXIT\n          for arch in {arch_list}; do\n            deb=\"artifacts/{package}-preview-${{VERSION}}-${{arch}}.deb\"\n            [ -f \"$deb\" ] || {{ echo \"::error::missing preview deb for $arch\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Version)\" = \"$VERSION\" ] \\\n              || {{ echo \"::error::published deb version != preview identity ($arch)\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Architecture)\" = \"$arch\" ] \\\n              || {{ echo \"::error::published deb arch mismatch ($arch)\" >&2; exit 1; }}\n            record=\"$tmpdir/package-record-$arch.json\"\n            record_path=\"$(dpkg-deb -c \"$deb\" | awk '$NF ~ /(^|\\/)package-record\\.json$/ {{ print $NF }}')\"\n            [ -n \"$record_path\" ] || {{ echo \"::error::deb missing its package record ($arch)\" >&2; exit 1; }}\n            dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - \"$record_path\" > \"$record\"\n            record_digest=\"$(sha256sum \"$record\" | awk '{{print $1}}')\"\n            preview-metadata/{binary}-release-tool release verify-record \\\n              --record \"$record\" --sha256 \"$record_digest\" >/dev/null \\\n              || {{ echo \"::error::packaged package record is incoherent ($arch)\" >&2; exit 1; }}\n            packaged_binary=\"$(dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - ./usr/bin/{binary} | sha256sum | awk '{{print $1}}')\"\n            jq -e --arg commit \"$COMMIT\" --arg version \"$VERSION\" --arg arch \"$arch\" --arg binary \"$packaged_binary\" \\\n              '.build.kind == \"preview\" and .build.commit == $commit and\n               .build.debian_version == $version and\n               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \\\n              \"$record\" >/dev/null \\\n              || {{ echo \"::error::packaged package record does not name this preview identity ($arch)\" >&2; exit 1; }}\n          done\n{manifest_step}      - name: Replace the rolling preview release atomically\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          live_response=\"$(mktemp)\"\n          trap 'rm -f -- \"$live_response\"' EXIT\n          live_status=0\n          gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > \"$live_response\" 2>/dev/null || live_status=$?\n          live_http=\"$(awk 'NR == 1 {{print $2; exit}}' \"$live_response\")\"\n          if [ \"$live_status\" -ne 0 ]; then\n            [ \"$live_http\" = \"404\" ] \\\n              || {{ echo \"::error::could not read the live preview release (gh api exit $live_status, HTTP ${{live_http:-unknown}}); refusing to replace it\" >&2; exit 1; }}\n          else\n            live_body=\"$(awk 'body {{print; next}} /^\\r?$/ {{body = 1}}' \"$live_response\")\"\n            if ! live_name=\"$(jq -er '.name | strings' <<<\"$live_body\" 2>/dev/null)\"; then\n              echo \"::error::live preview release response carries no name; refusing to replace it\" >&2\n              exit 1\n            fi\n            [ -n \"$live_name\" ] || {{ echo \"::error::live preview release has an empty name; refusing to replace it\" >&2; exit 1; }}\n            live_version=\"${{live_name#Preview }}\"\n            [[ \"$live_name\" = \"Preview $live_version\" && \"$live_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n              || {{ echo \"::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to delete it\" >&2; exit 1; }}\n            if dpkg --compare-versions \"$live_version\" eq \"$VERSION\"; then\n              :\n            elif dpkg --compare-versions \"$live_version\" gt \"$VERSION\"; then\n              echo \"::error::live preview $live_version is newer than candidate $VERSION; refusing to move the rolling preview backward — re-run the LATEST preview run instead\" >&2\n              exit 1\n            fi\n          fi\n          gh release delete preview --cleanup-tag --yes || true\n          gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\" \\\n            {create_assets}\n      - name: Verify the published rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh api \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > published.json\n          asset_version=\"${{VERSION//'~'/'.'}}\"\n          jq -e \\\n            --arg name \"$NAME\" --arg commit \"$COMMIT\" --arg asset_version \"$asset_version\" '\n              (.draft | not) and .prerelease == true and\n              .tag_name == \"preview\" and .name == $name and\n              .target_commitish == $commit and\n              ([.assets[].name] | sort) ==\n              ([\n                {expected_assets}\n              ] | sort)\n            ' published.json >/dev/null\n          jq -e --arg version \"$VERSION\" \\\n            '.version == $version and .source_ref == \"refs/heads/{branch}\" and\n             (.assets | length) == {count}' release-manifest.json >/dev/null\n",
+        "  publish:\n    needs: [{needs}]\n    name: Replace the rolling preview release\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{branch}' }}}}\n    timeout-minutes: 20\n    runs-on: {runner}\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.identity.outputs.version }}}}\n      NAME: ${{{{ needs.identity.outputs.name }}}}\n      COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      GH_REPO: ${{{{ github.repository }}}}\n    steps:\n      - name: Download preview debs\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: debian-packages-*\n          merge-multiple: true\n      - name: Download preview metadata\n        uses: {download}\n        with:\n          name: preview-metadata\n          path: preview-metadata\n      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*-preview-*.deb)\n          test \"${{#subjects[@]}}\" -eq {count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n          chmod +x preview-metadata/{binary}-release-tool\n          tmpdir=\"$(mktemp -d)\"\n          trap 'rm -rf -- \"$tmpdir\"' EXIT\n          for arch in {arch_list}; do\n            deb=\"artifacts/{package}-preview-${{VERSION}}-${{arch}}.deb\"\n            [ -f \"$deb\" ] || {{ echo \"::error::missing preview deb for $arch\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Version)\" = \"$VERSION\" ] \\\n              || {{ echo \"::error::published deb version != preview identity ($arch)\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Architecture)\" = \"$arch\" ] \\\n              || {{ echo \"::error::published deb arch mismatch ($arch)\" >&2; exit 1; }}\n            record=\"$tmpdir/package-record-$arch.json\"\n            record_path=\"$(dpkg-deb -c \"$deb\" | awk '$NF ~ /(^|\\/)package-record\\.json$/ {{ print $NF }}')\"\n            [ -n \"$record_path\" ] || {{ echo \"::error::deb missing its package record ($arch)\" >&2; exit 1; }}\n            dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - \"$record_path\" > \"$record\"\n            record_digest=\"$(sha256sum \"$record\" | awk '{{print $1}}')\"\n            preview-metadata/{binary}-release-tool release verify-record \\\n              --record \"$record\" --sha256 \"$record_digest\" >/dev/null \\\n              || {{ echo \"::error::packaged package record is incoherent ($arch)\" >&2; exit 1; }}\n            packaged_binary=\"$(dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - ./usr/bin/{binary} | sha256sum | awk '{{print $1}}')\"\n            jq -e --arg commit \"$COMMIT\" --arg version \"$VERSION\" --arg arch \"$arch\" --arg binary \"$packaged_binary\" \\\n              '.build.kind == \"preview\" and .build.commit == $commit and\n               .build.debian_version == $version and\n               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \\\n              \"$record\" >/dev/null \\\n              || {{ echo \"::error::packaged package record does not name this preview identity ($arch)\" >&2; exit 1; }}\n          done\n{manifest_step}      - name: Replace the rolling preview release atomically\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          live_response=\"$(mktemp)\"\n          trap 'rm -f -- \"$live_response\"' EXIT\n          live_status=0\n          gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > \"$live_response\" 2>/dev/null || live_status=$?\n          live_http=\"$(awk 'NR == 1 {{print $2; exit}}' \"$live_response\")\"\n          if [ \"$live_status\" -ne 0 ]; then\n            [ \"$live_http\" = \"404\" ] \\\n              || {{ echo \"::error::could not read the live preview release (gh api exit $live_status, HTTP ${{live_http:-unknown}}); refusing to replace it\" >&2; exit 1; }}\n          else\n            live_body=\"$(awk 'body {{print; next}} /^\\r?$/ {{body = 1}}' \"$live_response\")\"\n            if ! live_name=\"$(jq -er '.name | strings' <<<\"$live_body\" 2>/dev/null)\"; then\n              echo \"::error::live preview release response carries no name; refusing to replace it\" >&2\n              exit 1\n            fi\n            [ -n \"$live_name\" ] || {{ echo \"::error::live preview release has an empty name; refusing to replace it\" >&2; exit 1; }}\n            live_version=\"${{live_name#Preview }}\"\n            [[ \"$live_name\" = \"Preview $live_version\" && \"$live_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n              || {{ echo \"::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to delete it\" >&2; exit 1; }}\n            if dpkg --compare-versions \"$live_version\" eq \"$VERSION\"; then\n              :\n            elif dpkg --compare-versions \"$live_version\" gt \"$VERSION\"; then\n              echo \"::error::live preview $live_version is newer than candidate $VERSION; refusing to move the rolling preview backward — re-run the LATEST preview run instead\" >&2\n              exit 1\n            fi\n          fi\n          gh release delete preview --cleanup-tag --yes || true\n          gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\" \\\n            {create_assets}\n      - name: Verify the published rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh api \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > published.json\n          asset_version=\"${{VERSION//'~'/'.'}}\"\n          jq -e \\\n            --arg name \"$NAME\" --arg commit \"$COMMIT\" --arg asset_version \"$asset_version\" '\n              (.draft | not) and .prerelease == true and\n              .tag_name == \"preview\" and .name == $name and\n              .target_commitish == $commit and\n              ([.assets[].name] | sort) ==\n              ([\n                {expected_assets}\n              ] | sort)\n            ' published.json >/dev/null\n          jq -e --arg version \"$VERSION\" \\\n            '.version == $version and .source_ref == \"refs/heads/{branch}\" and\n             (.assets | length) == {count}' release-manifest.json >/dev/null\n",
         branch = config.default_branch,
         runner = selected_runner(config),
         count = arches.len(),
@@ -2978,6 +3032,15 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     } else {
         "true"
     };
+    // A producer-bound rolling release is built from the admitted source
+    // revision, not the workflow_run event's default-branch SHA. Keep the
+    // initial create and replacement edit on one explicit target so a missing
+    // release cannot silently fall back to the moving default branch.
+    let preview_target = if has_producer_binding(release) {
+        "${{ needs.publish-gate.outputs.sha }}"
+    } else {
+        "${{ github.sha }}"
+    };
     let mut output = format!(
         r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
@@ -3074,6 +3137,24 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ),
     )
     .replace("run: cargo build ", "run: mbx build ");
+    if has_producer_binding(release) {
+        // Bind both the first-create fallback and the replacement edit to the
+        // exact source admitted by publish-gate. Without this pair, a
+        // workflow_run publisher can create/tag the moving default branch.
+        output = output
+            .replace(
+                "gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title \"Rolling preview\"",
+                &format!(
+                    "gh release view preview >/dev/null 2>&1 || gh release create preview --target \"{preview_target}\" --prerelease --title \"Rolling preview\""
+                ),
+            )
+            .replace(
+                "gh release edit preview --target \"${{ github.sha }}\" --prerelease",
+                &format!(
+                    "gh release edit preview --target \"{preview_target}\" --prerelease"
+                ),
+            );
+    }
     // Unit verification is part of the preview admission graph. Keep the
     // provider jobs ahead of the artifact build and make the singular
     // publisher wait on the same exact IDs.
@@ -4719,12 +4800,29 @@ fn render_docker_manifest_job(
         .join(",");
     let needs = needs.join(", ");
     format!(
-        "  image{suffix}:\n    if: ${{{{ always() && needs.verify.result == 'success' && needs.image-admission{suffix}.result == 'success' && (needs.image-platform{suffix}.result == 'success' || needs.image-platform{suffix}.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform{suffix}-*\n          path: image-artifacts{suffix}\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts{suffix} --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission{suffix}.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission{suffix}.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests{suffix}\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  image{suffix}:\n    if: ${{{{ always() && needs.release-verified.outputs.verify_result == 'success' && needs.image-admission{suffix}.result == 'success' && (needs.image-platform{suffix}.result == 'success' || needs.image-platform{suffix}.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.release-verified.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform{suffix}-*\n          path: image-artifacts{suffix}\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts{suffix} --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission{suffix}.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission{suffix}.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests{suffix}\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
         suffix = image.suffix,
         runner = selected_runner(config),
         image = yaml_scalar(image.image),
         count = arches.len(),
         login_step = docker_login_step(release),
+    )
+}
+
+/// The release unit aggregator: one job waits on `verify` plus every
+/// release unit lane and re-exports the tag gate the manifest jobs read.
+/// Without it each manifest job repeats the full unit fan-out in its own
+/// `needs` list, which pushes multi-image release files past GitHub's
+/// per-file size limit. The aggregator preserves the exact gate: unit
+/// lanes stay ordering-only (their results never block publication),
+/// while `verify_result`/`version` forward the tag gate verbatim.
+fn render_release_verified_job(config: &ProjectConfig, unit_job_ids: &[String]) -> String {
+    let mut needs = vec!["verify".to_owned()];
+    needs.extend(unit_job_ids.iter().cloned());
+    let needs = needs.join(", ");
+    format!(
+        "  release-verified:\n    name: Aggregate release unit results\n    if: ${{{{ always() }}}}\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 5\n    outputs:\n      verify_result: ${{{{ needs.verify.result }}}}\n      version: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Export unit results\n        run: echo \"release unit lanes complete\"\n",
+        runner = selected_runner(config),
     )
 }
 
@@ -4735,18 +4833,18 @@ fn render_docker_manifest_job(
 /// per ref serializes publishers so a resume and a fresh publication can
 /// never interleave on the same tag. A multi-image contract renders one
 /// `-<name>` chain per `[[release.image]]` row in config order, each
-/// admission waiting on its `needs` tags; the scalar contract renders
-/// today's exact bytes.
+/// admission waiting on its `needs` tags. Every manifest job waits on the
+/// `release-verified` aggregator instead of repeating the unit fan-out.
 fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
+    let verified = render_release_verified_job(config, &unit_job_ids);
     let chains = if release.images.is_empty() {
         let scalar = DockerImageView::scalar(release);
-        let mut manifest_needs = vec![
-            "verify".to_owned(),
+        let manifest_needs = vec![
+            "release-verified".to_owned(),
             "image-admission".to_owned(),
             "image-platform".to_owned(),
         ];
-        manifest_needs.extend(unit_job_ids);
         format!(
             "{admission}\n{platform}\n{manifest}",
             admission = render_docker_admission_job(config, release, &scalar, &[]),
@@ -4762,12 +4860,11 @@ fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
                 .iter()
                 .map(|dependency| format!("image-{dependency}"))
                 .collect::<Vec<_>>();
-            let mut manifest_needs = vec![
-                "verify".to_owned(),
+            let manifest_needs = vec![
+                "release-verified".to_owned(),
                 format!("image-admission{}", image.suffix),
                 format!("image-platform{}", image.suffix),
             ];
-            manifest_needs.extend(unit_job_ids.iter().cloned());
             chains.push_str(&render_docker_admission_job(
                 config,
                 release,
@@ -4787,10 +4884,11 @@ fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         chains
     };
     format!(
-        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [{tags}]\n  workflow_dispatch:\n    inputs:\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{verify}\n{unit_jobs}{chains}",
+        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [{tags}]\n  workflow_dispatch:\n    inputs:\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{verify}\n{unit_jobs}{verified}\n{chains}",
         tags = yaml_scalar(release_tag_pattern(release)),
         verify = render_docker_verify_job(config),
         unit_jobs = unit_jobs,
+        verified = verified,
         chains = chains,
     )
 }
@@ -5266,7 +5364,6 @@ on:
         type: string
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
@@ -5279,6 +5376,9 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
     runs-on: __MAINTENANCE_PRUNE_RUNNER__
     timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
     steps:
       - name: Delete merge-ref cache namespace
         env:
@@ -6056,6 +6156,16 @@ cp "$record" "$out"
     }
 
     fn assert_cache_retention_has_actions_write(workflow: &str) {
+        let workflow_permissions = workflow.split("jobs:").next().unwrap_or_default();
+        assert!(
+            !workflow_permissions.contains("actions: write"),
+            "maintenance must not grant cache mutation to every job: {workflow}"
+        );
+        let prune = yaml_job(workflow, "prune-pr-cache");
+        assert!(
+            prune.contains("permissions:\n      actions: write\n      contents: read"),
+            "closed-PR pruning must hold its own minimal cache mutation permission: {prune}"
+        );
         let job = yaml_job(workflow, "cache-budget");
         assert!(
             job.contains("name: Cache retention"),
@@ -6334,6 +6444,7 @@ cp "$record" "$out"
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -6553,6 +6664,8 @@ cp "$record" "$out"
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_lock_backends: BTreeMap::new(),
+            mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
             velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
         }
@@ -6624,19 +6737,19 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "63e4abe43158fc16153efef67d4d81ed0ef3cd7306d0c69930c0201f36563bc6",
+                "ccb41bed96febf991764dcf752169bc5e56d2f8a83593199b96e16d24df9ea9f",
             ),
             (
                 "preview.yml",
-                "9c01438ada4a500c8f221aa890c20b58d492a2ae1b35ab54392f1d161393097f",
+                "9a860863d29563a89c267e04b9eb0b2f95e6f17ffbf02042feedfbef55a09a94",
             ),
             (
                 "maintenance.yml",
-                "3725b27e2f9fe196c7a5694f8e1255feef011f7b88ad52e214c47300809c0328",
+                "627a5ea5c4e44ea9f612b556b4b21cf40be99fb632fe1684644174e3d4538525",
             ),
             (
                 "ci-release-package-signer.yml",
-                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+                "6b8532b90264f60a464f05462ea426c271e24507c1b732176b3b3bca0912daff",
             ),
         ];
         let root = scanned_root("default");
@@ -6749,15 +6862,17 @@ cp "$record" "$out"
     #[test]
     fn identity_rows_render_the_pinned_native_surface() {
         const PINNED: &[(&str, &str)] = &[
-            // inc3: the dispatch-scoped admit-provider job and the providers
-            // input are gone; the build gate declares tag scope statically.
+            // Per-arch debian artifacts: the twin legs upload
+            // `debian-packages-<arch>`, each signer leg addresses its own,
+            // and the publishers merge the per-arch artifacts by pattern.
+            // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "7f31f4ac2d87afc62f85ec2f75e4805ee5575c2a6cfe796ed4acf2ee0081ac15",
+                "d41173c905e9d6b2627f21da8f3f9a7e1fed164720b5c928e76030b39dd2b2a2",
             ),
             (
                 "preview.yml",
-                "6dbb4d7a71bd8313fd06daecb2407986a26c52ed1b3033bfec89a109ff2c93bc",
+                "b462ebf6c21ec929e45a99b108689011f2ae079dbcac21d45cc9f0c8df043a27",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -6838,6 +6953,55 @@ cp "$record" "$out"
                 ),
                 "cross toolchain must carry the aarch64 sysroot:\n{debian}"
             );
+        }
+    }
+
+    /// The twin debian legs must not share one upload name: same-name
+    /// uploads stay separate artifacts and a bare-name download fetches
+    /// only one of them, which failed exactly one `Sign <arch>` leg on
+    /// every run. Each leg publishes `debian-packages-<arch>`, each signer
+    /// leg addresses its own arch artifact, and the publishers merge the
+    /// per-arch artifacts back by pattern. The stable lane shares the
+    /// renderer, so it carries the same contract.
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn debian_artifacts_are_per_arch_addressable_in_both_lanes() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        for (lane, workflow) in [
+            ("preview", super::render_preview(&config, Some(release))),
+            ("stable", super::render_release(&config, release)),
+        ] {
+            let debian = yaml_job(&workflow, "debian");
+            assert!(
+                debian.contains("name: debian-packages-${{ matrix.arch }}"),
+                "{lane}: debian legs must upload per-arch artifacts:\n{debian}"
+            );
+            let sign = yaml_job(&workflow, "sign-deb");
+            assert!(
+                sign.contains("artifact-name: debian-packages-${{ matrix.arch }}"),
+                "{lane}: signer legs must address their own arch artifact:\n{sign}"
+            );
+            let publish = yaml_job(&workflow, "publish");
+            for marker in ["pattern: debian-packages-*", "merge-multiple: true"] {
+                assert!(
+                    publish.contains(marker),
+                    "{lane}: publish must merge the per-arch artifacts ({marker}):\n{publish}"
+                );
+            }
+            for line in workflow.lines() {
+                let trimmed = line.trim();
+                assert!(
+                    trimmed != "name: debian-packages"
+                        && trimmed != "artifact-name: debian-packages",
+                    "{lane}: a bare debian artifact name resurrects the collision:\n{workflow}"
+                );
+            }
         }
     }
 
@@ -7785,6 +7949,47 @@ cp "$record" "$out"
     }
 
     #[test]
+    fn declared_release_verification_lanes_are_exact() {
+        let root = scanned_root("declared-release-verification");
+        let config = config(&["preview.yml"], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "rust-binary"
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["github-hosted"]
+"#,
+            ),
+        );
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("release-github-hosted-rust-example"),
+            "declared release must render the requested hosted verifier: {release}"
+        );
+        assert!(
+            !release.contains("release-github-self-hosted-")
+                && !release.contains("release-velnor-"),
+            "declared release must not fan out to unrelated providers: {release}"
+        );
+        let build = yaml_job(&release, "build");
+        assert!(
+            build.contains("release-github-hosted-rust-example")
+                && !build.contains("release-github-self-hosted-")
+                && !build.contains("release-velnor-"),
+            "release publication must depend on exactly the requested verifier: {build}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn schema2_tasks_release_renders_typed_desktop_jobs() {
         let root = scanned_root("tasks-release");
         must(
@@ -8109,7 +8314,7 @@ cp "$record" "$out"
         assert!(!debian.contains("Attest Debian packages"), "{debian}");
         // Publish attaches both lanes plus the consumer manifest.
         let publish = yaml_job(&workflow, "publish");
-        assert!(publish.contains("name: debian-packages"), "{publish}");
+        assert!(publish.contains("pattern: debian-packages-*"), "{publish}");
         assert!(publish.contains("name: release-metadata"), "{publish}");
         assert!(
             publish.contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\""),
@@ -10601,6 +10806,32 @@ cp "$record" "$out"
                 ),
             "the rolling publish must admit only the gate's publish mode: {publish}"
         );
+        let release_commands: Vec<&str> = publish
+            .lines()
+            .filter(|line| {
+                line.contains("gh release create preview")
+                    || line.contains("gh release edit preview")
+            })
+            .collect();
+        assert_eq!(
+            release_commands.len(),
+            2,
+            "producer tarball publisher must render both create and edit paths: {publish}"
+        );
+        for command in release_commands {
+            assert!(
+                command.contains("--target \"${{ needs.publish-gate.outputs.sha }}\""),
+                "producer release command must target the admitted source SHA: {command}"
+            );
+            assert!(
+                !command.contains("github.sha"),
+                "producer release command must not use the workflow event SHA: {command}"
+            );
+        }
+        assert!(
+            !publish.contains("gh release create preview --prerelease --title \"Rolling preview\""),
+            "producer create fallback must not omit its admitted target: {publish}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11137,6 +11368,21 @@ cp "$record" "$out"
                 "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\narchive_retention_days = 91\n",
                 "must be 1-90",
             ),
+            (
+                "empty-verification-providers",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = []\n",
+                "must name at least one provider",
+            ),
+            (
+                "duplicate-verification-providers",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = [\"github-hosted\", \"github-hosted\"]\n",
+                "more than once",
+            ),
+            (
+                "unknown-verification-provider",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = [\"unknown\"]\n",
+                "unknown provider",
+            ),
         ] {
             let error = match try_generate(
                 &root,
@@ -11153,6 +11399,38 @@ cp "$record" "$out"
                 "`{name}` must name the problem: {error}"
             );
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_verification_providers_must_be_available() {
+        let root = scanned_root("declared-verification-availability");
+        let mut config = config(&[], None);
+        config.providers = [ProviderId::GithubHosted].into_iter().collect();
+        let error = match try_generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "rust-binary"
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["velnor"]
+"#,
+            ),
+        ) {
+            Ok(_) => panic!("an unavailable verification provider must fail closed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("outside [workflow] providers"),
+            "availability errors must name the provider universe: {error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11180,6 +11458,46 @@ cp "$record" "$out"
                 && preview.contains("--members 'example-role'")
                 && preview.contains("          retention-days: 7\n"),
             "declared preview bindings must render: {preview}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_preview_verification_lanes_are_exact() {
+        let root = scanned_root("declared-preview-verification");
+        let config = config(&[], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "preview"
+file = "preview.yml"
+
+[declare.args]
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["github-hosted"]
+"#,
+            ),
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("release-github-hosted-rust-example"),
+            "declared preview must render the requested hosted verifier: {preview}"
+        );
+        assert!(
+            !preview.contains("release-github-self-hosted-")
+                && !preview.contains("release-velnor-"),
+            "declared preview must not fan out to unrelated providers: {preview}"
+        );
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains("release-github-hosted-rust-example")
+                && !publish.contains("release-github-self-hosted-")
+                && !publish.contains("release-velnor-"),
+            "preview publication must depend on exactly the requested verifier: {publish}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -11872,7 +12190,7 @@ cp "$record" "$out"
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "de8b89dc8e7f38d2a8cad3cd603bd5fba0cfdb2fa79b63dc4a3388acd1f019cb",
+            "ecfe5139ad9f64a1ea7936abcfcdf72e853dc4bdb9fbc45ac06a19414178369b",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));
@@ -11990,6 +12308,58 @@ cp "$record" "$out"
             admission.contains("GHCR_IMAGE: \"example/node\""),
             "the admission gate must inspect the row's own tag:\n{admission}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Manifest jobs wait on the `release-verified` aggregator instead of
+    /// repeating the full unit fan-out, keeping multi-image release files
+    /// under GitHub's per-file size limit without changing the gate.
+    #[test]
+    fn docker_manifest_waits_on_release_verified_aggregator() {
+        let root = scanned_root("release-verified-aggregator");
+        let config = config(&["release.yml"], Some(multi_image_docker_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let verified = yaml_job(&release, "release-verified");
+        let needs = yaml_job_needs(verified);
+        assert!(
+            needs.contains(&"verify".to_owned()),
+            "the aggregator must wait on the tag gate: {needs:?}"
+        );
+        assert!(
+            needs.iter().any(|need| need.starts_with("release-")),
+            "the aggregator must wait on every unit lane: {needs:?}"
+        );
+        assert!(
+            verified.contains("verify_result: ${{ needs.verify.result }}"),
+            "the aggregator must forward the tag result:\n{verified}"
+        );
+        for job in ["image-base", "image-node"] {
+            let manifest = yaml_job(&release, job);
+            let manifest_needs = yaml_job_needs(manifest);
+            assert!(
+                manifest_needs.contains(&"release-verified".to_owned()),
+                "{job} must wait on the aggregator: {manifest_needs:?}"
+            );
+            assert!(
+                !manifest_needs
+                    .iter()
+                    .any(|need| need.starts_with("release-github")),
+                "{job} must not repeat the unit fan-out: {manifest_needs:?}"
+            );
+            assert!(
+                manifest.contains("needs.release-verified.outputs.verify_result == 'success'"),
+                "{job} must read the tag gate from the aggregator:\n{manifest}"
+            );
+            assert!(
+                !manifest.contains("needs.verify.result"),
+                "{job} must not read the unwired verify result:\n{manifest}"
+            );
+            assert!(
+                manifest.contains("VERSION: ${{ needs.release-verified.outputs.version }}"),
+                "{job} must read the version from the aggregator:\n{manifest}"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 
