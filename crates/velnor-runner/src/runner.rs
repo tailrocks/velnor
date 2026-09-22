@@ -36,7 +36,10 @@ use crate::{
         ActionMetadata, CompositeActionInvocation, LocalActionPlan, RepositoryActionPlan,
         ResolvedAction,
     },
-    args::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
+    args::{
+        ConfigureArgs, DaemonArgs, DoctorArgs, HostMode, PreflightArgs, RemoveArgs, RunArgs,
+        StatusArgs,
+    },
     checkout::{
         checkout_plan, checkout_plans, checkout_step_id, cleanup_checkout_credentials,
         configure_safe_directory, reap_stale_checkout_credentials, CheckoutPlan,
@@ -3090,7 +3093,12 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 }
 
 async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
-    let slots = validate_daemon_slots(args.slots)?;
+    validate_host_mode(&args)?;
+    let slots = if args.mode.native_enabled() {
+        validate_daemon_slots(args.slots)?
+    } else {
+        0
+    };
     validate_daemon_runner_labels(&args)?;
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
@@ -3101,7 +3109,9 @@ async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
     // rest of daemon startup: a transient journal/filesystem failure must not
     // turn into a systemd restart storm, while no slot may register until the
     // gate succeeds.
-    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+    let supervised = (args.url.is_some() || args.mode.scale_set_enabled())
+        && !args.once
+        && !args.dry_run_registration;
     if supervised && let Ok(config_base) = daemon_config_dir(&args) {
         start_drain_listener(config_base);
     }
@@ -3115,7 +3125,9 @@ async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
 
     // Reclaim credentials abandoned by a prior daemon before any slot can
     // accept a job. This runs once per daemon process, outside pass retries.
-    reap_checkout_credentials_at_startup(supervised).await?;
+    if args.mode.native_enabled() {
+        reap_checkout_credentials_at_startup(supervised).await?;
+    }
     if effective_draining(drain_journal.as_deref()) {
         return Ok(DaemonExit::new(drain_exit_reason(
             drain_journal.as_deref(),
@@ -3271,15 +3283,18 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     crate::ops::init_at(instance_slug_for_store(), args.state_db.as_deref())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
-    let storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
-    if args.url.is_some() && !args.dry_run_registration {
-        // Before preflight and before any slot can admit a job: delete every
-        // mbx store layout the current code no longer produces, then bring
-        // the compiler stores under the host budget.
-        startup_store_maintenance(args, &config_base, &storage_layout, slots);
+    let native_enabled = args.mode.native_enabled();
+    if native_enabled {
+        let storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
+        if args.url.is_some() && !args.dry_run_registration {
+            // Before preflight and before any slot can admit a job: delete every
+            // mbx store layout the current code no longer produces, then bring
+            // the compiler stores under the host budget.
+            startup_store_maintenance(args, &config_base, &storage_layout, slots);
+        }
+        preflight_before_daemon_jit_config(args, &config_base, slots)?;
     }
-    preflight_before_daemon_jit_config(args, &config_base, slots)?;
-    if args.url.is_some() && !args.dry_run_registration {
+    if native_enabled && args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
             .work_dir
             .as_deref()
@@ -3304,10 +3319,16 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             );
         }
     }
-    let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
+    let mut resolved_args = if native_enabled {
+        resolve_daemon_runner_group_once(args).await?
+    } else {
+        args.clone()
+    };
     let total_slots = slots;
-    reserve_capacity_permits(&config_base, &resolved_args, slots as u32)?;
-    if !daemon_should_poll_after_jit_config(&resolved_args) {
+    if native_enabled {
+        reserve_capacity_permits(&config_base, &resolved_args, slots as u32)?;
+    }
+    if native_enabled && !daemon_should_poll_after_jit_config(&resolved_args) {
         let _usable_slots =
             configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
@@ -3331,6 +3352,17 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // The daemon-level retention lifecycle is started by `daemon` and waits
     // for this readiness announcement. Keeping ownership outside this retryable
     // pass prevents detached ticker duplication across retries.
+    // Scale-set lane network startup runs BEFORE slot supervision: a lane
+    // that cannot register/adopt fails the pass fast (supervised retry),
+    // never beside already-polling slots.
+    let scaleset_lane =
+        ScaleSetLaneHandle::start_if_configured(&resolved_args, &config_base).await?;
+    if !native_enabled {
+        let lane = scaleset_lane
+            .ok_or_else(|| anyhow::anyhow!("scale-set-only mode did not start a Scale Set lane"))?;
+        return lane.wait_scale_set_only().await;
+    }
+
     println!(
         "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
         if total_slots == 1 { "" } else { "es" }
@@ -3359,11 +3391,6 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // The lifecycle ledger slug (hostname-derived daemon identity) differs
     // from the controller scope (slot-id prefix): map both explicitly.
     let lifecycle = controller_lifecycle_for_daemon(&resolved_args, sink);
-    // Scale-set lane network startup runs BEFORE slot supervision: a lane
-    // that cannot register/adopt fails the pass fast (supervised retry),
-    // never beside already-polling slots.
-    let scaleset_lane =
-        ScaleSetLaneHandle::start_if_configured(&resolved_args, &config_base).await?;
     let mut result = crate::node::controller::supervise_from_daemon(
         config_base.clone(),
         scope,
@@ -4802,6 +4829,9 @@ async fn configure_daemon_slots(
 fn attest_scaleset_demand_holders(
     args: &DaemonArgs,
 ) -> Result<Vec<(String, velnor_control::permit_ledger::PermitState)>> {
+    if !args.mode.scale_set_enabled() {
+        return Ok(Vec::new());
+    }
     let Some(config_path) = args.scale_set_config.as_deref() else {
         return Ok(Vec::new());
     };
@@ -4834,12 +4864,12 @@ struct ScaleSetLaneHandle {
 
 impl ScaleSetLaneHandle {
     async fn start_if_configured(args: &DaemonArgs, config_base: &Path) -> Result<Option<Self>> {
-        let Some(config_path) = args.scale_set_config.as_deref() else {
-            return Ok(None);
-        };
-        if !crate::scaleset::lane_configured(Some(config_path)) {
+        if !args.mode.scale_set_enabled() {
             return Ok(None);
         }
+        let Some(config_path) = args.scale_set_config.as_deref() else {
+            bail!("Scale Set mode requires a Scale Set config path");
+        };
         let defaults = crate::scaleset::DaemonDefaults {
             state_db: daemon_state_db_path(args),
             ledger_path: crate::permit_guard::resolve_permit_ledger_path(
@@ -4896,6 +4926,25 @@ impl ScaleSetLaneHandle {
         }))
     }
 
+    /// Scale-set-only has no native controller to keep the daemon alive.
+    /// Wait for the lane itself and clean up its drain watcher.
+    async fn wait_scale_set_only(self) -> Result<()> {
+        let ScaleSetLaneHandle { task, watcher, .. } = self;
+        let result = task.await;
+        watcher.abort();
+        let _ = watcher.await;
+        let report = result??;
+        let shutdown = &report.shutdown_report;
+        println!(
+            "Scale-set lane stopped: set {} adopted_across_restart={} failed={} recorded_total={}",
+            report.scale_set_id,
+            shutdown.adopted_across_restart,
+            shutdown.failed,
+            shutdown.recorded_total,
+        );
+        Ok(())
+    }
+
     /// Stop the loop, join the lane task, and report the shutdown triage.
     /// No timeout: systemd bounds the stop and crash recovery converges
     /// anything a SIGKILL interrupts; cutting the triage short here would
@@ -4947,17 +4996,19 @@ fn init_host_permit_ledger(args: &DaemonArgs, config_base: &Path, slots: usize) 
     // retained (its pid is alive) or swept (its pid is dead and no other
     // marker references the holder).
     let mut alive = Vec::new();
-    for slot_dir in daemon_slot_config_dirs(config_base, slots)? {
-        match load_in_flight_job(&slot_dir) {
-            Ok(Some(record)) if !record.permit_holder.is_empty() => {
-                alive.push(record.permit_holder);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!(
-                    "Warning: permit ledger reconcile skipped unreadable marker {}: {error:#}",
-                    slot_dir.display()
-                );
+    if slots > 0 {
+        for slot_dir in daemon_slot_config_dirs(config_base, slots)? {
+            match load_in_flight_job(&slot_dir) {
+                Ok(Some(record)) if !record.permit_holder.is_empty() => {
+                    alive.push(record.permit_holder);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "Warning: permit ledger reconcile skipped unreadable marker {}: {error:#}",
+                        slot_dir.display()
+                    );
+                }
             }
         }
     }
@@ -5656,6 +5707,50 @@ fn daemon_preflight_args(
         })
         .filter_map(Result::transpose)
         .collect()
+}
+
+fn validate_host_mode(args: &DaemonArgs) -> Result<()> {
+    let has_scale_set_config = args.scale_set_config.is_some();
+    let has_positive_max_jobs = matches!(args.max_jobs, Some(value) if value > 0);
+
+    match args.mode {
+        HostMode::NativeOnly if has_scale_set_config => bail!(
+            "native-only host mode forbids --scale-set-config/VELNOR_SCALE_SET_CONFIG; choose scale-set-only or both"
+        ),
+        HostMode::ScaleSetOnly | HostMode::Both if !has_scale_set_config => bail!(
+            "{} host mode requires --scale-set-config/VELNOR_SCALE_SET_CONFIG",
+            args.mode
+        ),
+        HostMode::ScaleSetOnly | HostMode::Both if !has_positive_max_jobs => bail!(
+            "{} host mode requires a positive --max-jobs/VELNOR_MAX_JOBS",
+            args.mode
+        ),
+        _ => {}
+    }
+
+    if args.mode.scale_set_enabled() {
+        validate_shared_permit_ledger(args)?;
+    }
+    Ok(())
+}
+
+fn validate_shared_permit_ledger(args: &DaemonArgs) -> Result<()> {
+    let Some(config_path) = args.scale_set_config.as_deref() else {
+        return Ok(());
+    };
+    let file = crate::scaleset::load_file_config(config_path)?;
+    let shared_path =
+        crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
+    if let Some(configured_path) = file.ledger_path.as_deref()
+        && configured_path != shared_path.as_path()
+    {
+        bail!(
+            "scale-set ledger path {} diverges from the host-wide permit ledger {}; remove ledger_path from the Scale Set config or set --permit-ledger/VELNOR_PERMIT_LEDGER to the exact same path",
+            configured_path.display(),
+            shared_path.display()
+        );
+    }
+    Ok(())
 }
 
 fn validate_daemon_slots(slots: usize) -> Result<usize> {
@@ -20128,6 +20223,7 @@ jobs:
             dry_run_jobs: false,
             dump_job_message: None,
             docker_image: "ubuntu:24.04".into(),
+            mode: HostMode::NativeOnly,
             max_jobs: None,
             permit_ledger: None,
             scale_set_config: None,
@@ -20140,6 +20236,31 @@ jobs:
             skip_preflight: false,
             require_docker_socket: false,
         }
+    }
+
+    #[test]
+    fn host_mode_validation_rejects_implicit_scale_set_configuration() {
+        let mut args = daemon_args(1);
+        assert!(validate_host_mode(&args).is_ok());
+
+        args.scale_set_config = Some(PathBuf::from("scale-set.toml"));
+        assert!(validate_host_mode(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("native-only"));
+
+        args.mode = HostMode::ScaleSetOnly;
+        args.scale_set_config = None;
+        assert!(validate_host_mode(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("requires --scale-set-config"));
+
+        args.scale_set_config = Some(PathBuf::from("scale-set.toml"));
+        assert!(validate_host_mode(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("positive --max-jobs"));
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
@@ -27607,14 +27728,24 @@ runs:
         );
         // The pre-create thread has exited, yet the proxy is still alive: the
         // socket file exists and accepts connections.
-        assert!(listen.exists(), "socket died with the pre-create thread");
+        assert!(
+            crate::docker_lease::lease_is_live(&listen),
+            "lease endpoint died with the pre-create thread"
+        );
+        #[cfg(target_os = "macos")]
+        std::net::TcpStream::connect((
+            "127.0.0.1",
+            crate::docker_lease::guest_docker_tcp_port(&listen),
+        ))
+        .expect("TCP lease proxy must accept connections after claim");
+        #[cfg(not(target_os = "macos"))]
         std::os::unix::net::UnixStream::connect(&listen)
-            .expect("lease proxy must accept connections after claim");
+            .expect("Unix lease proxy must accept connections after claim");
 
         drop(lease);
         assert!(
-            !listen.exists(),
-            "dropping the guard must remove the lease socket"
+            !crate::docker_lease::lease_is_live(&listen),
+            "dropping the guard must remove the lease endpoint"
         );
         fs::remove_dir_all(&socket_dir).ok();
         fs::remove_dir_all(&root).ok();
@@ -27657,7 +27788,7 @@ runs:
             // and takes the guard.
         }
         assert!(
-            !listen.exists(),
+            !crate::docker_lease::lease_is_live(&listen),
             "abandoned pre-created environment must drop its lease guard"
         );
         fs::remove_dir_all(&socket_dir).ok();

@@ -5815,6 +5815,43 @@ mod tests {
     }
 
     #[test]
+    fn workflow_provider_mode_is_typed_and_conflicts_with_raw_sets() {
+        for (value, expected) in [
+            ("native-only", ProviderMode::NativeOnly),
+            ("scale-set-only", ProviderMode::ScaleSetOnly),
+            ("both", ProviderMode::Both),
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nprovider_mode = \"{value}\"\n"
+            ));
+            assert_eq!(config.provider_mode(), Some(expected));
+            must(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "typed provider mode validates",
+            );
+        }
+
+        for raw in [
+            "providers = [\"github-hosted\"]",
+            "automatic_providers = [\"github-hosted\"]",
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nprovider_mode = \"native-only\"\n{raw}\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "typed mode must reject raw provider sets",
+            );
+            assert!(
+                error.to_string().contains("provider_mode")
+                    && (error.to_string().contains("providers")
+                        || error.to_string().contains("automatic_providers")),
+                "unexpected conflict error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn workflow_dispatch_provider_default_is_removed_not_deprecated() {
         let error = must_fail(
             toml::from_str::<RepoGenerationConfig>(

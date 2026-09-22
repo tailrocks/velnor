@@ -199,6 +199,18 @@ pub struct IdleReport {
     pub reacquire_failed: bool,
 }
 
+fn require_generation<L: CapacityLedger>(ledger: &L, expected: u64) -> Result<()> {
+    let current = ledger
+        .generation()
+        .map_err(|error| anyhow::anyhow!("read ledger generation: {error}"))?;
+    if current != expected {
+        anyhow::bail!(
+            "ledger generation moved from {expected} to {current}; stale lifecycle work must be redelivered"
+        );
+    }
+    Ok(())
+}
+
 fn batch_age(created_at: &str) -> Option<Duration> {
     let created = velnor_model::Timestamp::parse(created_at).ok()?;
     let age_secs = velnor_model::Timestamp::now()
@@ -264,6 +276,7 @@ async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
     batch: &crate::scaleset::intents::AcquireBatch,
     generation: u64,
 ) -> Result<bool> {
+    require_generation(ledger, generation)?;
     let mut states = Vec::with_capacity(batch.request_ids.len());
     for request_id in &batch.request_ids {
         states.push(demand.get(*request_id)?);
@@ -279,6 +292,7 @@ async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
         return Ok(false);
     }
     for (request_id, row) in batch.request_ids.iter().zip(states.iter()) {
+        require_generation(ledger, generation)?;
         let Some(row) = row else { continue };
         let holder = permit_holder(batch.scale_set_id, *request_id);
         match row.state {
@@ -319,14 +333,18 @@ fn fenced_release_orphan<L: CapacityLedger>(
     holder: &str,
     generation: u64,
 ) -> Result<bool> {
-    let fresh = ledger
-        .generation()
-        .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
-    if fresh != generation {
-        anyhow::bail!(
-            "ledger generation moved during idle resolve (saw {generation}, now {fresh}); retry under the fresh epoch"
-        );
-    }
+    require_generation(ledger, generation)?;
+    let Some(state) = ledger
+        .holder_state(holder)
+        .map_err(|error| anyhow::anyhow!("read orphan holder: {error}"))?
+    else {
+        return Ok(false);
+    };
+    // A fenced no-op transition validates the holder's epoch at the same
+    // durable boundary used by lifecycle transitions before the release.
+    ledger
+        .transition(holder, state, generation)
+        .map_err(|error| anyhow::anyhow!("fence orphan release: {error}"))?;
     ledger
         .release(holder)
         .map_err(|error| anyhow::anyhow!("release orphaned holder: {error}"))
@@ -338,19 +356,17 @@ pub(crate) fn transition_or_adopt<L: CapacityLedger>(
     state: LedgerPermitState,
     generation: u64,
 ) -> Result<()> {
-    match ledger.transition(holder, state, generation) {
-        Ok(()) => Ok(()),
-        Err(error) if L::is_stale_generation(&error) => {
-            let fresh = ledger
-                .generation()
-                .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
-            match ledger.transition(holder, state, fresh) {
-                Ok(()) => Ok(()),
-                Err(_) => adopt_holder(ledger, holder, state, fresh),
-            }
-        }
-        Err(_) => adopt_holder(ledger, holder, state, generation),
+    require_generation(ledger, generation)?;
+    if ledger
+        .holder_state(holder)
+        .map_err(|error| anyhow::anyhow!("read holder before transition: {error}"))?
+        .is_none()
+    {
+        return adopt_holder(ledger, holder, state, generation);
     }
+    ledger
+        .transition(holder, state, generation)
+        .map_err(|error| anyhow::anyhow!("transition ledger holder: {error}"))
 }
 
 /// Adopt a lost holder row back as counted occupancy rather than run
@@ -363,18 +379,12 @@ fn adopt_holder<L: CapacityLedger>(
     state: LedgerPermitState,
     generation: u64,
 ) -> Result<()> {
+    require_generation(ledger, generation)?;
     match ledger.acquire(holder, LedgerLane::ScaleSet, state, generation) {
         Ok(AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld) => Ok(()),
-        Ok(AcquireOutcome::StaleGeneration) => {
-            let fresh = ledger
-                .generation()
-                .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
-            match ledger.acquire(holder, LedgerLane::ScaleSet, state, fresh) {
-                Ok(AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld) => Ok(()),
-                Ok(outcome) => anyhow::bail!("adopt lost holder {holder}: ledger says {outcome:?}"),
-                Err(error) => anyhow::bail!("adopt lost holder {holder}: {error}"),
-            }
-        }
+        Ok(AcquireOutcome::StaleGeneration) => anyhow::bail!(
+            "adopt lost holder {holder}: ledger generation moved; redeliver under the new epoch"
+        ),
         Ok(outcome) => anyhow::bail!("adopt lost holder {holder}: ledger says {outcome:?}"),
         Err(error) => anyhow::bail!("adopt lost holder {holder}: {error}"),
     }
@@ -425,8 +435,10 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
             return Ok(false);
         }
     };
+    require_generation(ledger, generation)?;
     let (acquired, missing) = reconcile_returned_ids(&uncertain, &returned);
     for request_id in &acquired {
+        require_generation(ledger, generation)?;
         let state = if canceled_pending.contains(request_id) {
             DemandState::CanceledAcquired
         } else {
@@ -441,6 +453,7 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
         )?;
     }
     for request_id in &missing {
+        require_generation(ledger, generation)?;
         let holder = permit_holder(batch.scale_set_id, *request_id);
         if canceled_pending.contains(request_id) {
             // The cancellation message was already ACKed. Once the batch
@@ -919,7 +932,9 @@ mod tests {
         ledger.begin_epoch();
         let error = fenced_release_orphan(&mut ledger, &holder, generation).unwrap_err();
         assert!(
-            error.to_string().contains("retry under the fresh epoch"),
+            error
+                .to_string()
+                .contains("stale lifecycle work must be redelivered"),
             "unexpected fence error: {error:#}"
         );
         // No release happened: the next poll retries under the fresh epoch.
@@ -928,6 +943,35 @@ mod tests {
             Some(LedgerPermitState::Uncertain)
         );
         assert_eq!(ledger.occupied().unwrap(), 1);
+    }
+
+    #[test]
+    fn stale_transition_does_not_retry_or_adopt_into_new_epoch() {
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(1);
+        ledger.reconcile(&[]).unwrap();
+        let stale = ledger.generation().unwrap();
+        let holder = permit_holder(7, 45);
+        ledger
+            .acquire(
+                &holder,
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Reserved,
+                stale,
+            )
+            .unwrap();
+        ledger.begin_epoch();
+
+        let error = transition_or_adopt(&mut ledger, &holder, LedgerPermitState::Running, stale)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("stale lifecycle work must be redelivered"));
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Reserved)
+        );
     }
 
     #[test]

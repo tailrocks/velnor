@@ -25,10 +25,11 @@
 //!
 //! Before any provision, the [`ToolContentHook`] proves the pulled bytes
 //! are exactly the pinned content: `RepoDigests` must contain the pinned
-//! `repo@digest`, and declared provenance labels must match. The hook
-//! emits a [`ToolContentAttestation`] recording image id, digest, and the
-//! runner version the pin documents; provisioning records the attestation
-//! and refuses to start a runner the hook did not clear.
+//! `repo@digest`, and declared provenance labels must match. Admission then
+//! requires independent platform and attestation proof for both images, plus
+//! GitHub's cryptographic artifact-provenance verification for the official
+//! runner image. An unavailable or incomplete proof fails closed before Docker
+//! objects are created. The official runner image is passed through unchanged.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,14 @@ pub const RUNNER_DIGEST_ARM64: &str =
 /// Provenance label the runner image must carry (verified live 2026-09-17).
 pub const RUNNER_SOURCE_LABEL: &str = "org.opencontainers.image.source";
 pub const RUNNER_SOURCE: &str = "https://github.com/actions/runner";
+/// Repository identity enforced by GitHub's artifact-attestation verifier.
+const RUNNER_ATTESTATION_REPOSITORY: &str = "actions/runner";
+/// Trusted workflow identity that publishes the official runner image.
+const RUNNER_ATTESTATION_WORKFLOW: &str = "actions/runner/.github/workflows/release.yml";
+/// The provenance predicate emitted by `actions/attest-build-provenance`.
+const RUNNER_ATTESTATION_PREDICATE: &str = "https://slsa.dev/provenance/v1";
+/// GitHub Actions' Fulcio OIDC issuer.
+const GITHUB_ACTIONS_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// Official DinD image repository.
 pub const DIND_REPOSITORY: &str = "docker";
@@ -69,6 +78,63 @@ pub const DIND_DIGEST_AMD64: &str =
     "sha256:9a06753d2401cd049b34cd27dbbc3e0db717d4c1db7bc7f2efad1c187e00bf5a";
 pub const DIND_DIGEST_ARM64: &str =
     "sha256:145184796e8717376e73eaf29e16ede8ede2fd75e947a3fae7c05298e5e20d28";
+
+/// OCI platform required for one worker pair.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImagePlatform {
+    os: String,
+    architecture: String,
+}
+
+impl ImagePlatform {
+    /// Parse the canonical OCI form `os/architecture`.
+    pub fn parse(raw: &str) -> Result<Self> {
+        let mut parts = raw.split('/');
+        let os = parts.next().unwrap_or_default();
+        let architecture = parts.next().unwrap_or_default();
+        if parts.next().is_some()
+            || os.is_empty()
+            || architecture.is_empty()
+            || os.chars().any(char::is_whitespace)
+            || architecture.chars().any(char::is_whitespace)
+        {
+            anyhow::bail!("invalid OCI platform {raw:?}; expected os/architecture");
+        }
+        Ok(Self {
+            os: os.to_string(),
+            architecture: architecture.to_string(),
+        })
+    }
+
+    /// Construct the supported Linux platform for a host architecture.
+    #[must_use]
+    pub fn linux_for_arch(arch: &str) -> Option<Self> {
+        let architecture = match arch {
+            "x86_64" | "amd64" => "amd64",
+            "aarch64" | "arm64" => "arm64",
+            _ => return None,
+        };
+        Some(Self {
+            os: "linux".to_string(),
+            architecture: architecture.to_string(),
+        })
+    }
+
+    #[must_use]
+    pub fn os(&self) -> &str {
+        &self.os
+    }
+
+    #[must_use]
+    pub fn architecture(&self) -> &str {
+        &self.architecture
+    }
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.os, self.architecture)
+    }
+}
 
 /// Env var carrying the JIT blob into the runner container (the image's
 /// own input contract; cf. ARC's runner container).
@@ -192,17 +258,15 @@ impl std::error::Error for InvalidPinnedImage {}
 pub struct HomogeneousProfile {
     runner: PinnedImage,
     dind: PinnedImage,
+    platform: ImagePlatform,
 }
 
 impl HomogeneousProfile {
-    /// Profile for `arch` (`x86_64`/`aarch64`): index digests pin content
-    /// for every platform, so both arches share the index pins while the
-    /// per-arch digests document what each platform resolves to.
+    /// Profile for `arch` (`x86_64`/`aarch64`). The configured image
+    /// references remain digest-only; the engine platform is admitted
+    /// separately and must match this profile exactly.
     pub fn for_arch(arch: &str) -> Option<Self> {
-        match arch {
-            "x86_64" | "aarch64" => Some(Self::pinned()),
-            _ => None,
-        }
+        Some(Self::pinned(ImagePlatform::linux_for_arch(arch)?))
     }
 
     /// Profile for the host the daemon runs on. `None` on unprovisioned
@@ -215,7 +279,7 @@ impl HomogeneousProfile {
 
     /// The pinned profile. Infallible: the constants above are valid by
     /// construction (proven by `production_pins_parse`).
-    fn pinned() -> Self {
+    fn pinned(platform: ImagePlatform) -> Self {
         // Proof: `PinnedImage::parse` on a literal either holds for every
         // build or fails every build; the unit test pins the literals, so
         // a bad constant breaks the build at test time, not in production.
@@ -227,7 +291,11 @@ impl HomogeneousProfile {
             repository: DIND_REPOSITORY.to_string(),
             digest: DIND_INDEX_DIGEST.to_string(),
         };
-        Self { runner, dind }
+        Self {
+            runner,
+            dind,
+            platform,
+        }
     }
 
     #[must_use]
@@ -238,6 +306,11 @@ impl HomogeneousProfile {
     #[must_use]
     pub fn dind(&self) -> &PinnedImage {
         &self.dind
+    }
+
+    #[must_use]
+    pub fn platform(&self) -> &ImagePlatform {
+        &self.platform
     }
 
     /// Recorded versions: `(runner_version, dind_version)`.
@@ -267,25 +340,44 @@ pub struct ToolContentExpectation {
     pub source: Option<String>,
     /// Version recorded on the attestation (pin metadata).
     pub content_version: String,
+    /// OCI platform the engine must prove for the pulled image.
+    pub platform: ImagePlatform,
 }
 
 impl ToolContentExpectation {
     #[must_use]
     pub fn runner() -> Self {
+        Self::runner_for(&ImagePlatform::linux_for_arch("amd64").expect("amd64 platform"))
+    }
+
+    #[must_use]
+    pub fn runner_for(platform: &ImagePlatform) -> Self {
         Self {
             source: Some(RUNNER_SOURCE.to_string()),
             content_version: RUNNER_VERSION.to_string(),
+            platform: platform.clone(),
         }
     }
 
     #[must_use]
     pub fn dind() -> Self {
+        Self::dind_for(&ImagePlatform::linux_for_arch("amd64").expect("amd64 platform"))
+    }
+
+    #[must_use]
+    pub fn dind_for(platform: &ImagePlatform) -> Self {
         // The dind index carries no config labels (`null` at index level,
         // verified live); its content proof is the digest match alone.
         Self {
             source: None,
             content_version: DIND_VERSION.to_string(),
+            platform: platform.clone(),
         }
+    }
+
+    #[must_use]
+    pub fn platform(&self) -> &ImagePlatform {
+        &self.platform
     }
 }
 
@@ -304,9 +396,55 @@ pub trait ToolContentHook {
         image: &PinnedImage,
         expected: &ToolContentExpectation,
     ) -> Result<ToolContentAttestation>;
+
+    /// Prove the engine selected the exact configured OCI platform.
+    ///
+    /// The default is deliberately rejecting: a content hook that does not
+    /// implement platform proof cannot admit a worker.
+    fn verify_platform(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        image: &PinnedImage,
+        expected: &ImagePlatform,
+    ) -> Result<()> {
+        anyhow::bail!(
+            "platform proof hook missing for {} (expected {})",
+            image.reference(),
+            expected.label()
+        );
+    }
+
+    /// Prove the attestation binds to the exact configured image and pin.
+    ///
+    /// The default is deliberately rejecting so custom hooks must opt into
+    /// this boundary explicitly.
+    fn verify_attestation(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        image: &PinnedImage,
+        _expected: &ToolContentExpectation,
+        _attestation: &ToolContentAttestation,
+    ) -> Result<()> {
+        anyhow::bail!("attestation proof hook missing for {}", image.reference());
+    }
+
+    /// Prove the image signature or equivalent trusted release proof when the
+    /// expectation declares a signed release source. The admission driver
+    /// fails closed for that image class when this hook is absent.
+    fn verify_signature(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        image: &PinnedImage,
+        _expected: &ToolContentExpectation,
+        _attestation: &ToolContentAttestation,
+    ) -> Result<()> {
+        anyhow::bail!("signature proof hook missing for {}", image.reference());
+    }
 }
 
-/// Default hook: digest match on `RepoDigests` + declared label match.
+/// Default hook: digest match on `RepoDigests` + declared label match, exact
+/// platform selection, and GitHub artifact-provenance verification for the
+/// official runner image.
 ///
 /// Mirrors the release-activation image proof
 /// (`release::verify_and_tag_release_image`): pull, then compare the
@@ -347,14 +485,11 @@ impl ToolContentHook for DockerToolContentHook {
         // The Engine reports what IT pulled; the pin is what WE asked for.
         // Both spellings (`docker@...` and `docker.io/library/docker@...`)
         // name the same content, so compare digest suffixes, not prefixes.
-        let short_repo = image.repository().rsplit('/').next().unwrap_or_default();
         let digest_match = digests.iter().any(|digest| {
             digest == &reference
                 || digest
                     .strip_prefix("docker.io/library/")
                     .is_some_and(|rest| rest == reference)
-                || short_repo == image.repository()
-                    && digest.ends_with(&format!("@{}", image.digest()))
         });
         if !digest_match {
             anyhow::bail!(
@@ -402,6 +537,234 @@ impl ToolContentHook for DockerToolContentHook {
             source: expected.source.clone(),
         })
     }
+
+    fn verify_platform(
+        &self,
+        runner: &mut dyn WorkerRunner,
+        image: &PinnedImage,
+        expected: &ImagePlatform,
+    ) -> Result<()> {
+        let reference = image.reference();
+        let inspected = runner
+            .run("docker", &platform_args(&reference))
+            .with_context(|| format!("inspect platform of {reference}"))?;
+        if inspected.code != 0 {
+            anyhow::bail!(
+                "inspect platform of {reference} exited {}: {}",
+                inspected.code,
+                inspected.stderr.trim()
+            );
+        }
+        let actual = ImagePlatform::parse(inspected.stdout.trim())
+            .with_context(|| format!("parse platform of {reference}"))?;
+        if actual != *expected {
+            anyhow::bail!(
+                "image {reference} platform disagrees with configured platform: engine reports {}, expected {}",
+                actual.label(),
+                expected.label()
+            );
+        }
+        Ok(())
+    }
+
+    fn verify_attestation(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        image: &PinnedImage,
+        expected: &ToolContentExpectation,
+        attestation: &ToolContentAttestation,
+    ) -> Result<()> {
+        validate_tool_content_attestation(image, expected, attestation)
+    }
+
+    fn verify_signature(
+        &self,
+        runner: &mut dyn WorkerRunner,
+        image: &PinnedImage,
+        expected: &ToolContentExpectation,
+        _attestation: &ToolContentAttestation,
+    ) -> Result<()> {
+        if image.repository() != RUNNER_REPOSITORY
+            || expected.source.as_deref() != Some(RUNNER_SOURCE)
+        {
+            anyhow::bail!(
+                "GitHub artifact-provenance policy is defined only for the official runner image; refusing {}",
+                image.reference()
+            );
+        }
+
+        let reference = image.reference();
+        let output = runner
+            .run("gh", &github_attestation_verify_args(image))
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "GitHub artifact-provenance verification is unknown for {reference}: {error:#}"
+                )
+            })?;
+        if output.code != 0 {
+            anyhow::bail!(
+                "GitHub artifact-provenance verification rejected {reference}: {}",
+                output.stderr.trim()
+            );
+        }
+        validate_github_attestation_output(&output.stdout, image).with_context(|| {
+            format!("GitHub artifact-provenance verification is unknown for {reference}")
+        })
+    }
+}
+
+/// Validate the hook's returned proof before any worker-owned Docker object
+/// is created. In particular, a custom hook cannot attest a different image
+/// or silently omit the engine identity/provenance fields.
+pub(crate) fn validate_tool_content_attestation(
+    image: &PinnedImage,
+    expected: &ToolContentExpectation,
+    attestation: &ToolContentAttestation,
+) -> Result<()> {
+    let reference = image.reference();
+    if attestation.reference != reference {
+        anyhow::bail!(
+            "attestation reference disagrees with configured image: got {:?}, expected {:?}",
+            attestation.reference,
+            reference
+        );
+    }
+    if attestation.image_id.trim().is_empty() {
+        anyhow::bail!("attestation for {reference} is missing the engine image id");
+    }
+    if attestation.content_version != expected.content_version {
+        anyhow::bail!(
+            "attestation content version for {reference} disagrees with configured version: got {:?}, expected {:?}",
+            attestation.content_version,
+            expected.content_version
+        );
+    }
+    if attestation.source != expected.source {
+        anyhow::bail!(
+            "attestation provenance for {reference} disagrees with configured source: got {:?}, expected {:?}",
+            attestation.source,
+            expected.source
+        );
+    }
+    Ok(())
+}
+
+/// Run every worker-admission proof before creating a network or container.
+///
+/// The order is intentional: the configured digest is checked by `verify`,
+/// the hook result is bound to that exact reference, then platform and
+/// attestation proofs are required. Signed release proof is additionally
+/// required when the expectation declares a source contract. Any missing
+/// applicable proof stops admission before worker-owned Docker state exists.
+pub(crate) fn admit_tool_content(
+    hook: &dyn ToolContentHook,
+    runner: &mut dyn WorkerRunner,
+    image: &PinnedImage,
+    expected: &ToolContentExpectation,
+) -> Result<ToolContentAttestation> {
+    let attestation = hook.verify(runner, image, expected)?;
+    validate_tool_content_attestation(image, expected, &attestation)?;
+    hook.verify_platform(runner, image, expected.platform())?;
+    hook.verify_attestation(runner, image, expected, &attestation)?;
+    // The official runner image has a signed GitHub artifact-provenance
+    // contract. DinD has no equivalent upstream contract, so do not claim a
+    // signature proof for it; its immutable digest, selected platform, and
+    // engine-bound attestation remain mandatory above.
+    if expected.source.is_some() {
+        hook.verify_signature(runner, image, expected, &attestation)?;
+    }
+    Ok(attestation)
+}
+
+fn github_attestation_verify_args(image: &PinnedImage) -> Vec<String> {
+    vec![
+        "attestation".to_string(),
+        "verify".to_string(),
+        format!("oci://{}", image.reference()),
+        "--repo".to_string(),
+        RUNNER_ATTESTATION_REPOSITORY.to_string(),
+        "--signer-workflow".to_string(),
+        RUNNER_ATTESTATION_WORKFLOW.to_string(),
+        "--predicate-type".to_string(),
+        RUNNER_ATTESTATION_PREDICATE.to_string(),
+        "--cert-oidc-issuer".to_string(),
+        GITHUB_ACTIONS_OIDC_ISSUER.to_string(),
+        "--deny-self-hosted-runners".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ]
+}
+
+/// Validate the structured result emitted by `gh attestation verify`.
+///
+/// The verifier's exit status is not treated as a configurable boolean. A
+/// successful result must also contain a non-empty, cryptographically verified
+/// certificate/timestamp record and an in-toto subject bound to this exact
+/// image repository and digest. Any schema drift is unknown and rejects.
+fn validate_github_attestation_output(stdout: &str, image: &PinnedImage) -> Result<()> {
+    let document: serde_json::Value = serde_json::from_str(stdout.trim())
+        .context("parse GitHub artifact-provenance verifier JSON")?;
+    let Some(entries) = document.as_array() else {
+        anyhow::bail!("GitHub artifact-provenance verifier returned a non-array result");
+    };
+    if entries.is_empty() {
+        anyhow::bail!("GitHub artifact-provenance verifier returned no verified attestations");
+    }
+
+    let Some(expected_digest) = image.digest().strip_prefix("sha256:") else {
+        anyhow::bail!("configured runner image digest is not sha256");
+    };
+    let exact_subject = entries.iter().any(|entry| {
+        let Some(verification) = entry.get("verificationResult") else {
+            return false;
+        };
+        if verification
+            .pointer("/signature/certificate")
+            .and_then(serde_json::Value::as_object)
+            .is_none()
+        {
+            return false;
+        }
+        let Some(timestamps) = verification
+            .get("verifiedTimestamps")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        if timestamps.is_empty() {
+            return false;
+        }
+        let Some(statement) = verification.get("statement") else {
+            return false;
+        };
+        if statement
+            .get("predicateType")
+            .and_then(serde_json::Value::as_str)
+            != Some(RUNNER_ATTESTATION_PREDICATE)
+        {
+            return false;
+        }
+        let Some(subjects) = statement
+            .get("subject")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        subjects.iter().any(|subject| {
+            subject.get("name").and_then(serde_json::Value::as_str) == Some(image.repository())
+                && subject
+                    .pointer("/digest/sha256")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected_digest)
+        })
+    });
+    if !exact_subject {
+        anyhow::bail!(
+            "GitHub artifact-provenance verifier result is not bound to {}",
+            image.reference()
+        );
+    }
+    Ok(())
 }
 
 fn pull_args(reference: &str) -> Vec<String> {
@@ -425,6 +788,17 @@ fn config_labels_args(reference: &str) -> Vec<String> {
         "inspect".to_string(),
         "--format".to_string(),
         "{{json .Config.Labels}}".to_string(),
+        "--".to_string(),
+        reference.to_string(),
+    ]
+}
+
+fn platform_args(reference: &str) -> Vec<String> {
+    vec![
+        "image".to_string(),
+        "inspect".to_string(),
+        "--format".to_string(),
+        "{{.Os}}/{{.Architecture}}".to_string(),
         "--".to_string(),
         reference.to_string(),
     ]
@@ -664,24 +1038,6 @@ impl RunnerSpec {
                 self.state_dir.join("buildkit-cache").display()
             ),
             "--volume".to_string(),
-            format!(
-                "{}:/var/lib/apt/lists",
-                self.state_dir
-                    .parent()
-                    .unwrap_or(&self.state_dir)
-                    .join("apt/lists")
-                    .display()
-            ),
-            "--volume".to_string(),
-            format!(
-                "{}:/var/cache/apt/archives",
-                self.state_dir
-                    .parent()
-                    .unwrap_or(&self.state_dir)
-                    .join("apt/archives")
-                    .display()
-            ),
-            "--volume".to_string(),
             format!("{}:/home/runner/.cargo/registry", cargo_registry.display()),
             "--volume".to_string(),
             format!("{}:/home/runner/.cargo/git", cargo_git.display()),
@@ -689,9 +1045,10 @@ impl RunnerSpec {
         args.extend(self.identity.label_args(ROLE_RUNNER));
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
-        args.push("sh".to_string());
-        args.push("-c".to_string());
-        args.push("sudo mkdir -p /home/runner/_work /opt/hostedtoolcache /home/runner/.cargo && sudo chown -R runner:runner /home/runner/_work /opt/hostedtoolcache && sudo chown runner:runner /home/runner/.cargo && sudo chmod 0777 /home/runner/_work /opt/hostedtoolcache /home/runner/.cargo && sudo rm -f /etc/apt/apt.conf.d/docker-clean && (command -v cc >/dev/null 2>&1 || (sudo dpkg -i /var/cache/apt/archives/*.deb 2>/dev/null; sudo apt-get install -y --no-install-recommends gcc libc6-dev 2>/dev/null) || true) && (command -v gh >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && gh_arch=\"arm64\" || gh_arch=\"amd64\"; curl -fsSL \"https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_${gh_arch}.tar.gz\" | sudo tar -xz -C /usr/local/bin --strip-components=2 \"gh_2.101.0_linux_${gh_arch}/bin/gh\" 2>/dev/null || true)) && (command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable 2>/dev/null && sudo ln -sf /home/runner/.cargo/bin/* /usr/local/bin/ || true)) && ([ -f /var/cache/apt/archives/cargo-nextest ] && sudo cp /var/cache/apt/archives/cargo-nextest /usr/local/bin/cargo-nextest && sudo chmod 0755 /usr/local/bin/cargo-nextest || (command -v cargo-nextest >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && nxt=\"linux-arm\" || nxt=\"linux\"; curl -fsSL \"https://get.nexte.st/latest/${nxt}\" | sudo tar -xz -C /usr/local/bin 2>/dev/null || true))) && (command -v mise >/dev/null 2>&1 || (curl -fsSL https://mise.run | sh 2>/dev/null && sudo ln -sf /home/runner/.local/bin/mise /usr/local/bin/mise || true)) && (ldconfig -p | grep -q libatomic || (sudo dpkg -i /var/cache/apt/archives/libatomic1*.deb 2>/dev/null || true)) && (command -v velnor-workflow >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && vw_arch=\"ARM64\" || vw_arch=\"X64\"; (sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow && sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow-policy && sudo chmod 0755 /usr/local/bin/velnor-workflow /usr/local/bin/velnor-workflow-policy) 2>/dev/null || true)) && exec /home/runner/run.sh --once".to_string());
+        // Do not override the official image entrypoint/command. Toolchain
+        // installation, curl, and floating `latest` resolution are forbidden
+        // on the normal worker path; the image is admitted and run exactly as
+        // published.
         args
     }
 }
@@ -961,11 +1318,14 @@ mod tests {
 
     impl WorkerRunner for ScriptRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<WorkerOutput> {
-            assert_eq!(program, "docker");
+            assert!(
+                matches!(program, "docker" | "gh"),
+                "unexpected program {program}"
+            );
             self.seen.push(args.to_vec());
             self.results
                 .pop_front()
-                .ok_or_else(|| anyhow::anyhow!("script exhausted at docker {}", args.join(" ")))
+                .ok_or_else(|| anyhow::anyhow!("script exhausted at {program} {}", args.join(" ")))
         }
     }
 
@@ -1200,6 +1560,41 @@ mod tests {
     }
 
     #[test]
+    fn runner_argv_keeps_the_official_image_entrypoint_immutable() {
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            Path::new("/tmp/velnor-test-runner-state"),
+            "jit-blob",
+        );
+        let args = spec
+            .create_args_with_env_file(&spec.jit_env_file_path().unwrap())
+            .join("\n");
+        for forbidden in [
+            "curl",
+            "wget",
+            "latest",
+            "rustup",
+            "cargo-nextest",
+            "mise",
+            "apt-get",
+            "dpkg",
+            "sudo",
+        ] {
+            assert!(
+                !args.contains(forbidden),
+                "worker create argv contains floating install path {forbidden}: {args}"
+            );
+        }
+        assert_eq!(
+            spec.create_args_with_env_file(&spec.jit_env_file_path().unwrap())
+                .last()
+                .map(String::as_str),
+            Some(RUNNER_REF)
+        );
+    }
+
+    #[test]
     fn hook_attests_matching_content() {
         let image = PinnedImage::parse(RUNNER_REF).unwrap();
         let mut runner = ScriptRunner::scripted(vec![
@@ -1233,6 +1628,213 @@ mod tests {
             .verify(&mut runner, &image, &ToolContentExpectation::runner())
             .unwrap_err();
         assert!(error.to_string().contains("digest disagrees"), "{error}");
+    }
+
+    #[test]
+    fn hook_rejects_missing_configured_digest() {
+        let image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("Status: Image is up to date\n"),
+            ScriptRunner::ok("[]\n"),
+        ]);
+        let error = DockerToolContentHook
+            .verify(&mut runner, &image, &ToolContentExpectation::runner())
+            .unwrap_err();
+        assert!(error.to_string().contains("digest disagrees"), "{error}");
+    }
+
+    fn verified_runner_provenance(image: &PinnedImage) -> String {
+        let digest = image.digest().strip_prefix("sha256:").unwrap();
+        serde_json::json!([{
+            "verificationResult": {
+                "signature": { "certificate": { "subjectAlternativeName": {
+                    "value": "https://github.com/actions/runner/.github/workflows/release.yml@refs/heads/main"
+                }}},
+                "verifiedTimestamps": [{ "type": "Tlog" }],
+                "statement": {
+                    "subject": [{ "name": image.repository(), "digest": { "sha256": digest } }],
+                    "predicateType": RUNNER_ATTESTATION_PREDICATE
+                }
+            }
+        }])
+        .to_string()
+    }
+
+    fn admission_script(image: &PinnedImage, final_result: WorkerOutput) -> ScriptRunner {
+        ScriptRunner::scripted(vec![
+            ScriptRunner::ok("Status: Image is up to date\n"),
+            ScriptRunner::ok(&format!("[\"{}\"]\n", image.reference())),
+            ScriptRunner::ok(
+                r#"{"org.opencontainers.image.source":"https://github.com/actions/runner"}"#,
+            ),
+            ScriptRunner::ok("sha256:feedface\n"),
+            ScriptRunner::ok("linux/amd64\n"),
+            final_result,
+        ])
+    }
+
+    #[test]
+    fn admission_accepts_verified_official_runner_provenance() {
+        let image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let mut runner = admission_script(
+            &image,
+            ScriptRunner::ok(&verified_runner_provenance(&image)),
+        );
+        let expected = ToolContentExpectation::runner();
+        let attestation =
+            admit_tool_content(&DockerToolContentHook, &mut runner, &image, &expected).unwrap();
+        assert_eq!(attestation.reference, image.reference());
+        let gh_args = runner
+            .seen
+            .iter()
+            .find(|args| args.first().map(String::as_str) == Some("attestation"))
+            .unwrap();
+        assert!(gh_args.windows(2).any(|pair| {
+            pair == [
+                "--repo".to_string(),
+                RUNNER_ATTESTATION_REPOSITORY.to_string(),
+            ]
+        }));
+        assert!(gh_args.contains(&"--deny-self-hosted-runners".to_string()));
+    }
+
+    #[test]
+    fn admission_rejects_runner_provenance_verifier_failure() {
+        let image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let mut runner = admission_script(
+            &image,
+            ScriptRunner::fail(1, "no valid attestation matched the policy"),
+        );
+        let error = admit_tool_content(
+            &DockerToolContentHook,
+            &mut runner,
+            &image,
+            &ToolContentExpectation::runner(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("provenance verification rejected"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn admission_rejects_unknown_runner_provenance_result() {
+        let image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let mut runner = admission_script(&image, ScriptRunner::ok(""));
+        let error = admit_tool_content(
+            &DockerToolContentHook,
+            &mut runner,
+            &image,
+            &ToolContentExpectation::runner(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("provenance verification is unknown"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn hook_rejects_platform_mismatch() {
+        let image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let expected = ImagePlatform::parse("linux/amd64").unwrap();
+        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("linux/arm64\n")]);
+        let error = DockerToolContentHook
+            .verify_platform(&mut runner, &image, &expected)
+            .unwrap_err();
+        assert!(error.to_string().contains("platform disagrees"), "{error}");
+    }
+
+    struct MissingPlatformProofHook;
+
+    impl ToolContentHook for MissingPlatformProofHook {
+        fn verify(
+            &self,
+            _runner: &mut dyn WorkerRunner,
+            image: &PinnedImage,
+            expected: &ToolContentExpectation,
+        ) -> Result<ToolContentAttestation> {
+            Ok(ToolContentAttestation {
+                reference: image.reference(),
+                image_id: "sha256:verified".to_string(),
+                content_version: expected.content_version.clone(),
+                source: expected.source.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn admission_rejects_missing_platform_proof_before_docker_state() {
+        let image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let expected =
+            ToolContentExpectation::runner_for(&ImagePlatform::parse("linux/amd64").unwrap());
+        let mut runner = ScriptRunner::scripted(vec![]);
+        let error = admit_tool_content(&MissingPlatformProofHook, &mut runner, &image, &expected)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("platform proof hook missing"),
+            "{error}"
+        );
+        assert!(
+            runner.seen.is_empty(),
+            "proof failure must precede Docker calls"
+        );
+    }
+
+    struct MissingSignatureProofHook;
+
+    impl ToolContentHook for MissingSignatureProofHook {
+        fn verify(
+            &self,
+            _runner: &mut dyn WorkerRunner,
+            image: &PinnedImage,
+            expected: &ToolContentExpectation,
+        ) -> Result<ToolContentAttestation> {
+            Ok(ToolContentAttestation {
+                reference: image.reference(),
+                image_id: "sha256:verified".to_string(),
+                content_version: expected.content_version.clone(),
+                source: expected.source.clone(),
+            })
+        }
+
+        fn verify_platform(
+            &self,
+            _runner: &mut dyn WorkerRunner,
+            _image: &PinnedImage,
+            _expected: &ImagePlatform,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn verify_attestation(
+            &self,
+            _runner: &mut dyn WorkerRunner,
+            _image: &PinnedImage,
+            _expected: &ToolContentExpectation,
+            _attestation: &ToolContentAttestation,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn admission_rejects_missing_signature_proof() {
+        let image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let expected =
+            ToolContentExpectation::runner_for(&ImagePlatform::parse("linux/amd64").unwrap());
+        let mut runner = ScriptRunner::scripted(vec![]);
+        let error = admit_tool_content(&MissingSignatureProofHook, &mut runner, &image, &expected)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("signature proof hook missing"),
+            "{error}"
+        );
     }
 
     #[test]

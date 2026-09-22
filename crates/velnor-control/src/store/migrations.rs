@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 23;
+pub const LATEST_SCHEMA_VERSION: u32 = 25;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -627,6 +627,43 @@ const SCHEMA_V23: &str = "
 ALTER TABLE scaleset_demand ADD COLUMN event_name TEXT NOT NULL DEFAULT '';
 ";
 
+/// Persist the workflow identity used by the scale-set admission gate. Older
+/// demand rows keep the empty sentinel and therefore cannot become trusted.
+const SCHEMA_V24: &str = "
+ALTER TABLE scaleset_demand ADD COLUMN job_workflow_ref TEXT NOT NULL DEFAULT '';
+";
+
+/// Fence scale-set acquire claims by exact request identity. The request
+/// identity keeps the opaque job ID alongside its i64 lookup projection so a
+/// hash collision fails closed instead of merging two jobs. The claim table
+/// has one active owner per `(scale_set_id, request_id)`.
+const SCHEMA_V25: &str = "
+ALTER TABLE scaleset_demand ADD COLUMN request_identity TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS scaleset_acquire_claims (
+    scale_set_id INTEGER NOT NULL,
+    request_id INTEGER NOT NULL,
+    batch_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (scale_set_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_acquire_claims_batch
+    ON scaleset_acquire_claims (batch_id);
+";
+
+const SCHEMA_V25_REPLAY: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_acquire_claims (
+    scale_set_id INTEGER NOT NULL,
+    request_id INTEGER NOT NULL,
+    batch_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (scale_set_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_acquire_claims_batch
+    ON scaleset_acquire_claims (batch_id);
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -773,6 +810,16 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "scaleset-demand-event",
         sql: SCHEMA_V23,
     },
+    Migration {
+        version: 24,
+        name: "scaleset-demand-workflow-identity",
+        sql: SCHEMA_V24,
+    },
+    Migration {
+        version: 25,
+        name: "scaleset-demand-and-acquire-claim-fencing",
+        sql: SCHEMA_V25,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -823,13 +870,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
             "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
         )));
     }
-    if version >= LATEST_SCHEMA_VERSION && !v23_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v25_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 23 is recorded but its scale-set demand event column or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 25 is recorded but its scale-set request identity or acquire-claim schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -1031,6 +1078,46 @@ pub(crate) fn apply_pending(
             migration.version == 20 && has_column(&transaction, "jobs", "execution_backend")?;
         let demand_event_column_exists =
             migration.version == 23 && has_column(&transaction, "scaleset_demand", "event_name")?;
+        let demand_workflow_ref_exists = migration.version == 24
+            && has_column(&transaction, "scaleset_demand", "job_workflow_ref")?;
+        let demand_workflow_ref_complete = migration.version == 24
+            && column_definition_matches(
+                &transaction,
+                "scaleset_demand",
+                "job_workflow_ref",
+                "TEXT",
+                true,
+                Some("''"),
+            )?;
+        if migration.version == 24 && demand_workflow_ref_exists && !demand_workflow_ref_complete {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v24 scale-set demand workflow identity column is present but does not exactly match the migration; repair the schema before retrying",
+            ));
+        }
+        let demand_request_identity_exists = migration.version == 25
+            && has_column(&transaction, "scaleset_demand", "request_identity")?;
+        let acquire_claims_table_exists = migration.version == 25
+            && transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scaleset_acquire_claims')",
+                [],
+                |row| row.get(0),
+            )?;
+        let acquire_claims_schema_partial = migration.version == 25
+            && (demand_request_identity_exists || acquire_claims_table_exists)
+            && !(demand_request_identity_exists && acquire_claims_table_exists);
+        if acquire_claims_schema_partial {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v25 request identity and acquire-claim schema is partial; both must converge transactionally before the schema version can advance",
+            ));
+        }
         if migration.version == 16
             && slot_lifecycle_columns.iter().any(|exists| *exists)
             && !slot_lifecycle_columns.iter().all(|exists| *exists)
@@ -1077,6 +1164,13 @@ pub(crate) fn apply_pending(
                 SCHEMA_V12_REPLAY
             } else if reservation_count_exists {
                 SCHEMA_V15_REPLAY
+            } else if migration.version == 24 && demand_workflow_ref_complete {
+                ""
+            } else if migration.version == 25
+                && demand_request_identity_exists
+                && acquire_claims_table_exists
+            {
+                SCHEMA_V25_REPLAY
             } else {
                 migration.sql
             };
@@ -1188,6 +1282,24 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v23 scale-set demand event column did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 24 && !v24_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v24 scale-set demand workflow identity column did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 25 && !v25_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v25 scale-set request identity and acquire-claim tables did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1517,6 +1629,47 @@ fn v23_schema_complete(conn: &Connection) -> StoreResult<bool> {
     )
 }
 
+fn v24_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v23_schema_complete(conn)? {
+        return Ok(false);
+    }
+    column_definition_matches(
+        conn,
+        "scaleset_demand",
+        "job_workflow_ref",
+        "TEXT",
+        true,
+        Some("''"),
+    )
+}
+
+fn v25_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v24_schema_complete(conn)?
+        || !column_definition_matches(
+            conn,
+            "scaleset_demand",
+            "request_identity",
+            "TEXT",
+            true,
+            Some("''"),
+        )?
+    {
+        return Ok(false);
+    }
+    let claims_exist: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scaleset_acquire_claims')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(claims_exist
+        && has_index_columns(
+            conn,
+            "idx_scaleset_acquire_claims_batch",
+            "scaleset_acquire_claims",
+            &["batch_id"],
+        )?)
+}
+
 fn v22_schema_complete(conn: &Connection) -> StoreResult<bool> {
     if !v21_schema_complete(conn)? {
         return Ok(false);
@@ -1786,6 +1939,19 @@ mod tests {
     impl Drop for TempDb {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn seed_v23_schema(conn: &Connection) {
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(conn).unwrap();
+        for migration in MIGRATIONS.iter().take(23) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
         }
     }
 
@@ -2472,7 +2638,7 @@ mod tests {
         let store = Store::open(&temp.path).expect("initial migration");
         assert_eq!(
             current_version(&store.lock_conn().expect("store lock")).unwrap(),
-            23
+            LATEST_SCHEMA_VERSION
         );
         let connection = store.lock_conn().expect("store lock");
         connection
@@ -2526,5 +2692,120 @@ mod tests {
             )
             .unwrap();
         assert_eq!(event, "");
+    }
+
+    #[test]
+    fn replays_exact_v24_workflow_column_and_applies_v25_claim_schema() {
+        let temp = TempDb::new("v24-exact-replay");
+        let mut conn = Connection::open(&temp.path).expect("open v23 database");
+        seed_v23_schema(&conn);
+        conn.execute(
+            "ALTER TABLE scaleset_demand
+             ADD COLUMN job_workflow_ref TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "v24-exact-replay", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v24-exact-replay", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v24-exact-replay").unwrap();
+
+        assert!(v24_schema_complete(&conn).unwrap());
+        assert!(v25_schema_complete(&conn).unwrap());
+        let workflow_columns: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('scaleset_demand')
+                 WHERE name = 'job_workflow_ref'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(workflow_columns, 1);
+        let claims_tables: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'scaleset_acquire_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims_tables, 1);
+    }
+
+    #[test]
+    fn partial_v24_workflow_column_fails_closed_without_version_bump() {
+        let temp = TempDb::new("v24-partial-column");
+        let mut conn = Connection::open(&temp.path).expect("open v23 database");
+        seed_v23_schema(&conn);
+        conn.execute(
+            "ALTER TABLE scaleset_demand ADD COLUMN job_workflow_ref TEXT",
+            [],
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "v24-partial-column", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(&mut conn, "v24-partial-column", None).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+        assert_eq!(current_version(&conn).unwrap(), 23);
+        assert!(!v24_schema_complete(&conn).unwrap());
+        assert!(has_column_connection(&conn, "scaleset_demand", "job_workflow_ref").unwrap());
+        assert!(!has_column_connection(&conn, "scaleset_demand", "request_identity").unwrap());
+        let claims_tables: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'scaleset_acquire_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims_tables, 0);
+        release_lock(&conn, "v24-partial-column").unwrap();
+    }
+
+    #[test]
+    fn v24_ddl_and_version_roll_back_together_before_v25() {
+        let temp = TempDb::new("v24-rollback");
+        let mut conn = Connection::open(&temp.path).expect("open v23 database");
+        seed_v23_schema(&conn);
+        acquire_lock(&conn, "v24-rollback", Duration::from_secs(1)).unwrap();
+
+        let error = apply_pending(
+            &mut conn,
+            "v24-rollback",
+            Some(&|version| {
+                if version == 24 {
+                    Err(StoreError::new(
+                        ExitClass::Operation,
+                        "store.test.v24-rollback",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error.envelope.reason, "store.test.v24-rollback");
+        assert_eq!(current_version(&conn).unwrap(), 23);
+        assert!(!has_column_connection(&conn, "scaleset_demand", "job_workflow_ref").unwrap());
+        assert!(!has_column_connection(&conn, "scaleset_demand", "request_identity").unwrap());
+        let claims_tables: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'scaleset_acquire_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims_tables, 0);
+
+        assert_eq!(
+            apply_pending(&mut conn, "v24-rollback", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        assert!(v25_schema_complete(&conn).unwrap());
+        release_lock(&conn, "v24-rollback").unwrap();
     }
 }

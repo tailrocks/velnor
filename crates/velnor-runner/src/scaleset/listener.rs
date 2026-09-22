@@ -164,44 +164,12 @@ impl SessionStore {
             .context("fetch session cursor")
     }
 
-    fn upsert(&mut self, cursor: &SessionCursor) -> Result<()> {
-        let now = Self::now_rfc3339();
-        self.conn
-            .execute(
-                "INSERT INTO scaleset_sessions
-                 (scale_set_id, session_id, owner, last_message_id, stats_json, generation, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT (scale_set_id) DO UPDATE SET
-                   session_id = excluded.session_id, owner = excluded.owner,
-                   last_message_id = excluded.last_message_id, stats_json = excluded.stats_json,
-                   generation = excluded.generation, updated_at = excluded.updated_at",
-                params![
-                    cursor.scale_set_id,
-                    cursor.session_id,
-                    cursor.owner,
-                    cursor.last_message_id,
-                    cursor.stats_json,
-                    i64::try_from(cursor.generation).unwrap_or(i64::MAX),
-                    now,
-                ],
-            )
-            .context("upsert session cursor")?;
-        Ok(())
-    }
-
-    fn load_or_default(&self, scale_set_id: i32) -> Result<SessionCursor> {
-        Ok(self.get(scale_set_id)?.unwrap_or(SessionCursor {
-            scale_set_id,
-            session_id: String::new(),
-            owner: String::new(),
-            last_message_id: 0,
-            stats_json: None,
-            generation: 0,
-        }))
-    }
-
-    /// Record session identity after (re)connect. Never moves the cursor within
-    /// an existing session, but resets last_message_id to 0 on session rollover.
+    /// Record session identity after (re)connect.
+    ///
+    /// The row is the ownership fence. A newer generation may replace it and
+    /// starts its session at cursor zero. An equal-generation write is valid
+    /// only for the same session. Older generations and same-generation
+    /// foreign sessions lose the race and fail without changing the row.
     pub fn save_session(
         &mut self,
         scale_set_id: i32,
@@ -209,27 +177,73 @@ impl SessionStore {
         owner: &str,
         generation: u64,
     ) -> Result<()> {
-        let mut cursor = self.load_or_default(scale_set_id)?;
-        if cursor.session_id != session_id {
-            cursor.last_message_id = 0;
+        let generation = i64::try_from(generation).unwrap_or(i64::MAX);
+        let changed = self
+            .conn
+            .execute(
+                "INSERT INTO scaleset_sessions
+                 (scale_set_id, session_id, owner, last_message_id, stats_json, generation, updated_at)
+                 VALUES (?1, ?2, ?3, 0, NULL, ?4, ?5)
+                 ON CONFLICT (scale_set_id) DO UPDATE SET
+                   session_id = excluded.session_id,
+                   owner = excluded.owner,
+                   last_message_id = CASE
+                       WHEN scaleset_sessions.session_id = excluded.session_id
+                       THEN scaleset_sessions.last_message_id
+                       ELSE 0
+                   END,
+                   generation = excluded.generation,
+                   updated_at = excluded.updated_at
+                 WHERE scaleset_sessions.generation < excluded.generation
+                    OR (scaleset_sessions.generation = excluded.generation
+                        AND scaleset_sessions.session_id = excluded.session_id)",
+                params![scale_set_id, session_id, owner, generation, Self::now_rfc3339()],
+            )
+            .context("compare-and-set session cursor")?;
+        if changed == 0 {
+            anyhow::bail!(
+                "scale-set session cursor fenced: scale_set_id={scale_set_id}, session_id={session_id:?}, generation={generation}"
+            );
         }
-        cursor.session_id = session_id.to_owned();
-        cursor.owner = owner.to_owned();
-        cursor.generation = generation;
-        self.upsert(&cursor)
+        Ok(())
     }
 
     /// Advance the cursor past an ACKed message. Called AFTER the ACK lands.
+    /// The session and generation predicates make a late old listener unable
+    /// to overwrite the current owner; the message predicate makes the
+    /// cursor monotonic within one owner.
     pub fn save_cursor(
         &mut self,
         scale_set_id: i32,
+        session_id: &str,
         last_message_id: i32,
         generation: u64,
     ) -> Result<()> {
-        let mut cursor = self.load_or_default(scale_set_id)?;
-        cursor.last_message_id = last_message_id;
-        cursor.generation = generation;
-        self.upsert(&cursor)
+        let generation = i64::try_from(generation).unwrap_or(i64::MAX);
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE scaleset_sessions
+                 SET last_message_id = ?1, updated_at = ?2
+                 WHERE scale_set_id = ?3
+                   AND session_id = ?4
+                   AND generation = ?5
+                   AND last_message_id <= ?1",
+                params![
+                    last_message_id,
+                    Self::now_rfc3339(),
+                    scale_set_id,
+                    session_id,
+                    generation,
+                ],
+            )
+            .context("compare-and-set session cursor")?;
+        if changed == 0 {
+            anyhow::bail!(
+                "scale-set cursor fenced or regressed: scale_set_id={scale_set_id}, session_id={session_id:?}, generation={generation}, message_id={last_message_id}"
+            );
+        }
+        Ok(())
     }
 
     /// Persist the authoritative statistics from a poll (every poll,
@@ -237,14 +251,35 @@ impl SessionStore {
     pub fn save_stats(
         &mut self,
         scale_set_id: i32,
+        session_id: &str,
         stats: &RunnerScaleSetStatistic,
         generation: u64,
     ) -> Result<()> {
-        let mut cursor = self.load_or_default(scale_set_id)?;
-        cursor.stats_json =
-            Some(serde_json::to_string(stats).context("encode session statistics")?);
-        cursor.generation = generation;
-        self.upsert(&cursor)
+        let stats_json = serde_json::to_string(stats).context("encode session statistics")?;
+        let generation = i64::try_from(generation).unwrap_or(i64::MAX);
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE scaleset_sessions
+                 SET stats_json = ?1, updated_at = ?2
+                 WHERE scale_set_id = ?3
+                   AND session_id = ?4
+                   AND generation = ?5",
+                params![
+                    stats_json,
+                    Self::now_rfc3339(),
+                    scale_set_id,
+                    session_id,
+                    generation,
+                ],
+            )
+            .context("compare-and-set session statistics")?;
+        if changed == 0 {
+            anyhow::bail!(
+                "scale-set statistics fenced: scale_set_id={scale_set_id}, session_id={session_id:?}, generation={generation}"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -298,6 +333,7 @@ pub struct Listener<S, L, W> {
     session: S,
     processor: Processor<S, L, W>,
     cursors: SessionStore,
+    session_id: Option<String>,
     metrics: Metrics,
     config: LoopConfig,
     started: bool,
@@ -317,6 +353,7 @@ impl<S, L, W> Listener<S, L, W> {
             session,
             processor,
             cursors,
+            session_id: None,
             metrics,
             config,
             started: false,
@@ -430,8 +467,9 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             .save_session(self.config.scale_set_id, &session_id, &owner, generation)
             .map_err(ListenerError::Store)?;
         self.cursors
-            .save_stats(self.config.scale_set_id, &stats, generation)
+            .save_stats(self.config.scale_set_id, &session_id, &stats, generation)
             .map_err(ListenerError::Store)?;
+        self.session_id = Some(session_id);
         let initial = RunnerScaleSetMessage {
             message_id: INITIAL_MESSAGE_ID,
             statistics: Some(stats),
@@ -456,8 +494,13 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
     ) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
         self.metrics.inc_nil_polls();
         if let Some(stats) = self.session.session_statistics().await {
+            let session_id = self.session_id.clone().ok_or_else(|| {
+                ListenerError::Store(anyhow::anyhow!(
+                    "scale-set session identity missing before statistics persistence"
+                ))
+            })?;
             self.cursors
-                .save_stats(self.config.scale_set_id, &stats, generation)
+                .save_stats(self.config.scale_set_id, &session_id, &stats, generation)
                 .map_err(ListenerError::Store)?;
             self.processor.set_cached_stats(stats);
         }
@@ -496,9 +539,14 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
         generation: u64,
     ) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
         self.metrics.inc_messages();
+        let session_id = self.session_id.clone().ok_or_else(|| {
+            ListenerError::Store(anyhow::anyhow!(
+                "scale-set session identity missing before message persistence"
+            ))
+        })?;
         if let Some(stats) = message.statistics {
             self.cursors
-                .save_stats(self.config.scale_set_id, &stats, generation)
+                .save_stats(self.config.scale_set_id, &session_id, &stats, generation)
                 .map_err(ListenerError::Store)?;
         }
         let outcome = self
@@ -516,7 +564,12 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             .await
             .map_err(ListenerError::Ack)?;
         self.cursors
-            .save_cursor(self.config.scale_set_id, message.message_id, generation)
+            .save_cursor(
+                self.config.scale_set_id,
+                &session_id,
+                message.message_id,
+                generation,
+            )
             .map_err(ListenerError::Store)?;
         self.metrics.inc_acks();
         self.metrics.set_last_message_id(message.message_id);
@@ -578,7 +631,7 @@ mod tests {
     use super::*;
     use crate::scaleset::capacity::MemLedger;
     use crate::scaleset::converge::ProvisionImages;
-    use crate::scaleset::demand::DemandStore;
+    use crate::scaleset::demand::{DemandStore, OfferAdmission};
     use crate::scaleset::intents::{AcquireBatchStore, ProvisionIntentStore};
     use crate::scaleset::scale::{ProcessorConfig, QueueSession};
     use std::collections::VecDeque;
@@ -603,6 +656,7 @@ mod tests {
         acquired: Mutex<Vec<Vec<i64>>>,
         seen_capacity: Mutex<Vec<i32>>,
         seen_last_id: Mutex<Vec<i32>>,
+        cursor_path_after_ack: Mutex<Option<std::path::PathBuf>>,
         stats: RunnerScaleSetStatistic,
     }
 
@@ -651,6 +705,16 @@ mod tests {
 
         async fn delete_message(&self, message_id: i32) -> Result<(), Self::Error> {
             self.state.acks.lock().unwrap().push(message_id);
+            if let Some(path) = self.state.cursor_path_after_ack.lock().unwrap().clone() {
+                let mut cursors = SessionStore::open(&path).map_err(|error| {
+                    SessionError(format!("open interleaved cursor store: {error:#}"))
+                })?;
+                cursors
+                    .save_cursor(7, "session-1", 100, 0)
+                    .map_err(|error| {
+                        SessionError(format!("advance interleaved cursor: {error:#}"))
+                    })?;
+            }
             Ok(())
         }
     }
@@ -714,11 +778,95 @@ mod tests {
         dir.join("state.db")
     }
 
+    #[test]
+    fn session_store_rejects_stale_owner_and_generation() {
+        let path = temp_path("session-fence");
+        let mut current = SessionStore::open(&path).unwrap();
+        current
+            .save_session(7, "session-new", "octo-org", 2)
+            .unwrap();
+        current.save_cursor(7, "session-new", 41, 2).unwrap();
+        drop(current);
+
+        let mut stale = SessionStore::open(&path).unwrap();
+        let error = stale
+            .save_session(7, "session-old", "octo-org", 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("fenced"));
+        let error = stale.save_cursor(7, "session-old", 99, 1).unwrap_err();
+        assert!(error.to_string().contains("fenced"));
+
+        let cursor = stale.get(7).unwrap().unwrap();
+        assert_eq!(cursor.session_id, "session-new");
+        assert_eq!(cursor.generation, 2);
+        assert_eq!(cursor.last_message_id, 41);
+    }
+
+    #[test]
+    fn session_store_keeps_same_session_cursor_monotonic() {
+        let path = temp_path("cursor-monotonic");
+        let mut store = SessionStore::open(&path).unwrap();
+        store.save_session(7, "session-1", "octo-org", 3).unwrap();
+        store.save_cursor(7, "session-1", 41, 3).unwrap();
+
+        let error = store.save_cursor(7, "session-1", 40, 3).unwrap_err();
+        assert!(error.to_string().contains("regressed"));
+        store.save_cursor(7, "session-1", 42, 3).unwrap();
+        store.save_session(7, "session-1", "octo-org", 4).unwrap();
+        assert_eq!(store.get(7).unwrap().unwrap().last_message_id, 42);
+    }
+
+    #[test]
+    fn concurrent_session_writers_keep_the_highest_generation() {
+        let path = temp_path("session-concurrent");
+        let mut seed = SessionStore::open(&path).unwrap();
+        seed.save_session(7, "session-1", "octo-org", 1).unwrap();
+        drop(seed);
+
+        let mut older = SessionStore::open(&path).unwrap();
+        let mut newer = SessionStore::open(&path).unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let older_start = start.clone();
+        let older_thread = std::thread::spawn(move || {
+            older_start.wait();
+            older.save_session(7, "session-2", "octo-org", 2)
+        });
+        let newer_start = start.clone();
+        let newer_thread = std::thread::spawn(move || {
+            newer_start.wait();
+            newer.save_session(7, "session-3", "octo-org", 3)
+        });
+        start.wait();
+
+        let older_result = older_thread.join().unwrap();
+        let newer_result = newer_thread.join().unwrap();
+        assert!(newer_result.is_ok());
+        if let Err(error) = older_result {
+            assert!(error.to_string().contains("fenced"));
+        }
+
+        let cursor = SessionStore::open(&path).unwrap().get(7).unwrap().unwrap();
+        assert_eq!(cursor.session_id, "session-3");
+        assert_eq!(cursor.generation, 3);
+        assert_eq!(cursor.last_message_id, 0);
+    }
+
     fn stats() -> RunnerScaleSetStatistic {
         RunnerScaleSetStatistic {
             total_assigned_jobs: 2,
             ..RunnerScaleSetStatistic::default()
         }
+    }
+
+    fn admission() -> OfferAdmission {
+        OfferAdmission::exact(
+            "tailrocks",
+            "tailrocks/velnor",
+            "main",
+            "tailrocks/velnor",
+            ".github/workflows/ci.yml",
+            "push",
+        )
     }
 
     fn offer(id: i64) -> ScaleSetJobAvailable {
@@ -730,7 +878,7 @@ mod tests {
                 repository_name: "velnor".to_owned(),
                 owner_name: "tailrocks".to_owned(),
                 job_id: format!("job-{id}"),
-                job_workflow_ref: String::new(),
+                job_workflow_ref: "tailrocks/velnor/.github/workflows/ci.yml@main".to_owned(),
                 job_display_name: String::new(),
                 workflow_run_id: 0,
                 event_name: "push".to_owned(),
@@ -764,7 +912,7 @@ mod tests {
             session.clone(),
             ledger,
             StubLane,
-            DemandStore::open(path).unwrap(),
+            DemandStore::open_with_admission(path, admission()).unwrap(),
             AcquireBatchStore::open(path).unwrap(),
             ProvisionIntentStore::open(path).unwrap(),
             metrics.clone(),
@@ -823,6 +971,30 @@ mod tests {
         assert_eq!(snapshot.nil_polls, 1);
         assert_eq!(snapshot.acks, 1);
         assert_eq!(snapshot.last_message_id, 41);
+    }
+
+    #[tokio::test]
+    async fn cursor_fence_failure_after_ack_is_reported_and_cursor_stays_monotonic() {
+        let path = temp_path("ack-cursor-order");
+        let batch = RunnerScaleSetMessage {
+            message_id: 41,
+            ..RunnerScaleSetMessage::default()
+        };
+        let (mut listener, session) = harness(&path, vec![Some(batch)]);
+        *session.state.cursor_path_after_ack.lock().unwrap() = Some(path.clone());
+
+        let result = listener.run_once().await;
+        assert!(matches!(result, Err(ListenerError::Store(_))));
+        assert_eq!(session.state.acks.lock().unwrap().as_slice(), &[41]);
+        assert_eq!(
+            SessionStore::open(&path)
+                .unwrap()
+                .get(7)
+                .unwrap()
+                .unwrap()
+                .last_message_id,
+            100
+        );
     }
 
     #[tokio::test]

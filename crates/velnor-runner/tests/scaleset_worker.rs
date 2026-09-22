@@ -27,10 +27,11 @@ use velnor_runner::scaleset::allocator::ScaleSetAllocator;
 use velnor_runner::scaleset::permit_holder;
 use velnor_runner::scaleset::worker::{
     provision_worker, DockerToolContentHook, HomogeneousProfile, OwnershipId, PinnedImage,
-    ProvisionPlan, ScaleSetWorker, Supervision, SupervisionOutcome, VecEdgeSink, WorkerIdentity,
-    WorkerOutput, WorkerRunner, DIND_DIGEST_AMD64, DIND_DIGEST_ARM64, DIND_INDEX_DIGEST,
-    DIND_REPOSITORY, DIND_VERSION, RUNNER_DIGEST_AMD64, RUNNER_DIGEST_ARM64, RUNNER_INDEX_DIGEST,
-    RUNNER_REPOSITORY, RUNNER_VERSION,
+    ProvisionPlan, ScaleSetWorker, Supervision, SupervisionOutcome, ToolContentAttestation,
+    ToolContentExpectation, ToolContentHook, VecEdgeSink, WorkerIdentity, WorkerOutput,
+    WorkerRunner, DIND_DIGEST_AMD64, DIND_DIGEST_ARM64, DIND_INDEX_DIGEST, DIND_REPOSITORY,
+    DIND_VERSION, RUNNER_DIGEST_AMD64, RUNNER_DIGEST_ARM64, RUNNER_INDEX_DIGEST, RUNNER_REPOSITORY,
+    RUNNER_VERSION,
 };
 use velnor_runner::scaleset::Fixtures;
 
@@ -91,6 +92,50 @@ impl WorkerRunner for ScriptRunner {
         self.results
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("script exhausted at docker {}", args.join(" ")))
+    }
+}
+
+/// Test-only hook: production uses DockerToolContentHook's real runner
+/// provenance verifier; this lifecycle test isolates Docker ownership/order.
+struct CompleteTestHook;
+
+impl ToolContentHook for CompleteTestHook {
+    fn verify(
+        &self,
+        runner: &mut dyn WorkerRunner,
+        image: &PinnedImage,
+        expected: &ToolContentExpectation,
+    ) -> anyhow::Result<ToolContentAttestation> {
+        DockerToolContentHook.verify(runner, image, expected)
+    }
+
+    fn verify_platform(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        _image: &PinnedImage,
+        _expected: &velnor_runner::scaleset::worker::ImagePlatform,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn verify_attestation(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        _image: &PinnedImage,
+        _expected: &ToolContentExpectation,
+        _attestation: &ToolContentAttestation,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn verify_signature(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        _image: &PinnedImage,
+        _expected: &ToolContentExpectation,
+        _attestation: &ToolContentAttestation,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -218,13 +263,9 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         ScriptRunner::ok("work\n"),
         ScriptRunner::ok("dindata\n"),
     ]);
-    let outcome = provision_worker(
-        &mut script,
-        &DockerToolContentHook,
-        &plan,
-        &|_| {},
-        &mut || Ok(()),
-    )
+    let outcome = provision_worker(&mut script, &CompleteTestHook, &plan, &|_| {}, &mut || {
+        Ok(())
+    })
     .unwrap();
     assert_eq!(outcome.dind_attestation.content_version, DIND_VERSION);
     assert_eq!(outcome.runner_attestation.content_version, RUNNER_VERSION);

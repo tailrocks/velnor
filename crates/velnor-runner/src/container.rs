@@ -18,6 +18,7 @@ pub use crate::docker_argv::PreparedDockerArgs;
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
 const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+const PRIVATE_DIND_DOCKER_HOST: &str = "tcp://docker:2375";
 const JOB_WORKFLOW_CLI: &str = "/usr/local/bin/velnor-workflow";
 const JOB_WORKFLOW_CLI_SHA256: &str = "/usr/local/share/velnor/velnor-workflow.sha256";
 const JOB_DONE_CONTAINER_DIR: &str = "/__velnor";
@@ -59,6 +60,21 @@ fn is_docker_control_env(name: &str) -> bool {
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
         || name.eq_ignore_ascii_case("VELNOR_DOCKER_HOST")
         || name.eq_ignore_ascii_case("VELNOR_DOCKER_CONTEXT")
+}
+
+fn is_official_dind_image(image: &str) -> bool {
+    let (reference, tag) = image.split_once(':').unwrap_or((image, ""));
+    let reference = reference.trim().to_ascii_lowercase();
+    let tag = tag
+        .split_once('@')
+        .map_or(tag, |(tag, _)| tag)
+        .trim()
+        .to_ascii_lowercase();
+    let official = matches!(
+        reference.as_str(),
+        "docker" | "docker.io/library/docker" | "index.docker.io/library/docker"
+    );
+    official && !tag.is_empty() && tag.split('-').any(|component| component == "dind")
 }
 
 /// Docker flags that would impose a CPU/RAM/PID ceiling on the workload.
@@ -382,7 +398,7 @@ impl JobContainerSpec {
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
         args.env("HOME", "/github/home");
-        args.env("DOCKER_HOST", JOB_DOCKER_HOST);
+        args.env("DOCKER_HOST", self.docker_host());
         args.env("RUSTUP_HOME", "/root/.rustup");
         args.env("CARGO_HOME", "/github/home/.cargo");
         args.env("RUNNER_TEMP", "/__t");
@@ -642,7 +658,7 @@ impl JobContainerSpec {
     /// dropped, so every in-container Docker client stays on the lease.
     fn append_base_exec_env(&self, command: &mut DockerCommand) {
         command.env("HOME", "/github/home");
-        command.env("DOCKER_HOST", JOB_DOCKER_HOST);
+        command.env("DOCKER_HOST", self.docker_host());
         command.env("RUSTUP_HOME", "/root/.rustup");
         command.env("CARGO_HOME", "/github/home/.cargo");
         command.env("PATH", self.default_exec_path());
@@ -715,6 +731,7 @@ impl JobContainerSpec {
             args.flag(mount);
         }
         args.env("HOME", "/github/home");
+        self.append_docker_host_env(args);
         args.env("RUNNER_TOOL_CACHE", "/__tool");
         args.env("AGENT_TOOLSDIRECTORY", "/__tool");
         // The Node image entrypoint/shell drops env names with '-', but
@@ -914,6 +931,7 @@ impl JobContainerSpec {
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
         args.env("HOME", "/github/home");
+        self.append_docker_host_env(args);
         args.env("RUNNER_TOOL_CACHE", "/__tool");
         args.env("AGENT_TOOLSDIRECTORY", "/__tool");
         self.append_ownership_labels(args);
@@ -993,6 +1011,44 @@ impl JobContainerSpec {
         crate::docker_lease::guest_docker_socket_host(&self.name, &self.temp_host)
     }
 
+    /// A private DinD service is the only job-owned Docker daemon endpoint.
+    /// It is deliberately narrow: an arbitrary service named `docker` must
+    /// not redirect trusted jobs away from the Velnor lease, and a published
+    /// DinD port is not private to the job.
+    pub(crate) fn uses_private_dind(&self) -> bool {
+        self.services.iter().any(|service| {
+            service.network_alias.eq_ignore_ascii_case("docker")
+                && is_official_dind_image(&service.image)
+                && service.ports.is_empty()
+                && service.options.iter().any(|option| {
+                    option == "--privileged" || option.eq_ignore_ascii_case("--privileged=true")
+                })
+        })
+    }
+
+    /// Resolve the Docker endpoint emitted into the job and every Docker
+    /// sidecar. On macOS the endpoint is a Velnor lease over loopback TCP;
+    /// it is never the host daemon socket. The matching listener is bound by
+    /// `DockerLeaseGuard` before the job container starts. A failed bind
+    /// therefore fails the job before an endpoint can be used.
+    pub(crate) fn docker_host(&self) -> String {
+        if self.uses_private_dind() {
+            return PRIVATE_DIND_DOCKER_HOST.to_owned();
+        }
+        if self.mount_docker_socket && cfg!(target_os = "macos") {
+            return crate::docker_lease::guest_docker_tcp_endpoint(
+                &self.guest_docker_socket_host(),
+            );
+        }
+        JOB_DOCKER_HOST.to_owned()
+    }
+
+    fn append_docker_host_env(&self, args: &mut DockerCommand) {
+        if self.mount_docker_socket || self.uses_private_dind() {
+            args.env("DOCKER_HOST", self.docker_host());
+        }
+    }
+
     /// Resolve both filesystem views of the job lease.
     pub(crate) fn docker_lease_paths(&self) -> io::Result<DockerLeasePaths> {
         let host_visible = self.guest_docker_socket_host();
@@ -1058,14 +1114,24 @@ impl JobContainerSpec {
         if let Some(path) = &self.sccache_store_host {
             self.docker_host_path_checked(path, "sccache store")?;
         }
-        // This also rejects a lease path shortened outside the mapped work
-        // root; the host listener and daemon mount must refer to one socket.
-        self.docker_lease_paths()?;
+        // Linux binds the lease socket into the daemon-visible work root. On
+        // macOS the guest reaches the loopback TCP lease through
+        // host.docker.internal, so no socket inode is passed to the VM.
+        if Self::guest_can_connect_host_bound_unix_lease() && self.mount_docker_socket {
+            self.docker_lease_paths()?;
+        }
         Ok(())
     }
 
     fn append_docker_socket_mount(&self, args: &mut impl FlagSink) -> io::Result<()> {
-        if !self.mount_docker_socket {
+        if !self.mount_docker_socket || self.uses_private_dind() {
+            return Ok(());
+        }
+        if cfg!(target_os = "macos") {
+            // The macOS VM can see a bind-mounted inode but cannot connect to
+            // a Velnor Unix listener through virtiofs. The scoped TCP lease is
+            // the transport; mounting any host socket here would be a daemon
+            // escape.
             return Ok(());
         }
         let daemon_visible = self.guest_docker_socket_bind_source()?;
@@ -1079,11 +1145,8 @@ impl JobContainerSpec {
     /// Unix socket the Linux job container should see as `/var/run/docker.sock`.
     ///
     /// On a native Linux host that is the per-job lease proxy. On macOS the
-    /// runner binds that proxy on a host path the OrbStack/Docker Desktop VM
-    /// can *see* as a socket inode, but `connect()` is `ECONNREFUSED`
-    /// (virtiofs). The daemon's own socket is special-cased and connectable.
-    /// A TCP lease proxy is the root fix; until then trusted macOS jobs
-    /// mount the resolved host socket.
+    /// guest reaches the same policy through the loopback TCP lease because a
+    /// Unix listener behind virtiofs is not connectable from the VM.
     pub(crate) fn guest_can_connect_host_bound_unix_lease() -> bool {
         !cfg!(target_os = "macos")
     }
@@ -1092,12 +1155,9 @@ impl JobContainerSpec {
         if Self::guest_can_connect_host_bound_unix_lease() {
             return Ok(self.docker_lease_paths()?.daemon_visible);
         }
-        let endpoint = crate::docker::engine::resolve_docker_endpoint().map_err(|error| {
-            io::Error::other(format!(
-                "resolve host Docker socket for macOS job mount: {error}"
-            ))
-        })?;
-        Ok(endpoint.socket.canonicalize().unwrap_or(endpoint.socket))
+        Err(io::Error::other(
+            "macOS Docker jobs use the Velnor loopback TCP lease; direct host socket mounts are forbidden",
+        ))
     }
 
     fn append_docker_cli_mounts(&self, args: &mut impl FlagSink) {
@@ -2646,9 +2706,13 @@ mod tests {
         } else {
             assert!(
                 args.iter()
-                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
-                        && !arg.contains("vdl-")),
-                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+                    .all(|arg| !arg.ends_with(".sock:/var/run/docker.sock")),
+                "macOS guest Docker must not mount any host socket, got {args:?}"
+            );
+            assert!(
+                args.iter()
+                    .any(|arg| arg.starts_with("DOCKER_HOST=tcp://host.docker.internal:")),
+                "macOS guest Docker must use its scoped TCP lease, got {args:?}"
             );
         }
         // PID 1 supervises the console tail and exits only on the private
@@ -3116,9 +3180,13 @@ mod tests {
         } else {
             assert!(
                 args.iter()
-                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
-                        && !arg.contains("vdl-")),
-                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+                    .all(|arg| !arg.ends_with(".sock:/var/run/docker.sock")),
+                "macOS guest Docker must not mount any host socket, got {args:?}"
+            );
+            assert!(
+                args.iter()
+                    .any(|arg| arg.starts_with("DOCKER_HOST=tcp://host.docker.internal:")),
+                "macOS guest Docker must use its scoped TCP lease, got {args:?}"
             );
         }
     }
@@ -3198,6 +3266,7 @@ mod tests {
         let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
         let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
         let cargo_target_env = format!("CARGO_TARGET_DIR={}", spec.mbx_target_container_dir());
+        let docker_host_env = format!("DOCKER_HOST={}", spec.docker_host());
 
         assert_eq!(
             rendered(&prepared),
@@ -3206,7 +3275,7 @@ mod tests {
                 "--workdir",
                 "/__w/repo",
                 "HOME=/github/home",
-                "DOCKER_HOST=unix:///var/run/docker.sock",
+                docker_host_env.as_str(),
                 "RUSTUP_HOME=/root/.rustup",
                 "CARGO_HOME=/github/home/.cargo",
                 "PATH=/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -3248,6 +3317,7 @@ mod tests {
         let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
         let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
         let cargo_target_env = format!("CARGO_TARGET_DIR={}", spec.mbx_target_container_dir());
+        let docker_host_env = format!("DOCKER_HOST={}", spec.docker_host());
 
         assert_eq!(
             rendered(&prepared),
@@ -3256,7 +3326,7 @@ mod tests {
                 "--workdir",
                 "/__w/repo",
                 "HOME=/github/home",
-                "DOCKER_HOST=unix:///var/run/docker.sock",
+                docker_host_env.as_str(),
                 "RUSTUP_HOME=/root/.rustup",
                 "CARGO_HOME=/github/home/.cargo",
                 "PATH=/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -3440,7 +3510,7 @@ mod tests {
         ];
         let start_prepared = spec.start_args().unwrap();
         let start = rendered(&start_prepared);
-        assert!(start.contains(&"DOCKER_HOST=unix:///var/run/docker.sock".into()));
+        assert!(start.contains(&format!("DOCKER_HOST={}", spec.docker_host())));
         assert!(start.contains(&"SAFE_ENV=kept".into()));
         assert!(!start.iter().any(|arg| arg.contains("attacker.example")));
         assert!(!start.iter().any(|arg| arg == "DOCKER_CONTEXT=attacker"));
@@ -3458,10 +3528,39 @@ mod tests {
                 &["docker".into(), "version".into()],
             )
             .unwrap();
-        assert!(rendered(&prepared).contains(&"DOCKER_HOST=unix:///var/run/docker.sock".into()));
+        assert!(rendered(&prepared).contains(&format!("DOCKER_HOST={}", spec.docker_host())));
         assert!(!rendered(&prepared)
             .iter()
             .any(|arg| arg.contains("attacker")));
+    }
+
+    #[test]
+    fn private_dind_uses_only_the_job_network_endpoint() {
+        let mut spec = spec();
+        spec.services = vec![ServiceContainerSpec {
+            name: "velnor-service-docker".into(),
+            image: "docker:27-dind".into(),
+            network_alias: "docker".into(),
+            network: spec.network.clone(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: vec!["--privileged".into()],
+        }];
+
+        assert!(spec.uses_private_dind());
+        assert_eq!(spec.docker_host(), "tcp://docker:2375");
+        let start = rendered(&spec.start_args().unwrap());
+        assert!(start.contains(&"DOCKER_HOST=tcp://docker:2375".into()));
+        assert!(!start
+            .iter()
+            .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")));
+
+        let exec = rendered(
+            &spec
+                .prepare_exec_process_args("/__w", &[], &[], &["docker".into(), "version".into()])
+                .unwrap(),
+        );
+        assert!(exec.contains(&"DOCKER_HOST=tcp://docker:2375".into()));
     }
 
     #[test]
@@ -3944,23 +4043,23 @@ mod tests {
             .map(|entry| mount_container(&entry).to_owned())
             .collect();
         containers.sort_unstable();
-        assert_eq!(
-            containers,
-            [
-                "/__a",
-                "/__t",
-                "/__tool",
-                "/__w",
-                "/github/file_commands",
-                "/github/home",
-                "/github/runner_temp",
-                "/github/workflow",
-                "/github/workspace",
-                "/tmp",
-                "/var/cache/mbx",
-                "/var/run/docker.sock",
-            ]
-        );
+        let mut expected = vec![
+            "/__a",
+            "/__t",
+            "/__tool",
+            "/__w",
+            "/github/file_commands",
+            "/github/home",
+            "/github/runner_temp",
+            "/github/workflow",
+            "/github/workspace",
+            "/tmp",
+            "/var/cache/mbx",
+        ];
+        if JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+            expected.push("/var/run/docker.sock");
+        }
+        assert_eq!(containers, expected);
     }
 
     /// Main and post node actions are prepared by the same call with the same

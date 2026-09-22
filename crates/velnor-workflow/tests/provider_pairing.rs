@@ -126,8 +126,7 @@ fn velnor_only_config() -> String {
 
 fn all_providers_config() -> String {
     format!(
-        "providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n\
-         automatic_providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n\
+        "provider_mode = \"both\"\n\
          \n{HOSTED_SELECTOR}"
     )
 }

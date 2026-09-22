@@ -124,6 +124,20 @@ impl ProviderMode {
             Self::Both => ProviderId::ALL.into_iter().collect(),
         }
     }
+
+    /// Resolve the typed mode represented by an effective provider universe
+    /// and automatic-event set. Raw provider-set configurations that do not
+    /// exactly represent one of the three supported modes stay untyped.
+    #[must_use]
+    pub(crate) fn from_effective_sets(
+        providers: &ProviderSet,
+        automatic_providers: &ProviderSet,
+    ) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| {
+            mode.provider_universe() == *providers
+                && mode.automatic_providers() == *automatic_providers
+        })
+    }
 }
 
 impl std::fmt::Display for ProviderMode {

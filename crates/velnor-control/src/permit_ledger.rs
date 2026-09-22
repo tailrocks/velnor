@@ -18,11 +18,11 @@
 //! * The ledger is a host-wide SQLite database. Every daemon on the host
 //!   must resolve to the same file; multi-process contention is bounded by
 //!   a busy timeout, and every mutation runs in an immediate transaction.
-//! * Grants are generation-fenced: [`PermitLedger::begin_epoch`] bumps the
-//!   generation at daemon startup, and acquire/transition calls carrying a
-//!   stale generation are rejected. Release is intentionally unfenced —
-//!   freeing capacity is always safe, and fencing it would leak permits
-//!   held by a previous epoch's workers.
+//! * Grants and lifecycle mutations are generation-fenced:
+//!   [`PermitLedger::begin_epoch`] bumps the generation at daemon startup,
+//!   and acquire/transition/release calls carrying a stale generation are
+//!   rejected. The legacy release methods remain for non-worker cleanup;
+//!   worker lifecycle paths use the explicit `*_fenced` methods.
 //! * Capacity is advertised only after reconciliation:
 //!   [`PermitLedger::advertised_free`] returns `None` until
 //!   [`PermitLedger::reconcile`] has run in the current epoch.
@@ -1043,9 +1043,26 @@ impl PermitLedger {
                 seen: generation,
             });
         }
+        let recorded: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(recorded) = recorded else {
+            return Err(LedgerError::UnknownHolder(holder.to_string()));
+        };
+        if recorded.max(0) as u64 != generation {
+            return Err(LedgerError::StaleGeneration {
+                expected: recorded.max(0) as u64,
+                seen: generation,
+            });
+        }
         let now = unix_now() as i64;
         let updated = tx.execute(
-            "UPDATE permits SET state = ?1, updated_unix = ?2, generation = ?3 WHERE holder = ?4",
+            "UPDATE permits SET state = ?1, updated_unix = ?2, generation = ?3
+             WHERE holder = ?4 AND generation = ?3",
             params![
                 state.as_str(),
                 now,
@@ -1077,6 +1094,34 @@ impl PermitLedger {
     /// the demand cannot block later work.
     pub fn release_cancelled(&mut self, holder: &str) -> Result<bool, LedgerError> {
         self.release_with_demand_state(holder, DemandState::Cancelled)
+    }
+
+    /// Confirm terminal owned cleanup, then release only the permit owned by
+    /// `generation`. This is the worker-lifecycle release primitive: a stale
+    /// worker cannot free a permit adopted by a newer epoch or close its
+    /// demand row.
+    pub fn release_fenced(&mut self, holder: &str, generation: u64) -> Result<bool, LedgerError> {
+        self.release_with_demand_state_fenced(holder, DemandState::Terminal, generation)
+    }
+
+    /// Fenced retry/handoff release. The demand is returned to the queue
+    /// only when the permit row belongs to the supplied epoch.
+    pub fn release_to_eligible_fenced(
+        &mut self,
+        holder: &str,
+        generation: u64,
+    ) -> Result<bool, LedgerError> {
+        self.release_with_demand_state_fenced(holder, DemandState::Eligible, generation)
+    }
+
+    /// Fenced cancellation release. A stale cancellation cannot close a new
+    /// epoch's demand row.
+    pub fn release_cancelled_fenced(
+        &mut self,
+        holder: &str,
+        generation: u64,
+    ) -> Result<bool, LedgerError> {
+        self.release_with_demand_state_fenced(holder, DemandState::Cancelled, generation)
     }
 
     fn release_with_demand_state(
@@ -1111,6 +1156,80 @@ impl PermitLedger {
         }
         tx.commit()?;
         Ok(removed > 0)
+    }
+
+    fn release_with_demand_state_fenced(
+        &mut self,
+        holder: &str,
+        next_demand_state: DemandState,
+        generation: u64,
+    ) -> Result<bool, LedgerError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: i64 = tx.query_row(
+            "SELECT generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let current = current.max(0) as u64;
+        if current != generation {
+            return Err(LedgerError::StaleGeneration {
+                expected: current,
+                seen: generation,
+            });
+        }
+
+        let recorded: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(recorded) = recorded else {
+            // Idempotent release. Crucially, do not mutate demand when the
+            // permit is absent: a stale terminal event must not close a new
+            // demand with the same holder string.
+            tx.commit()?;
+            return Ok(false);
+        };
+        let recorded = recorded.max(0) as u64;
+        if recorded != generation {
+            return Err(LedgerError::StaleGeneration {
+                expected: recorded,
+                seen: generation,
+            });
+        }
+
+        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        let removed = tx.execute(
+            "DELETE FROM permits WHERE holder = ?1 AND generation = ?2",
+            params![holder, i64::try_from(generation).unwrap_or(i64::MAX)],
+        )?;
+        if removed == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        match next_demand_state {
+            DemandState::Terminal | DemandState::Cancelled => {
+                tx.execute(
+                    "UPDATE permit_demands SET state = ?1, updated_unix = ?2
+                     WHERE holder = ?3",
+                    params![next_demand_state.as_str(), now, holder],
+                )?;
+            }
+            DemandState::Eligible => {
+                tx.execute(
+                    "UPDATE permit_demands SET state = 'eligible', updated_unix = ?1
+                     WHERE holder = ?2 AND state IN ('eligible', 'granted')",
+                    params![now, holder],
+                )?;
+            }
+            DemandState::Granted | DemandState::Waiting => {}
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Retain an uncertain permit after cleanup could not be confirmed.
@@ -1186,6 +1305,11 @@ impl PermitLedger {
                 )?;
                 report.adopted.push((*holder).to_string());
             } else {
+                tx.execute(
+                    "UPDATE permits SET lane = ?1, state = ?2, updated_unix = ?3,
+                            generation = ?4 WHERE holder = ?5",
+                    params![lane.as_str(), state.as_str(), now, generation, *holder,],
+                )?;
                 report.confirmed.push((*holder).to_string());
             }
             let demand = ensure_demand_tx(
@@ -1638,6 +1762,51 @@ mod tests {
         // Release always frees, whatever epoch the hold came from.
         assert!(ledger.release("a").unwrap());
         assert!(!ledger.release("a").unwrap());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fenced_release_rejects_stale_epoch_and_preserves_new_owner() {
+        let (mut ledger, dir) = temp_ledger("fenced-release");
+        ledger.set_max_jobs(1).unwrap();
+        let stale = ledger.generation().unwrap();
+        let holder = "scaleset/7/44";
+        assert_eq!(
+            ledger
+                .acquire(
+                    holder,
+                    PermitLane::ScaleSet,
+                    PermitState::Running,
+                    stale,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+
+        let current = ledger.begin_epoch().unwrap();
+        // Startup reconciliation transfers the durable live owner to the
+        // current epoch before the new lane can mutate it.
+        ledger
+            .reconcile(&[(holder, PermitLane::ScaleSet, PermitState::Running)])
+            .unwrap();
+
+        assert!(matches!(
+            ledger.release_fenced(holder, stale),
+            Err(LedgerError::StaleGeneration { .. })
+        ));
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            ledger.holder_state(holder).unwrap(),
+            Some(PermitState::Running)
+        );
+        assert!(ledger.release_fenced(holder, current).unwrap());
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
 
         std::fs::remove_dir_all(dir).unwrap();
     }

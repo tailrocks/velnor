@@ -359,6 +359,7 @@ pub struct Cli {
     default_branch: Option<String>,
     output: Option<PathBuf>,
     providers: Option<provider::ProviderSet>,
+    provider_mode: Option<provider::ProviderMode>,
     dry_run: bool,
     check: bool,
     force: bool,
@@ -400,9 +401,15 @@ struct RawCli {
 
     /// Provider universe override: a comma-separated list of strict provider
     /// IDs (`github-hosted`, `github-self-hosted`, `velnor`). Absent keeps
-    /// the `[workflow] providers` config value.
+    /// the `[workflow] providers` config value. This low-level override is
+    /// mutually exclusive with the typed `--provider-mode` selection.
     #[arg(long, value_delimiter = ',', value_name = "PROVIDERS")]
     providers: Vec<String>,
+
+    /// Typed automatic host topology: `native-only`, `scale-set-only`, or
+    /// `both`. The generated dispatch universe remains all three providers.
+    #[arg(long, value_name = "MODE", conflicts_with = "providers")]
+    provider_mode: Option<String>,
 
     /// Inspect changes without writing files.
     #[arg(long, conflicts_with = "check")]
@@ -479,11 +486,17 @@ impl TryFrom<RawCli> for Cli {
         if let Some(providers) = &providers {
             provider::require_non_empty(providers, "--providers")?;
         }
+        let provider_mode = raw
+            .provider_mode
+            .as_deref()
+            .map(provider::ProviderMode::parse)
+            .transpose()?;
         Ok(Self {
             target,
             default_branch: raw.default_branch,
             output: raw.output,
             providers,
+            provider_mode,
             dry_run: raw.dry_run,
             check: raw.check,
             force: raw.force,
@@ -1238,13 +1251,13 @@ pub struct ProjectConfig {
     pub(crate) default_branch: String,
     /// The provider universe for this repo. Non-empty.
     pub(crate) providers: provider::ProviderSet,
-    /// Providers that run on automatic events (PR/push/schedule). Under the
-    /// visibility-based runner policy this equals the visibility singleton;
-    /// pure event-to-provider routing.
+    /// Providers that run on automatic events (PR/push/schedule). Untyped
+    /// repositories resolve this to the visibility singleton; typed provider
+    /// mode selects the explicit local topology while retaining hosted
+    /// recovery.
     pub(crate) automatic_providers: provider::ProviderSet,
-    // NOTE: no `default_dispatch_providers`. Manual dispatches select the
-    // static universe; the runtime contract still carries the key (rendered
-    // below from the automatic set) so pinned runtimes keep parsing it.
+    // Manual dispatches select the complete static universe; the runtime
+    // contract carries the key so pinned runtimes can validate that boundary.
     /// Per-provider `runs-on` routing. The only place labels live.
     pub(crate) selectors: provider::SelectorMap,
     pub(crate) release_enabled: bool,
@@ -1356,6 +1369,13 @@ fn default_workflow_files() -> Vec<String> {
 }
 
 impl ProjectConfig {
+    /// The typed mode represented by the resolved generator contract, when
+    /// its universe and automatic-event set match one of the supported
+    /// topologies. Raw provider subsets remain intentionally untyped.
+    pub(crate) fn effective_provider_mode(&self) -> Option<provider::ProviderMode> {
+        provider::ProviderMode::from_effective_sets(&self.providers, &self.automatic_providers)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the generated TOML keeps the complete checked-in runtime contract together"
@@ -1387,14 +1407,13 @@ impl ProjectConfig {
                 .map(|provider| provider.as_str().to_owned())
                 .collect::<Vec<_>>(),
         );
-        // The dispatch default is the automatic set: dispatches select the
-        // static universe. The key stays so pinned runtimes keep parsing the
-        // contract they were built against.
+        // Manual dispatches use the complete declared universe. The key stays
+        // so pinned runtimes keep parsing the contract they were built against.
         write_toml_array(
             &mut output,
             "default_dispatch_providers",
             &self
-                .automatic_providers
+                .providers
                 .iter()
                 .map(|provider| provider.as_str().to_owned())
                 .collect::<Vec<_>>(),
@@ -1406,6 +1425,9 @@ impl ProjectConfig {
         write_toml_array(&mut output, "limitations", &self.analysis.limitations);
         output.push('\n');
         output.push_str("[workflow]\n");
+        if let Some(mode) = self.effective_provider_mode() {
+            write_toml_string(&mut output, "provider_mode", mode.as_str());
+        }
         // Selectors are generation-time only: the generated `runs-on` routing
         // carries them; the runtime planner needs only the provider sets.
         let generated_workflows = workflow_file_names(self);
@@ -1596,6 +1618,7 @@ fn enforce_visibility_policy(
     config: &mut ProjectConfig,
     generation: Option<&config::RepoGenerationConfig>,
     mode_active: bool,
+    cli_providers: bool,
     root: &Path,
 ) -> Result<(), GeneratorError> {
     // The evidence module speaks the crate-root error type; both carry a
@@ -1614,21 +1637,91 @@ fn enforce_visibility_policy(
         evidence.visibility.as_str(),
         evidence.repository,
     );
-    // Provider mode is the only high-level selection that promises hosted
-    // recovery. Raw provider-set overrides remain available to low-level
-    // generator tests and adopted surfaces; mode-derived output cannot lose
-    // hosted from either the universe or automatic events.
-    if mode_active
-        && (!config
+    let visibility_expected =
+        (!mode_active).then(|| provider::singleton_for_visibility(evidence.visibility));
+    if mode_active {
+        // Provider mode is the typed escape from visibility-singleton routing,
+        // but hosted recovery remains mandatory in both serialized sets.
+        if !config
             .providers
             .contains(&provider::ProviderId::GithubHosted)
             || !config
                 .automatic_providers
-                .contains(&provider::ProviderId::GithubHosted))
-    {
-        return Err(GeneratorError::usage(format!(
-            "provider mode must retain github-hosted in providers and automatic_providers for independent recovery; {evidence_note}"
-        )));
+                .contains(&provider::ProviderId::GithubHosted)
+        {
+            return Err(GeneratorError::usage(format!(
+                "provider mode must retain github-hosted in providers and automatic_providers for independent recovery; {evidence_note}"
+            )));
+        }
+    } else {
+        let Some(expected) = visibility_expected.as_ref() else {
+            return Err(GeneratorError::usage(
+                "visibility provider selection was not resolved",
+            ));
+        };
+        let expected_name = expected
+            .iter()
+            .map(provider::ProviderId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let evidence_note = format!(
+            "the repository visibility evidence ({}: {:?} for {}) requires [{expected_name}]",
+            crate::visibility::VISIBILITY_EVIDENCE_PATH,
+            evidence.visibility.as_str(),
+            evidence.repository,
+        );
+        let declared_source =
+            if generation.is_some_and(|generation| generation.providers().is_some()) {
+                Some("[workflow] providers")
+            } else if cli_providers {
+                Some("--providers")
+            } else {
+                None
+            };
+        if let Some(source) = declared_source {
+            if config
+                .providers
+                .contains(&provider::ProviderId::GithubSelfHosted)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "unsupported provider `github-self-hosted` in {source}: the visibility-based runner policy admits only `github-hosted` (public repositories) and `velnor` (private repositories); {evidence_note}"
+                )));
+            }
+            if config.providers != *expected {
+                let declared = config
+                    .providers
+                    .iter()
+                    .map(provider::ProviderId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(GeneratorError::usage(format!(
+                    "contradictory runner selection: {source} selects [{declared}], but {evidence_note} — public repositories run on GitHub-hosted runners only, private repositories on Velnor runners only"
+                )));
+            }
+        } else {
+            config.providers.clone_from(&expected);
+        }
+        let automatic_declared =
+            generation.is_some_and(|generation| generation.automatic_providers().is_some());
+        if automatic_declared {
+            if config.automatic_providers != *expected {
+                let declared = config
+                    .automatic_providers
+                    .iter()
+                    .map(provider::ProviderId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(GeneratorError::usage(format!(
+                    "contradictory runner selection: [workflow] automatic_providers selects [{declared}], but {evidence_note}"
+                )));
+            }
+        } else {
+            config.automatic_providers.clone_from(&expected);
+        }
+        // The singleton policy also binds named provider lanes. Typed mode
+        // deliberately skips this visibility restriction, because its full
+        // universe is the explicit operator contract.
+        enforce_visibility_job_routing(config, evidence.visibility, &expected, &evidence_note)?;
     }
 
     // Declared selectors must stay inside the resolved universe; the scan
@@ -1640,24 +1733,95 @@ fn enforce_visibility_policy(
                     "[workflow.selectors] has unknown provider `{key}`; expected one of: github-hosted, github-self-hosted, velnor"
                 ))
             })?;
-            if !config.providers.contains(&provider) {
+            let selector_universe = visibility_expected.as_ref().unwrap_or(&config.providers);
+            if !selector_universe.contains(&provider) {
+                if visibility_expected.is_some() {
+                    return Err(GeneratorError::usage(format!(
+                        "contradictory runner selection: [workflow.selectors.{provider}] declares routing for a provider no job can use, but {evidence_note}; remove the selector"
+                    )));
+                }
                 return Err(GeneratorError::usage(format!(
                     "[workflow.selectors.{provider}] declares routing for a provider outside the resolved universe; {evidence_note}; remove the selector"
                 )));
             }
         }
     }
-    validate_visibility_selector_identities(config, &evidence_note)?;
+    validate_visibility_selector_identities(config, visibility_expected.as_ref(), &evidence_note)?;
     Ok(())
 }
 
-/// Hosted selectors must remain GitHub-owned. Local selectors are explicit
-/// repository placement inputs and are validated for presence and disjointness
-/// by the provider module; no estate-specific label is imposed here.
-fn validate_visibility_selector_identities(
+/// Keep named non-aggregate lanes on the same visibility singleton as the
+/// default provider selection. Typed provider mode skips this check because
+/// its multi-provider universe is an explicit operator contract.
+fn enforce_visibility_job_routing(
     config: &ProjectConfig,
+    visibility: crate::visibility::Visibility,
+    expected: &provider::ProviderSet,
     evidence_note: &str,
 ) -> Result<(), GeneratorError> {
+    for profile in &config.check_profiles {
+        let is_velnor = profile.runner.as_str() == "velnor";
+        if is_velnor == visibility.is_public() {
+            return Err(GeneratorError::usage(format!(
+                "contradictory runner selection: [[check_profile]] `{}` runs on `{}` (macOS counts as GitHub-hosted), but {evidence_note}",
+                profile.id, profile.runner
+            )));
+        }
+    }
+    let Some(release) = config.release.as_ref() else {
+        return Ok(());
+    };
+    if let Some(verification) = release.verification_providers.as_ref()
+        && verification != expected
+    {
+        let declared = verification
+            .iter()
+            .map(provider::ProviderId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(GeneratorError::usage(format!(
+            "contradictory runner selection: [release] verification_providers selects [{declared}], but {evidence_note}"
+        )));
+    }
+    if !visibility.is_public() {
+        for target in &release.targets {
+            if target.ends_with("-apple-darwin") {
+                return Err(GeneratorError::usage(format!(
+                    "contradictory runner selection: [release] target `{target}` builds on the fixed macOS hosted image, but {evidence_note}; Velnor serves linux-x64 only"
+                )));
+            }
+        }
+    }
+    for job in &release.jobs {
+        let is_velnor = job.runner.as_str() == "velnor";
+        if is_velnor == visibility.is_public() {
+            return Err(GeneratorError::usage(format!(
+                "contradictory runner selection: [[release.job]] `{}` runs on `{}` (macOS counts as GitHub-hosted), but {evidence_note}",
+                job.id, job.runner
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the provider identity of selectors. The default visibility lane
+/// additionally requires the exact Velnor fleet identity; typed mode keeps
+/// the generic local selectors because its provider universe is explicit.
+fn validate_visibility_selector_identities(
+    config: &ProjectConfig,
+    expected: Option<&provider::ProviderSet>,
+    evidence_note: &str,
+) -> Result<(), GeneratorError> {
+    if expected.is_some_and(|expected| expected.contains(&provider::ProviderId::Velnor))
+        && let Some(selector) = config.selectors.get(&provider::ProviderId::Velnor)
+        && !crate::s2::estate::is_velnor_fleet_identity(&selector.runs_on)
+    {
+        return Err(GeneratorError::usage(format!(
+            "contradictory runner selection: [workflow.selectors.velnor] runs_on [{}] is not the Velnor fleet identity — a bare `self-hosted` label proves nothing; the selector must be exactly [{}], but {evidence_note}",
+            selector.runs_on.join(", "),
+            crate::s2::estate::VELNOR_FLEET_RUNS_ON.join(", ")
+        )));
+    }
     if config
         .providers
         .contains(&provider::ProviderId::GithubHosted)
@@ -1706,6 +1870,20 @@ fn scan_target_with_mode(
     let config_mode = generation
         .as_ref()
         .and_then(config::RepoGenerationConfig::provider_mode);
+    if provider_mode.is_some()
+        && generation.as_ref().is_some_and(|generation| {
+            generation.providers().is_some() || generation.automatic_providers().is_some()
+        })
+    {
+        return Err(GeneratorError::usage(
+            "--provider-mode conflicts with raw [workflow] providers/automatic_providers; use one typed provider selection",
+        ));
+    }
+    if providers.is_some() && config_mode.is_some() {
+        return Err(GeneratorError::usage(
+            "--providers conflicts with [workflow] provider_mode; use one typed provider selection",
+        ));
+    }
     let mut scan_providers = if cli_mode_active || config_mode.is_some() {
         provider::ProviderId::ALL.into_iter().collect()
     } else {
@@ -1719,8 +1897,8 @@ fn scan_target_with_mode(
             scan_providers = provider::parse_provider_set(declared, "[workflow] providers")?;
         }
     }
-    if let Some(override_providers) = providers {
-        scan_providers = override_providers;
+    if let Some(override_providers) = &providers {
+        scan_providers.clone_from(override_providers);
     }
     provider::require_non_empty(&scan_providers, "[workflow] providers")?;
     let scan_default_branch = generation
@@ -1750,6 +1928,7 @@ fn scan_target_with_mode(
         &mut config,
         generation.as_ref(),
         provider_mode.is_some() || config_mode.is_some(),
+        providers.is_some(),
         root,
     )?;
     // Prerequisites compile into the selection graph and prepare commands, and
@@ -6362,7 +6541,7 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
     let rendered = render_tree_with_mode(
         checkout.path(),
         cli.providers.clone(),
-        None,
+        cli.provider_mode,
         &default_branch,
     )?;
     let config = rendered.config;
@@ -10334,6 +10513,25 @@ mod tests {
         ]);
         let url = must(url, "parse single provider override");
         assert_eq!(url.providers, Some(provider_set([ProviderId::Velnor])));
+        for (value, expected) in [
+            ("native-only", provider::ProviderMode::NativeOnly),
+            ("scale-set-only", provider::ProviderMode::ScaleSetOnly),
+            ("both", provider::ProviderMode::Both),
+        ] {
+            let cli = must(
+                Cli::parse_args([OsString::from("--provider-mode"), OsString::from(value)]),
+                "parse typed provider mode",
+            );
+            assert_eq!(cli.provider_mode, Some(expected));
+            assert_eq!(cli.providers, None);
+        }
+        let conflict = Cli::parse_args([
+            OsString::from("--providers"),
+            OsString::from("github-hosted"),
+            OsString::from("--provider-mode"),
+            OsString::from("both"),
+        ]);
+        assert!(conflict.is_err(), "raw provider sets must not bypass mode");
         let explicit_branch = Cli::parse_args([
             OsString::from("."),
             OsString::from("--default-branch"),
@@ -20117,6 +20315,46 @@ lockfile = true
     }
 
     #[test]
+    fn effective_provider_mode_is_serialized_and_dispatch_stays_full() {
+        let mut config = scanned_fixture(all_providers());
+        for mode in provider::ProviderMode::ALL {
+            config.providers = mode.provider_universe();
+            config.automatic_providers = mode.automatic_providers();
+            let project = config.toml();
+            assert!(
+                project.contains(&format!("provider_mode = \"{}\"", mode.as_str())),
+                "effective mode must be in generated runtime config: {project}"
+            );
+            assert!(
+                project.contains(
+                    "default_dispatch_providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]"
+                ),
+                "manual dispatch must retain the full declared universe: {project}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_provider_modes_reach_the_scanned_effective_config() {
+        for mode in provider::ProviderMode::ALL {
+            let scanned = must(
+                scan_target_with_mode(&fixture_root(), None, Some(mode), "main"),
+                "scan fixture with typed provider mode",
+            );
+            assert_eq!(scanned.config.providers, mode.provider_universe());
+            assert_eq!(
+                scanned.config.automatic_providers,
+                mode.automatic_providers()
+            );
+            assert_eq!(
+                scanned.config.effective_provider_mode(),
+                Some(mode),
+                "resolved sets must retain the selected typed mode"
+            );
+        }
+    }
+
+    #[test]
     fn planning_installs_head_so_runtime_toml_carries_providers() {
         let mut config = scanned_fixture(all_providers());
         config.automatic_providers = all_providers();
@@ -23877,6 +24115,7 @@ lockfile = true
             providers: Some(std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::GithubHosted,
             ])),
+            provider_mode: None,
             dry_run: false,
             check: false,
             force: false,

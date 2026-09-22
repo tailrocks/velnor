@@ -5939,9 +5939,7 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
-        if container.mount_docker_socket
-            && crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease()
-        {
+        if container.mount_docker_socket && !container.uses_private_dind() {
             container.validate_docker_host_path_mapping()?;
             let lease_paths = container.docker_lease_paths()?;
             self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
@@ -16592,7 +16590,7 @@ esac
         impl CommandRunner for LeaseOrderRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 let args: &[String] = &crate::execution::expand_env_file_args(args);
-                let lease_live = self.lease_path.exists();
+                let lease_live = crate::docker_lease::lease_is_live(&self.lease_path);
                 if args
                     == [
                         "rm".to_string(),
@@ -16643,8 +16641,8 @@ esac
         )
         .unwrap();
         assert!(
-            lease_path.exists(),
-            "lease socket must exist before cleanup"
+            crate::docker_lease::lease_is_live(&lease_path),
+            "lease endpoint must be live before cleanup"
         );
         let spec = container(&temp);
         let mut executor = DockerJobEngine::inert(LeaseOrderRunner {
@@ -16666,7 +16664,10 @@ esac
             runner.buildkit_saw_dead_lease,
             "cleanup must reclaim BuildKit after aborting the lease"
         );
-        assert!(!lease_path.exists(), "cleanup must drop the lease socket");
+        assert!(
+            !crate::docker_lease::lease_is_live(&lease_path),
+            "cleanup must drop the lease endpoint"
+        );
         fs::remove_dir_all(temp).ok();
         fs::remove_dir_all(lease_dir).ok();
     }
@@ -16685,7 +16686,7 @@ esac
         impl CommandRunner for SkipBuildkitRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 let args: &[String] = &crate::execution::expand_env_file_args(args);
-                let lease_live = self.lease_path.exists();
+                let lease_live = crate::docker_lease::lease_is_live(&self.lease_path);
                 if args
                     == [
                         "rm".to_string(),
@@ -16751,7 +16752,7 @@ esac
             runner.calls
         );
         assert!(
-            !lease_path.exists(),
+            !crate::docker_lease::lease_is_live(&lease_path),
             "deferred BuildKit worker must not inherit a live Engine Start"
         );
         fs::remove_dir_all(temp).ok();
@@ -28427,7 +28428,13 @@ fi"#
     }
 
     fn guest_docker_socket_mount_is_expected(args: &[String]) -> bool {
-        if crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+        if cfg!(target_os = "macos") {
+            args.iter()
+                .any(|arg| arg.starts_with("DOCKER_HOST=tcp://host.docker.internal:"))
+                && args
+                    .iter()
+                    .all(|arg| !arg.ends_with(".sock:/var/run/docker.sock"))
+        } else if crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
             args.iter().any(|arg| {
                 arg.contains("vdl-")
                     && arg.contains(".sock:/var/run/docker.sock")
@@ -28435,8 +28442,7 @@ fi"#
                     && !arg.starts_with("/var/run/docker.sock:")
             })
         } else {
-            args.iter()
-                .any(|arg| arg.ends_with(".sock:/var/run/docker.sock") && !arg.contains("vdl-"))
+            false
         }
     }
 

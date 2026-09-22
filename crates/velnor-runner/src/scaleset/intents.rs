@@ -18,7 +18,7 @@
 //! the only secret-adjacent projections the stores keep: hashes, never raw
 //! labels, JIT blobs, or URLs.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -204,6 +204,18 @@ pub struct AcquireBatch {
     pub updated_at: String,
 }
 
+/// Result of claiming request membership before an `acquirejobs` call.
+///
+/// `Claimed` owns the requested batch ID. `Contended` adopts the already-open
+/// batch and must not issue a second upstream call. The distinction is
+/// durable: it comes from the unique request claim table, not from a process
+/// mutex.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcquireClaimOutcome {
+    Claimed(AcquireBatch),
+    Contended(AcquireBatch),
+}
+
 /// Set-reconcile of one `acquirejobs` round: `acquired = returned ∩
 /// requested`, `missing = requested − returned`. Never assume the server
 /// granted everything; extras outside the request set are ignored (they
@@ -235,7 +247,9 @@ impl AcquireBatchStore {
         let conn = Connection::open(path).context("open acquire-batch database")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .context("set acquire-batch store busy timeout")?;
-        Ok(Self { conn })
+        let mut store = Self { conn };
+        store.backfill_active_claims()?;
+        Ok(store)
     }
 
     fn now_rfc3339() -> String {
@@ -271,21 +285,124 @@ impl AcquireBatchStore {
         })
     }
 
-    /// Persist the acquire intent BEFORE the `acquirejobs` call. Idempotent
-    /// on `batch_id`: a redelivered intent returns the recorded row.
-    pub fn record_intended(
+    fn validate_request_ids(request_ids: &[i64], holders: &[String]) -> Result<()> {
+        if request_ids.is_empty() {
+            anyhow::bail!("acquire batch cannot be empty");
+        }
+        if request_ids.len() != holders.len() {
+            anyhow::bail!(
+                "acquire batch request/holder cardinality differs: {} != {}",
+                request_ids.len(),
+                holders.len()
+            );
+        }
+        let mut requests = HashSet::with_capacity(request_ids.len());
+        for request_id in request_ids {
+            if *request_id == 0 || !requests.insert(*request_id) {
+                anyhow::bail!(
+                    "acquire batch contains a missing or duplicate request identity: {request_id}"
+                );
+            }
+        }
+        let mut holder_set = HashSet::with_capacity(holders.len());
+        for holder in holders {
+            if holder.is_empty() || !holder_set.insert(holder) {
+                anyhow::bail!("acquire batch contains a missing or duplicate holder identity");
+            }
+        }
+        Ok(())
+    }
+
+    fn backfill_active_claims(&mut self) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin acquire-claim backfill")?;
+        let batches: Vec<(String, i32, String, u64, String)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT batch_id, scale_set_id, request_ids_json, generation, created_at
+                     FROM scaleset_acquire_batches
+                     WHERE state IN ('intended', 'uncertain')",
+                )
+                .context("prepare acquire-claim backfill")?;
+            stmt.query_map([], |row| {
+                let generation: i64 = row.get(3)?;
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    generation.max(0) as u64,
+                    row.get(4)?,
+                ))
+            })
+            .context("query acquire-claim backfill")?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (batch_id, scale_set_id, request_json, generation, created_at) in batches {
+            let request_ids: Vec<i64> =
+                serde_json::from_str(&request_json).context("decode acquire-claim backfill")?;
+            let holders = request_ids
+                .iter()
+                .map(|request_id| permit_holder(scale_set_id, *request_id))
+                .collect::<Vec<_>>();
+            Self::validate_request_ids(&request_ids, &holders)?;
+            for request_id in request_ids {
+                let inserted = tx.execute(
+                    "INSERT OR IGNORE INTO scaleset_acquire_claims
+                     (scale_set_id, request_id, batch_id, generation, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        scale_set_id,
+                        request_id,
+                        batch_id,
+                        i64::try_from(generation).unwrap_or(i64::MAX),
+                        created_at,
+                    ],
+                )?;
+                if inserted == 0 {
+                    let owner: String = tx.query_row(
+                        "SELECT batch_id FROM scaleset_acquire_claims
+                         WHERE scale_set_id = ?1 AND request_id = ?2",
+                        params![scale_set_id, request_id],
+                        |row| row.get(0),
+                    )?;
+                    if owner != batch_id {
+                        anyhow::bail!(
+                            "request {scale_set_id}/{request_id} is claimed by both {owner:?} and {batch_id:?}"
+                        );
+                    }
+                }
+            }
+        }
+        tx.commit().context("commit acquire-claim backfill")?;
+        Ok(())
+    }
+
+    /// Claim every request before the `acquirejobs` call. The unique request
+    /// key makes concurrent processors adopt the same open batch rather than
+    /// minting separate network operations.
+    pub fn claim_intended(
         &mut self,
         batch_id: &str,
         scale_set_id: i32,
         request_ids: &[i64],
         holders: &[String],
         generation: u64,
-    ) -> Result<AcquireBatch> {
+    ) -> Result<AcquireClaimOutcome> {
+        if batch_id.is_empty() {
+            anyhow::bail!("acquire batch ID cannot be empty");
+        }
+        Self::validate_request_ids(request_ids, holders)?;
         let now = Self::now_rfc3339();
         let request_json =
             serde_json::to_string(request_ids).context("encode acquire request ids")?;
         let holders_json = serde_json::to_string(holders).context("encode acquire holders")?;
-        self.conn
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin acquire-claim transaction")?;
+        let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO scaleset_acquire_batches
                  (batch_id, scale_set_id, request_ids_json, holders_json, state,
@@ -302,8 +419,95 @@ impl AcquireBatchStore {
                 ],
             )
             .context("record acquire intent")?;
-        self.get(batch_id)?
-            .with_context(|| format!("acquire intent {batch_id:?} vanished after insert"))
+        let recorded = tx
+            .query_row(
+                "SELECT batch_id, scale_set_id, request_ids_json, holders_json, state,
+                        uncertain, generation, created_at, updated_at
+                 FROM scaleset_acquire_batches WHERE batch_id = ?1",
+                params![batch_id],
+                Self::row_to_batch,
+            )
+            .context("read recorded acquire intent")?;
+        if inserted == 0
+            && (recorded.scale_set_id != scale_set_id
+                || recorded.request_ids != request_ids
+                || recorded.holders != holders
+                || recorded.generation != generation)
+        {
+            anyhow::bail!("acquire batch {batch_id:?} identity or generation changed");
+        }
+        if matches!(recorded.state, BatchState::Resolved) {
+            anyhow::bail!("acquire batch {batch_id:?} is already resolved");
+        }
+
+        for request_id in request_ids {
+            let owner: Option<String> = tx
+                .query_row(
+                    "SELECT batch_id FROM scaleset_acquire_claims
+                     WHERE scale_set_id = ?1 AND request_id = ?2",
+                    params![scale_set_id, request_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("read acquire request claim")?;
+            let Some(owner) = owner else {
+                tx.execute(
+                    "INSERT INTO scaleset_acquire_claims
+                     (scale_set_id, request_id, batch_id, generation, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        scale_set_id,
+                        request_id,
+                        batch_id,
+                        i64::try_from(generation).unwrap_or(i64::MAX),
+                        Self::now_rfc3339(),
+                    ],
+                )
+                .context("claim acquire request")?;
+                continue;
+            };
+            if owner == batch_id {
+                continue;
+            }
+            let conflict = tx
+                .query_row(
+                    "SELECT batch_id, scale_set_id, request_ids_json, holders_json, state,
+                            uncertain, generation, created_at, updated_at
+                     FROM scaleset_acquire_batches WHERE batch_id = ?1",
+                    params![owner],
+                    Self::row_to_batch,
+                )
+                .optional()
+                .context("read competing acquire batch")?
+                .with_context(|| format!("active acquire claim {owner:?} has no batch row"))?;
+            if conflict.scale_set_id != scale_set_id
+                || !matches!(conflict.state, BatchState::Intended | BatchState::Uncertain)
+            {
+                anyhow::bail!(
+                    "request {scale_set_id}/{request_id} has an invalid active claim {owner:?}"
+                );
+            }
+            tx.rollback().context("rollback contended acquire claim")?;
+            return Ok(AcquireClaimOutcome::Contended(conflict));
+        }
+        tx.commit().context("commit acquire-claim transaction")?;
+        Ok(AcquireClaimOutcome::Claimed(recorded))
+    }
+
+    /// Compatibility wrapper for callers that only need the durable row.
+    pub fn record_intended(
+        &mut self,
+        batch_id: &str,
+        scale_set_id: i32,
+        request_ids: &[i64],
+        holders: &[String],
+        generation: u64,
+    ) -> Result<AcquireBatch> {
+        match self.claim_intended(batch_id, scale_set_id, request_ids, holders, generation)? {
+            AcquireClaimOutcome::Claimed(batch) | AcquireClaimOutcome::Contended(batch) => {
+                Ok(batch)
+            }
+        }
     }
 
     /// Fetch one batch by ID.
@@ -323,23 +527,50 @@ impl AcquireBatchStore {
     /// Resolve one batch after the `acquirejobs` round: `resolved` on a
     /// reconciled response, `uncertain` on transport failure after send.
     pub fn resolve(&mut self, batch_id: &str, uncertain: bool) -> Result<()> {
-        let now = Self::now_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin resolve acquire batch")?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT state FROM scaleset_acquire_batches WHERE batch_id = ?1",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read acquire batch before resolve")?;
+        let Some(current) = current else {
+            anyhow::bail!("acquire batch {batch_id:?} does not exist");
+        };
+        if current == BatchState::Resolved.as_str() {
+            tx.commit().context("commit idempotent acquire resolve")?;
+            return Ok(());
+        }
         let state = if uncertain {
             BatchState::Uncertain
         } else {
             BatchState::Resolved
         };
-        let updated = self
-            .conn
-            .execute(
-                "UPDATE scaleset_acquire_batches
-                 SET state = ?1, uncertain = ?2, updated_at = ?3 WHERE batch_id = ?4",
-                params![state.as_str(), i32::from(uncertain), now, batch_id],
+        tx.execute(
+            "UPDATE scaleset_acquire_batches
+             SET state = ?1, uncertain = ?2, updated_at = ?3
+             WHERE batch_id = ?4 AND state IN ('intended', 'uncertain')",
+            params![
+                state.as_str(),
+                i32::from(uncertain),
+                Self::now_rfc3339(),
+                batch_id
+            ],
+        )
+        .context("resolve acquire batch")?;
+        if !uncertain {
+            tx.execute(
+                "DELETE FROM scaleset_acquire_claims WHERE batch_id = ?1",
+                params![batch_id],
             )
-            .context("resolve acquire batch")?;
-        if updated == 0 {
-            anyhow::bail!("acquire batch {batch_id:?} does not exist");
+            .context("release acquire request claims")?;
         }
+        tx.commit().context("commit acquire batch resolution")?;
         Ok(())
     }
 
@@ -673,6 +904,78 @@ mod tests {
             BatchState::Resolved
         );
         assert!(store.open_batches(7, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_processors_adopt_one_request_claim() {
+        let path = temp_path("claim-race");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_path = path.clone();
+        let left_barrier = barrier.clone();
+        let left = std::thread::spawn(move || {
+            let mut store = AcquireBatchStore::open(&left_path).unwrap();
+            left_barrier.wait();
+            store
+                .claim_intended("acq-left", 7, &[42], &["scaleset/7/42".to_owned()], 4)
+                .unwrap()
+        });
+        let right_path = path.clone();
+        let right_barrier = barrier.clone();
+        let right = std::thread::spawn(move || {
+            let mut store = AcquireBatchStore::open(&right_path).unwrap();
+            right_barrier.wait();
+            store
+                .claim_intended("acq-right", 7, &[42], &["scaleset/7/42".to_owned()], 4)
+                .unwrap()
+        });
+        let outcomes = [left.join().unwrap(), right.join().unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, AcquireClaimOutcome::Claimed(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, AcquireClaimOutcome::Contended(_)))
+                .count(),
+            1
+        );
+        let mut store = AcquireBatchStore::open(&path).unwrap();
+        assert_eq!(store.open_batches(7, 10).unwrap().len(), 1);
+        let owner = outcomes
+            .iter()
+            .find_map(|outcome| match outcome {
+                AcquireClaimOutcome::Claimed(batch) | AcquireClaimOutcome::Contended(batch) => {
+                    Some(batch.batch_id.clone())
+                }
+            })
+            .unwrap();
+        store.resolve(&owner, false).unwrap();
+        assert!(matches!(
+            store
+                .claim_intended("acq-after", 7, &[42], &["scaleset/7/42".to_owned()], 4,)
+                .unwrap(),
+            AcquireClaimOutcome::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn duplicate_request_membership_fails_closed() {
+        let path = temp_path("claim-duplicate");
+        let mut store = AcquireBatchStore::open(&path).unwrap();
+        let error = store
+            .claim_intended(
+                "acq-duplicate",
+                7,
+                &[42, 42],
+                &["scaleset/7/42".to_owned(), "scaleset/7/42".to_owned()],
+                4,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("duplicate request identity"));
     }
 
     #[test]

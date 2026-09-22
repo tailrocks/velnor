@@ -12,6 +12,21 @@
 //! copy cannot see job cancel, so `docker rm` of Created BuildKit hung until
 //! dockerd itself was killed. The proxy now splices both directions and Drop
 //! shuts down every live Engine stream before reclaim.
+//!
+//! macOS transport security boundary: Docker guests cannot mount the host Unix
+//! socket, so this module exposes a per-job loopback TCP port and forwards it
+//! to that Unix socket. The current guest contract supplies only plain
+//! `DOCKER_HOST=tcp://...`; it supplies no client certificate, SSH credential,
+//! or authenticated request header. The port and `host.docker.internal` route
+//! are therefore not peer authentication, and this module must not claim that
+//! they are. The fail-closed boundary is request admission in
+//! `handle_client_with`: malformed, unsupported, and foreign-resource requests
+//! are denied before the host socket is connected. Residual risk is exact: any
+//! local/guest peer that discovers a live per-job port is treated as that job
+//! for the Docker capabilities accepted by `DockerLeasePolicy`; it cannot use
+//! foreign resource identifiers, but it can exercise every capability that the
+//! policy allows. mTLS or SSH with guest-side credentials must be wired by the
+//! caller before this transport is used against hostile same-host peers.
 
 use crate::docker::client as docker_client;
 use anyhow::{bail, Context, Result};
@@ -44,6 +59,9 @@ pub const JOB_CONTAINER_NAME_PREFIX: &str = "velnor-job-";
 /// ownership path.
 pub const BUILDKIT_CONTAINER_NAME_PREFIX: &str = "buildx_buildkit_velnor-builder-";
 const UNIX_SOCKET_PATH_LIMIT: usize = 100;
+const MACOS_TCP_PORT_MIN: u16 = 40_000;
+const MACOS_TCP_PORT_SPAN: u16 = 20_000;
+const MACOS_DOCKER_HOST_ALIAS: &str = "host.docker.internal";
 
 const MAX_PROXY_BODY: usize = 32 * 1024 * 1024;
 const MAX_PROXY_HEADER: usize = 64 * 1024;
@@ -600,6 +618,51 @@ pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
     // bind operation returns an actionable length error, and a configured VM
     // mapping can reject an escaping path before any container starts.
     preferred
+}
+
+/// Stable loopback port for the lease identified by its runner-visible Unix
+/// path. A deterministic port lets the container command line be built from
+/// the same identity as the listener without a process-global endpoint map.
+/// Collisions fail the lease bind; they never fall back to a shared listener.
+pub(crate) fn guest_docker_tcp_port(lease_path: &Path) -> u16 {
+    let mut hasher = Sha256::new();
+    hasher.update(lease_path.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 2];
+    bytes.copy_from_slice(&digest[..2]);
+    MACOS_TCP_PORT_MIN + u16::from_be_bytes(bytes) % MACOS_TCP_PORT_SPAN
+}
+
+pub(crate) fn guest_docker_tcp_endpoint(lease_path: &Path) -> String {
+    format!(
+        "tcp://{MACOS_DOCKER_HOST_ALIAS}:{}",
+        guest_docker_tcp_port(lease_path)
+    )
+}
+
+/// Test and teardown code must use the platform's actual lease endpoint.
+/// macOS deliberately has no socket inode: the guest reaches the policy
+/// proxy through the deterministic loopback TCP port.
+#[cfg(test)]
+pub(crate) fn lease_is_live(lease_path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+
+        return TcpStream::connect_timeout(
+            &SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                guest_docker_tcp_port(lease_path),
+            ),
+            Duration::from_millis(250),
+        )
+        .is_ok();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        lease_path.exists()
+    }
 }
 
 pub fn list_owned_containers_args(job_id: &str) -> Vec<String> {
@@ -2197,7 +2260,7 @@ fn reclaim_listed(
 }
 
 pub struct DockerLeaseGuard {
-    listen_path: PathBuf,
+    cleanup_path: Option<PathBuf>,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
     #[cfg(unix)]
@@ -2215,7 +2278,7 @@ struct LeaseConnSet {
     connection_count: std::sync::atomic::AtomicUsize,
     buffered_bytes: std::sync::atomic::AtomicUsize,
     next_id: Mutex<u64>,
-    streams: Mutex<BTreeMap<u64, std::os::unix::net::UnixStream>>,
+    streams: Mutex<BTreeMap<u64, std::os::fd::RawFd>>,
 }
 
 #[cfg(unix)]
@@ -2287,24 +2350,31 @@ impl LeaseConnSet {
         self.shutdown.store(true, Ordering::SeqCst);
         let mut streams = self.streams.lock().unwrap_or_else(|err| err.into_inner());
         let drained = std::mem::take(&mut *streams);
-        for (_, stream) in drained {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+        for (_, fd) in drained {
+            // The owning stream remains with its handler. `shutdown` wakes
+            // both Unix and TCP handlers without closing a descriptor that
+            // may already have been reused by another thread.
+            unsafe {
+                libc::shutdown(fd, libc::SHUT_RDWR);
+            }
         }
     }
 
-    fn watch(self: &Arc<Self>, stream: &std::os::unix::net::UnixStream) -> WatchedStream {
-        let id = stream.try_clone().ok().map(|clone| {
+    fn watch<S: std::os::fd::AsRawFd>(self: &Arc<Self>, stream: &S) -> WatchedStream {
+        let id = Some(stream.as_raw_fd()).map(|fd| {
             let mut next = self.next_id.lock().unwrap_or_else(|err| err.into_inner());
             let id = *next;
             *next = next.saturating_add(1);
             self.streams
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
-                .insert(id, clone);
+                .insert(id, fd);
             id
         });
         if self.is_shutdown() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            unsafe {
+                libc::shutdown(stream.as_raw_fd(), libc::SHUT_RDWR);
+            }
         }
         WatchedStream {
             set: Arc::clone(self),
@@ -2407,7 +2477,11 @@ impl DockerLeaseGuard {
             let _ = (listen_path, host_socket, job_id, daemon_id);
             bail!("job Docker lease proxy requires unix");
         }
-        #[cfg(unix)]
+        #[cfg(all(unix, target_os = "macos"))]
+        {
+            bind_tcp_lease(listen_path, host_socket, job_id, daemon_id)
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             bind_unix_lease(listen_path, host_socket, job_id, daemon_id)
         }
@@ -2433,26 +2507,23 @@ impl Drop for DockerLeaseGuard {
                 // inside a blocking accept on busy hosts.
                 let _ = wake.write_all(&[1]);
             }
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = thread.join();
-                let _ = tx.send(());
-            });
-            if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
-                eprintln!(
-                    "Warning: job Docker lease accept thread did not stop within 2s; continuing teardown"
-                );
-            }
+            // The listener is owned by the accept thread. Do not detach it
+            // after a timeout: Drop must not return while the endpoint can
+            // still accept a new connection.
+            let _ = thread.join();
         }
-        let _ = std::fs::remove_file(&self.listen_path);
-        // dockerd auto-creates an empty DIRECTORY at a missing bind-mount
-        // source; if this path ever became one, drop it too (remove_dir only
-        // succeeds on empty dirs, so a real socket file tree is untouched).
-        let _ = std::fs::remove_dir(&self.listen_path);
+        if let Some(path) = &self.cleanup_path {
+            let _ = std::fs::remove_file(path);
+            // dockerd auto-creates an empty DIRECTORY at a missing bind-mount
+            // source; if this path ever became one, drop it too (remove_dir
+            // only succeeds on empty dirs, so a real socket file tree is
+            // untouched).
+            let _ = std::fs::remove_dir(path);
+        }
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn bind_unix_lease(
     listen_path: PathBuf,
     host_socket: PathBuf,
@@ -2500,14 +2571,14 @@ fn bind_unix_lease(
                     daemon_id,
                     conns: conns_thread,
                     policy: policy_thread,
-                    listen_path: listen_path_thread,
+                    cleanup_path: Some(listen_path_thread),
                 },
                 wake_reader,
             );
         })
         .context("start job Docker lease proxy thread")?;
     Ok(DockerLeaseGuard {
-        listen_path,
+        cleanup_path: Some(listen_path),
         shutdown,
         accept_thread: Some(accept_thread),
         conns,
@@ -2526,9 +2597,10 @@ struct LeaseServeContext {
     daemon_id: String,
     conns: Arc<LeaseConnSet>,
     policy: Arc<DockerLeasePolicy>,
-    listen_path: PathBuf,
+    cleanup_path: Option<PathBuf>,
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
 fn accept_loop(
     listener: std::os::unix::net::UnixListener,
     context: LeaseServeContext,
@@ -2540,7 +2612,7 @@ fn accept_loop(
         daemon_id,
         conns,
         policy,
-        listen_path,
+        cleanup_path,
     } = context;
     use std::os::fd::AsRawFd;
 
@@ -2623,7 +2695,158 @@ fn accept_loop(
                 }
             });
     }
-    let _ = std::fs::remove_file(listen_path);
+    if let Some(path) = cleanup_path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// macOS Docker VMs cannot reliably connect through a Unix socket inode
+/// mounted from the host work tree. Bind the same policy proxy to one
+/// loopback TCP port instead. The listener is IPv4 loopback-only; the
+/// container reaches it through Docker's `host.docker.internal` gateway.
+#[cfg(target_os = "macos")]
+fn bind_tcp_lease(
+    listen_path: PathBuf,
+    host_socket: PathBuf,
+    job_id: String,
+    daemon_id: String,
+) -> Result<DockerLeaseGuard> {
+    use std::net::{IpAddr, Ipv4Addr, TcpListener};
+    use std::os::unix::net::UnixStream;
+
+    let port = guest_docker_tcp_port(&listen_path);
+    let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::LOCALHOST), port)).with_context(|| {
+        format!(
+            "bind job Docker TCP lease on 127.0.0.1:{port}; the deterministic per-job port is occupied"
+        )
+    })?;
+    listener
+        .set_nonblocking(true)
+        .context("configure job Docker TCP lease")?;
+    let (wake_reader, wake_writer) =
+        UnixStream::pair().context("create job Docker TCP lease shutdown wake")?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let conns = LeaseConnSet::new(Arc::clone(&shutdown));
+    let policy = Arc::new(DockerLeasePolicy::new(&job_id)?);
+    let conns_thread = Arc::clone(&conns);
+    let policy_thread = Arc::clone(&policy);
+    let accept_thread = std::thread::Builder::new()
+        .name(format!("velnor-docker-lease-tcp-{job_id}"))
+        .spawn(move || {
+            accept_tcp_loop(
+                listener,
+                LeaseServeContext {
+                    host_socket,
+                    job_id,
+                    daemon_id,
+                    conns: conns_thread,
+                    policy: policy_thread,
+                    cleanup_path: None,
+                },
+                wake_reader,
+            );
+        })
+        .context("start job Docker TCP lease proxy thread")?;
+    Ok(DockerLeaseGuard {
+        cleanup_path: None,
+        shutdown,
+        accept_thread: Some(accept_thread),
+        conns,
+        shutdown_wake: Some(wake_writer),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn accept_tcp_loop(
+    listener: std::net::TcpListener,
+    context: LeaseServeContext,
+    wake_reader: std::os::unix::net::UnixStream,
+) {
+    use std::os::fd::AsRawFd;
+
+    let LeaseServeContext {
+        host_socket,
+        job_id,
+        daemon_id,
+        conns,
+        policy,
+        cleanup_path,
+    } = context;
+    let mut poll_fds = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake_reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    while !conns.is_shutdown() {
+        poll_fds[0].revents = 0;
+        poll_fds[1].revents = 0;
+        let polled = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, -1) };
+        if polled < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+        if poll_fds[1].revents != 0 {
+            break;
+        }
+        if poll_fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) == 0 {
+            continue;
+        }
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) {
+                    eprintln!(
+                        "Warning: job Docker TCP lease accept retry after transient error: {error}"
+                    );
+                }
+                continue;
+            }
+            Err(_) => break,
+        };
+        if conns.is_shutdown() {
+            break;
+        }
+        let Some(permit) = conns.try_acquire_connection() else {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            continue;
+        };
+        let host_socket = host_socket.clone();
+        let job_id = job_id.clone();
+        let daemon_id = daemon_id.clone();
+        let conns = Arc::clone(&conns);
+        let policy = Arc::clone(&policy);
+        let _ = std::thread::Builder::new()
+            .name("velnor-docker-lease-tcp-conn".into())
+            .spawn(move || {
+                let _permit = permit;
+                if let Err(error) =
+                    handle_tcp_client_with(stream, &host_socket, &job_id, &daemon_id, conns, policy)
+                {
+                    eprintln!("Warning: job Docker TCP lease proxy: {error:#}");
+                }
+            });
+    }
+    let _ = cleanup_path;
 }
 
 #[cfg(all(test, unix))]
@@ -2771,6 +2994,86 @@ fn handle_client_with(
             return Ok(());
         }
     }
+}
+
+/// Adapt a macOS TCP guest connection to the existing Unix-stream HTTP proxy.
+/// The adapter is transport-only: all Docker authorization, request rewrite,
+/// response capture, and cleanup remain in `handle_client_with`.
+#[cfg(target_os = "macos")]
+fn handle_tcp_client_with(
+    client: std::net::TcpStream,
+    host_socket: &Path,
+    job_id: &str,
+    daemon_id: &str,
+    conns: Arc<LeaseConnSet>,
+    policy: Arc<DockerLeasePolicy>,
+) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+
+    client
+        .set_read_timeout(Some(PROXY_IDLE_TIMEOUT))
+        .context("configure job Docker TCP lease client idle timeout")?;
+    client
+        .set_write_timeout(Some(PROXY_IDLE_TIMEOUT))
+        .context("configure job Docker TCP lease client write timeout")?;
+    let abort_client = client
+        .try_clone()
+        .context("clone job Docker TCP lease client")?;
+    let (proxy_client, bridge_socket) =
+        UnixStream::pair().context("create Docker TCP lease adapter")?;
+    let bridge_conns = Arc::clone(&conns);
+    let bridge = std::thread::Builder::new()
+        .name("velnor-docker-lease-tcp-bridge".into())
+        .spawn(move || bridge_tcp_to_unix(client, bridge_socket, bridge_conns))
+        .context("start Docker TCP lease adapter")?;
+    let result = handle_client_with(proxy_client, host_socket, job_id, daemon_id, conns, policy);
+    // `handle_client_with` can finish while the guest keeps its TCP socket
+    // open after a malformed/denied request. Stop only the guest->proxy read
+    // direction first. The bridge still needs the proxy->guest write
+    // direction to drain a Docker-shaped denial response before the socket is
+    // fully closed; shutting down both directions here races that response
+    // and turns a policy denial into an empty EOF.
+    let _ = abort_client.shutdown(std::net::Shutdown::Read);
+    let _ = bridge.join();
+    let _ = abort_client.shutdown(std::net::Shutdown::Both);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn bridge_tcp_to_unix(
+    tcp: std::net::TcpStream,
+    unix: std::os::unix::net::UnixStream,
+    conns: Arc<LeaseConnSet>,
+) -> Result<()> {
+    use std::io::copy;
+
+    let _tcp_watch = conns.watch(&tcp);
+    let mut tcp_read = tcp
+        .try_clone()
+        .context("clone Docker TCP lease read stream")?;
+    let mut unix_write = unix
+        .try_clone()
+        .context("clone Docker TCP lease Unix write stream")?;
+    let upstream = std::thread::Builder::new()
+        .name("velnor-docker-lease-tcp-upstream".into())
+        .spawn(move || {
+            let result = copy(&mut tcp_read, &mut unix_write);
+            let _ = unix_write.shutdown(std::net::Shutdown::Write);
+            result
+        })
+        .context("start Docker TCP lease upstream")?;
+
+    let mut unix_read = unix
+        .try_clone()
+        .context("clone Docker TCP lease Unix read stream")?;
+    let mut tcp_write = tcp
+        .try_clone()
+        .context("clone Docker TCP lease write stream")?;
+    let downstream = copy(&mut unix_read, &mut tcp_write);
+    let _ = tcp.shutdown(std::net::Shutdown::Write);
+    let _ = upstream.join();
+    downstream.context("forward Docker TCP lease response")?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -4562,7 +4865,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn bind_rejects_a_host_socket_path_that_exceeds_unix_limit() {
         let path = PathBuf::from("/tmp").join("x".repeat(UNIX_SOCKET_PATH_LIMIT));
@@ -6237,7 +6540,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn drop_aborts_in_flight_host_engine_request() {
         use std::os::unix::net::{UnixListener, UnixStream};
@@ -6287,7 +6590,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn drop_stops_idle_accept_thread_promptly() {
         let dir = unique_unix_dir("velnor-lease-drop-idle");
@@ -6308,6 +6611,108 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
             started.elapsed()
         );
         assert!(!listen_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn macos_tcp_endpoint_is_derived_from_the_lease_identity() {
+        let first = Path::new("/var/lib/velnor/work/job-a/_velnor/vdl-a.sock");
+        let second = Path::new("/var/lib/velnor/work/job-b/_velnor/vdl-b.sock");
+        let first_endpoint = guest_docker_tcp_endpoint(first);
+        let second_endpoint = guest_docker_tcp_endpoint(second);
+        assert!(first_endpoint.starts_with("tcp://host.docker.internal:"));
+        assert!(second_endpoint.starts_with("tcp://host.docker.internal:"));
+        assert!(!first_endpoint.contains("0.0.0.0"));
+        assert!(!second_endpoint.contains("0.0.0.0"));
+        assert_ne!(
+            guest_docker_tcp_port(first),
+            guest_docker_tcp_port(second),
+            "different lease identities must not share a TCP endpoint"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tcp_lease_is_reachable_on_loopback_and_removed_on_drop() {
+        use std::net::TcpStream;
+
+        let dir = unique_unix_dir("velnor-lease-tcp-drop");
+        let listen_path = dir.join("lease.identity");
+        let port = guest_docker_tcp_port(&listen_path);
+        let guard = DockerLeaseGuard::bind_to(
+            listen_path,
+            dir.join("missing-engine.sock"),
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+        let client = TcpStream::connect(("127.0.0.1", port))
+            .expect("macOS lease must listen on its loopback TCP endpoint");
+        drop(client);
+        drop(guard);
+        assert!(
+            TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "dropping a lease must close its per-job TCP endpoint"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tcp_lease_denies_unowned_request_before_host_connect() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        // This is the explicit fail-closed boundary for the unauthenticated
+        // TCP adaptation: a peer that discovers the port cannot turn a denied
+        // Docker route into a host-engine connection.
+        let dir = unique_unix_dir("velnor-lease-tcp-deny");
+        let engine_path = dir.join("engine.sock");
+        let engine = UnixListener::bind(&engine_path).unwrap();
+        engine.set_nonblocking(true).unwrap();
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let host_socket = engine_path.clone();
+        let proxy = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_tcp_client_with(
+                stream,
+                &host_socket,
+                "job",
+                "daemon",
+                LeaseConnSet::new(Arc::new(AtomicBool::new(false))),
+                Arc::new(DockerLeasePolicy::new("job").unwrap()),
+            )
+        });
+
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(
+                b"GET /v1.43/containers/foreign/json HTTP/1.1\r\n\
+                   Host: docker\r\n\
+                   Connection: close\r\n\r\n",
+            )
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+
+        let result = proxy.join().unwrap();
+        assert!(
+            result.is_err(),
+            "denied request must terminate the proxy path"
+        );
+        assert!(
+            matches!(engine.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "a denied TCP peer must not connect the host Docker socket"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

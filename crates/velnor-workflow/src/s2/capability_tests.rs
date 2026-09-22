@@ -458,7 +458,10 @@ mod tests {
             for lane in &lanes {
                 assert_eq!(
                     lane.command_digest,
-                    format!("probe-{}", probe.as_str()),
+                    crate::s2::provider::execution_identity_digest(
+                        probe.platform(),
+                        &format!("probe-{}", probe.as_str()),
+                    ),
                     "probe {} diverged across lanes",
                     probe.as_str()
                 );

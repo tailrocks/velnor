@@ -23,6 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::scaleset::demand::OfferAdmission;
 use crate::scaleset::key_material::{load_app_auth, load_pat, AppKeyConfig, KeySource};
 use crate::scaleset::lane::{AdoptReport, DaemonWorkerLane, LaneConfig, ShutdownReport};
 use crate::scaleset::registration::{reconcile_registration, ReconciledSet, RegistrationPlan};
@@ -68,6 +69,9 @@ pub struct ScaleSetFileConfig {
     pub labels: Vec<String>,
     /// Credentials (App xor PAT, each by file or env reference).
     pub auth: AuthFileConfig,
+    /// Every offer identity dimension must be explicitly allowlisted.
+    #[serde(default)]
+    pub admission: OfferAdmission,
     /// State database (defaults to the daemon's operational state db).
     pub state_db: Option<PathBuf>,
     /// Host-wide permit ledger (defaults to the daemon's ledger path).
@@ -142,6 +146,16 @@ impl ScaleSetFileConfig {
                 anyhow::bail!("scale-set config: needs set_id or set_name");
             }
             _ => {}
+        }
+        self.admission
+            .validate()
+            .context("validate [admission] allowlists")?;
+        if self
+            .ledger_path
+            .as_deref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            anyhow::bail!("scale-set config: ledger_path must not be empty");
         }
         self.auth.resolve()?;
         if self.ready_attempts == Some(0) {
@@ -255,6 +269,7 @@ pub struct ScaleSetDaemon {
     lane_config: LaneConfig,
     state_db: PathBuf,
     ledger_path: PathBuf,
+    admission: OfferAdmission,
     runner: Option<Box<dyn WorkerRunner + Send>>,
     hook: Option<Box<dyn ToolContentHook + Send>>,
     metrics: Metrics,
@@ -322,10 +337,7 @@ impl ScaleSetDaemon {
             }
         };
         let state_db = file.state_db.clone().unwrap_or(defaults.state_db.clone());
-        let ledger_path = file
-            .ledger_path
-            .clone()
-            .unwrap_or(defaults.ledger_path.clone());
+        let ledger_path = resolve_ledger_path(file.ledger_path.as_deref(), &defaults.ledger_path)?;
         let worker_state_dir = file
             .worker_state_dir
             .clone()
@@ -354,6 +366,7 @@ impl ScaleSetDaemon {
             lane_config,
             state_db,
             ledger_path,
+            admission: file.admission,
             runner: Some(runner),
             hook: Some(hook),
             metrics: Metrics::new(),
@@ -467,7 +480,8 @@ impl ScaleSetDaemon {
             queue.clone(),
             ledger,
             lane,
-            DemandStore::open(&self.state_db).context("open scale-set demand store")?,
+            DemandStore::open_with_admission(&self.state_db, self.admission.clone())
+                .context("open scale-set demand store")?,
             AcquireBatchStore::open(&self.state_db).context("open acquire-batch store")?,
             ProvisionIntentStore::open(&self.state_db).context("open provision-intent store")?,
             self.metrics.clone(),
@@ -572,6 +586,26 @@ fn system_info(scale_set_id: i32) -> SystemInfo {
     }
 }
 
+/// Resolve the lane ledger without permitting a second host-wide ledger.
+///
+/// The daemon receives the already-resolved host ledger from `runner.rs`.
+/// A config override is therefore valid only when it names that exact path;
+/// otherwise the Scale Set lane could reserve capacity outside the native
+/// controller's ledger.
+fn resolve_ledger_path(configured: Option<&Path>, host_ledger: &Path) -> Result<PathBuf> {
+    let Some(configured) = configured else {
+        return Ok(host_ledger.to_path_buf());
+    };
+    if configured != host_ledger {
+        anyhow::bail!(
+            "scale-set ledger path {} diverges from the host-wide permit ledger {}",
+            configured.display(),
+            host_ledger.display()
+        );
+    }
+    Ok(host_ledger.to_path_buf())
+}
+
 /// What [`ScaleSetDaemon::start`] established.
 #[derive(Debug, Clone)]
 pub struct StartReport {
@@ -628,6 +662,13 @@ mod tests {
              group_name = \"velnor\"\n\
              set_name = \"velnor-set\"\n\
              labels = [\"velnor\", \"linux\"]\n\
+             [admission]\n\
+             owner = [\"octo-org\"]\n\
+             repository = [\"octo-org/velnor\"]\n\
+             ref = [\"main\"]\n\
+             source = [\"octo-org/velnor\"]\n\
+             workflow = [\".github/workflows/ci.yml\"]\n\
+             event = [\"push\"]\n\
              [auth.app]\n\
              client_id = \"Iv1.abc\"\n\
              installation_id = 42\n\
@@ -674,6 +715,13 @@ mod tests {
              owner = \"octo-org\"\n\
              group_id = 3\n\
              set_id = 7\n\
+             [admission]\n\
+             owner = [\"octo-org\"]\n\
+             repository = [\"octo-org/velnor\"]\n\
+             ref = [\"main\"]\n\
+             source = [\"octo-org/velnor\"]\n\
+             workflow = [\".github/workflows/ci.yml\"]\n\
+             event = [\"push\"]\n\
              [auth.pat]\n\
              token_env = \"NEVER_SET_VELNOR_TEST\"\n";
         let path = write_config("pat", body);
@@ -763,5 +811,18 @@ mod tests {
         assert!(lane_configured(Some(Path::new(
             "/etc/velnor/scaleset.toml"
         ))));
+    }
+
+    #[test]
+    fn scale_set_ledger_must_match_host_ledger() {
+        let host = Path::new("/var/lib/velnor/permit-ledger.db");
+        assert_eq!(resolve_ledger_path(None, host).unwrap(), host.to_path_buf());
+        assert_eq!(
+            resolve_ledger_path(Some(host), host).unwrap(),
+            host.to_path_buf()
+        );
+        let error =
+            resolve_ledger_path(Some(Path::new("/tmp/other-permit-ledger.db")), host).unwrap_err();
+        assert!(error.to_string().contains("diverges"));
     }
 }

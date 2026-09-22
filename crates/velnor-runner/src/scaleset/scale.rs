@@ -43,9 +43,12 @@ use crate::scaleset::converge::{
     ensure_provision_intent, local_population, reconcile_population, PopulationDecision,
     ProvisionImages, WorkerLane,
 };
-use crate::scaleset::demand::{grant_oldest, Demand, DemandState, DemandStore, SubmitOutcome};
+use crate::scaleset::demand::{
+    grant_oldest, resolve_job_request_id, Demand, DemandState, DemandStore, SubmitOutcome,
+};
 use crate::scaleset::intents::{
-    mint_batch_id, permit_holder, reconcile_returned_ids, AcquireBatchStore, ProvisionIntentStore,
+    mint_batch_id, permit_holder, reconcile_returned_ids, AcquireBatchStore, AcquireClaimOutcome,
+    ProvisionIntentStore,
 };
 use crate::scaleset::metrics::Metrics;
 use crate::scaleset::reconcile::{transition_or_adopt, unknown_event};
@@ -285,6 +288,17 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         }
         unknown_event(&self.metrics, &message.unknown_message_types);
 
+        // Resolve all offers before mutating durable state. An offer without
+        // runnerRequestId and jobId cannot be keyed, so it must veto the ACK
+        // rather than collapse onto a sentinel or partially advance permits.
+        let offer_request_ids: Vec<i64> = message
+            .job_available_messages
+            .iter()
+            .map(|offer| {
+                resolve_job_request_id(&offer.base).ok_or(ScaleError::OfferWithoutIdentity)
+            })
+            .collect::<Result<_, _>>()?;
+
         // Step 1: idempotent observations.
         let mut outcome = ScaleOutcome::empty();
         outcome.kind = ScaleKind::Message {
@@ -309,7 +323,11 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         // Step 2: queue offers, then grant the oldest grantable ones.
         let generation = self.generation()?;
         outcome.offers_seen = message.job_available_messages.len();
-        for offer in &message.job_available_messages {
+        for (offer, request_id) in message
+            .job_available_messages
+            .iter()
+            .zip(&offer_request_ids)
+        {
             match self
                 .demand
                 .submit_offer(self.config.scale_set_id, offer, generation)
@@ -318,11 +336,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 SubmitOutcome::Inserted { .. } => outcome.offers_submitted += 1,
                 SubmitOutcome::Redelivered { .. } | SubmitOutcome::ReofferedTerminal => {}
             }
-            if let Some(row) = self
-                .demand
-                .get(offer.base.runner_request_id)
-                .map_err(ScaleError::Store)?
-            {
+            if let Some(row) = self.demand.get(*request_id).map_err(ScaleError::Store)? {
                 self.sync_global_demand(&row)?;
             }
         }
@@ -354,16 +368,14 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
 
         // Offer-validity guard: every offer in this batch must have a
         // durable row before `Ok` licenses the ACK.
-        for offer in &message.job_available_messages {
+        for request_id in offer_request_ids {
             let present = self
                 .demand
-                .get(offer.base.runner_request_id)
+                .get(request_id)
                 .map_err(ScaleError::Store)?
                 .is_some();
             if !present {
-                return Err(ScaleError::OfferWithoutRow {
-                    request_id: offer.base.runner_request_id,
-                });
+                return Err(ScaleError::OfferWithoutRow { request_id });
             }
         }
 
@@ -529,11 +541,15 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         started: &ScaleSetJobStarted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
+        let Some(wire_request_id) = crate::scaleset::demand::resolve_job_request_id(&started.base)
+        else {
+            // Do not admit an event whose ownership identity is absent.
+            return Ok(false);
+        };
         let Some(request_id) = crate::scaleset::intents::request_id_for_runner(
             self.config.scale_set_id,
             &started.runner_name,
-            request_id,
+            wire_request_id,
         ) else {
             return Ok(false);
         };
@@ -595,11 +611,16 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         &mut self,
         completed: &ScaleSetJobCompleted,
     ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
+        let Some(wire_request_id) =
+            crate::scaleset::demand::resolve_job_request_id(&completed.base)
+        else {
+            // Do not release or mutate a permit without a durable identity.
+            return Ok(false);
+        };
         let Some(request_id) = crate::scaleset::intents::request_id_for_runner(
             self.config.scale_set_id,
             &completed.runner_name,
-            request_id,
+            wire_request_id,
         ) else {
             return Ok(false);
         };
@@ -790,9 +811,44 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         }
         let request_ids: Vec<i64> = taken.iter().map(|(id, _)| *id).collect();
         let holders: Vec<String> = taken.iter().map(|(_, holder)| holder.clone()).collect();
+        // A row granted by a prior epoch is not safe to send from this
+        // processor. Reconciliation/regrant must first establish the current
+        // epoch on the durable row.
+        if candidates
+            .iter()
+            .filter(|candidate| request_ids.contains(&candidate.request_id))
+            .any(|candidate| candidate.generation != generation)
+        {
+            return Err(ScaleError::Store(anyhow::anyhow!(
+                "granted demand generation changed before acquire claim"
+            )));
+        }
+        // Win the durable state CAS before claiming the network batch. A
+        // competing processor then sees no `granted` row and cannot issue a
+        // second acquire operation. If the process dies here, startup treats
+        // the unbatched intent as unsent and safely requeues it.
+        for request_id in &request_ids {
+            let changed = self
+                .demand
+                .compare_and_set_state(
+                    *request_id,
+                    DemandState::Granted,
+                    generation,
+                    DemandState::AcquireIntent,
+                    None,
+                    generation,
+                )
+                .map_err(ScaleError::Store)?;
+            if !changed {
+                return Err(ScaleError::Store(anyhow::anyhow!(
+                    "granted demand {request_id} changed before acquire claim"
+                )));
+            }
+        }
         let batch_id = mint_batch_id(self.config.scale_set_id);
-        self.batches
-            .record_intended(
+        let claim = self
+            .batches
+            .claim_intended(
                 &batch_id,
                 self.config.scale_set_id,
                 &request_ids,
@@ -800,15 +856,18 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 generation,
             )
             .map_err(ScaleError::Store)?;
-        // The batch record is the durable boundary before the network call.
-        // If a crash lands while these row writes are partial, startup can
-        // recover every member from the batch as uncertain. An unbatched
-        // AcquireIntent therefore proves the request was never sent.
-        for request_id in &request_ids {
-            self.demand
-                .set_state(*request_id, DemandState::AcquireIntent, None, generation)
-                .map_err(ScaleError::Store)?;
-        }
+        let batch_id = match claim {
+            AcquireClaimOutcome::Claimed(batch) => {
+                debug_assert_eq!(batch.batch_id, batch_id);
+                batch.batch_id
+            }
+            AcquireClaimOutcome::Contended(_) => {
+                // Another processor owns the durable network boundary. Its
+                // result will reconcile these rows; ACKing this duplicate
+                // poll is safe and avoids a second `acquirejobs` call.
+                return Ok((Vec::new(), Vec::new(), Vec::new()));
+            }
+        };
         self.metrics.inc_acquire_batches();
 
         // Step 4: the call, then set-reconcile. Transport failure after send
@@ -817,9 +876,22 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             Ok(ids) => ids,
             Err(error) => {
                 for request_id in &request_ids {
-                    self.demand
-                        .set_state(*request_id, DemandState::Uncertain, None, generation)
+                    let changed = self
+                        .demand
+                        .compare_and_set_state(
+                            *request_id,
+                            DemandState::AcquireIntent,
+                            generation,
+                            DemandState::Uncertain,
+                            None,
+                            generation,
+                        )
                         .map_err(ScaleError::Store)?;
+                    if !changed {
+                        return Err(ScaleError::Store(anyhow::anyhow!(
+                            "acquire request {request_id} changed before uncertain fencing"
+                        )));
+                    }
                 }
                 self.batches
                     .resolve(&batch_id, true)
@@ -835,9 +907,22 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         };
         let (acquired, missing) = reconcile_returned_ids(&request_ids, &returned);
         for request_id in &acquired {
-            self.demand
-                .set_state(*request_id, DemandState::Acquired, None, generation)
+            let changed = self
+                .demand
+                .compare_and_set_state(
+                    *request_id,
+                    DemandState::AcquireIntent,
+                    generation,
+                    DemandState::Acquired,
+                    None,
+                    generation,
+                )
                 .map_err(ScaleError::Store)?;
+            if !changed {
+                return Err(ScaleError::Store(anyhow::anyhow!(
+                    "acquire request {request_id} changed before acquired fencing"
+                )));
+            }
             fenced_transition(
                 &mut self.ledger,
                 &permit_holder(self.config.scale_set_id, *request_id),
@@ -847,12 +932,25 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             .map_err(ScaleError::Ledger)?;
         }
         for request_id in &missing {
+            let changed = self
+                .demand
+                .compare_and_set_state(
+                    *request_id,
+                    DemandState::AcquireIntent,
+                    generation,
+                    DemandState::Eligible,
+                    None,
+                    generation,
+                )
+                .map_err(ScaleError::Store)?;
+            if !changed {
+                return Err(ScaleError::Store(anyhow::anyhow!(
+                    "missing acquire request {request_id} changed before release"
+                )));
+            }
             self.ledger
                 .release_to_eligible(&permit_holder(self.config.scale_set_id, *request_id))
                 .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
-            self.demand
-                .set_state(*request_id, DemandState::Eligible, None, generation)
-                .map_err(ScaleError::Store)?;
         }
         self.batches
             .resolve(&batch_id, false)
@@ -927,6 +1025,7 @@ pub enum ScaleError<Q, W> {
     Queue(Q),
     Lane(W),
     MissingInitialStats,
+    OfferWithoutIdentity,
     OfferWithoutRow { request_id: i64 },
 }
 
@@ -938,6 +1037,12 @@ impl<Q: std::fmt::Display, W: std::fmt::Display> std::fmt::Display for ScaleErro
             Self::Queue(error) => write!(f, "scale queue: {error}"),
             Self::Lane(error) => write!(f, "scale worker lane: {error}"),
             Self::MissingInitialStats => write!(f, "initial message carries no statistics"),
+            Self::OfferWithoutIdentity => {
+                write!(
+                    f,
+                    "offer has no canonical request identity; refusing the ACK"
+                )
+            }
             Self::OfferWithoutRow { request_id } => write!(
                 f,
                 "offer {request_id} reached no durable row; refusing the ACK"
@@ -992,7 +1097,7 @@ fn fenced_transition<L: CapacityLedger>(
 mod tests {
     use super::*;
     use crate::scaleset::capacity::MemLedger;
-    use crate::scaleset::demand::DemandStore;
+    use crate::scaleset::demand::{DemandStore, OfferAdmission};
     use velnor_model::{
         ScaleSetJobAvailable, ScaleSetJobMessage, ScaleSetJobMessageType, ScaleSetJobStarted,
     };
@@ -1098,6 +1203,17 @@ mod tests {
         }
     }
 
+    fn admission() -> OfferAdmission {
+        OfferAdmission::exact(
+            "tailrocks",
+            "tailrocks/velnor",
+            "main",
+            "tailrocks/velnor",
+            ".github/workflows/ci.yml",
+            "push",
+        )
+    }
+
     fn push_offer(id: i64) -> ScaleSetJobAvailable {
         ScaleSetJobAvailable {
             acquire_job_url: String::new(),
@@ -1107,7 +1223,7 @@ mod tests {
                 repository_name: "velnor".to_owned(),
                 owner_name: "tailrocks".to_owned(),
                 job_id: format!("job-{id}"),
-                job_workflow_ref: String::new(),
+                job_workflow_ref: "tailrocks/velnor/.github/workflows/ci.yml@main".to_owned(),
                 job_display_name: String::new(),
                 workflow_run_id: 0,
                 event_name: "push".to_owned(),
@@ -1127,7 +1243,7 @@ mod tests {
             repository_name: "velnor".to_owned(),
             owner_name: "tailrocks".to_owned(),
             job_id: format!("job-{id}"),
-            job_workflow_ref: String::new(),
+            job_workflow_ref: "tailrocks/velnor/.github/workflows/ci.yml@main".to_owned(),
             job_display_name: String::new(),
             workflow_run_id: 0,
             event_name: "push".to_owned(),
@@ -1198,7 +1314,7 @@ mod tests {
             queue,
             ledger,
             StubLane::default(),
-            DemandStore::open(path).unwrap(),
+            DemandStore::open_with_admission(path, admission()).unwrap(),
             AcquireBatchStore::open(path).unwrap(),
             ProvisionIntentStore::open(path).unwrap(),
             Metrics::new(),
@@ -1233,6 +1349,85 @@ mod tests {
                 headroom: 2,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn job_id_identity_replays_without_raw_zero_lookup() {
+        let path = temp_path("job-id-identity");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        let offer = push_offer(0);
+        let request_id = resolve_job_request_id(&offer.base).unwrap();
+        assert_ne!(request_id, 0);
+
+        let first = processor
+            .scale(Some(&message(101, vec![offer.clone()])))
+            .await
+            .unwrap();
+        assert_eq!(first.acquired, vec![request_id]);
+        assert_eq!(first.provisioned, vec![request_id]);
+        assert!(processor.demand_mut().get(request_id).unwrap().is_some());
+        assert!(processor.demand_mut().get(0).unwrap().is_none());
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+
+        // The same wire event is a durable replay: it cannot reserve a
+        // second permit or look up the raw zero request ID.
+        let replay = processor
+            .scale(Some(&message(102, vec![offer])))
+            .await
+            .unwrap();
+        assert_eq!(replay.offers_submitted, 0);
+        assert!(replay.acquired.is_empty());
+        assert!(replay.provisioned.is_empty());
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn offer_without_identity_vetoes_ack_without_sentinel_state() {
+        let path = temp_path("missing-offer-identity");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        let mut offer = push_offer(0);
+        offer.base.job_id.clear();
+
+        let error = processor
+            .scale(Some(&message(103, vec![offer])))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ScaleError::OfferWithoutIdentity));
+        assert!(processor.demand_mut().get(0).unwrap().is_none());
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+    }
+
+    #[test]
+    fn lifecycle_without_identity_is_ignored_without_claiming() {
+        let path = temp_path("missing-lifecycle-identity");
+        let mut processor = processor(&path, ScriptedQueue::default());
+
+        let mut assigned = ScaleSetJobAssigned {
+            base: base(0, ScaleSetJobMessageType::JobAssigned),
+        };
+        assigned.base.job_id.clear();
+        assert!(matches!(
+            processor.observe_assigned(&assigned),
+            Err(ScaleError::Store(_))
+        ));
+
+        let mut started = ScaleSetJobStarted {
+            runner_id: 1,
+            runner_name: "velnor-7-missing".to_owned(),
+            base: base(0, ScaleSetJobMessageType::JobStarted),
+        };
+        started.base.job_id.clear();
+        assert!(!processor.observe_started(&started).unwrap());
+
+        let mut completed = completed(0, "succeeded");
+        completed.base.job_id.clear();
+        assert!(!processor.observe_completed(&completed).unwrap());
+
+        assert!(processor.demand_mut().get(0).unwrap().is_none());
+        assert!(processor.lane_mut().assigned.is_empty());
+        assert!(processor.lane_mut().started.is_empty());
+        assert!(processor.lane_mut().terminals.is_empty());
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
     }
 
     #[tokio::test]

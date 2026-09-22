@@ -499,6 +499,43 @@ pub struct HostBootstrapImageArgs {
     pub rebuild_workflow: bool,
 }
 
+/// Explicit host execution topology exposed by host and daemon commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HostMode {
+    #[value(name = "native-only")]
+    NativeOnly,
+    #[value(name = "scale-set-only")]
+    ScaleSetOnly,
+    #[value(name = "both")]
+    Both,
+}
+
+impl HostMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeOnly => "native-only",
+            Self::ScaleSetOnly => "scale-set-only",
+            Self::Both => "both",
+        }
+    }
+
+    #[must_use]
+    pub const fn native_enabled(self) -> bool {
+        matches!(self, Self::NativeOnly | Self::Both)
+    }
+}
+
+impl From<HostMode> for velnor_runner::args::HostMode {
+    fn from(mode: HostMode) -> Self {
+        match mode {
+            HostMode::NativeOnly => Self::NativeOnly,
+            HostMode::ScaleSetOnly => Self::ScaleSetOnly,
+            HostMode::Both => Self::Both,
+        }
+    }
+}
+
 /// Start one repository-scoped recovery host. The repository comes from the
 /// global `--repo OWNER/NAME` selector (default tailrocks/velnor) or `--url`.
 #[derive(Debug, Args)]
@@ -512,6 +549,14 @@ pub struct HostStartArgs {
     /// Bounded slot count.
     #[arg(long, default_value_t = 1)]
     pub slots: usize,
+    /// Host execution topology. Defaults to native-only.
+    #[arg(
+        long,
+        value_enum,
+        env = "VELNOR_HOST_MODE",
+        default_value = "native-only"
+    )]
+    pub mode: HostMode,
     /// PR number to document targeting semantics for. GitHub stays the scheduler.
     #[arg(long, value_name = "NUMBER")]
     pub pr: Option<u64>,
@@ -525,4 +570,13 @@ pub struct HostStartArgs {
     /// Job image. Defaults to velnor/job-ubuntu:26.04. Must already exist locally.
     #[arg(long)]
     pub docker_image: Option<String>,
+    /// Host-wide maximum concurrent jobs. Required for Scale Set modes.
+    #[arg(long, env = "VELNOR_MAX_JOBS")]
+    pub max_jobs: Option<u32>,
+    /// Explicit host-wide permit ledger path shared by every enabled engine.
+    #[arg(long, env = "VELNOR_PERMIT_LEDGER")]
+    pub permit_ledger: Option<PathBuf>,
+    /// Scale Set lane configuration. Required for Scale Set modes.
+    #[arg(long, env = "VELNOR_SCALE_SET_CONFIG")]
+    pub scale_set_config: Option<PathBuf>,
 }

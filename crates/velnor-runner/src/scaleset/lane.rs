@@ -141,8 +141,8 @@ impl WorkerRegistry {
         })
     }
 
-    /// Generation stamped on subsequent edge writes. The lane refreshes
-    /// this from its ledger handle on every entry.
+    /// Generation stamped on subsequent edge writes. A registry belongs to
+    /// one daemon epoch; callers must create a new registry for a new epoch.
     pub fn set_generation(&mut self, generation: u64) {
         self.generation = generation;
     }
@@ -208,7 +208,8 @@ impl WorkerRegistry {
                    operation_id = excluded.operation_id,
                    request_id = excluded.request_id,
                    generation = excluded.generation,
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at
+                 WHERE scaleset_workers.generation = excluded.generation",
                 params![
                     ownership_id,
                     operation_id,
@@ -234,6 +235,50 @@ impl WorkerRegistry {
             .context("ensure worker runtime row")?;
         self.get(ownership_id)?
             .with_context(|| format!("worker row {ownership_id:?} vanished after upsert"))
+            .and_then(|row| {
+                if row.generation != self.generation {
+                    anyhow::bail!(
+                        "worker {ownership_id:?} belongs to generation {}, current lane is {}",
+                        row.generation,
+                        self.generation
+                    );
+                }
+                Ok(row)
+            })
+    }
+
+    /// Transfer a durable worker row to this epoch during explicit restart
+    /// adoption. The compare-and-set prevents an older lane from claiming a
+    /// row that a newer lane already owns.
+    fn claim_generation(&mut self, ownership_id: &str, previous: u64) -> Result<()> {
+        let now = Self::now_rfc3339();
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE scaleset_workers SET generation = ?1, updated_at = ?2
+                 WHERE ownership_id = ?3 AND generation = ?4",
+                params![
+                    i64::try_from(self.generation).unwrap_or(i64::MAX),
+                    now,
+                    ownership_id,
+                    i64::try_from(previous).unwrap_or(i64::MAX),
+                ],
+            )
+            .context("claim worker generation")?;
+        if updated == 1 {
+            return Ok(());
+        }
+        let row = self
+            .get(ownership_id)?
+            .with_context(|| format!("worker row {ownership_id:?} vanished during adoption"))?;
+        if row.generation == self.generation {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "worker {ownership_id:?} changed generation during adoption (saw {}, now {})",
+            previous,
+            row.generation
+        )
     }
 
     /// Fetch one worker by canonical ownership id.
@@ -308,12 +353,19 @@ impl WorkerRegistry {
             .execute(
                 "UPDATE scaleset_workers
                  SET worker_state = ?1, generation = ?2, updated_at = ?3
-                 WHERE ownership_id = ?4",
+                 WHERE ownership_id = ?4 AND generation = ?2",
                 params![state.as_str(), generation, now, ownership_id],
             )
             .context("record worker edge")?;
         if updated == 0 {
-            anyhow::bail!("worker registry holds no row for {ownership_id:?}");
+            let row = self
+                .get(ownership_id)?
+                .with_context(|| format!("worker registry holds no row for {ownership_id:?}"))?;
+            anyhow::bail!(
+                "worker {ownership_id:?} belongs to generation {}, current registry is {}",
+                row.generation,
+                self.generation
+            );
         }
         Ok(())
     }
@@ -324,34 +376,51 @@ impl WorkerRegistry {
         deadline_epoch: u64,
     ) -> Result<u64> {
         let deadline = i64::try_from(deadline_epoch).unwrap_or(i64::MAX);
+        let generation = i64::try_from(self.generation).unwrap_or(i64::MAX);
         self.conn
             .execute(
                 "UPDATE scaleset_worker_runtime
              SET runner_start_deadline_epoch = COALESCE(runner_start_deadline_epoch, ?1)
-             WHERE ownership_id = ?2",
-                params![deadline, ownership_id],
+             WHERE ownership_id = ?2 AND EXISTS (
+                 SELECT 1 FROM scaleset_workers
+                 WHERE ownership_id = ?2 AND generation = ?3
+             )",
+                params![deadline, ownership_id, generation],
             )
             .context("persist runner startup deadline")?;
-        let stored: Option<i64> = self
+        let (row_generation, stored): (i64, Option<i64>) = self
             .conn
             .query_row(
-                "SELECT runner_start_deadline_epoch FROM scaleset_worker_runtime
-             WHERE ownership_id = ?1",
+                "SELECT w.generation, r.runner_start_deadline_epoch
+                 FROM scaleset_workers w
+                 JOIN scaleset_worker_runtime r USING (ownership_id)
+                 WHERE w.ownership_id = ?1",
                 params![ownership_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .context("read runner startup deadline")?;
+        if row_generation.max(0) as u64 != self.generation {
+            anyhow::bail!(
+                "worker {ownership_id:?} belongs to generation {}, current registry is {}",
+                row_generation,
+                self.generation
+            );
+        }
         stored
             .map(|seconds| seconds.max(0) as u64)
-            .with_context(|| format!("worker runtime row {ownership_id:?} is missing"))
+            .with_context(|| format!("worker runtime row {ownership_id:?} has no deadline"))
     }
 
     fn clear_runner_start_deadline(&mut self, ownership_id: &str) -> Result<()> {
+        let generation = i64::try_from(self.generation).unwrap_or(i64::MAX);
         self.conn
             .execute(
                 "UPDATE scaleset_worker_runtime SET runner_start_deadline_epoch = NULL
-             WHERE ownership_id = ?1",
-                params![ownership_id],
+             WHERE ownership_id = ?1 AND EXISTS (
+                 SELECT 1 FROM scaleset_workers
+                 WHERE ownership_id = ?1 AND generation = ?2
+             )",
+                params![ownership_id, generation],
             )
             .context("clear runner startup deadline")?;
         Ok(())
@@ -359,13 +428,17 @@ impl WorkerRegistry {
 
     fn set_dind_restarts_used(&mut self, ownership_id: &str, used: u32) -> Result<()> {
         let used = i64::from(used);
+        let generation = i64::try_from(self.generation).unwrap_or(i64::MAX);
         let updated = self
             .conn
             .execute(
                 "UPDATE scaleset_worker_runtime
              SET dind_restarts_used = MAX(dind_restarts_used, ?1)
-             WHERE ownership_id = ?2",
-                params![used, ownership_id],
+             WHERE ownership_id = ?2 AND EXISTS (
+                 SELECT 1 FROM scaleset_workers
+                 WHERE ownership_id = ?2 AND generation = ?3
+             )",
+                params![used, ownership_id, generation],
             )
             .context("persist DinD restart budget")?;
         if updated == 0 {
@@ -375,12 +448,16 @@ impl WorkerRegistry {
     }
 
     fn set_diagnostics_complete(&mut self, ownership_id: &str) -> Result<()> {
+        let generation = i64::try_from(self.generation).unwrap_or(i64::MAX);
         let updated = self
             .conn
             .execute(
                 "UPDATE scaleset_worker_runtime SET diagnostics_complete = 1
-             WHERE ownership_id = ?1",
-                params![ownership_id],
+             WHERE ownership_id = ?1 AND EXISTS (
+                 SELECT 1 FROM scaleset_workers
+                 WHERE ownership_id = ?1 AND generation = ?2
+             )",
+                params![ownership_id, generation],
             )
             .context("persist diagnostic export completion")?;
         if updated == 0 {
@@ -446,6 +523,7 @@ struct LiveWorker {
 pub struct DaemonWorkerLane {
     client: ScaleSetClient,
     config: LaneConfig,
+    generation: u64,
     runner: Box<dyn WorkerRunner + Send>,
     hook: Box<dyn ToolContentHook + Send>,
     intents: ProvisionIntentStore,
@@ -482,14 +560,19 @@ impl DaemonWorkerLane {
                 config.state_root.display()
             )
         })?;
+        let ledger = SharedLedger::open(ledger_path)?;
+        let generation = ledger.generation()?;
+        let mut registry = WorkerRegistry::open(state_db)?;
+        registry.set_generation(generation);
         Ok(Self {
             client,
             config,
+            generation,
             runner,
             hook,
             intents: ProvisionIntentStore::open(state_db)?,
-            registry: WorkerRegistry::open(state_db)?,
-            ledger: SharedLedger::open(ledger_path)?,
+            registry,
+            ledger,
             workers: HashMap::new(),
             last_sweep: None,
         })
@@ -567,14 +650,24 @@ impl DaemonWorkerLane {
         Ok(state_dir.to_path_buf())
     }
 
-    /// Refresh the registry generation from the ledger. Edges stamped with
-    /// a stale generation would lie about which epoch recorded them.
+    /// Verify that this lane still owns its startup epoch. A lane never
+    /// retargets itself to a newer generation; the daemon must redeliver the
+    /// work to the new lane instead.
     fn refresh_generation(&mut self) -> Result<(), LaneError> {
-        let generation = self
+        let current = self
             .ledger
             .generation()
             .map_err(|error| LaneError::new("read ledger generation", error.into()))?;
-        self.registry.set_generation(generation);
+        if current != self.generation {
+            return Err(LaneError::new(
+                "fence worker lifecycle",
+                anyhow::anyhow!(
+                    "lane epoch {} is stale; ledger is at generation {}",
+                    self.generation,
+                    current
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -635,35 +728,34 @@ impl DaemonWorkerLane {
         Ok(config.encoded_jit_config)
     }
 
-    /// Move one held permit to `state`, re-reading the generation once on
-    /// a fencing failure. A missing row is fine (a concurrent release won);
-    /// anything else propagates and vetoes the ACK.
+    /// Move one held permit to `state` under this lane's immutable epoch.
+    /// Stale generations are terminal for this lane: retrying with the new
+    /// epoch could mutate ownership adopted by another daemon.
     fn fenced_transition(&mut self, holder: &str, state: LedgerPermitState) -> Result<()> {
-        for _ in 0..2 {
-            let generation = self.ledger.generation()?;
-            match self.ledger.transition(holder, state, generation) {
-                Ok(()) => return Ok(()),
-                Err(error) if SharedLedger::is_stale_generation(&error) => continue,
-                Err(velnor_control::permit_ledger::LedgerError::UnknownHolder(_)) => return Ok(()),
-                Err(error) => return Err(error.into()),
-            }
-        }
-        anyhow::bail!("ledger epoch moved twice under one lane transition for {holder:?}")
+        self.ledger
+            .transition(holder, state, self.generation)
+            .map_err(Into::into)
     }
 
     /// Retain worker occupancy and close its demand atomically after a
     /// cleanup failure. Retry one generation race; never turn an unknown
     /// holder into false free capacity.
     fn retain_uncertain(&mut self, holder: &str) -> Result<()> {
-        for _ in 0..2 {
-            let generation = self.ledger.generation()?;
-            match self.ledger.retain_uncertain(holder, generation) {
-                Ok(()) => return Ok(()),
-                Err(error) if SharedLedger::is_stale_generation(&error) => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
-        anyhow::bail!("ledger epoch moved twice while retaining uncertain holder {holder:?}")
+        self.ledger
+            .retain_uncertain(holder, self.generation)
+            .map_err(Into::into)
+    }
+
+    /// Release through the control ledger's atomic holder+epoch transaction.
+    /// `SharedLedger` intentionally keeps the generic capacity surface small;
+    /// opening the same SQLite file here selects the fenced worker primitive
+    /// without widening that public trait.
+    fn fenced_release(&mut self, holder: &str) -> Result<bool> {
+        let mut ledger = velnor_control::permit_ledger::PermitLedger::open(self.ledger.path())
+            .context("open permit ledger for fenced release")?;
+        ledger
+            .release_fenced(holder, self.generation)
+            .map_err(anyhow::Error::new)
     }
 
     /// Recorded state of one tracked worker.
@@ -693,6 +785,20 @@ impl DaemonWorkerLane {
             .registry
             .get(key)?
             .with_context(|| format!("no worker recorded for {key:?}"))?;
+        if row.generation > self.generation {
+            anyhow::bail!(
+                "worker {key:?} belongs to newer generation {}, current lane is {}",
+                row.generation,
+                self.generation
+            );
+        }
+        if row.generation < self.generation {
+            self.registry.claim_generation(key, row.generation)?;
+        }
+        let row = self
+            .registry
+            .get(key)?
+            .with_context(|| format!("worker {key:?} vanished after generation claim"))?;
         let ownership = OwnershipId::bind(self.config.scale_set_id, &row.runner_name);
         let identity = WorkerIdentity::new(ownership);
         let state_dir = self.recorded_state_dir(&row)?;
@@ -879,7 +985,7 @@ impl DaemonWorkerLane {
         let row = self.registry.get(key)?;
         let Some(mut row) = row else {
             if let Some(holder) = holder_for_key(self.config.scale_set_id, key) {
-                self.ledger.release(&holder)?;
+                self.fenced_release(&holder)?;
             }
             return Ok(TerminalOutcome::AlreadyReleased);
         };
@@ -892,9 +998,23 @@ impl DaemonWorkerLane {
             // exactly like a fresh release: deletion ends owned Docker
             // objects, never the exported logs.
             if let Some(holder) = holder_for_key(self.config.scale_set_id, key) {
-                self.ledger.release(&holder)?;
+                self.fenced_release(&holder)?;
             }
             return Ok(TerminalOutcome::AlreadyReleased);
+        }
+        if row.generation > self.generation {
+            anyhow::bail!(
+                "worker {key:?} belongs to newer generation {}, current lane is {}",
+                row.generation,
+                self.generation
+            );
+        }
+        if row.generation < self.generation {
+            self.registry.claim_generation(key, row.generation)?;
+            row = self
+                .registry
+                .get(key)?
+                .with_context(|| format!("worker {key:?} vanished after generation claim"))?;
         }
         self.ensure_live(key)?;
         let mut recorded = self.worker_state(key)?;
@@ -987,7 +1107,7 @@ impl DaemonWorkerLane {
         }
         if let Some(request_id) = row.request_id {
             let holder = permit_holder(self.config.scale_set_id, request_id);
-            self.ledger.release(&holder)?;
+            self.fenced_release(&holder)?;
         }
         self.transition_worker(key, ScaleSetWorkerState::PermitReleased)?;
         Ok(TerminalOutcome::Released)
@@ -1487,7 +1607,12 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_assigned(&mut self, assigned: &ScaleSetJobAssigned) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&assigned.base);
+        let Some(request_id) = crate::scaleset::demand::resolve_job_request_id(&assigned.base)
+        else {
+            // A scale-set event without runnerRequestId and jobId has no
+            // durable ownership identity. It cannot safely affect a permit.
+            return Ok(());
+        };
         let Some(intent) = self
             .intents
             .get_by_request(self.config.scale_set_id, request_id)
@@ -1512,7 +1637,7 @@ impl WorkerLane for DaemonWorkerLane {
     fn note_started(&mut self, started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let key = if !started.runner_name.is_empty() {
+        let (key, holder) = if !started.runner_name.is_empty() {
             let Some((scale_set_id, _)) =
                 crate::scaleset::intents::parse_runner_name(&started.runner_name)
             else {
@@ -1521,11 +1646,20 @@ impl WorkerLane for DaemonWorkerLane {
             if scale_set_id != self.config.scale_set_id {
                 return Ok(());
             }
-            OwnershipId::bind(self.config.scale_set_id, &started.runner_name)
+            let key = OwnershipId::bind(self.config.scale_set_id, &started.runner_name)
                 .as_str()
-                .to_string()
+                .to_string();
+            let Some(holder) = holder_for_key(self.config.scale_set_id, &key) else {
+                return Ok(());
+            };
+            (key, holder)
         } else {
-            let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
+            let Some(request_id) = crate::scaleset::demand::resolve_job_request_id(&started.base)
+            else {
+                // A scale-set event without runnerRequestId and jobId has no
+                // durable ownership identity. It cannot safely affect a permit.
+                return Ok(());
+            };
             let Some(intent) = self
                 .intents
                 .get_by_request(self.config.scale_set_id, request_id)
@@ -1533,7 +1667,10 @@ impl WorkerLane for DaemonWorkerLane {
             else {
                 return Ok(());
             };
-            Self::ownership_key(&intent)
+            (
+                Self::ownership_key(&intent),
+                permit_holder(self.config.scale_set_id, request_id),
+            )
         };
         let known = self
             .registry
@@ -1543,6 +1680,21 @@ impl WorkerLane for DaemonWorkerLane {
         if !known {
             return Ok(());
         }
+        // Check before supervision: a worker without a counted permit must
+        // fail/requeue, and must not advance its durable state toward
+        // Running. The fenced transition below repeats the check at the
+        // mutation boundary for concurrent cleanup.
+        if self
+            .ledger
+            .holder_state(&holder)
+            .map_err(|error| LaneError::new("check worker permit", error.into()))?
+            .is_none()
+        {
+            return Err(LaneError::new(
+                "start worker",
+                anyhow::anyhow!("worker {key:?} has no permit; refusing Running/ACK"),
+            ));
+        }
         let outcome = self.tick_worker(&key)?;
         if matches!(outcome, SupervisionOutcome::WorkerFailed { .. }) {
             // The tick already failed the worker explicitly; GitHub owns
@@ -1550,6 +1702,12 @@ impl WorkerLane for DaemonWorkerLane {
             // converges the demand row).
             return Ok(());
         }
+        // Fence the permit before advancing the worker record. If cleanup
+        // raced this start and removed the row, the message errors and is
+        // redelivered; no Running edge or ACK is emitted.
+        self.fenced_transition(&holder, LedgerPermitState::Running)
+            .map_err(|error| LaneError::new("mark permit running", error))?;
+
         // Advance the record toward `running` along the happy path only;
         // terminal-side and retry states are owned by their own paths.
         let recorded = self
@@ -1572,11 +1730,6 @@ impl WorkerLane for DaemonWorkerLane {
             self.transition_worker(&key, *edge)
                 .map_err(|error| LaneError::new("record job started", error))?;
         }
-        let request_id = crate::scaleset::demand::resolve_job_request_id(&started.base);
-        let holder = holder_for_key(self.config.scale_set_id, &key)
-            .unwrap_or_else(|| permit_holder(self.config.scale_set_id, request_id));
-        self.fenced_transition(&holder, LedgerPermitState::Running)
-            .map_err(|error| LaneError::new("mark permit running", error))?;
         Ok(())
     }
 
@@ -1596,11 +1749,17 @@ impl WorkerLane for DaemonWorkerLane {
                 .as_str()
                 .to_string()
         } else {
-            let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
+            let Some(request_id) = crate::scaleset::demand::resolve_job_request_id(&completed.base)
+            else {
+                // A terminal event without identity cannot release or mutate
+                // a permit. Leave it for the next broker delivery/diagnostics.
+                return Ok(());
+            };
             self.terminal_key(request_id)?
         };
         self.drive_terminal(&key)
-            .map_err(|error| LaneError::new("drive worker terminal", error))
+            .map_err(|error| LaneError::new("drive worker terminal", error))?;
+        Ok(())
     }
 
     fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {
@@ -1735,6 +1894,10 @@ mod tests {
             crate::scaleset::backoff::RetryPolicy::default(),
         )
         .unwrap();
+        let mut registry = WorkerRegistry::open(db).unwrap();
+        let ledger = SharedLedger::open(ledger).unwrap();
+        let generation = ledger.generation().unwrap();
+        registry.set_generation(generation);
         DaemonWorkerLane {
             client,
             config: LaneConfig {
@@ -1744,14 +1907,110 @@ mod tests {
                 ready_attempts: 1,
                 sweep_interval: Duration::ZERO,
             },
+            generation,
             runner,
             hook: Box::new(crate::scaleset::worker::DockerToolContentHook),
             intents: ProvisionIntentStore::open(db).unwrap(),
-            registry: WorkerRegistry::open(db).unwrap(),
-            ledger: SharedLedger::open(ledger).unwrap(),
+            registry,
+            ledger,
             workers: HashMap::new(),
             last_sweep: None,
         }
+    }
+
+    #[test]
+    fn lifecycle_without_identity_does_not_touch_workers_or_permits() {
+        let dir = unique_test_dir("missing-identity");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = CleanupRunner::missing("unused".to_owned(), seen.clone());
+        let mut lane = test_lane(&db, &ledger, &state_root, Box::new(runner));
+
+        assert!(lane.note_assigned(&ScaleSetJobAssigned::default()).is_ok());
+        assert!(lane.note_started(&ScaleSetJobStarted::default()).is_ok());
+        assert!(lane.note_terminal(&ScaleSetJobCompleted::default()).is_ok());
+
+        assert_eq!(lane.live_workers(), 0);
+        assert!(lane.registry.list_live().unwrap().is_empty());
+        assert_eq!(lane.ledger.occupied().unwrap(), 0);
+        assert!(seen.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_permit_at_start_requeues_without_running_edge() {
+        let dir = unique_test_dir("missing-start-permit");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4244");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry
+            .upsert(
+                &key,
+                "op-start",
+                4244,
+                "velnor-7-4244",
+                &identity.network(),
+                state_root
+                    .join(ownership.slug())
+                    .join("workspace")
+                    .to_string_lossy()
+                    .as_ref(),
+                state_root
+                    .join(ownership.slug())
+                    .join("dind-data")
+                    .to_string_lossy()
+                    .as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::RunnerConnected)
+            .unwrap();
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-start",
+                &key,
+                7,
+                4244,
+                "velnor-7-4244",
+                "sha256:runner",
+                "sha256:dind",
+                0,
+            )
+            .unwrap();
+        drop(intents);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut lane = test_lane(
+            &db,
+            &ledger,
+            &state_root,
+            Box::new(CleanupRunner::missing(
+                identity.runner_container(),
+                seen.clone(),
+            )),
+        );
+        let mut started = ScaleSetJobStarted::default();
+        started.base.runner_request_id = 4244;
+        let error = lane.note_started(&started).unwrap_err();
+        assert!(error.to_string().contains("refusing Running/ACK"));
+        assert_eq!(
+            lane.registry.get(&key).unwrap().unwrap().worker_state,
+            ScaleSetWorkerState::RunnerConnected
+        );
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(lane.ledger.occupied().unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

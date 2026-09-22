@@ -31,7 +31,7 @@ use super::primitives::snapshot::{
 };
 use super::provider::{
     check_capabilities, eligibility, parse_provider_set, plan_digest, Capabilities,
-    ExclusionReason, Platform, ProviderId, ProviderSet, TrustReq,
+    ExclusionReason, Platform, ProviderId, ProviderMode, ProviderSet, TrustReq,
 };
 use super::{GeneratorError, UnitKind, ValidationPhase};
 
@@ -82,6 +82,8 @@ struct Analysis {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Workflow {
+    #[serde(default)]
+    provider_mode: Option<ProviderMode>,
     files: Vec<String>,
     notes: Vec<String>,
     #[serde(default)]
@@ -1567,6 +1569,18 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
         "default_dispatch_providers",
         "providers",
     )?;
+    if let Some(mode) = config.workflow.provider_mode {
+        if universe != mode.provider_universe() || automatic != mode.automatic_providers() {
+            return Err(GeneratorError::usage(format!(
+                "workflow.provider_mode `{mode}` does not match the serialized provider universe and automatic providers"
+            )));
+        }
+        if dispatch != universe {
+            return Err(GeneratorError::usage(
+                "workflow.provider_mode requires default_dispatch_providers to equal the full provider universe",
+            ));
+        }
+    }
     let mut known = BTreeSet::new();
     for unit in &config.unit {
         if !is_unit_id(&unit.id) {

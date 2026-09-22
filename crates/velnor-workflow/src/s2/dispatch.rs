@@ -3,7 +3,7 @@
 //! The bridge binary serves two configuration schemas: schema 1 renders
 //! through the original pipeline in the crate root, schema 2 through the
 //! provider pipeline in [`crate::s2`]. This module peeks at the invocation
-//! (an explicit `--providers` flag, or the target's own
+//! (an explicit `--providers`/`--provider-mode` flag, or the target's own
 //! `.github-gen/velnor-workflow.toml`) and routes before either parser runs.
 //!
 //! The peek is fail-closed in both directions: a misrouted invocation still
@@ -58,7 +58,7 @@ fn wants_s2(arguments: &[OsString]) -> bool {
     {
         return false;
     }
-    if has_providers_flag(arguments) {
+    if has_provider_selection_flag(arguments) {
         return true;
     }
     if let Some(command) = arguments.first().and_then(|value| value.to_str())
@@ -69,10 +69,13 @@ fn wants_s2(arguments: &[OsString]) -> bool {
     wants_s2_generator(arguments)
 }
 
-fn has_providers_flag(arguments: &[OsString]) -> bool {
+fn has_provider_selection_flag(arguments: &[OsString]) -> bool {
     arguments.iter().any(|argument| {
         let text = argument.to_string_lossy();
-        text == "--providers" || text.starts_with("--providers=")
+        text == "--providers"
+            || text.starts_with("--providers=")
+            || text == "--provider-mode"
+            || text.starts_with("--provider-mode=")
     })
 }
 
@@ -186,6 +189,12 @@ mod tests {
     fn providers_flag_routes_schema2_without_a_target() {
         assert!(wants_s2(&args(&["--providers", "github-hosted"])));
         assert!(wants_s2(&args(&["--providers=github-hosted"])));
+    }
+
+    #[test]
+    fn provider_mode_flag_routes_schema2_without_a_target() {
+        assert!(wants_s2(&args(&["--provider-mode", "native-only"])));
+        assert!(wants_s2(&args(&["--provider-mode=scale-set-only"])));
     }
 
     #[test]
