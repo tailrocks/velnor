@@ -9,7 +9,7 @@ repository = "tailrocks/velnor"
 # The branch changes the generator, so keep Stage 0 on the published base
 # product until the generator change is merged and published. The policy
 # candidate path verifies the checked-in tree with this branch's renderer.
-revision = "45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2"
+revision = "30100e4272e67df33c1cbc8ea1a47d54bfd76cb4"
 
 [scan]
 exclude = ["migrations/**"]
