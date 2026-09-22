@@ -96,6 +96,24 @@ publication mutation. Migration of an older consumer release belongs in that
 consumer's release automation and must use `pre_publish_tasks` with a durable
 recovery contract.
 
+## Typed release-job tools
+
+Schema-2 `[[release.job]]` rows may declare the exact root mise tools their
+named tasks require. Every id must be present in `mise.lock`; hosted jobs keep
+manifest auto-install disabled and pass the pinned subset through the mise
+action's `install_args`, while Velnor jobs install the same locked subset
+before running tasks.
+
+```toml
+[[release.job]]
+id = "build"
+tasks = ["build-release"]
+tools = ["cargo:boltffi_cli"]
+```
+
+Tool versions belong in the repository's `mise.toml` and `mise.lock`, not in
+the release row.
+
 ## `[renovate]` — self-hosted dependency updates
 
 Scan evidence alone (`renovate.json`, `renovate.json5`, or `.github/renovate.json*`)

@@ -11,11 +11,11 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
-    checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
-    render_mutable_mount_seed_restore_for_unit, render_pinned_toolchain_steps,
-    render_retained_output_cache_note, Args, CacheBackend, Primitive, RenderCtx, Rendered,
-    WorkflowIr, D19_PIN_FETCH_COMMANDS, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
-    RELEASE_SIGNER, STATIC_WORKFLOW,
+    checks_env, close_mise_tool_subset, docker_build_token_env_for_members,
+    render_cargo_source_preparation, render_mutable_mount_seed_restore_for_unit,
+    render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
+    Primitive, RenderCtx, Rendered, WorkflowIr, D19_PIN_FETCH_COMMANDS, MAINTENANCE,
+    PACKAGE_RELEASE, PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::s2::provider::{self, runs_on_for, ProviderId, ProviderSet};
 use crate::s2::{
@@ -3325,24 +3325,53 @@ fn render_versioned_tool_mise_setup(config: &ProjectConfig) -> String {
     if !config.providers.contains(&ProviderId::GithubHosted) {
         return String::new();
     }
-    render_mise_setup()
+    render_mise_setup(&[])
 }
 
 /// Pinned Mise provisioning for one typed release job. The job's selected
 /// runner owns this decision: GitHub-hosted Linux and macOS lanes need the
 /// setup action, while Velnor lanes use the preinstalled binary.
-fn render_mise_setup_for_runner(runner: &str) -> String {
-    if matches!(runner, "github" | "macos") {
-        render_mise_setup()
-    } else {
-        String::new()
+fn render_mise_setup_for_runner(
+    config: &ProjectConfig,
+    runner: &str,
+    declared_tools: &[String],
+) -> String {
+    let mut tools = declared_tools.to_vec();
+    close_mise_tool_subset(
+        &mut tools,
+        &config.mise_lock_keys,
+        &config.mise_lock_backends,
+        &config.mise_install_deps,
+    );
+    match runner {
+        "github" | "macos" => render_mise_setup(&tools),
+        "velnor" => render_velnor_mise_setup(&tools),
+        _ => String::new(),
     }
 }
 
-fn render_mise_setup() -> String {
+fn render_mise_setup(tools: &[String]) -> String {
+    let install_args = if tools.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "          install_args: {}\n",
+            yaml_scalar(&tools.join(" "))
+        )
+    };
     format!(
-        "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false\n",
+        "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false\n{install_args}",
         ActionPin::Mise.reference()
+    )
+}
+
+fn render_velnor_mise_setup(tools: &[String]) -> String {
+    if tools.is_empty() {
+        return String::new();
+    }
+    format!(
+        "      - name: Install declared Mise tools\n        run: |\n          set -euo pipefail\n          mise --yes --locked install {}\n",
+        tools.join(" ")
     )
 }
 
@@ -3470,7 +3499,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         output,
         "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
         ActionPin::Checkout.reference(),
-        render_mise_setup_for_runner(&job.runner),
+        render_mise_setup_for_runner(config, &job.runner, &job.tools),
     );
     output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
     if !job.attest_subjects.is_empty() {
@@ -7995,9 +8024,16 @@ verification_providers = ["github-hosted"]
         must(
             fs::write(
                 root.join("mise.toml"),
-                "[tasks.desktop-build]\nrun = \"true\"\n\n[tasks.desktop-sign]\nrun = \"true\"\n",
+                "[tools]\nrust = \"1.97.1\"\n\"cargo:boltffi_cli\" = \"0.30.1\"\nxcodegen = \"2.46.0\"\ncargo-binstall = \"1.21.1\"\n\n[tasks.desktop-build]\nrun = \"true\"\n\n[tasks.desktop-sign]\nrun = \"true\"\n",
             ),
             "write desktop task fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.rust]]\nversion = \"1.97.1\"\n\n[[tools.\"cargo:boltffi_cli\"]]\nversion = \"0.30.1\"\nbackend = \"cargo:boltffi_cli\"\n\n[[tools.xcodegen]]\nversion = \"2.46.0\"\n\n[[tools.cargo-binstall]]\nversion = \"1.21.1\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n",
+            ),
+            "write locked release tool fixture",
         );
         must(
             fs::create_dir_all(root.join(".github-gen")),
@@ -8006,7 +8042,7 @@ verification_providers = ["github-hosted"]
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\ntools = [\"rust\", \"cargo:boltffi_cli\", \"xcodegen\", \"cargo-binstall\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\ntools = [\"rust\", \"cargo:boltffi_cli\", \"xcodegen\", \"cargo-binstall\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\ntools = [\"rust\", \"cargo:boltffi_cli\", \"xcodegen\", \"cargo-binstall\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
             ),
             "write tasks release config",
         );
@@ -8028,6 +8064,11 @@ verification_providers = ["github-hosted"]
         let build = yaml_job(release, "build");
         assert!(build.contains("runs-on: ubuntu-24.04"), "{build}");
         assert!(build.contains("run: mise run desktop-build"), "{build}");
+        assert!(build.contains("install: false"), "{build}");
+        assert!(
+            build.contains("install_args: \"rust cargo:boltffi_cli xcodegen cargo-binstall\""),
+            "{build}"
+        );
         let sign = yaml_job(release, "sign");
         assert!(sign.contains("needs: [build]"), "{sign}");
         assert!(
@@ -8042,6 +8083,11 @@ verification_providers = ["github-hosted"]
         );
         assert!(sign.contains("id-token: write"), "{sign}");
         assert!(sign.contains("attestations: write"), "{sign}");
+        assert!(sign.contains("install: false"), "{sign}");
+        assert!(
+            sign.contains("install_args: \"rust cargo:boltffi_cli xcodegen cargo-binstall\""),
+            "{sign}"
+        );
         assert!(sign.contains("run: mise run desktop-sign"), "{sign}");
         assert!(
             sign.contains("subject-path: |\n            dist/app.zip"),
@@ -8051,6 +8097,18 @@ verification_providers = ["github-hosted"]
         assert!(defaults.contains("contents: read"), "{defaults}");
         assert!(defaults.contains("id-token: write"), "{defaults}");
         assert!(defaults.contains("attestations: write"), "{defaults}");
+        assert!(defaults.contains("install: false"), "{defaults}");
+        assert!(
+            defaults.contains("install_args: \"rust cargo:boltffi_cli xcodegen cargo-binstall\""),
+            "{defaults}"
+        );
+        assert_eq!(
+            release
+                .matches("install_args: \"rust cargo:boltffi_cli xcodegen cargo-binstall\"")
+                .count(),
+            3,
+            "every typed release job provisions its declared tool: {release}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -8064,6 +8122,7 @@ verification_providers = ["github-hosted"]
                 id: "job".to_owned(),
                 name: "Job".to_owned(),
                 tasks: vec!["desktop-build".to_owned()],
+                tools: vec!["ripgrep".to_owned()],
                 runner: runner.to_owned(),
                 timeout_minutes: 10,
                 ..ReleaseJobSpec::default()
@@ -8074,6 +8133,15 @@ verification_providers = ["github-hosted"]
                 needs_setup,
                 "Mise setup for runner {runner}: {rendered}"
             );
+            if needs_setup {
+                assert!(rendered.contains("install: false"), "{rendered}");
+                assert!(rendered.contains("install_args: ripgrep"), "{rendered}");
+            } else {
+                assert!(
+                    rendered.contains("mise --yes --locked install ripgrep"),
+                    "Velnor release jobs must install declared tools: {rendered}"
+                );
+            }
         }
     }
 
