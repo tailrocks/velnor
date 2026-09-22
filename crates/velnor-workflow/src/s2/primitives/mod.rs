@@ -469,6 +469,10 @@ pub(crate) struct RenderCtx<'a> {
     /// The aggregate passes them to the kind-reusable callers so caller
     /// `with:` values and callee step gates derive from one contract.
     pub(crate) contracts: &'a BTreeMap<String, UnitContract>,
+    /// Whether generated units may serialize the staged typed precondition
+    /// phase. Configured repositories disable it until their pinned runtime
+    /// supports the enum; direct fixture generation keeps it enabled.
+    pub(crate) precondition_phases_enabled: bool,
 }
 
 /// One render primitive of the CI surface.
@@ -995,6 +999,11 @@ pub(crate) fn generate(
     config: &ProjectConfig,
     generation: Option<&RepoGenerationConfig>,
 ) -> Result<Surface, GeneratorError> {
+    // Capability staging boundary: the checked-in repository config is
+    // consumed by a pinned runtime that predates `Precondition`. Keep its
+    // generated tree legacy-compatible until a later pin/config activation;
+    // unconfigured fixtures exercise the typed capability now.
+    let precondition_phases_enabled = generation.is_none();
     let declared = match generation {
         Some(generation) => generation
             .declare()
@@ -1040,6 +1049,7 @@ pub(crate) fn generate(
                 &cache,
                 &[],
                 &BTreeMap::new(),
+                precondition_phases_enabled,
             ),
             &row.args(),
         )?;
@@ -1076,6 +1086,7 @@ pub(crate) fn generate(
                 &cache,
                 &nodes,
                 &contracts,
+                precondition_phases_enabled,
             ),
             &row.args(),
         )?;
@@ -1179,6 +1190,7 @@ fn ctx<'a>(
     cache: &'a cache::ResolvedCache,
     nodes: &'a [GraphNode],
     contracts: &'a BTreeMap<String, UnitContract>,
+    precondition_phases_enabled: bool,
 ) -> RenderCtx<'a> {
     RenderCtx {
         root,
@@ -1193,6 +1205,7 @@ fn ctx<'a>(
         cache,
         nodes,
         contracts,
+        precondition_phases_enabled,
     }
 }
 
