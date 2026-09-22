@@ -1193,6 +1193,10 @@ pub(crate) struct BoltffiProducer {
     pub(crate) package_swift: Option<String>,
     /// The typed pack recipe: profile, lock enforcement, verbosity.
     pub(crate) recipe: BoltffiRecipe,
+    /// The locked `BoltFFI` CLI version, when the root `mise.lock` exposes
+    /// it. Absence stays unknown so scan-only fixtures can still describe a
+    /// same-run product; generation separately requires the tool lock.
+    pub(crate) tool_version: Option<String>,
     /// The Rust unit owning the producing crate, resolved at detect time.
     pub(crate) unit: Option<String>,
     /// The expected structural output files: the framework manifest plus,
@@ -1362,6 +1366,44 @@ const BOLTFFI_DEFAULT_MULTI_ARCHITECTURES: [&str; 2] = ["arm64", "x86_64"];
 /// (`default_apple_output`, `default_apple_deployment_target`).
 const BOLTFFI_DEFAULT_APPLE_OUTPUT: &str = "dist/apple";
 const BOLTFFI_DEFAULT_DEPLOYMENT_TARGET: &str = "16.0";
+const BOLTFFI_TOOL_KEY: &str = "cargo:boltffi_cli";
+
+/// Read the locked version of the CLI that materializes a `BoltFFI` product.
+/// The lock is an input fact, never an execution probe: malformed TOML is a
+/// scan error, while a missing tool row/version stays unknown and therefore
+/// cannot make exact reuse eligible on its own.
+fn parse_boltffi_tool_version(lock_toml: &str) -> Result<Option<String>, GeneratorError> {
+    let table: toml::Table = lock_toml.parse().map_err(|error| {
+        GeneratorError::usage(format!(
+            "parse lock TOML for BoltFFI adapter identity: {error}"
+        ))
+    })?;
+    let Some(tools) = table.get("tools").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
+    let Some(entry) = tools.get(BOLTFFI_TOOL_KEY) else {
+        return Ok(None);
+    };
+    let row = entry
+        .as_array()
+        .and_then(|rows| rows.first())
+        .unwrap_or(entry);
+    Ok(row
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned))
+}
+
+fn boltffi_tool_version(context: &ScanContext<'_>) -> Result<Option<String>, GeneratorError> {
+    if !context.file_set.contains("mise.lock") {
+        return Ok(None);
+    }
+    let path = context.root.join("mise.lock");
+    let lock_toml = fs::read_to_string(&path)
+        .map_err(|error| GeneratorError::io("read mise.lock", &path, &error))?;
+    parse_boltffi_tool_version(&lock_toml)
+}
 
 /// Whether `arch` is an architecture `BoltFFI` can place in an Apple slice
 /// (`boltffi_cli/src/target.rs` `Architecture`, Apple members only).
@@ -2081,6 +2123,7 @@ fn boltffi_producer_from_manifest(
     context: &ScanContext<'_>,
     manifest_path: &String,
     diagnostics: &mut Vec<String>,
+    tool_version: Option<&str>,
 ) -> Result<Option<BoltffiProducer>, GeneratorError> {
     let root = parent_path(manifest_path);
     let path = context.root.join(manifest_path);
@@ -2187,6 +2230,7 @@ fn boltffi_producer_from_manifest(
         framework,
         package_swift: bindings.package_swift,
         recipe,
+        tool_version: tool_version.map(str::to_owned),
         unit: None,
         inputs,
         inputs_unknown,
@@ -2199,12 +2243,20 @@ pub(crate) fn boltffi_producers(
 ) -> Result<(Vec<BoltffiProducer>, Vec<String>), GeneratorError> {
     let mut manifests = files_named(context.files, "boltffi.toml");
     manifests.sort();
+    let tool_version = if manifests.is_empty() {
+        None
+    } else {
+        boltffi_tool_version(context)?
+    };
     let mut producers = Vec::new();
     let mut diagnostics = Vec::new();
     for manifest_path in &manifests {
-        if let Some(producer) =
-            boltffi_producer_from_manifest(context, manifest_path, &mut diagnostics)?
-        {
+        if let Some(producer) = boltffi_producer_from_manifest(
+            context,
+            manifest_path,
+            &mut diagnostics,
+            tool_version.as_deref(),
+        )? {
             producers.push(producer);
         }
     }
@@ -2269,11 +2321,31 @@ pub(crate) fn detect(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{include_str_paths, package_runs_doctests, parse_cargo_manifest};
+    use super::{
+        include_str_paths, package_runs_doctests, parse_boltffi_tool_version, parse_cargo_manifest,
+    };
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+
+    #[test]
+    fn boltffi_tool_version_reads_the_locked_cli_version() {
+        let lock = "[[tools.\"cargo:boltffi_cli\"]]\nversion = \"0.30.1\"\nbackend = \"cargo:boltffi_cli\"\n";
+        assert_eq!(
+            parse_boltffi_tool_version(lock).ok(),
+            Some(Some("0.30.1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn boltffi_tool_version_stays_unknown_without_a_valid_pin() {
+        assert_eq!(
+            parse_boltffi_tool_version("[tools]\nother = \"1.0.0\"\n").ok(),
+            Some(None)
+        );
+        assert!(parse_boltffi_tool_version("[").is_err());
+    }
 
     #[test]
     fn lib_crate_types_mark_ffi_evidence() {

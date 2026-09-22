@@ -214,6 +214,12 @@ fn wire_native_edge(
         let recipe_commands = producer
             .recipe
             .commands(&producer.root, &producer.output, &surface);
+        // The pack runs Apple tooling, so the producing unit inherits the
+        // macOS requirement before its identity is built. Deriving the host
+        // ABI from this typed routing fact keeps cache identity and placement
+        // on one source of truth.
+        shape.units[producer_index].platform = Platform::MacosArm64;
+        shape.units[producer_index].capabilities.native_macos_arm64 = true;
         let identity = native_product_identity(
             shape,
             producer_index,
@@ -248,8 +254,6 @@ fn wire_native_edge(
                 rebuild: recipe_commands.clone(),
             });
         let unit = &mut shape.units[producer_index];
-        unit.platform = crate::s2::provider::Platform::MacosArm64;
-        unit.capabilities.native_macos_arm64 = true;
         unit.pr_commands.extend(recipe_commands.clone());
         unit.full_commands.extend(recipe_commands);
         // Recipe commands carry no phase tag; the unit keeps every command
@@ -329,17 +333,29 @@ fn native_product_identity(
         generation.insert("package_swift".to_owned(), package_swift.clone());
     }
 
+    // The locked BoltFFI CLI version is part of the native input closure
+    // through `mise.lock` and is copied into the adapter identity when the
+    // scan can prove it. A missing lock/version stays versionless rather than
+    // manufacturing a stale value; generation separately refuses an
+    // unpinned BoltFFI producer, and the unknown SDK below still blocks exact
+    // cross-run reuse.
+    let host_abi = shape.units[producer_index].platform.as_str().to_owned();
+    let adapter = producer.tool_version.as_deref().map_or_else(
+        || "boltffi".to_owned(),
+        |version| format!("boltffi@{version}"),
+    );
+
     crate::s2::platform::ProductIdentity {
         schema: crate::s2::platform::PRODUCT_IDENTITY_SCHEMA.to_owned(),
         producer: producer.unit.clone().unwrap_or_default(),
         product: product_name.to_owned(),
-        adapter: "boltffi@0.30.1".to_owned(),
+        adapter,
         source: format!(
             "{};crate={};framework={}",
             producer.manifest, producer.crate_name, producer.framework
         ),
         inputs_digest: producer.inputs_digest.clone(),
-        host_abi: "macos-arm64".to_owned(),
+        host_abi,
         target: "apple-xcframework".to_owned(),
         target_triple: target_triple.to_owned(),
         architectures,
@@ -731,6 +747,7 @@ mod tests {
                 locked: true,
                 verbose: false,
             },
+            tool_version: Some("0.30.1".to_owned()),
             unit: Some(producer_id.clone()),
             output_files: vec!["Info.plist".to_owned()],
             inputs: vec!["crates/ffi/src/**".to_owned()],
@@ -751,6 +768,17 @@ mod tests {
         let product = &unit.products[0];
         assert_eq!("xcframework-bridgecore", product.name);
         assert_eq!(vec!["native/out/BridgeCore.xcframework"], product.outputs);
+        let identity = match product.identity.as_ref() {
+            Some(identity) => identity,
+            None => panic!("native product identity"),
+        };
+        assert_eq!(identity.adapter, "boltffi@0.30.1");
+        assert_eq!(identity.host_abi, unit.platform.as_str());
+        assert!(identity.sdk.is_empty(), "static scan must not guess an SDK");
+        assert!(
+            !identity.exact_reuse_allowed(),
+            "unknown scan-time facts must disable exact reuse"
+        );
         assert_eq!(
             product.deployment_target, "26.0",
             "the product keeps the manifest scan fact"
@@ -853,6 +881,7 @@ mod tests {
                 locked: true,
                 verbose: false,
             },
+            tool_version: Some("0.30.1".to_owned()),
             unit: Some(shape.units[0].id.clone()),
             output_files: Vec::new(),
             inputs: Vec::new(),
