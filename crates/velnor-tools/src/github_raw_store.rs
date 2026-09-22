@@ -102,6 +102,11 @@ impl RawObjectFileStore {
             drop(setup_root);
             let _reconcile_lock =
                 NamespaceLock::acquire(&anchor.root).map_err(raw_storage_io_error)?;
+            if let Some(quarantine) =
+                QuarantineNamespace::open_existing_at(&anchor.root).map_err(raw_storage_io_error)?
+            {
+                reconcile_quarantine_namespace(&quarantine.file).map_err(raw_storage_io_error)?;
+            }
             anchor.reconcile(&objects, &originals, &refs)?;
             anchor.root.sync_all()?;
             drop(_reconcile_lock);
@@ -218,6 +223,7 @@ impl RawObjectFileStore {
             &transaction_name,
             &transaction_payload,
             MAX_RAW_SIDECAR_BYTES,
+            None,
         )?;
         self.anchor
             .validate(&self.objects, &self.originals, &self.refs)?;
@@ -498,6 +504,418 @@ impl FileIdentity {
             && other.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
             && self.mode & 0o7777 == other.mode & 0o7777
     }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CleanupPoint {
+    AfterIdentityCheck,
+    AfterQuarantineCheck,
+    BeforeDestructiveAction,
+}
+
+#[cfg(unix)]
+type CleanupHook = dyn Fn(CleanupPoint, &File, &CStr) -> Result<(), RawStorageError> + Send + Sync;
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum LinkCount {
+    Exact(u64),
+    AtMost(u64),
+}
+
+#[cfg(unix)]
+impl LinkCount {
+    fn accepts(self, actual: u64) -> bool {
+        match self {
+            Self::Exact(expected) => actual == expected,
+            Self::AtMost(maximum) => actual <= maximum,
+        }
+    }
+}
+
+#[cfg(unix)]
+struct CleanupSpec<'a> {
+    creator: &'a File,
+    expected: FileIdentity,
+    links: LinkCount,
+    expected_bytes: Option<&'a [u8]>,
+    expected_digest: Option<(&'a str, usize)>,
+    max_bytes: Option<usize>,
+    existing_namespace: Option<&'a File>,
+    hook: Option<&'a CleanupHook>,
+}
+
+#[cfg(unix)]
+const QUARANTINE_DIRECTORY_PREFIX: &[u8] = b".velnor-raw-quarantine-";
+
+#[cfg(unix)]
+const QUARANTINE_ENTRY_PREFIX: &[u8] = b".velnor-raw-entry-";
+
+#[cfg(unix)]
+const QUARANTINE_NAMESPACE_NAME: &[u8] = b".velnor-raw-quarantine";
+
+#[cfg(unix)]
+const QUARANTINE_MANIFEST_NAME: &[u8] = b".velnor-raw-manifest";
+
+#[cfg(unix)]
+const QUARANTINE_MANIFEST_MAGIC: &[u8] = b"VLNOR-RAW-QUARANTINE-V1\0";
+
+#[cfg(unix)]
+const MAX_QUARANTINE_MANIFEST_BYTES: usize = 512;
+
+#[cfg(unix)]
+static NEXT_QUARANTINE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct QuarantineNamespace {
+    file: File,
+}
+
+#[cfg(unix)]
+struct QuarantineDirectory {
+    namespace: FileIdentity,
+    identity: FileIdentity,
+    name: CString,
+    file: File,
+}
+
+#[cfg(unix)]
+struct QuarantineManifest {
+    expected: FileIdentity,
+    links: LinkCount,
+    max_bytes: Option<usize>,
+    expected_digest: Option<(usize, String)>,
+}
+
+#[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
+impl QuarantineManifest {
+    fn from_cleanup(
+        expected: FileIdentity,
+        links: LinkCount,
+        max_bytes: Option<usize>,
+        expected_bytes: Option<&[u8]>,
+        expected_digest: Option<(&str, usize)>,
+    ) -> Result<Self, RawStorageError> {
+        let expected_digest = match (expected_bytes, expected_digest) {
+            (Some(bytes), None) => Some((bytes.len(), sha256_digest(bytes))),
+            (None, Some((digest, length))) => Some((length, digest.to_owned())),
+            (None, None) => None,
+            (Some(_), Some(_)) => return Err(RawStorageError::Refused),
+        };
+        if expected_digest.is_some() && max_bytes.is_none() {
+            return Err(RawStorageError::Refused);
+        }
+        Ok(Self {
+            expected,
+            links,
+            max_bytes,
+            expected_digest,
+        })
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, RawStorageError> {
+        let mut bytes = QUARANTINE_MANIFEST_MAGIC.to_vec();
+        bytes.extend_from_slice(&self.expected.device.to_le_bytes());
+        bytes.extend_from_slice(&self.expected.inode.to_le_bytes());
+        bytes.extend_from_slice(&self.expected.nlink.to_le_bytes());
+        bytes.extend_from_slice(&self.expected.mode.to_le_bytes());
+        match self.links {
+            LinkCount::Exact(value) => {
+                bytes.push(0);
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            LinkCount::AtMost(value) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let max_bytes = self
+            .max_bytes
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| RawStorageError::Refused)?
+            .unwrap_or(u64::MAX);
+        bytes.extend_from_slice(&max_bytes.to_le_bytes());
+        match &self.expected_digest {
+            Some((length, digest)) => {
+                bytes.push(1);
+                bytes.extend_from_slice(
+                    &u64::try_from(*length)
+                        .map_err(|_| RawStorageError::Refused)?
+                        .to_le_bytes(),
+                );
+                let digest = digest.as_bytes();
+                let digest_length =
+                    u8::try_from(digest.len()).map_err(|_| RawStorageError::Refused)?;
+                bytes.push(digest_length);
+                bytes.extend_from_slice(digest);
+            }
+            None => bytes.push(0),
+        }
+        if bytes.len() > MAX_QUARANTINE_MANIFEST_BYTES {
+            return Err(RawStorageError::Refused);
+        }
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, RawStorageError> {
+        if !bytes.starts_with(QUARANTINE_MANIFEST_MAGIC) {
+            return Err(RawStorageError::Refused);
+        }
+        let mut offset = QUARANTINE_MANIFEST_MAGIC.len();
+        let expected = FileIdentity {
+            device: read_manifest_u64(bytes, &mut offset)?,
+            inode: read_manifest_u64(bytes, &mut offset)?,
+            nlink: read_manifest_u64(bytes, &mut offset)?,
+            mode: read_manifest_u32(bytes, &mut offset)?,
+        };
+        let links = match read_manifest_u8(bytes, &mut offset)? {
+            0 => LinkCount::Exact(read_manifest_u64(bytes, &mut offset)?),
+            1 => LinkCount::AtMost(read_manifest_u64(bytes, &mut offset)?),
+            _ => return Err(RawStorageError::Refused),
+        };
+        let max_bytes = match read_manifest_u64(bytes, &mut offset)? {
+            u64::MAX => None,
+            value => Some(usize::try_from(value).map_err(|_| RawStorageError::Refused)?),
+        };
+        let expected_digest = match read_manifest_u8(bytes, &mut offset)? {
+            0 => None,
+            1 => {
+                let length = usize::try_from(read_manifest_u64(bytes, &mut offset)?)
+                    .map_err(|_| RawStorageError::Refused)?;
+                let digest_length = usize::from(read_manifest_u8(bytes, &mut offset)?);
+                let end = offset
+                    .checked_add(digest_length)
+                    .ok_or(RawStorageError::Refused)?;
+                let digest = bytes
+                    .get(offset..end)
+                    .and_then(|digest| std::str::from_utf8(digest).ok())
+                    .filter(|digest| valid_digest(digest))
+                    .ok_or(RawStorageError::Refused)?
+                    .to_owned();
+                offset = end;
+                Some((length, digest))
+            }
+            _ => return Err(RawStorageError::Refused),
+        };
+        if offset != bytes.len() || expected_digest.is_some() && max_bytes.is_none() {
+            return Err(RawStorageError::Refused);
+        }
+        Ok(Self {
+            expected,
+            links,
+            max_bytes,
+            expected_digest,
+        })
+    }
+
+    fn matches(&self, file: &mut File) -> Result<bool, RawStorageError> {
+        let actual = stat_fd(file).map_err(storage_io)?;
+        if !actual.same_inode(self.expected)
+            || actual.mode & libc::S_IFMT as u32 != libc::S_IFREG as u32
+            || actual.mode & 0o7777 != self.expected.mode & 0o7777
+            || !self.links.accepts(actual.nlink)
+        {
+            return Ok(false);
+        }
+        let Some(max_bytes) = self.max_bytes else {
+            return Ok(self.expected_digest.is_none());
+        };
+        let bytes = match read_verified_fd(file, max_bytes) {
+            Ok(bytes) => bytes,
+            Err(RawStorageError::Refused | RawStorageError::Unbound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(self
+            .expected_digest
+            .as_ref()
+            .is_none_or(|(length, digest)| {
+                bytes.len() == *length && sha256_digest(&bytes) == *digest
+            }))
+    }
+}
+
+#[cfg(unix)]
+fn read_manifest_u8(bytes: &[u8], offset: &mut usize) -> Result<u8, RawStorageError> {
+    let value = *bytes.get(*offset).ok_or(RawStorageError::Refused)?;
+    *offset = offset.checked_add(1).ok_or(RawStorageError::Refused)?;
+    Ok(value)
+}
+
+#[cfg(unix)]
+fn read_manifest_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, RawStorageError> {
+    let end = offset.checked_add(4).ok_or(RawStorageError::Refused)?;
+    let value = bytes
+        .get(*offset..end)
+        .and_then(|value| value.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or(RawStorageError::Refused)?;
+    *offset = end;
+    Ok(value)
+}
+
+#[cfg(unix)]
+fn read_manifest_u64(bytes: &[u8], offset: &mut usize) -> Result<u64, RawStorageError> {
+    let end = offset.checked_add(8).ok_or(RawStorageError::Refused)?;
+    let value = bytes
+        .get(*offset..end)
+        .and_then(|value| value.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or(RawStorageError::Refused)?;
+    *offset = end;
+    Ok(value)
+}
+
+#[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
+impl QuarantineNamespace {
+    fn open_for(directory: &File) -> Result<Self, RawStorageError> {
+        let parent = open_directory_at(directory, OsStr::new(".."), false).map_err(storage_io)?;
+        Self::open_at(&parent, true)?.ok_or(RawStorageError::Unavailable)
+    }
+
+    fn open_existing_at(parent: &File) -> Result<Option<Self>, RawStorageError> {
+        Self::open_at(parent, false)
+    }
+
+    fn open_at(parent: &File, create: bool) -> Result<Option<Self>, RawStorageError> {
+        let name = CString::new(QUARANTINE_NAMESPACE_NAME).map_err(|_| RawStorageError::Refused)?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        let mut fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        let mut created = false;
+        if fd < 0 && create && io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EEXIST) {
+                    return Err(storage_io(error));
+                }
+            } else {
+                created = true;
+            }
+            fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        }
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            if !create && error.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(None);
+            }
+            return Err(storage_io(error));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let identity = stat_fd(&file).map_err(storage_io)?;
+        if identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+            || identity.mode & 0o7777 != 0o700
+        {
+            return Err(RawStorageError::Refused);
+        }
+        if created {
+            parent.sync_all().map_err(storage_io)?;
+        }
+        Ok(Some(Self { file }))
+    }
+}
+
+#[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
+impl QuarantineDirectory {
+    fn create(namespace: &File) -> Result<Self, RawStorageError> {
+        let namespace_identity = stat_fd(namespace).map_err(storage_io)?;
+        let sequence = NEXT_QUARANTINE.fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..64_u32 {
+            let name = CString::new(format!(
+                ".velnor-raw-quarantine-{}-{sequence}-{attempt}",
+                std::process::id()
+            ))
+            .map_err(|_| RawStorageError::Refused)?;
+            let result = unsafe { libc::mkdirat(namespace.as_raw_fd(), name.as_ptr(), 0o700) };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EEXIST) {
+                    continue;
+                }
+                return Err(storage_io(error));
+            }
+            let fd = unsafe {
+                libc::openat(
+                    namespace.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if fd < 0 {
+                let error = io::Error::last_os_error();
+                // Keep the named directory for the next reconciliation pass;
+                // without its creator FD, deleting it by name would risk
+                // removing a replacement directory.
+                return Err(storage_io(error));
+            }
+            let file = unsafe { File::from_raw_fd(fd) };
+            let identity = stat_fd(&file).map_err(storage_io)?;
+            if identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+                || identity.mode & 0o7777 != 0o700
+            {
+                return Err(RawStorageError::Refused);
+            }
+            sync_directory(namespace)?;
+            return Ok(Self {
+                namespace: namespace_identity,
+                identity,
+                name,
+                file,
+            });
+        }
+        Err(RawStorageError::Unavailable)
+    }
+
+    fn claim(&self, directory: &File, name: &CStr) -> Result<CString, RawStorageError> {
+        for attempt in 0..64_u32 {
+            let quarantine_name = quarantine_entry_name(attempt)?;
+            match install_no_clobber(directory, name, &self.file, &quarantine_name) {
+                Ok(()) => {
+                    sync_directory(&self.file)?;
+                    return Ok(quarantine_name);
+                }
+                Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
+                Err(error) => return Err(storage_io(error)),
+            }
+        }
+        Err(RawStorageError::Unavailable)
+    }
+
+    fn write_manifest(&self, manifest: &QuarantineManifest) -> Result<(), RawStorageError> {
+        let name = CString::new(QUARANTINE_MANIFEST_NAME).map_err(|_| RawStorageError::Refused)?;
+        let fd = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(storage_io(io::Error::last_os_error()));
+        }
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        file.write_all(&manifest.encode()?).map_err(storage_io)?;
+        file.sync_all().map_err(storage_io)?;
+        sync_directory(&self.file)
+    }
+}
+
+#[cfg(unix)]
+fn quarantine_entry_name(attempt: u32) -> Result<CString, RawStorageError> {
+    let sequence = NEXT_QUARANTINE.fetch_add(1, Ordering::Relaxed);
+    CString::new(format!(
+        ".velnor-raw-entry-{}-{sequence}-{attempt}",
+        std::process::id()
+    ))
+    .map_err(|_| RawStorageError::Refused)
 }
 
 #[cfg(unix)]
@@ -979,22 +1397,22 @@ fn reconcile_namespace(
             continue;
         };
         let Ok(raw_id) = std::str::from_utf8(raw_id_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
             continue;
         };
         let Ok(expected_name) = transaction_name(raw_id) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
             continue;
         };
         if expected_name.as_bytes() != name.as_bytes() {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
             continue;
         }
         let transaction_payload = read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?;
         let Some(reference) =
             parse_transaction_journal(objects, originals, raw_id, &transaction_payload)
         else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
             continue;
         };
         let sidecar_name = raw_id_name(raw_id)?;
@@ -1014,7 +1432,13 @@ fn reconcile_namespace(
                 MAX_RAW_SIDECAR_BYTES,
             )?;
         }
-        remove_exact_file(refs, &name, &transaction_payload, MAX_RAW_SIDECAR_BYTES)?;
+        remove_exact_file(
+            refs,
+            &name,
+            &transaction_payload,
+            MAX_RAW_SIDECAR_BYTES,
+            None,
+        )?;
     }
 
     let mut safe_names = HashSet::new();
@@ -1032,15 +1456,15 @@ fn reconcile_namespace(
             continue;
         };
         let Ok(raw_id) = std::str::from_utf8(raw_id_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
             continue;
         };
         let Ok(expected_name) = raw_id_name(raw_id) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
             continue;
         };
         if expected_name.as_bytes() != name.as_bytes() {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
             continue;
         }
         let valid = parse_reference(raw_id, &read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?)
@@ -1059,7 +1483,7 @@ fn reconcile_namespace(
                 true
             });
         if !valid {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), None)?;
         }
     }
     reconcile_object_directory(objects, &safe_names)?;
@@ -1143,7 +1567,7 @@ fn reconcile_object_directory(
             // A final object may be removed only when it is still a private,
             // single-link regular file. Hardlink/symlink replacements fail
             // closed and remain untouched.
-            remove_private_named(directory, &name, Some(MAX_RAW_OBJECT_BYTES))?;
+            remove_private_named(directory, &name, Some(MAX_RAW_OBJECT_BYTES), None)?;
         }
     }
     Ok(())
@@ -1190,10 +1614,166 @@ fn directory_names(directory: &File) -> Result<Vec<CString>, RawStorageError> {
 }
 
 #[cfg(unix)]
+fn quarantine_and_remove(
+    directory: &File,
+    name: &CStr,
+    spec: CleanupSpec<'_>,
+) -> Result<(), RawStorageError> {
+    let CleanupSpec {
+        creator,
+        expected,
+        links,
+        expected_bytes,
+        expected_digest,
+        max_bytes,
+        existing_namespace,
+        hook,
+    } = spec;
+    if let Some(hook) = hook {
+        hook(CleanupPoint::AfterIdentityCheck, directory, name)?;
+    }
+
+    let namespace = match existing_namespace {
+        Some(namespace) => namespace.try_clone().map_err(storage_io)?,
+        None => QuarantineNamespace::open_for(directory)?.file,
+    };
+    let quarantine = QuarantineDirectory::create(&namespace)?;
+    if !stat_fd(&namespace)
+        .map_err(storage_io)?
+        .same_directory(quarantine.namespace)
+    {
+        return Err(RawStorageError::Refused);
+    }
+    let manifest_expected = FileIdentity {
+        mode: stat_fd(creator).map_err(storage_io)?.mode,
+        ..expected
+    };
+    let manifest = QuarantineManifest::from_cleanup(
+        manifest_expected,
+        links,
+        max_bytes,
+        expected_bytes,
+        expected_digest,
+    )?;
+    quarantine.write_manifest(&manifest)?;
+    let quarantine_name = quarantine.claim(directory, name)?;
+    sync_directory(directory)?;
+
+    let Some(mut quarantined) = open_named(&quarantine.file, &quarantine_name)? else {
+        return Err(RawStorageError::Unavailable);
+    };
+    let quarantined_identity = stat_fd(&quarantined).map_err(storage_io)?;
+    let quarantined_bytes = max_bytes
+        .map(|max_bytes| read_verified_fd(&mut quarantined, max_bytes))
+        .transpose()?;
+    let creator_identity = stat_fd(creator).map_err(storage_io)?;
+    let first_matches = quarantined_identity.same_inode(expected)
+        && creator_identity.same_inode(expected)
+        && links.accepts(quarantined_identity.nlink)
+        && links.accepts(creator_identity.nlink)
+        && cleanup_content_matches(
+            quarantined_bytes.as_deref(),
+            expected_bytes,
+            expected_digest,
+        );
+    if !first_matches {
+        sync_directory(&quarantine.file)?;
+        return Err(RawStorageError::Refused);
+    }
+
+    if let Some(hook) = hook {
+        hook(CleanupPoint::AfterQuarantineCheck, directory, name)?;
+    }
+
+    // The entry is now addressed through the protected, creator-held
+    // quarantine directory. Recheck it after the test seam and before the
+    // destructive operation; a replacement is left recoverable in place.
+    let Some(mut still_quarantined) = open_named(&quarantine.file, &quarantine_name)? else {
+        return Err(RawStorageError::Unavailable);
+    };
+    let still_identity = stat_fd(&still_quarantined).map_err(storage_io)?;
+    let still_bytes = max_bytes
+        .map(|max_bytes| read_verified_fd(&mut still_quarantined, max_bytes))
+        .transpose()?;
+    let creator_identity = stat_fd(creator).map_err(storage_io)?;
+    let second_matches = still_identity.same_inode(expected)
+        && creator_identity.same_inode(expected)
+        && links.accepts(still_identity.nlink)
+        && links.accepts(creator_identity.nlink)
+        && cleanup_content_matches(still_bytes.as_deref(), expected_bytes, expected_digest);
+    if !second_matches {
+        sync_directory(&quarantine.file)?;
+        return Err(RawStorageError::Refused);
+    }
+
+    if let Some(hook) = hook {
+        hook(CleanupPoint::BeforeDestructiveAction, directory, name)?;
+    }
+
+    if !stat_fd(&namespace)
+        .map_err(storage_io)?
+        .same_directory(quarantine.namespace)
+        || !stat_fd(&quarantine.file)
+            .map_err(storage_io)?
+            .same_directory(quarantine.identity)
+    {
+        sync_directory(&quarantine.file)?;
+        return Err(RawStorageError::Refused);
+    }
+
+    // The quarantine directory is intentionally retained as a named recovery
+    // root. Its held FD is the only namespace used for this destructive
+    // operation; the original pathname is never unlinked. A same-UID actor
+    // that can enter this private directory is outside the guarantee: no
+    // portable Unix API combines an identity check with unlink-by-FD. Any
+    // observed identity/content mismatch above fails closed and preserves the
+    // claimed entry for recovery.
+    let result =
+        unsafe { libc::unlinkat(quarantine.file.as_raw_fd(), quarantine_name.as_ptr(), 0) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Err(RawStorageError::Unavailable);
+        }
+        return Err(storage_io(error));
+    }
+    sync_directory(&quarantine.file)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn cleanup_content_matches(
+    actual: Option<&[u8]>,
+    expected_bytes: Option<&[u8]>,
+    expected_digest: Option<(&str, usize)>,
+) -> bool {
+    match (actual, expected_bytes, expected_digest) {
+        (Some(actual), Some(expected), None) => actual == expected,
+        (Some(actual), None, Some((digest, length))) => {
+            actual.len() == length && sha256_digest(actual) == digest
+        }
+        (Some(_), None, None) | (None, None, None) => true,
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
 fn remove_private_named(
     directory: &File,
     name: &CStr,
     max_bytes: Option<usize>,
+    hook: Option<&CleanupHook>,
+) -> Result<(), RawStorageError> {
+    remove_private_named_in_namespace(directory, name, max_bytes, None, hook)
+}
+
+#[cfg(unix)]
+fn remove_private_named_in_namespace(
+    directory: &File,
+    name: &CStr,
+    max_bytes: Option<usize>,
+    existing_namespace: Option<&File>,
+    hook: Option<&CleanupHook>,
 ) -> Result<(), RawStorageError> {
     let Some(mut file) = open_named(directory, name)? else {
         return Ok(());
@@ -1209,15 +1789,20 @@ fn remove_private_named(
     if after != before {
         return Err(RawStorageError::Refused);
     }
-    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(());
-        }
-        return Err(storage_io(error));
-    }
-    Ok(())
+    quarantine_and_remove(
+        directory,
+        name,
+        CleanupSpec {
+            creator: &file,
+            expected: before,
+            links: LinkCount::Exact(before.nlink),
+            expected_bytes: None,
+            expected_digest: None,
+            max_bytes,
+            existing_namespace,
+            hook,
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -1226,6 +1811,7 @@ fn remove_exact_file(
     name: &CStr,
     expected: &[u8],
     max_bytes: usize,
+    hook: Option<&CleanupHook>,
 ) -> Result<(), RawStorageError> {
     let Some(mut file) = open_named(directory, name)? else {
         return Ok(());
@@ -1240,15 +1826,20 @@ fn remove_exact_file(
     if after != before {
         return Err(RawStorageError::Refused);
     }
-    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(());
-        }
-        return Err(storage_io(error));
-    }
-    Ok(())
+    quarantine_and_remove(
+        directory,
+        name,
+        CleanupSpec {
+            creator: &file,
+            expected: before,
+            links: LinkCount::Exact(before.nlink),
+            expected_bytes: Some(expected),
+            expected_digest: None,
+            max_bytes: Some(max_bytes),
+            existing_namespace: None,
+            hook,
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -1263,9 +1854,109 @@ fn reconcile_temporary(directory: &File, name: &CStr) -> Result<(), RawStorageEr
     // regular file by name.
     let permissions = identity.mode & 0o777;
     if identity.is_private_regular_single_link() && matches!(permissions, 0o400 | 0o600) {
-        remove_private_named(directory, name, None)?;
+        remove_private_named(directory, name, None, None)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
+fn reconcile_quarantine_namespace(namespace: &File) -> Result<(), RawStorageError> {
+    let identity = stat_fd(namespace).map_err(storage_io)?;
+    if identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+        || identity.mode & 0o7777 != 0o700
+    {
+        return Err(RawStorageError::Refused);
+    }
+    for name in directory_names(namespace)? {
+        if name.as_bytes().starts_with(QUARANTINE_DIRECTORY_PREFIX) {
+            reconcile_quarantine_directory(namespace, &name)?;
+        }
+    }
+    sync_directory(namespace)
+}
+
+#[cfg(unix)]
+fn read_quarantine_manifest(
+    directory: &File,
+) -> Result<Option<QuarantineManifest>, RawStorageError> {
+    let name = CString::new(QUARANTINE_MANIFEST_NAME).map_err(|_| RawStorageError::Refused)?;
+    let Some(mut file) = (match open_named(directory, &name) {
+        Ok(file) => file,
+        Err(RawStorageError::Refused) => return Ok(None),
+        Err(error) => return Err(error),
+    }) else {
+        return Ok(None);
+    };
+    let bytes = match read_verified_fd(&mut file, MAX_QUARANTINE_MANIFEST_BYTES) {
+        Ok(bytes) => bytes,
+        Err(RawStorageError::Refused | RawStorageError::Unbound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(QuarantineManifest::decode(&bytes).ok())
+}
+
+#[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
+fn reconcile_quarantine_directory(namespace: &File, name: &CStr) -> Result<(), RawStorageError> {
+    let directory = match open_directory_at(namespace, OsStr::from_bytes(name.to_bytes()), false) {
+        Ok(directory) => directory,
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+        Err(error) => return Err(storage_io(error)),
+    };
+    let identity = stat_fd(&directory).map_err(storage_io)?;
+    if identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+        || identity.mode & 0o7777 != 0o700
+    {
+        return Err(RawStorageError::Refused);
+    }
+    let Some(manifest) = read_quarantine_manifest(&directory)? else {
+        // A manifest is written and synced before any source entry is
+        // claimed. Missing or malformed metadata therefore means the
+        // quarantine cannot be proven safe after restart; preserve it.
+        return Ok(());
+    };
+    let expected_digest = manifest
+        .expected_digest
+        .as_ref()
+        .map(|(length, digest)| (digest.as_str(), *length));
+    for entry in directory_names(&directory)? {
+        if entry.as_bytes().starts_with(QUARANTINE_ENTRY_PREFIX) {
+            let Some(mut file) = (match open_named(&directory, &entry) {
+                Ok(file) => file,
+                Err(RawStorageError::Refused) => None,
+                Err(error) => return Err(error),
+            }) else {
+                continue;
+            };
+            let matches = match manifest.matches(&mut file) {
+                Ok(matches) => matches,
+                Err(RawStorageError::Refused | RawStorageError::Unbound) => false,
+                Err(error) => return Err(error),
+            };
+            if !matches {
+                sync_directory(&directory)?;
+                continue;
+            }
+            quarantine_and_remove(
+                &directory,
+                &entry,
+                CleanupSpec {
+                    creator: &file,
+                    expected: manifest.expected,
+                    links: manifest.links,
+                    expected_bytes: None,
+                    expected_digest,
+                    max_bytes: manifest.max_bytes,
+                    existing_namespace: Some(namespace),
+                    hook: None,
+                },
+            )?;
+        }
+    }
+    sync_directory(&directory)
 }
 
 #[cfg(all(test, unix))]
@@ -1419,7 +2110,7 @@ fn publish_if_absent(
             return Err(storage_io(io::Error::last_os_error()));
         }
 
-        match install_no_clobber(directory, &temporary.name, name) {
+        match install_no_clobber(directory, &temporary.name, directory, name) {
             Ok(()) => {
                 // Atomic rename/link moved the temporary name to the final
                 // name. There is no cleanup pathname left to race.
@@ -1447,7 +2138,7 @@ fn publish_if_absent(
                 // namespace transaction lock is held. An external writer
                 // raced the immutable install; reclaim our name only after
                 // an identity/link-count check. Drop repeats that check.
-                let _ = temporary.remove_name(1);
+                let _ = temporary.remove_name(1, None);
                 Err(RawStorageError::Refused)
             }
             Err(error) => Err(storage_io(error)),
@@ -1456,14 +2147,19 @@ fn publish_if_absent(
 }
 
 #[cfg(unix)]
-fn install_no_clobber(directory: &File, temporary: &CStr, final_name: &CStr) -> io::Result<()> {
+fn install_no_clobber(
+    source_directory: &File,
+    source_name: &CStr,
+    destination_directory: &File,
+    destination_name: &CStr,
+) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     let result = unsafe {
         libc::renameatx_np(
-            directory.as_raw_fd(),
-            temporary.as_ptr(),
-            directory.as_raw_fd(),
-            final_name.as_ptr(),
+            source_directory.as_raw_fd(),
+            source_name.as_ptr(),
+            destination_directory.as_raw_fd(),
+            destination_name.as_ptr(),
             libc::RENAME_EXCL,
         )
     };
@@ -1472,16 +2168,21 @@ fn install_no_clobber(directory: &File, temporary: &CStr, final_name: &CStr) -> 
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
-            directory.as_raw_fd(),
-            temporary.as_ptr(),
-            directory.as_raw_fd(),
-            final_name.as_ptr(),
+            source_directory.as_raw_fd(),
+            source_name.as_ptr(),
+            destination_directory.as_raw_fd(),
+            destination_name.as_ptr(),
             1_i32,
         ) as libc::c_int
     };
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (directory, temporary, final_name);
+    let _ = (
+        source_directory,
+        source_name,
+        destination_directory,
+        destination_name,
+    );
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -1654,7 +2355,11 @@ impl<'a> TemporaryFile<'a> {
         Err(RawStorageError::Unavailable)
     }
 
-    fn remove_name(&mut self, expected_links: u64) -> Result<(), RawStorageError> {
+    fn remove_name(
+        &mut self,
+        expected_links: u64,
+        hook: Option<&CleanupHook>,
+    ) -> Result<(), RawStorageError> {
         let Some(named_file) = open_named(self.directory, &self.name)? else {
             return Err(RawStorageError::Unavailable);
         };
@@ -1667,12 +2372,21 @@ impl<'a> TemporaryFile<'a> {
         {
             return Err(RawStorageError::Refused);
         }
-        let result = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
-        if result < 0 {
-            return Err(storage_io(io::Error::last_os_error()));
-        }
+        quarantine_and_remove(
+            self.directory,
+            &self.name,
+            CleanupSpec {
+                creator: &self.file,
+                expected: self.identity,
+                links: LinkCount::Exact(expected_links),
+                expected_bytes: None,
+                expected_digest: None,
+                max_bytes: None,
+                existing_namespace: None,
+                hook,
+            },
+        )?;
         self.name_removed = true;
-        sync_directory(self.directory)?;
         Ok(())
     }
 }
@@ -1703,8 +2417,20 @@ impl Drop for TemporaryFile<'_> {
         {
             return;
         }
-        let _ = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
-        let _ = self.directory.sync_all();
+        let _ = quarantine_and_remove(
+            self.directory,
+            &self.name,
+            CleanupSpec {
+                creator: &self.file,
+                expected: self.identity,
+                links: LinkCount::AtMost(2),
+                expected_bytes: None,
+                expected_digest: None,
+                max_bytes: None,
+                existing_namespace: None,
+                hook: None,
+            },
+        );
     }
 }
 
@@ -1727,4 +2453,339 @@ fn raw_storage_io_error(error: RawStorageError) -> io::Error {
         RawStorageError::Unbound => io::ErrorKind::InvalidData,
     };
     io::Error::new(kind, "raw store namespace reconciliation failed")
+}
+
+#[cfg(all(test, unix))]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "cleanup race tests turn fixture setup failures into explicit test failures"
+)]
+mod cleanup_tests {
+    use super::*;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    fn fixture(name: &str) -> PathBuf {
+        let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let parent = std::env::current_dir()
+            .expect("find cleanup test directory")
+            .join(format!(
+                ".github-raw-store-cleanup-{name}-{}-{sequence}",
+                std::process::id()
+            ));
+        fs::create_dir(&parent).expect("create cleanup fixture parent");
+        let path = parent.join("store");
+        fs::create_dir(&path).expect("create cleanup fixture");
+        path
+    }
+
+    fn fixture_parent(path: &Path) -> &Path {
+        path.parent().expect("fixture has a private parent")
+    }
+
+    fn quarantine_namespace_path(path: &Path) -> PathBuf {
+        fixture_parent(path).join(OsStr::from_bytes(QUARANTINE_NAMESPACE_NAME))
+    }
+
+    fn write_private(path: &Path, bytes: &[u8]) {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .expect("create private cleanup file");
+        file.write_all(bytes).expect("write cleanup file");
+        file.sync_all().expect("sync cleanup file");
+    }
+
+    fn replace_named(directory: &File, name: &CStr, bytes: &[u8]) -> Result<(), RawStorageError> {
+        let replacement_name = CString::new(format!(
+            ".velnor-raw-test-attacker-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ))
+        .map_err(|_| RawStorageError::Refused)?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                replacement_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(storage_io(io::Error::last_os_error()));
+        }
+        let mut replacement = unsafe { File::from_raw_fd(fd) };
+        replacement
+            .write_all(bytes)
+            .and_then(|_| replacement.sync_all())
+            .map_err(storage_io)?;
+        drop(replacement);
+        let result = unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                replacement_name.as_ptr(),
+                directory.as_raw_fd(),
+                name.as_ptr(),
+            )
+        };
+        if result < 0 {
+            return Err(storage_io(io::Error::last_os_error()));
+        }
+        sync_directory(directory)
+    }
+
+    fn quarantined_bytes(path: &Path) -> Vec<u8> {
+        let namespace = quarantine_namespace_path(path);
+        let quarantine = fs::read_dir(namespace)
+            .expect("read cleanup fixture")
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .as_bytes()
+                    .starts_with(QUARANTINE_DIRECTORY_PREFIX)
+            })
+            .expect("find quarantine directory")
+            .path();
+        let entry = fs::read_dir(quarantine)
+            .expect("read quarantine directory")
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .as_bytes()
+                    .starts_with(QUARANTINE_ENTRY_PREFIX)
+            })
+            .expect("find quarantined entry")
+            .path();
+        fs::read(entry).expect("read quarantined entry")
+    }
+
+    #[test]
+    fn replacement_before_quarantine_claim_stays_recoverable() {
+        let root = fixture("before-claim");
+        let target = root.join("target");
+        let outside = root.join("outside");
+        write_private(&target, b"creator");
+        write_private(&outside, b"outside-sentinel");
+        let directory = File::open(&root).expect("open cleanup directory");
+        let name = CString::new("target").expect("target name");
+        let hook =
+            |point: CleanupPoint, directory: &File, name: &CStr| -> Result<(), RawStorageError> {
+                if point == CleanupPoint::AfterIdentityCheck {
+                    replace_named(directory, name, b"attacker-before-claim")?;
+                }
+                Ok(())
+            };
+
+        let result = remove_private_named(&directory, &name, Some(1024), Some(&hook));
+        assert_eq!(result, Err(RawStorageError::Refused));
+        assert_eq!(quarantined_bytes(&root), b"attacker-before-claim");
+        assert_eq!(
+            fs::read(outside).expect("read outside sentinel"),
+            b"outside-sentinel"
+        );
+        let _ = fs::remove_dir_all(fixture_parent(&root));
+    }
+
+    #[test]
+    fn replacement_after_final_quarantine_check_survives_original_path_cleanup() {
+        let root = fixture("after-check");
+        let target = root.join("target");
+        let outside = root.join("outside");
+        write_private(&target, b"creator");
+        write_private(&outside, b"outside-sentinel");
+        let directory = File::open(&root).expect("open cleanup directory");
+        let name = CString::new("target").expect("target name");
+        let hook =
+            |point: CleanupPoint, directory: &File, name: &CStr| -> Result<(), RawStorageError> {
+                if point == CleanupPoint::BeforeDestructiveAction {
+                    replace_named(directory, name, b"attacker-after-check")?;
+                }
+                Ok(())
+            };
+
+        remove_private_named(&directory, &name, Some(1024), Some(&hook))
+            .expect("remove verified creator");
+        assert_eq!(
+            fs::read(&target).expect("read replacement"),
+            b"attacker-after-check"
+        );
+        assert_eq!(
+            fs::read(outside).expect("read outside sentinel"),
+            b"outside-sentinel"
+        );
+        assert!(fs::read_dir(quarantine_namespace_path(&root))
+            .expect("read cleanup directory")
+            .flatten()
+            .all(|entry| {
+                fs::read_dir(entry.path())
+                    .expect("read retained quarantine directory")
+                    .flatten()
+                    .all(|entry| {
+                        !entry
+                            .file_name()
+                            .as_bytes()
+                            .starts_with(QUARANTINE_ENTRY_PREFIX)
+                    })
+            }));
+        let _ = fs::remove_dir_all(fixture_parent(&root));
+    }
+
+    #[test]
+    fn exact_and_temporary_cleanup_share_quarantine_claim() {
+        let root = fixture("shared-claim");
+        let exact = root.join("exact");
+        write_private(&exact, b"exact");
+        let directory = File::open(&root).expect("open cleanup directory");
+        let exact_name = CString::new("exact").expect("exact name");
+        remove_exact_file(&directory, &exact_name, b"exact", 1024, None)
+            .expect("remove exact file");
+        assert!(!exact.exists());
+
+        let mut temporary = TemporaryFile::create(&directory).expect("create temporary file");
+        temporary
+            .file
+            .write_all(b"temporary")
+            .expect("write temporary file");
+        temporary.file.sync_all().expect("sync temporary file");
+        temporary
+            .remove_name(1, None)
+            .expect("remove temporary name");
+        assert!(directory_names(&directory)
+            .expect("read cleanup directory")
+            .iter()
+            .all(|name| !name.as_bytes().starts_with(QUARANTINE_DIRECTORY_PREFIX)));
+        assert!(fs::read_dir(quarantine_namespace_path(&root))
+            .expect("read retained quarantine namespace")
+            .flatten()
+            .all(|entry| {
+                fs::read_dir(entry.path())
+                    .expect("read retained quarantine directory")
+                    .flatten()
+                    .all(|entry| {
+                        !entry
+                            .file_name()
+                            .as_bytes()
+                            .starts_with(QUARANTINE_ENTRY_PREFIX)
+                    })
+            }));
+        let _ = fs::remove_dir_all(fixture_parent(&root));
+    }
+
+    #[test]
+    fn restart_reconciles_named_quarantine_directory() {
+        let root = fixture("restart-recovery");
+        let store = RawObjectFileStore::new(&root).expect("open recovery store");
+        drop(store);
+
+        let objects = root.join("sha256");
+        let directory = File::open(&objects).expect("open object directory");
+        let namespace = QuarantineNamespace::open_for(&directory).expect("open namespace");
+        let quarantine = QuarantineDirectory::create(&namespace.file).expect("create quarantine");
+        let source_name = CString::new(".velnor-raw-restart-source").expect("source name");
+        let source_path = root.join(OsStr::from_bytes(source_name.as_bytes()));
+        write_private(&source_path, b"crash-bytes");
+        let source = open_named(
+            &File::open(&root).expect("open source parent"),
+            &source_name,
+        )
+        .expect("open restart source")
+        .expect("restart source exists");
+        let manifest = QuarantineManifest::from_cleanup(
+            stat_fd(&source).expect("stat restart source"),
+            LinkCount::Exact(1),
+            Some(1024),
+            Some(b"crash-bytes"),
+            None,
+        )
+        .expect("create restart manifest");
+        quarantine
+            .write_manifest(&manifest)
+            .expect("write restart manifest");
+        let source_parent = File::open(&root).expect("open source parent");
+        install_no_clobber(
+            &source_parent,
+            &source_name,
+            &quarantine.file,
+            &CString::new(".velnor-raw-entry-crash").expect("entry name"),
+        )
+        .expect("claim restart source");
+        sync_directory(&quarantine.file).expect("sync restart quarantine");
+        sync_directory(&source_parent).expect("sync restart source parent");
+        drop(source);
+        drop(quarantine);
+
+        let reopened = RawObjectFileStore::new(&root).expect("reconcile recovery store");
+        drop(reopened);
+        assert!(
+            fs::read_dir(root.join(OsStr::from_bytes(QUARANTINE_NAMESPACE_NAME)))
+                .expect("read quarantine namespace after recovery")
+                .flatten()
+                .all(|entry| {
+                    fs::read_dir(entry.path())
+                        .expect("read recovered quarantine directory")
+                        .flatten()
+                        .all(|entry| {
+                            !entry
+                                .file_name()
+                                .as_bytes()
+                                .starts_with(QUARANTINE_ENTRY_PREFIX)
+                        })
+                })
+        );
+        let _ = fs::remove_dir_all(fixture_parent(&root));
+    }
+
+    #[test]
+    fn restart_preserves_quarantine_identity_mismatch() {
+        let root = fixture("restart-mismatch");
+        let store = RawObjectFileStore::new(&root).expect("open recovery store");
+        drop(store);
+
+        let objects = root.join("sha256");
+        let directory = File::open(&objects).expect("open object directory");
+        let namespace = QuarantineNamespace::open_for(&directory).expect("open namespace");
+        let quarantine = QuarantineDirectory::create(&namespace.file).expect("create quarantine");
+        let quarantine_path = root
+            .join(OsStr::from_bytes(QUARANTINE_NAMESPACE_NAME))
+            .join(quarantine.name.to_str().expect("quarantine name is UTF-8"));
+        let expected_path = root.join(".velnor-raw-expected");
+        write_private(&expected_path, b"creator-bytes");
+        let expected = File::open(&expected_path).expect("open expected creator");
+        let manifest = QuarantineManifest::from_cleanup(
+            stat_fd(&expected).expect("stat expected creator"),
+            LinkCount::Exact(1),
+            Some(1024),
+            Some(b"creator-bytes"),
+            None,
+        )
+        .expect("create mismatch manifest");
+        quarantine
+            .write_manifest(&manifest)
+            .expect("write mismatch manifest");
+        let entry_path = quarantine_path.join(OsStr::from_bytes(b".velnor-raw-entry-crash"));
+        write_private(&entry_path, b"attacker-bytes");
+        sync_directory(&quarantine.file).expect("sync mismatch quarantine");
+        drop(expected);
+        drop(quarantine);
+
+        let reopened = RawObjectFileStore::new(&root).expect("reconcile mismatch store");
+        drop(reopened);
+        assert_eq!(
+            fs::read(entry_path).expect("read preserved mismatch"),
+            b"attacker-bytes"
+        );
+        let _ = fs::remove_dir_all(fixture_parent(&root));
+    }
 }
