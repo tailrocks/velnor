@@ -4,10 +4,10 @@ require "json"
 # Product source is pinned; packaging assets are pinned separately until the
 # formula is rendered into a tap. Never replace either pin with a branch or
 # latest-release URL.
-SOURCE_COMMIT = "796c46110274a474572de100b12dadc4aa50f47b".freeze
-SOURCE_ARCHIVE_SHA256 = "e61990d897dc714e018cfe4c1563391e8d602f3badf8cd483016814111c60b04".freeze
-PACKAGING_COMMIT = "fb77e44e548e8d79ad7e0b71b4860f4ceefef679".freeze
-LAUNCH_SHA256 = "e86fbd6a6af01c75bd535f070735f8387829ee5d765c4ccf92405796dc9d5efc".freeze
+SOURCE_COMMIT = "e5a0c249157a6fa79e82b502843fef945030d225".freeze
+SOURCE_ARCHIVE_SHA256 = "fb4dfd4a2e824d65ddebd597648c20d154a755bef23fd39afc71e5b134fe7dfa".freeze
+PACKAGING_COMMIT = "cce2bc61d3d446797d857ca09202ade99c54615a".freeze
+LAUNCH_SHA256 = "f025ac790fd3395e09c6fbb5c9e12e4db71eefc6d73c76371efa749414d65eaf".freeze
 PLIST_SHA256 = "c7d3f69454e8d04a7913dfcfa0b7c0ea36b37c6339118cff580f1d4eb31493f5".freeze
 SOURCE_URL = "https://github.com/tailrocks/velnor/archive/#{SOURCE_COMMIT}.tar.gz".freeze
 GH_CLI_REQUIRED_FLAGS = %w[
