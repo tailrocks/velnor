@@ -1,0 +1,389 @@
+#!/bin/sh
+# Velnor macOS launchd entrypoint.
+#
+# launchd invokes this one stable wrapper. The operator env file is the only
+# source of host mode and scale-set inputs. Package-owned paths and transport
+# remain immutable. Every mode is validated before the runner is exec'd;
+# missing or invalid inputs fail closed and never become native-only.
+set -eu
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 78
+}
+
+require_positive_integer() {
+  name=$1
+  value=$2
+  case "$value" in
+    ''|*[!0-9]*|0) fail "$name must be a positive integer" ;;
+  esac
+}
+
+toml_field() {
+  config=$1
+  wanted_section=$2
+  wanted_key=$3
+  awk -v wanted_section="$wanted_section" -v wanted_key="$wanted_key" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    BEGIN { current = "" }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+      current = $0
+      sub(/^[[:space:]]*\[/, "", current)
+      sub(/\][[:space:]]*$/, "", current)
+      next
+    }
+    current == wanted_section {
+      prefix = "^[[:space:]]*" wanted_key "[[:space:]]*="
+      if ($0 ~ prefix) {
+        value = $0
+        sub(prefix, "", value)
+        if (value ~ /\[/ && value !~ /\]/) {
+          while (getline continuation > 0) {
+            value = value " " continuation
+            if (continuation ~ /\]/) break
+          }
+        }
+        sub(/[[:space:]]+#.*$/, "", value)
+        print trim(value)
+        exit
+      }
+    }
+  ' "$config"
+}
+
+toml_string() {
+  config=$1
+  section=$2
+  key=$3
+  raw=$(toml_field "$config" "$section" "$key")
+  [ -n "$raw" ] || return 0
+  case "$raw" in
+    \"*\")
+      value=${raw#\"}
+      value=${value%\"}
+      [ -n "$value" ] || return 0
+      printf '%s\n' "$value"
+      ;;
+    *)
+      fail "scale-set config [$section] $key must be a non-empty quoted string"
+      ;;
+  esac
+}
+
+toml_array_nonempty() {
+  config=$1
+  section=$2
+  key=$3
+  raw=$(toml_field "$config" "$section" "$key")
+  case "$raw" in
+    \[*\]) ;;
+    *) fail "scale-set config [$section] $key must be a non-empty string array" ;;
+  esac
+  items=${raw#\[}
+  items=${items%\]}
+  case "$items" in
+    ''|*'""'*) fail "scale-set config [$section] $key must contain a non-empty value" ;;
+  esac
+  printf '%s\n' "$items" | grep -Eq '"[^"[:space:]][^"]*"' || \
+    fail "scale-set config [$section] $key must contain a quoted value"
+}
+
+toml_section_exists() {
+  config=$1
+  wanted_section=$2
+  awk -v wanted_section="$wanted_section" '
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+      current = $0
+      sub(/^[[:space:]]*\[/, "", current)
+      sub(/\][[:space:]]*$/, "", current)
+      if (current == wanted_section) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$config"
+}
+
+validate_auth_source() {
+  config=$1
+  section=$2
+  file_key=$3
+  env_key=$4
+  label=$5
+  file_value=$(toml_string "$config" "$section" "$file_key")
+  env_value=$(toml_string "$config" "$section" "$env_key")
+  if [ -n "$file_value" ] && [ -n "$env_value" ]; then
+    fail "scale-set config $label must choose one credential source"
+  fi
+  if [ -n "$file_value" ]; then
+    case "$file_value" in
+      /*) ;;
+      *) fail "scale-set config $label file path must be absolute" ;;
+    esac
+    [ -s "$file_value" ] || fail "scale-set config $label file is missing or empty: $file_value"
+    return
+  fi
+  [ -n "$env_value" ] || fail "scale-set config $label needs a file or env credential source"
+  printf '%s\n' "$env_value" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$' || \
+    fail "scale-set config $label env source is not a valid variable name"
+  auth_value=
+  eval "auth_value=\${$env_value-}"
+  [ -n "$auth_value" ] || fail "scale-set config $label env credential is unset or empty: $env_value"
+}
+
+validate_scale_set_config() {
+  config=${VELNOR_SCALE_SET_CONFIG:-}
+  [ -n "$config" ] || fail "scale-set mode requires VELNOR_SCALE_SET_CONFIG"
+  case "$config" in
+    /*) ;;
+    *) fail "VELNOR_SCALE_SET_CONFIG must be an absolute path" ;;
+  esac
+  [ -r "$config" ] || fail "scale-set config is missing or unreadable: $config"
+
+  scope_url=$(toml_string "$config" "" "scope_url")
+  case "$scope_url" in
+    https://*) ;;
+    *) fail "scale-set config scope_url must use https://" ;;
+  esac
+  owner=$(toml_string "$config" "" "owner")
+  [ -n "$owner" ] || fail "scale-set config owner is required"
+  group_id=$(toml_field "$config" "" "group_id")
+  group_name=$(toml_string "$config" "" "group_name")
+  [ -n "$group_id" ] || [ -n "$group_name" ] || \
+    fail "scale-set config needs group_id or group_name"
+  set_id=$(toml_field "$config" "" "set_id")
+  set_name=$(toml_string "$config" "" "set_name")
+  [ -n "$set_id" ] || [ -n "$set_name" ] || \
+    fail "scale-set config needs set_id or set_name"
+
+  ledger_path=$(toml_string "$config" "" "ledger_path")
+  [ "$ledger_path" = "$package_permit_ledger" ] || \
+    fail "scale-set config ledger_path must equal package permit ledger: $package_permit_ledger"
+
+  for admission_key in owner repository ref source workflow event; do
+    toml_array_nonempty "$config" admission "$admission_key"
+  done
+
+  if toml_section_exists "$config" auth.app; then
+    app_auth=1
+  else
+    app_auth=0
+  fi
+  if toml_section_exists "$config" auth.pat; then
+    pat_auth=1
+  else
+    pat_auth=0
+  fi
+  [ "$app_auth" -ne "$pat_auth" ] || \
+    fail "scale-set config requires exactly one [auth.app] or [auth.pat]"
+  if [ "$app_auth" -eq 1 ]; then
+    client_id=$(toml_string "$config" auth.app client_id)
+    installation_id=$(toml_field "$config" auth.app installation_id)
+    [ -n "$client_id" ] || fail "scale-set config auth.app client_id is required"
+    case "$installation_id" in
+      ''|*[!0-9]*|0) fail "scale-set config auth.app installation_id must be positive" ;;
+    esac
+    validate_auth_source "$config" auth.app private_key_file private_key_env \
+      "auth.app"
+  else
+    validate_auth_source "$config" auth.pat token_file token_env "auth.pat"
+  fi
+}
+
+validate_gh_for_scale() {
+  if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+    fail "scale-set mode requires GH_TOKEN or GITHUB_TOKEN for gh attestation verification"
+  fi
+  gh_bin=$(command -v "$package_worker_verifier" 2>/dev/null || true)
+  [ -n "$gh_bin" ] || fail "official gh CLI is unavailable on PATH: $package_path"
+  [ -x "$gh_bin" ] || fail "official gh CLI is not executable: $gh_bin"
+  gh_help=$("$gh_bin" attestation verify --help 2>&1) || \
+    fail "official gh CLI lacks attestation verify: $gh_bin"
+  for required_flag in \
+    --repo \
+    --signer-workflow \
+    --predicate-type \
+    --cert-oidc-issuer \
+    --deny-self-hosted-runners \
+    --format; do
+    case "$gh_help" in
+      *"$required_flag"*) ;;
+      *) fail "official gh CLI lacks worker verifier flag $required_flag: $gh_bin" ;;
+    esac
+  done
+}
+
+require_docker() {
+  docker_bin=$(command -v docker 2>/dev/null || true)
+  [ -n "$docker_bin" ] || fail "Docker is required for Velnor container execution"
+  [ -x "$docker_bin" ] || fail "Docker is not executable: $docker_bin"
+  "$docker_bin" version >/dev/null 2>&1 || \
+    fail "Docker engine is unavailable at the package-owned endpoint: $package_docker_host"
+}
+
+write_mode_state() {
+  mode_state_tmp="$package_mode_state.$$"
+  if ! {
+    printf '%s\n' '{'
+    printf '  "schema": "velnor.host-mode/v1",\n'
+    printf '  "requested": "%s",\n' "$mode"
+    printf '  "effective": "%s",\n' "$mode"
+    printf '  "state": "validated-before-exec",\n'
+    printf '  "restart": "brew services stop velnorctl; edit env; brew services start velnorctl"\n'
+    printf '%s\n' '}'
+  } > "$mode_state_tmp"; then
+    rm -f "$mode_state_tmp"
+    fail "cannot write mode state: $package_mode_state"
+  fi
+  mv -f "$mode_state_tmp" "$package_mode_state" || \
+    fail "cannot install mode state: $package_mode_state"
+}
+
+self_dir=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)
+prefix=${self_dir%/libexec}
+runner="$prefix/bin/velnor-runner"
+
+[ -x "$runner" ] || fail "velnor-runner is missing or not executable: $runner"
+
+# launchd injects these values. They are package-owned and may not drift via
+# the operator env file. Mode, scale config, URLs, labels, and credentials are
+# intentionally not captured here: the env file owns those inputs.
+package_env_file=${VELNOR_ENV_FILE:?VELNOR_ENV_FILE is required}
+package_config_dir=${VELNOR_CONFIG_DIR:?VELNOR_CONFIG_DIR is required}
+package_storage_root=${VELNOR_STORAGE_ROOT:?VELNOR_STORAGE_ROOT is required}
+package_work_dir=${VELNOR_WORK_DIR:?VELNOR_WORK_DIR is required}
+package_log_dir=${VELNOR_LOG_DIR:?VELNOR_LOG_DIR is required}
+package_state_db=${VELNOR_STATE_DB:?VELNOR_STATE_DB is required}
+package_permit_ledger=${VELNOR_PERMIT_LEDGER:?VELNOR_PERMIT_LEDGER is required}
+package_mode_state=${VELNOR_MODE_STATE:?VELNOR_MODE_STATE is required}
+package_docker_host=${VELNOR_DOCKER_HOST:?VELNOR_DOCKER_HOST is required}
+package_path=${VELNOR_PATH:?VELNOR_PATH is required}
+package_worker_verifier=${VELNOR_WORKER_VERIFIER:?VELNOR_WORKER_VERIFIER is required}
+package_worker_verifier_contract=${VELNOR_WORKER_VERIFIER_CONTRACT:?VELNOR_WORKER_VERIFIER_CONTRACT is required}
+[ "$package_worker_verifier" = gh ] || fail "package worker verifier must be gh"
+[ "$package_worker_verifier_contract" = "attestation verify --help" ] || \
+  fail "unsupported package worker verifier contract: $package_worker_verifier_contract"
+
+[ -r "$package_env_file" ] || fail "Velnor env file is missing or unreadable: $package_env_file"
+
+# The file is mode 0600 and is the only durable location for operator secrets.
+set -a
+# shellcheck disable=SC1090
+. "$package_env_file"
+set +a
+
+# Reassert package-owned invariants after loading mutable operator settings.
+VELNOR_ENV_FILE=$package_env_file
+VELNOR_CONFIG_DIR=$package_config_dir
+VELNOR_STORAGE_ROOT=$package_storage_root
+VELNOR_WORK_DIR=$package_work_dir
+VELNOR_LOG_DIR=$package_log_dir
+VELNOR_STATE_DB=$package_state_db
+VELNOR_PERMIT_LEDGER=$package_permit_ledger
+VELNOR_MODE_STATE=$package_mode_state
+VELNOR_DOCKER_CONTEXT=orbstack
+VELNOR_DOCKER_HOST=$package_docker_host
+DOCKER_HOST=$package_docker_host
+VELNOR_PATH=$package_path
+PATH=$package_path
+VELNOR_WORKER_VERIFIER=$package_worker_verifier
+VELNOR_WORKER_VERIFIER_CONTRACT=$package_worker_verifier_contract
+VELNOR_CAPABILITY_VALIDATION=strict
+VELNOR_TRUST_SCOPE=untrusted
+MISE_LOCKFILE=1
+MISE_LOCKED=1
+MISE_LOCKED_VERIFY_PROVENANCE=1
+export VELNOR_ENV_FILE VELNOR_CONFIG_DIR VELNOR_STORAGE_ROOT VELNOR_WORK_DIR
+export VELNOR_LOG_DIR VELNOR_STATE_DB VELNOR_PERMIT_LEDGER VELNOR_MODE_STATE
+export VELNOR_DOCKER_CONTEXT VELNOR_DOCKER_HOST DOCKER_HOST
+export VELNOR_PATH PATH VELNOR_WORKER_VERIFIER VELNOR_WORKER_VERIFIER_CONTRACT
+export VELNOR_CAPABILITY_VALIDATION VELNOR_TRUST_SCOPE
+export MISE_LOCKFILE MISE_LOCKED MISE_LOCKED_VERIFY_PROVENANCE
+
+mode=${VELNOR_HOST_MODE:-}
+case "$mode" in
+  native-only|scale-set-only|both) ;;
+  '') fail "VELNOR_HOST_MODE is required: choose native-only, scale-set-only, or both" ;;
+  *) fail "invalid VELNOR_HOST_MODE: $mode" ;;
+esac
+VELNOR_HOST_MODE=$mode
+export VELNOR_HOST_MODE
+
+native_enabled=0
+case "$mode" in
+  native-only|both)
+    native_enabled=1
+    [ -n "${GITHUB_TOKEN:-}" ] || \
+      fail "$mode requires GITHUB_TOKEN in $package_env_file"
+    [ -n "${VELNOR_URL:-}" ] || \
+      fail "$mode requires VELNOR_URL in $package_env_file"
+    case "$VELNOR_URL" in
+      https://*) ;;
+      *) fail "VELNOR_URL must use https://: $VELNOR_URL" ;;
+    esac
+    ;;
+esac
+
+: "${VELNOR_NAME:=velnor-macos}"
+: "${VELNOR_LABELS:=velnor,velnor-target-mvp}"
+: "${VELNOR_SLOTS:=2}"
+: "${VELNOR_DOCKER_IMAGE:=velnor/job-ubuntu:26.04}"
+if [ "$native_enabled" -eq 1 ]; then
+  require_positive_integer VELNOR_SLOTS "$VELNOR_SLOTS"
+fi
+
+max_jobs=${VELNOR_MAX_JOBS:-}
+case "$mode" in
+  scale-set-only|both)
+    require_positive_integer VELNOR_MAX_JOBS "$max_jobs"
+    validate_scale_set_config
+    ;;
+  native-only)
+    [ -z "${VELNOR_SCALE_SET_CONFIG:-}" ] || \
+      fail "native-only mode forbids VELNOR_SCALE_SET_CONFIG"
+    if [ -n "$max_jobs" ]; then
+      require_positive_integer VELNOR_MAX_JOBS "$max_jobs"
+    else
+      unset VELNOR_MAX_JOBS
+    fi
+    unset VELNOR_SCALE_SET_CONFIG
+    ;;
+esac
+
+# Native slots and the Scale Set private-DinD worker both need the package's
+# Docker engine. The native branch is explicit so native mode cannot start
+# without Docker even when no job has arrived yet.
+require_docker
+
+case "$mode" in
+  scale-set-only|both) validate_gh_for_scale ;;
+esac
+
+umask 077
+mkdir -p "$VELNOR_CONFIG_DIR" "$VELNOR_STORAGE_ROOT" "$VELNOR_LOG_DIR" "$VELNOR_WORK_DIR"
+write_mode_state
+
+set -- daemon \
+  --mode "$mode" \
+  --name "$VELNOR_NAME" \
+  --labels "$VELNOR_LABELS" \
+  --slots "$VELNOR_SLOTS" \
+  --config-dir "$VELNOR_CONFIG_DIR" \
+  --state-db "$VELNOR_STATE_DB" \
+  --permit-ledger "$VELNOR_PERMIT_LEDGER" \
+  --work-dir "$VELNOR_WORK_DIR" \
+  --docker-image "$VELNOR_DOCKER_IMAGE" \
+  --replace
+
+if [ "$native_enabled" -eq 1 ]; then
+  set -- "$@" --url "$VELNOR_URL"
+fi
+if [ "$mode" != "native-only" ]; then
+  set -- "$@" --max-jobs "$max_jobs" --scale-set-config "$VELNOR_SCALE_SET_CONFIG"
+fi
+
+exec "$runner" "$@"

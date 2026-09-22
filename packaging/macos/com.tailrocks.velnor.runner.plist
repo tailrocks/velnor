@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tailrocks.velnor.runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VELNOR_PREFIX__/libexec/velnor-runner-launch</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VELNOR_CAPABILITY_VALIDATION</key>
+    <string>strict</string>
+    <key>VELNOR_CONFIG_DIR</key>
+    <string>__VELNOR_CONFIG_DIR__</string>
+    <key>VELNOR_DOCKER_CONTEXT</key>
+    <string>orbstack</string>
+    <key>VELNOR_DOCKER_HOST</key>
+    <string>__VELNOR_DOCKER_HOST__</string>
+    <key>DOCKER_HOST</key>
+    <string>__VELNOR_DOCKER_HOST__</string>
+    <key>PATH</key>
+    <string>__VELNOR_PATH__</string>
+    <key>VELNOR_ENV_FILE</key>
+    <string>__VELNOR_ENV_FILE__</string>
+    <key>VELNOR_LOG_DIR</key>
+    <string>__VELNOR_LOG_DIR__</string>
+    <key>VELNOR_MODE_STATE</key>
+    <string>__VELNOR_MODE_STATE__</string>
+    <key>VELNOR_PERMIT_LEDGER</key>
+    <string>__VELNOR_PERMIT_LEDGER__</string>
+    <key>VELNOR_STATE_DB</key>
+    <string>__VELNOR_STATE_DB__</string>
+    <key>VELNOR_STORAGE_ROOT</key>
+    <string>__VELNOR_STORAGE_ROOT__</string>
+    <key>VELNOR_TRUST_SCOPE</key>
+    <string>untrusted</string>
+    <key>VELNOR_WORK_DIR</key>
+    <string>__VELNOR_WORK_DIR__</string>
+    <key>VELNOR_PATH</key>
+    <string>__VELNOR_PATH__</string>
+    <key>VELNOR_WORKER_VERIFIER</key>
+    <string>gh</string>
+    <key>VELNOR_WORKER_VERIFIER_CONTRACT</key>
+    <string>attestation verify --help</string>
+    <key>MISE_LOCKFILE</key>
+    <string>1</string>
+    <key>MISE_LOCKED</key>
+    <string>1</string>
+    <key>MISE_LOCKED_VERIFY_PROVENANCE</key>
+    <string>1</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__VELNOR_STORAGE_ROOT__</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>StandardOutPath</key>
+  <string>__VELNOR_LOG_DIR__/runner.log</string>
+  <key>StandardErrorPath</key>
+  <string>__VELNOR_LOG_DIR__/runner.err.log</string>
+</dict>
+</plist>
