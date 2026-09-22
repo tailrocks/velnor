@@ -1017,6 +1017,7 @@ jobs:
         crates/velnor-workflow/templates/**
         crates/velnor-workflow/templates/release-package-signer.yml
         crates/velnor-workflow/tests/**
+        crates/velnor-workflow/tests/fixtures/github-action-consumer/workflow.yml
         crates/velnor-workflow/tests/generic_surface_literals.rs
         docker/build-mise.*
         docker/job-mise.lock
