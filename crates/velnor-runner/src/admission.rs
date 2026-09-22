@@ -2112,6 +2112,9 @@ mod tests {
                         Err(error) => panic!("fake Contents server accept failed: {error}"),
                     }
                 };
+                // On macOS, accepted sockets inherit the listener's
+                // nonblocking mode; the request read below is blocking.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
