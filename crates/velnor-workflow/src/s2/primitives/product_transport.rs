@@ -169,9 +169,17 @@ pub(crate) struct StageRequest {
     pub(crate) stage: PathBuf,
 }
 
+/// Whether product verification is allowed to install outputs and publish
+/// transport readiness. Exact cache validation is intentionally inspect-only;
+/// only same-run artifact transport owns installation and readiness.
+pub(crate) enum VerifyMode {
+    Install { marker: String, env_file: PathBuf },
+    Inspect,
+}
+
 /// The `verify-product` inputs: the expected plan identity, the install
-/// containment roots, the staging directory, the marker to export, and the
-/// `GITHUB_ENV` file receiving it.
+/// containment roots, and the staging directory. The mode makes the
+/// cache-vs-transport side effect boundary explicit.
 pub(crate) struct VerifyRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
@@ -180,8 +188,7 @@ pub(crate) struct VerifyRequest {
     pub(crate) outputs: Vec<String>,
     pub(crate) output_files: Vec<String>,
     pub(crate) stage: PathBuf,
-    pub(crate) marker: String,
-    pub(crate) env_file: PathBuf,
+    pub(crate) mode: VerifyMode,
 }
 
 fn identity_digest(identity: &ProductIdentity) -> Result<String, GeneratorError> {
@@ -522,20 +529,20 @@ fn link_target_safe(target: &str) -> bool {
     }
     !target.split('/').any(|segment| segment == "..")
 }
-/// Verify one downloaded artifact and install it: check the manifest
-/// identity, digest every staged file, require the structural files, and
-/// install only under the declared output roots. Returns the installed
-/// regular-file count; nothing installs unless every check passes. The
-/// ready marker lands in the env file last.
+/// Verify one staged product: check the manifest identity, digest every
+/// staged file, and require the structural files. Install and readiness are
+/// performed only for same-run transport; exact cache validation uses the
+/// inspect-only mode and cannot mutate the checkout or environment.
 pub(crate) fn verify_product(
     root: &Path,
     request: &VerifyRequest,
 ) -> Result<usize, GeneratorError> {
-    if !valid_env_name(&request.marker) {
-        return Err(GeneratorError::usage(format!(
-            "verify-product needs a valid --marker env name, got `{}`",
-            request.marker
-        )));
+    if let VerifyMode::Install { marker, .. } = &request.mode {
+        if !valid_env_name(marker) {
+            return Err(GeneratorError::usage(format!(
+                "verify-product needs a valid --marker env name, got `{marker}`"
+            )));
+        }
     }
     for output in &request.outputs {
         manifest_rel(output)?;
@@ -546,8 +553,10 @@ pub(crate) fn verify_product(
     check_manifest_paths(&manifest, request)?;
     let dest = stage.join(STAGED_OUTPUTS_DIR);
     verify_staged_contents(&manifest, &dest, request)?;
-    install_verified_product(&manifest, root, &dest)?;
-    export_marker(request)?;
+    if let VerifyMode::Install { marker, env_file } = &request.mode {
+        install_verified_product(&manifest, root, &dest)?;
+        export_marker(marker, env_file)?;
+    }
     Ok(manifest.files.len())
 }
 
@@ -762,14 +771,14 @@ fn install_verified_product(
 
 /// Export the ready marker last: only a fully installed product sets it.
 /// The env file is shared with every other step's exports: append.
-fn export_marker(request: &VerifyRequest) -> Result<(), GeneratorError> {
+fn export_marker(marker: &str, env_file: &Path) -> Result<(), GeneratorError> {
     let mut env = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&request.env_file)
-        .map_err(|error| GeneratorError::io("export product marker", &request.env_file, &error))?;
-    env.write_all(format!("{}=1\n", request.marker).as_bytes())
-        .map_err(|error| GeneratorError::io("export product marker", &request.env_file, &error))?;
+        .open(env_file)
+        .map_err(|error| GeneratorError::io("export product marker", env_file, &error))?;
+    env.write_all(format!("{marker}=1\n").as_bytes())
+        .map_err(|error| GeneratorError::io("export product marker", env_file, &error))?;
     Ok(())
 }
 
@@ -815,10 +824,9 @@ pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(
     Ok(())
 }
 
-/// Run `verify-product` from the runtime CLI: `root` is the repository
-/// checkout, the containment roots arrive via [`OUTPUTS_ENV`], the
-/// structural files via [`OUTPUT_FILES_ENV`], and the marker lands in
-/// `GITHUB_ENV`.
+/// Run `verify-product` from the runtime CLI. With `--check-only true`, it
+/// validates a cache entry without requiring `GITHUB_ENV`, installing files,
+/// or publishing a readiness marker.
 pub(crate) fn verify_product_cli(
     root: &Path,
     arguments: &[OsString],
@@ -826,20 +834,56 @@ pub(crate) fn verify_product_cli(
     let options = crate::s2::runtime::parse_options(
         arguments,
         &[
-            "producer", "product", "digest", "identity", "stage", "marker",
+            "producer",
+            "product",
+            "digest",
+            "identity",
+            "stage",
+            "marker",
+            "check-only",
         ],
     )?;
-    let missing = ["producer", "product", "stage", "marker"]
-        .into_iter()
-        .find(|name| !options.contains_key(*name));
-    if let Some(name) = missing {
+    let check_only = options
+        .get("check-only")
+        .map_or(Ok(false), |value| match value.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(GeneratorError::usage(
+                "verify-product --check-only must be true or false".to_owned(),
+            )),
+        })?;
+    let required = if check_only {
+        ["producer", "product", "stage"]
+            .into_iter()
+            .find(|name| !options.contains_key(*name))
+    } else {
+        ["producer", "product", "stage", "marker"]
+            .into_iter()
+            .find(|name| !options.contains_key(*name))
+    };
+    if let Some(name) = required {
         return Err(GeneratorError::usage(format!(
             "verify-product needs --{name}"
         )));
     }
-    let env_file = std::env::var("GITHUB_ENV").map_err(|_| {
-        GeneratorError::usage("verify-product needs GITHUB_ENV; it runs in a GitHub Actions step")
-    })?;
+    if check_only && options.contains_key("marker") {
+        return Err(GeneratorError::usage(
+            "verify-product --check-only cannot publish --marker".to_owned(),
+        ));
+    }
+    let mode = if check_only {
+        VerifyMode::Inspect
+    } else {
+        let env_file = std::env::var("GITHUB_ENV").map_err(|_| {
+            GeneratorError::usage(
+                "verify-product needs GITHUB_ENV; it runs in a GitHub Actions step",
+            )
+        })?;
+        VerifyMode::Install {
+            marker: options["marker"].clone(),
+            env_file: PathBuf::from(env_file),
+        }
+    };
     let request = VerifyRequest {
         producer: options["producer"].clone(),
         product: options["product"].clone(),
@@ -848,14 +892,20 @@ pub(crate) fn verify_product_cli(
         outputs: env_list(OUTPUTS_ENV),
         output_files: env_list(OUTPUT_FILES_ENV),
         stage: PathBuf::from(&options["stage"]),
-        marker: options["marker"].clone(),
-        env_file: PathBuf::from(env_file),
+        mode,
     };
     let count = verify_product(root, &request)?;
-    println!(
-        "velnor: verified and installed {count} product files for {}/{}",
-        request.producer, request.product
-    );
+    if check_only {
+        println!(
+            "velnor: verified product contents for {}/{}",
+            request.producer, request.product
+        );
+    } else {
+        println!(
+            "velnor: verified and installed {count} product files for {}/{}",
+            request.producer, request.product
+        );
+    }
     Ok(())
 }
 
@@ -956,18 +1006,18 @@ fn native_product_cache_step_id(key: &str) -> String {
     format!("native-product-cache-{suffix}")
 }
 
-/// Render an optional exact native-product cache restore and verification.
+/// Render an optional exact native-product cache restore and validation.
 ///
 /// The cache is not a transport edge: restore failures and misses are
 /// reported and ignored, while corrupt or wrong-identity entries are removed
-/// without installation. A valid entry uses the same manifest verifier as
-/// same-run product transport. No restore prefix is emitted.
+/// without installation or readiness publication. A valid entry uses the
+/// same manifest verifier as same-run product transport in inspect-only mode.
+/// No restore prefix is emitted.
 #[must_use]
 pub(crate) fn render_native_product_cache_restore_block(
     cache_restore_pin: &str,
     producer: &str,
     product: &NamedProduct,
-    marker: &str,
 ) -> Option<String> {
     let key = exact_product_cache_key(product)?;
     let restore_id = native_product_cache_step_id(&key);
@@ -991,9 +1041,8 @@ pub(crate) fn render_native_product_cache_restore_block(
     }
     let _ = write!(
         command,
-        " --identity {} --stage \"{shell_path}\" --marker {}",
+        " --identity {} --stage \"{shell_path}\" --check-only true",
         shell_quote(&identity_json),
-        shell_quote(marker)
     );
     let outputs_value = format!(
         "          {OUTPUTS_ENV}: |\n{}\n",
@@ -1008,7 +1057,7 @@ pub(crate) fn render_native_product_cache_restore_block(
         )
     };
     Some(format!(
-        "      - name: Restore exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Verify exact native product cache {artifact}\n        id: {verify_id}\n        if: steps.{restore_id}.outputs.cache-hit == 'true'\n        continue-on-error: true\n        env:\n{outputs_value}{files_value}        run: |\n          set -o pipefail\n          stage=\"{shell_path}\"\n          log=\"$RUNNER_TEMP/{artifact}-cache-verify.log\"\n          if [[ ! -f \"$stage/{MANIFEST_FILE}\" ]]; then\n            outcome=corrupt\n          else\n            rc=0\n            {command} 2>&1 | tee \"$log\" || rc=$?\n            if (( rc == 0 )); then\n              outcome=hit\n            elif grep -Eiq 'identity|schema mismatch|producer/product|inputs_digest' \"$log\"; then\n              outcome=wrong-identity\n            else\n              outcome=corrupt\n            fi\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n          echo \"outcome=$outcome\" >> \"$GITHUB_OUTPUT\"\n          echo \"usable=$([[ $outcome == hit ]] && echo true || echo false)\" >> \"$GITHUB_OUTPUT\"\n          if [[ \"$outcome\" != hit ]]; then\n            rm -rf -- \"$stage\"\n          fi\n      - name: Report exact native product cache {artifact}\n        if: always()\n        env:\n          RESTORE_OUTCOME: ${{{{ steps.{restore_id}.outcome }}}}\n          CACHE_HIT: ${{{{ steps.{restore_id}.outputs.cache-hit }}}}\n          VERIFY_OUTCOME: ${{{{ steps.{verify_id}.outputs.outcome }}}}\n        run: |\n          if [[ \"$RESTORE_OUTCOME\" != success || \"$CACHE_HIT\" != true ]]; then\n            outcome=miss\n          else\n            outcome=$VERIFY_OUTCOME\n            [[ -n \"$outcome\" ]] || outcome=corrupt\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n"
+        "      - name: Restore exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Validate exact native product cache {artifact}\n        id: {verify_id}\n        if: steps.{restore_id}.outputs.cache-hit == 'true'\n        continue-on-error: true\n        env:\n{outputs_value}{files_value}        run: |\n          set -o pipefail\n          stage=\"{shell_path}\"\n          log=\"$RUNNER_TEMP/{artifact}-cache-verify.log\"\n          if [[ ! -f \"$stage/{MANIFEST_FILE}\" ]]; then\n            outcome=corrupt\n          else\n            rc=0\n            {command} 2>&1 | tee \"$log\" || rc=$?\n            if (( rc == 0 )); then\n              outcome=hit\n            elif grep -Eiq 'identity|schema mismatch|producer/product|inputs_digest' \"$log\"; then\n              outcome=wrong-identity\n            else\n              outcome=corrupt\n            fi\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n          echo \"outcome=$outcome\" >> \"$GITHUB_OUTPUT\"\n          echo \"usable=$([[ $outcome == hit ]] && echo true || echo false)\" >> \"$GITHUB_OUTPUT\"\n          if [[ \"$outcome\" != hit ]]; then\n            rm -rf -- \"$stage\"\n          fi\n      - name: Report exact native product cache {artifact}\n        if: always()\n        env:\n          RESTORE_OUTCOME: ${{{{ steps.{restore_id}.outcome }}}}\n          CACHE_HIT: ${{{{ steps.{restore_id}.outputs.cache-hit }}}}\n          VERIFY_OUTCOME: ${{{{ steps.{verify_id}.outputs.outcome }}}}\n        run: |\n          if [[ \"$RESTORE_OUTCOME\" != success || \"$CACHE_HIT\" != true ]]; then\n            outcome=miss\n          else\n            outcome=$VERIFY_OUTCOME\n            [[ -n \"$outcome\" ]] || outcome=corrupt\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n"
     ))
 }
 
@@ -1076,7 +1125,7 @@ mod tests {
     use super::{
         artifact_name, exact_product_cache_key, exact_product_reuse_eligible, ready_records,
         render_native_product_cache_restore_block, render_native_product_cache_save_block,
-        stage_product, transport_eligible, verify_product, StageRequest, VerifyRequest,
+        stage_product, transport_eligible, verify_product, StageRequest, VerifyMode, VerifyRequest,
     };
     use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
 
@@ -1173,7 +1222,6 @@ mod tests {
             "actions/cache/restore@v4",
             "rust-ffi",
             &full,
-            "VELNOR_PRODUCT_RUST_FFI__XCFRAMEWORK_READY",
         )
         .expect("complete native product renders an exact cache restore");
         assert!(
@@ -1187,6 +1235,10 @@ mod tests {
         assert!(!rendered.contains("restore-keys:"), "{rendered}");
         assert!(rendered.contains("verify-product"), "{rendered}");
         assert!(rendered.contains("--identity"), "{rendered}");
+        assert!(rendered.contains("--check-only true"), "{rendered}");
+        assert!(!rendered.contains("--marker"), "{rendered}");
+        assert!(!rendered.contains("GITHUB_ENV"), "{rendered}");
+        assert!(!rendered.contains("install"), "{rendered}");
         assert!(rendered.contains("outcome=wrong-identity"), "{rendered}");
         assert!(rendered.contains("outcome=corrupt"), "{rendered}");
         assert!(rendered.contains("outcome=miss"), "{rendered}");
@@ -1230,7 +1282,6 @@ mod tests {
             "actions/cache/restore@v4",
             "rust-ffi",
             &incomplete,
-            "VELNOR_PRODUCT_RUST_FFI__XCFRAMEWORK_READY",
         )
         .is_none());
         assert!(render_native_product_cache_save_block(
@@ -1373,8 +1424,10 @@ mod tests {
             outputs: vec!["out/Foo.xcframework".to_owned()],
             output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
             stage: stage.to_path_buf(),
-            marker: "VELNOR_PRODUCT_MARKER".to_owned(),
-            env_file: env_file.to_path_buf(),
+            mode: VerifyMode::Install {
+                marker: "VELNOR_PRODUCT_MARKER".to_owned(),
+                env_file: env_file.to_path_buf(),
+            },
         }
     }
 
@@ -1435,6 +1488,39 @@ mod tests {
         let env = std::fs::read_to_string(&env_file).expect("marker file");
         assert!(env.contains("EXISTING=1\n"), "markers append: {env}");
         assert!(env.contains("VELNOR_PRODUCT_MARKER=1\n"), "{env}");
+    }
+
+    #[test]
+    fn inspect_only_cache_validation_never_installs_or_publishes_readiness() {
+        let producer_root = scratch("inspect-producer");
+        let consumer_root = scratch("inspect-consumer");
+        stage_fixture(&producer_root);
+        let stage = producer_root.join("stage");
+        stage_product(&producer_root, &stage_request(&stage)).expect("stage");
+        let shipped = consumer_root.join("stage");
+        copy_dir(&stage, &shipped);
+
+        let existing_output = consumer_root.join("out/Foo.xcframework/macos-arm64/libfoo.a");
+        std::fs::create_dir_all(existing_output.parent().expect("output parent"))
+            .expect("existing output directory");
+        std::fs::write(&existing_output, "existing-product").expect("existing output");
+        let env_file = consumer_root.join("github-env");
+        std::fs::write(&env_file, "EXISTING=1\n").expect("env file");
+
+        let mut request = verify_request(&shipped, &env_file);
+        request.mode = VerifyMode::Inspect;
+        assert_eq!(
+            verify_product(&consumer_root, &request).expect("inspect"),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(existing_output).expect("existing output"),
+            "existing-product"
+        );
+        assert_eq!(
+            std::fs::read_to_string(env_file).expect("env file"),
+            "EXISTING=1\n"
+        );
     }
 
     #[test]
@@ -1555,7 +1641,6 @@ mod tests {
                 identity: Some(wrong_architecture),
                 inputs_digest: "d".repeat(64),
                 stage: producer.join("stage"),
-                env_file: env_file.clone(),
                 ..verify_request(&producer.join("stage"), &env_file)
             },
         );
@@ -1574,7 +1659,6 @@ mod tests {
                 identity: Some(wrong_profile),
                 inputs_digest: "d".repeat(64),
                 stage: producer.join("stage"),
-                env_file: env_file.clone(),
                 ..verify_request(&producer.join("stage"), &env_file)
             },
         );
@@ -1630,8 +1714,10 @@ mod tests {
                 outputs: vec!["out/Foo.xcframework".to_owned()],
                 output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
                 stage,
-                marker: "VELNOR_PRODUCT_MARKER".to_owned(),
-                env_file,
+                mode: VerifyMode::Install {
+                    marker: "VELNOR_PRODUCT_MARKER".to_owned(),
+                    env_file,
+                },
             },
         );
         let message = format!(
@@ -1683,7 +1769,10 @@ mod tests {
         let bad_marker = verify_product(
             &consumer,
             &VerifyRequest {
-                marker: "not a name".to_owned(),
+                mode: VerifyMode::Install {
+                    marker: "not a name".to_owned(),
+                    env_file: env_file.clone(),
+                },
                 ..verify_request(&stage, &env_file)
             },
         );

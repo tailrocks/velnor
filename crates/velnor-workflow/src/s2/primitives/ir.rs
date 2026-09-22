@@ -1542,6 +1542,22 @@ mod tests {
         );
         assert!(restore < transport, "cache restore precedes transport");
         assert!(transport < save, "transport remains before cache save");
+        let cache_block = &kind[restore..transport];
+        assert!(
+            cache_block.contains("--check-only true"),
+            "cache validation is inspect-only: {cache_block}"
+        );
+        assert!(
+            !cache_block.contains("--marker")
+                && !cache_block.contains("GITHUB_ENV")
+                && !cache_block.contains("install"),
+            "cache validation cannot publish readiness or install outputs: {cache_block}"
+        );
+        let transport_block = &kind[transport..save];
+        assert!(
+            transport_block.contains("--marker"),
+            "required transport still owns readiness: {transport_block}"
+        );
         assert!(
             kind[restore..save].contains("continue-on-error: true"),
             "optional cache failures cannot replace transport"
@@ -8735,12 +8751,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     .collect::<Vec<_>>()
                     .join(" || ")
             });
-            let marker = crate::s2::platform::transport_marker(&producer, &product.name);
             let Some(block) = super::product_transport::render_native_product_cache_restore_block(
                 self.pins.cache_restore,
                 &producer,
                 product,
-                &marker,
             ) else {
                 continue;
             };
