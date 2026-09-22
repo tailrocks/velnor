@@ -2,6 +2,8 @@
 
 Authoritative specification for Debian APT packaging, signing, and host deployment on Bastion.
 
+> This file describes package/repository architecture. It is not a live readiness report. See [CURRENT_STATE.md](CURRENT_STATE.md) for the observed host state.
+
 - **Primary Signing Key**: `7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801`
 - **Signing Subkey**: `CD4693750A4BA4F12BC9ABFD857FCD279679A34B`
 - **Official Public URL**: `https://velnor-apt.tailrocks.com/`

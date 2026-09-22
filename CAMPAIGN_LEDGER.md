@@ -1,13 +1,15 @@
-# Velnor Rollout & Autonomous Execution Campaign Ledger
+# Velnor Rollout & Autonomous Execution Campaign Ledger (Historical)
 
-Authoritative operational ledger for Velnor deployment, two-engine host execution, and sequential five-repository rollout across macOS and Debian Bastion.
+Historical operational ledger for Velnor deployment, two-engine host execution, and sequential five-repository rollout across macOS and Debian Bastion.
+
+> **Current-state correction (2026-09-23):** This file preserves campaign claims and qualification history. It is not live host evidence. The current bastion snapshot is [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md): the package and local processes exist, but the host is currently **NOT READY / DEGRADED** with zero registered slots. Recheck the current-state document before treating any gate here as currently satisfied.
 
 - **Orchestrator**: Antigravity Autonomous Orchestrator
 - **Signoff Identity**: `Alexey Zhokhov <alexey@zhokhov.com>` via `git commit -s`
 - **Host 1**: macOS Local Workstation (`darwin`, Apple Silicon arm64 / aarch64, OrbStack Docker Engine 29.4.0, capacity `max_jobs = 4`)
 - **Host 2**: Debian Bastion (`root@37.27.110.241`, Debian 13 trixie x86_64, AMD EPYC 9454P 48c/96t, ~128 GB RAM, ~3.5 TB root NVMe, capacity `max_jobs = 16`)
 - **Canonical Providers**: `github-hosted`, `github-self-hosted` (Velnor Scale Set official runner), `velnor` (Velnor native Docker engine)
-- **Overall Campaign Status**: **ALL GATES G0–G8 FULLY QUALIFIED AND COMPLETE (100% GREEN)**
+- **Historical Campaign Status**: **This ledger records ALL GATES G0–G8 as qualified and complete; current bastion readiness is documented separately in [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).**
 
 ---
 
