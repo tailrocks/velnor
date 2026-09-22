@@ -11,11 +11,13 @@ use std::path::Path;
 
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
-use velnor_model::action_reference::ActionImageReference;
+use velnor_model::action_reference::{
+    resolve_action_path, ActionImageReference, RepositoryActionReference,
+};
 
 use super::file_walk::is_test_support_path;
 use super::{unit, RepositoryShape, ScanContext};
-use crate::s2::{is_full_revision, parent_path, shell_quote, UnitKind};
+use crate::s2::{parent_path, shell_quote, UnitKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActionSourceKind {
@@ -1463,10 +1465,16 @@ fn local_references(
                     "GitHub JavaScript action ({using}) metadata must declare runs.main"
                 ))
             })?;
-            add_local_reference(&mut references, main, action_root, root, files)?;
+            add_action_path_reference(&mut references, main, action_root, root, files)?;
             for reference in [&runs.pre, &runs.post] {
                 if let Some(reference) = reference.as_deref() {
-                    add_local_reference(&mut references, reference, action_root, root, files)?;
+                    add_action_path_reference(
+                        &mut references,
+                        reference,
+                        action_root,
+                        root,
+                        files,
+                    )?;
                 }
             }
         }
@@ -1482,7 +1490,7 @@ fn local_references(
                 ));
             }
             if is_dockerfile_reference(image) {
-                add_local_reference(&mut references, image, action_root, root, files)?;
+                add_action_path_reference(&mut references, image, action_root, root, files)?;
             } else if !is_docker_image_reference(image) {
                 return Err(crate::s2::GeneratorError::usage(format!(
                     "GitHub Docker action metadata `runs.image` must be a Dockerfile path or docker:// image reference, got `{image}`"
@@ -1501,28 +1509,13 @@ fn local_references(
 }
 
 fn is_full_sha_action_reference(value: &str) -> bool {
-    if value
-        .get(0.."docker://".len())
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("docker://"))
-    {
-        return false;
-    }
-    value.rsplit_once('@').is_some_and(|(action, revision)| {
-        let parts = action.split('/').collect::<Vec<_>>();
-        parts.len() >= 2
-            && parts.iter().all(|segment| {
-                !segment.is_empty()
-                    && !segment.contains("..")
-                    && !segment.chars().any(char::is_whitespace)
-            })
-            && is_full_revision(revision)
-    })
+    RepositoryActionReference::parse(value).is_ok()
 }
 
 /// Match actions/runner's Dockerfile test instead of guessing from an image
-/// tag.  An ordinary image such as `ubuntu` is resolved by the container
-/// runtime; only a basename named `Dockerfile` or beginning `Dockerfile.` is
-/// a host-side build source.
+/// tag. Repository Docker actions admit only a Dockerfile path or a
+/// `docker://` image; only a basename named `Dockerfile` or beginning
+/// `Dockerfile.` is a host-side build source.
 fn is_dockerfile_reference(value: &str) -> bool {
     matches!(
         ActionImageReference::parse(value),
@@ -1650,6 +1643,39 @@ fn normalize_working_directory(
     } else {
         Ok(components.join("/"))
     }
+}
+
+fn add_action_path_reference(
+    references: &mut BTreeSet<String>,
+    reference: &str,
+    action_root: &str,
+    root: &Path,
+    files: &[String],
+) -> Result<(), crate::s2::GeneratorError> {
+    let action_dir = root.join(action_root);
+    let resolved = resolve_action_path(&action_dir, reference).map_err(|error| {
+        crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata path `{reference}` is unsafe below `{action_root}`: {error}"
+        ))
+    })?;
+    let repository_path = resolved
+        .strip_prefix(root)
+        .map_err(|error| {
+            crate::s2::GeneratorError::usage(format!(
+                "GitHub Action metadata path `{reference}` escaped the repository root: {error}"
+            ))
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if !files.iter().any(|file| file == &repository_path)
+        && !is_excluded_action_file(root, &repository_path)?
+    {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action entrypoint `{reference}` resolves to missing file `{repository_path}`"
+        )));
+    }
+    references.insert(repository_path);
+    Ok(())
 }
 
 fn add_local_reference(
@@ -1971,6 +1997,81 @@ mod tests {
             shell_tokens("node './dist/main.js' --flag"),
             ["node", "./dist/main.js", "--flag"]
         );
+    }
+
+    #[test]
+    fn metadata_entrypoints_share_strict_path_validation() {
+        let invalid = [
+            (
+                "main-traversal",
+                "runs:\n  using: node20\n  main: ../main.js\n",
+            ),
+            (
+                "pre-backslash",
+                "runs:\n  using: node20\n  main: main.js\n  pre: nested\\\\pre.js\n",
+            ),
+            (
+                "post-drive",
+                "runs:\n  using: node20\n  main: main.js\n  post: C:/post.js\n",
+            ),
+            (
+                "dockerfile-absolute",
+                "runs:\n  using: docker\n  image: /Dockerfile\n",
+            ),
+            (
+                "dockerfile-traversal",
+                "runs:\n  using: docker\n  image: ../Dockerfile\n",
+            ),
+        ];
+        for (name, metadata) in invalid {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), metadata),
+                "write unsafe metadata",
+            );
+            let error = super::super::scan_shape_for_tests(&root, &providers(), "main", &[])
+                .err()
+                .unwrap_or_else(|| panic!("unsafe metadata path passed scan: {name}"));
+            assert!(
+                error.to_string().contains("unsafe")
+                    || error.to_string().contains("workspace")
+                    || error.to_string().contains("missing file"),
+                "unexpected unsafe metadata error for {name}: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_entrypoints_reject_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture("metadata-symlink");
+        let outside = root.join("outside");
+        let action = root.join("actions/js");
+        must(fs::create_dir_all(&outside), "create symlink target");
+        must(fs::create_dir_all(&action), "create nested action");
+        must(
+            fs::write(outside.join("index.js"), "process.exit(0)\n"),
+            "write symlink target",
+        );
+        must(
+            symlink(&outside, action.join("linked")),
+            "create metadata symlink",
+        );
+        must(
+            fs::write(
+                action.join("action.yml"),
+                "runs:\n  using: node20\n  main: linked/index.js\n",
+            ),
+            "write symlinked action metadata",
+        );
+        let error = super::super::scan_shape_for_tests(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("symlinked metadata path passed scan"));
+        assert!(error.to_string().contains("symlink"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
