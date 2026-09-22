@@ -33,6 +33,7 @@ use super::{lanes_support_unit_kind, GeneratorError, RunnerMode, UnitKind, Valid
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+const REVISION_FALLBACK_REASON: &str = "identical or unresolvable revisions; fell back to full";
 
 #[expect(
     dead_code,
@@ -1329,27 +1330,38 @@ fn select_command(
             "no affected base; fell back to full",
         ));
     }
+    print_selection(&select_affected_for_revisions(root, &watched, base, head)?)
+}
+
+fn select_affected_for_revisions(
+    root: &Path,
+    watched: &[crate::reuse::WatchedUnit],
+    base: &str,
+    head: &str,
+) -> Result<crate::reuse::AffectedSelection, GeneratorError> {
+    if git_revisions_same(root, base, head)? {
+        return Ok(crate::reuse::fallback_selection(
+            watched,
+            REVISION_FALLBACK_REASON,
+        ));
+    }
     let Some(lines) = git_name_status(root, base, head)? else {
-        return print_selection(&crate::reuse::fallback_selection(
-            &watched,
+        return Ok(crate::reuse::fallback_selection(
+            watched,
             "git diff unavailable; fell back to full",
         ));
     };
     let mut changes = Vec::with_capacity(lines.len());
     for line in &lines {
         let Some(change) = crate::reuse::parse_name_status_line(line) else {
-            return print_selection(&crate::reuse::fallback_selection(
-                &watched,
+            return Ok(crate::reuse::fallback_selection(
+                watched,
                 "unparseable change entry; fell back to full",
             ));
         };
         changes.push(change);
     }
-    print_selection(&crate::reuse::select_affected(
-        &watched,
-        &changes,
-        crate::reuse::FULL_SELECTION_PREFIXES,
-    )?)
+    crate::reuse::select_affected(watched, &changes, crate::reuse::FULL_SELECTION_PREFIXES)
 }
 
 fn print_selection(selection: &crate::reuse::AffectedSelection) -> Result<(), GeneratorError> {
@@ -2776,6 +2788,10 @@ fn selection_for_diff_with_closed_excluded<'a>(
         return full_selection(config, Some("no affected base; fell back to full"))
             .map(|selection| (selection, BTreeSet::new()));
     }
+    if git_revisions_same(root, base, head)? {
+        return full_selection(config, Some(REVISION_FALLBACK_REASON))
+            .map(|selection| (selection, BTreeSet::new()));
+    }
     let Some(raw) = git_name_status_nul(root, base, head)? else {
         return full_selection(config, Some("git diff unavailable; fell back to full"))
             .map(|selection| (selection, BTreeSet::new()));
@@ -2785,13 +2801,6 @@ fn selection_for_diff_with_closed_excluded<'a>(
             .map(|selection| (selection, BTreeSet::new()));
     };
     if changed.is_empty() {
-        // An empty three-dot diff is also produced when BASE and HEAD name
-        // the same commit. That is not proof of no work: an affected manual
-        // dispatch must not silently skip the baseline in that case. Only a
-        // successfully resolved, distinct revision pair can prove no work.
-        if git_revisions_same(root, base, head)? {
-            return full_selection(config, None).map(|selection| (selection, BTreeSet::new()));
-        }
         return Ok((
             UnitSelection {
                 units: Vec::new(),
@@ -6617,6 +6626,10 @@ workspace_check = true
             vec!["base", "app", "consumer", "docs"]
         );
         assert_eq!(same_object.full_units.len(), 4);
+        assert_eq!(
+            same_object.fallback_reason.as_deref(),
+            Some(REVISION_FALLBACK_REASON)
+        );
         let status = std::process::Command::new("git")
             .current_dir(&root)
             .args(["commit", "--allow-empty", "-qm", "empty diff"])
@@ -6629,6 +6642,60 @@ workspace_check = true
             crate::reuse::select_affected(&watched, &[], crate::reuse::FULL_SELECTION_PREFIXES)?;
         assert!(selected_id_set(&runtime_selection).is_empty());
         assert!(model.required.is_empty() && !model.fallback_full);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn revision_fallback_reason_is_shared_by_plan_and_select() -> Result<(), Box<dyn Error>> {
+        // `select` is the why-run oracle, while `plan` adds lane and workspace
+        // policy. Both must treat identical or unresolved revisions as a
+        // full fallback with the same auditable reason.
+        let (root, _, head) = selection_git_fixture("revision-fallback", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let watched = watched_units(&config.unit);
+        for (label, base, candidate_head) in [
+            ("identical", head.as_str(), head.as_str()),
+            ("unresolved base", "missing-base", head.as_str()),
+            ("unresolved head", head.as_str(), "missing-head"),
+        ] {
+            let planned =
+                selection_for_diff(&root, &config, Scope::Affected, base, candidate_head)?;
+            assert_eq!(planned.units.len(), config.unit.len(), "{label} plan units");
+            assert_eq!(
+                planned.fallback_reason.as_deref(),
+                Some(REVISION_FALLBACK_REASON),
+                "{label} plan reason"
+            );
+
+            let selected = select_affected_for_revisions(&root, &watched, base, candidate_head)?;
+            assert!(selected.fallback_full, "{label} select fallback");
+            assert_eq!(
+                selected.required.len(),
+                config.unit.len(),
+                "{label} select units"
+            );
+            assert_eq!(
+                selected.fallback_reason.as_deref(),
+                Some(REVISION_FALLBACK_REASON),
+                "{label} select reason"
+            );
+        }
+
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let planned = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
+        assert!(planned.units.is_empty());
+        assert!(planned.fallback_reason.is_none());
+        let selected = select_affected_for_revisions(&root, &watched, &head, &no_op_head)?;
+        assert!(selected.required.is_empty());
+        assert!(!selected.fallback_full);
+        assert!(selected.fallback_reason.is_none());
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
