@@ -518,14 +518,24 @@ impl PermitLedger {
         }
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        let schema_ready: i64 = conn.query_row(
+        let schema_objects: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master
              WHERE (type = 'table' AND name IN ('permit_meta', 'permits', 'permit_demands'))
                 OR (type = 'index' AND name = 'idx_permit_demands_oldest')",
             [],
             |row| row.get(0),
         )?;
-        if schema_ready != 4 {
+        // Keep the hot-open path read-only when the schema and its singleton
+        // metadata row are already complete. Counting only sqlite_master
+        // entries is insufficient: a process can observe all four objects
+        // after another process has removed the permit_meta seed row.
+        let meta_seeded = schema_objects == 4
+            && conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM permit_meta WHERE id = 1)",
+                [],
+                |row| row.get(0),
+            )?;
+        if schema_objects != 4 || !meta_seeded {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS permit_meta (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1920,6 +1930,36 @@ mod tests {
             )
             .unwrap();
         assert!(!legacy_exists);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_repairs_missing_permit_meta_seed_row() {
+        let (ledger, dir) = temp_ledger("missing-meta-seed");
+        let path = ledger.path().to_owned();
+        drop(ledger);
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.execute("DELETE FROM permit_meta WHERE id = 1", [])
+                .unwrap(),
+            1
+        );
+        drop(conn);
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(ledger.max_jobs().unwrap(), None);
+        assert_eq!(ledger.generation().unwrap(), 0);
+        let seeded: bool = ledger
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM permit_meta WHERE id = 1)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(seeded);
+
         std::fs::remove_dir_all(dir).unwrap();
     }
 
