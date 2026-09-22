@@ -1135,7 +1135,6 @@ mod tests {
             rust_needs: RustNeeds::Parallel,
             concurrency_group: None,
             serial_stack_groups: false,
-            tools: BTreeSet::new(),
             mise_present: false,
             mr_boxington: false,
             units,
@@ -6651,7 +6650,6 @@ pub(crate) struct WorkflowIr {
     pub(crate) concurrency_group: Option<String>,
     pub(crate) merge_group: bool,
     pub(crate) serial_stack_groups: bool,
-    pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
     /// never provides the Rust toolchain (rustup owns that), it only
     /// contributes the task runner and the tools units declare.
@@ -7707,48 +7705,10 @@ impl WorkflowIr {
         merge_group: bool,
         provenance: bool,
     ) -> Self {
-        let mut tools = BTreeSet::new();
         let mr_boxington = config
             .units
             .iter()
             .any(|unit| unit.kind == UnitKind::Rust && unit.uses_mbx());
-        if config
-            .units
-            .iter()
-            .any(|unit| unit.kind == UnitKind::OpenTofu)
-        {
-            tools.insert(ToolRequirement::OpenTofu);
-        }
-        if config
-            .units
-            .iter()
-            .any(|unit| unit.kind == UnitKind::Homebrew)
-        {
-            tools.insert(ToolRequirement::Homebrew);
-        }
-        if config.units.iter().any(|unit| unit.kind == UnitKind::Bun) {
-            tools.insert(ToolRequirement::Bun);
-        }
-        if config.units.iter().any(|unit| unit.kind == UnitKind::Node) {
-            tools.insert(ToolRequirement::Node);
-        }
-        if config
-            .units
-            .iter()
-            .any(|unit| unit.kind == UnitKind::Gradle)
-        {
-            tools.insert(ToolRequirement::Gradle);
-        }
-        if config.units.iter().any(|unit| unit.kind == UnitKind::Rust) {
-            if mr_boxington {
-                tools.insert(ToolRequirement::MrBoxington);
-            } else {
-                tools.insert(ToolRequirement::Sccache);
-            }
-        }
-        if config.units.iter().any(uses_mold) {
-            tools.insert(ToolRequirement::Mold);
-        }
         // The detection fact only says mise is configured; the renderer needs
         // it wherever a unit runs through mise or declares tools the scan
         // cannot see (docs, homebrew, Swift, and Rust alike).
@@ -7761,16 +7721,6 @@ impl WorkflowIr {
             unit.kind == UnitKind::Rust || !unit.mise_tools.is_empty() || commands_invoke_mise(unit)
         });
         let mise_present = mise_detected && mise_surface_needed;
-        if mise_present {
-            tools.insert(ToolRequirement::Mise);
-        }
-        if config
-            .units
-            .iter()
-            .any(|unit| unit.kind == UnitKind::Docker)
-        {
-            tools.insert(ToolRequirement::DockerBuildx);
-        }
         Self {
             default_branch: config.default_branch.clone(),
             providers: config.providers.clone(),
@@ -7786,7 +7736,6 @@ impl WorkflowIr {
             concurrency_group: config.concurrency_group.clone(),
             merge_group,
             serial_stack_groups: config.serial_stack_groups,
-            tools,
             mise_present,
             mr_boxington,
             units: config.units.clone(),
