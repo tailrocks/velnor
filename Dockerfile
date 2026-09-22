@@ -53,7 +53,7 @@ RUN --mount=type=secret,id=github_token \
     && : > /tmp/mise-empty.toml \
     && cd /opt/mise/config \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
-    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.9" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
+    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.12" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise trust /opt/mise/config/mise.toml \
     && if [ -f /run/secrets/github_token ]; then export MISE_GITHUB_TOKEN="$(cat /run/secrets/github_token)"; fi \
     && mise install --locked --yes rust mr-boxington \
