@@ -65,6 +65,73 @@ impl ProviderId {
     }
 }
 
+/// Which caller-managed host lane participates in automatic events.
+///
+/// GitHub-hosted is always part of the generated provider universe. It is the
+/// independent recovery/control-plane lane and remains automatic in every
+/// mode. The mode selects the local lane(s); manual dispatch uses the full
+/// three-provider universe.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ProviderMode {
+    NativeOnly,
+    ScaleSetOnly,
+    Both,
+}
+
+impl ProviderMode {
+    /// The accepted mode vocabulary, in stable display order.
+    pub(crate) const ALL: [Self; 3] = [Self::NativeOnly, Self::ScaleSetOnly, Self::Both];
+
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeOnly => "native-only",
+            Self::ScaleSetOnly => "scale-set-only",
+            Self::Both => "both",
+        }
+    }
+
+    /// Parse only the canonical mode names. Provider ids and the old runner
+    /// aliases are not accepted here.
+    pub(crate) fn parse(value: &str) -> Result<Self, GeneratorError> {
+        match value {
+            "native-only" => Ok(Self::NativeOnly),
+            "scale-set-only" => Ok(Self::ScaleSetOnly),
+            "both" => Ok(Self::Both),
+            _ => Err(GeneratorError::usage(format!(
+                "unknown provider mode `{value}`; expected one of: native-only, scale-set-only, both"
+            ))),
+        }
+    }
+
+    /// The generated workflow universe. Dispatches always see all three
+    /// canonical providers, independent of the automatic local mode.
+    #[must_use]
+    pub(crate) fn provider_universe(self) -> ProviderSet {
+        ProviderId::ALL.into_iter().collect()
+    }
+
+    /// Providers admitted on push, pull request, and schedule events.
+    /// Hosted recovery is deliberately present in every mode.
+    #[must_use]
+    pub(crate) fn automatic_providers(self) -> ProviderSet {
+        match self {
+            Self::NativeOnly => ProviderSet::from([ProviderId::GithubHosted, ProviderId::Velnor]),
+            Self::ScaleSetOnly => {
+                ProviderSet::from([ProviderId::GithubHosted, ProviderId::GithubSelfHosted])
+            }
+            Self::Both => ProviderId::ALL.into_iter().collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl std::fmt::Display for ProviderId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
@@ -522,6 +589,22 @@ pub(crate) fn plan_digest(
     format!("{digest:016x}")
 }
 
+/// Bind the typed execution platform to the planner's full command/profile/
+/// features/fixtures digest. The result record carries both fields, but the
+/// digest is the run-level binding available to the strict verdict without a
+/// second per-unit platform table.
+pub(crate) fn execution_identity_digest(platform: Platform, payload_digest: &str) -> String {
+    format!("platform={};payload={payload_digest}", platform.as_str())
+}
+
+fn execution_identity_platform(identity_digest: &str) -> Option<Platform> {
+    let platform = identity_digest
+        .strip_prefix("platform=")?
+        .split_once(";payload=")?
+        .0;
+    Platform::parse(platform).ok()
+}
+
 /// Full result identity (spec §2): repository + sha + run + attempt +
 /// plan digest + unit + provider + platform + command/profile/features/fixture.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -688,11 +771,20 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
-        if identity.command_digest != run.command_digest_for(&identity.unit_id) {
+        let expected_command_digest = run.command_digest_for(&identity.unit_id);
+        if identity.command_digest != expected_command_digest {
             failures.push(VerdictFailure::IdentityMismatch {
                 unit_id: identity.unit_id.clone(),
                 provider: identity.provider,
                 reason: "command digest does not match the planned unit".to_owned(),
+            });
+            continue;
+        }
+        if execution_identity_platform(&expected_command_digest) != Some(identity.platform) {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "execution identity digest does not bind the planned platform".to_owned(),
             });
             continue;
         }
@@ -738,7 +830,7 @@ pub(crate) fn evaluate_verdict(
                         ObservedOutcome::Skipped => 4,
                     })
                     .collect();
-                if outcomes.len() > 1 {
+                if records.len() != 1 || outcomes.len() > 1 {
                     failures.push(VerdictFailure::DuplicateConflicting {
                         unit_id: unit_id.clone(),
                         provider: *provider,
@@ -933,6 +1025,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_modes_are_exact_and_keep_the_three_provider_universe() {
+        assert_eq!(ProviderMode::ALL.len(), 3);
+        assert_eq!(
+            ProviderMode::parse("native-only").unwrap(),
+            ProviderMode::NativeOnly
+        );
+        assert_eq!(
+            ProviderMode::parse("scale-set-only").unwrap(),
+            ProviderMode::ScaleSetOnly
+        );
+        assert_eq!(ProviderMode::parse("both").unwrap(), ProviderMode::Both);
+        for alias in ["github", "velnor", "native", "scale-set", ""] {
+            let error = must_fail(ProviderMode::parse(alias), "provider mode alias");
+            assert!(error.contains("unknown provider mode"), "{alias}: {error}");
+        }
+        for mode in ProviderMode::ALL {
+            assert_eq!(mode.provider_universe().len(), ProviderId::ALL.len());
+            assert!(mode
+                .automatic_providers()
+                .contains(&ProviderId::GithubHosted));
+        }
+    }
+
+    #[test]
     fn platform_and_trust_parse_is_strict() {
         assert_eq!(Platform::parse("linux-x64").unwrap(), Platform::LinuxX64);
         assert_eq!(
@@ -1018,5 +1134,51 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[test]
+    fn strict_verdict_binds_platform_and_requires_one_record() {
+        let provider = ProviderId::GithubHosted;
+        let unit_id = "rust-a".to_owned();
+        let command_digest = execution_identity_digest(Platform::LinuxX64, "payload");
+        let run = RunIdentity {
+            repository_id: "repo".to_owned(),
+            source_sha: "sha".to_owned(),
+            run_id: "run".to_owned(),
+            run_attempt: "1".to_owned(),
+            plan_digest: "plan".to_owned(),
+            command_digests: BTreeMap::from([(unit_id.clone(), command_digest.clone())]),
+        };
+        let identity = || ResultIdentity {
+            repository_id: run.repository_id.clone(),
+            source_sha: run.source_sha.clone(),
+            run_id: run.run_id.clone(),
+            run_attempt: run.run_attempt.clone(),
+            plan_digest: run.plan_digest.clone(),
+            unit_id: unit_id.clone(),
+            provider,
+            platform: Platform::LinuxX64,
+            command_digest: command_digest.clone(),
+        };
+        let expected = BTreeSet::from([(unit_id.clone(), provider)]);
+        let success = || ObservedResult {
+            identity: identity(),
+            outcome: ObservedOutcome::Success,
+        };
+        assert!(evaluate_verdict(&expected, &[success()], &run).is_empty());
+
+        let mut wrong_platform = success();
+        wrong_platform.identity.platform = Platform::MacosArm64;
+        let failures = evaluate_verdict(&expected, &[wrong_platform], &run);
+        assert!(failures.iter().any(|failure| matches!(
+            failure,
+            VerdictFailure::IdentityMismatch { reason, .. }
+                if reason.contains("planned platform")
+        )));
+
+        let duplicate_failures = evaluate_verdict(&expected, &[success(), success()], &run);
+        assert!(duplicate_failures
+            .iter()
+            .any(|failure| matches!(failure, VerdictFailure::DuplicateConflicting { .. })));
     }
 }

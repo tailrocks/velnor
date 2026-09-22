@@ -14,8 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::s2::provider::{
-    plan_digest, unit_job_display_name, unit_job_id, validate_selector_disjointness, Capabilities,
-    ExclusionReason, Platform, ProviderId, ProviderSet, SelectorMap, TrustReq,
+    execution_identity_digest, plan_digest, unit_job_display_name, unit_job_id,
+    validate_selector_disjointness, Capabilities, ExclusionReason, Platform, ProviderId,
+    ProviderSet, SelectorMap, TrustReq,
 };
 use crate::s2::routing::{route_unit, RouteDecision, UnitRequirements};
 use crate::s2::GeneratorError;
@@ -203,6 +204,7 @@ pub(crate) fn fanout(
             }
             continue;
         }
+        let execution_digest = execution_identity_digest(unit.platform, &unit.command_digest);
         let mut routed = ProviderSet::new();
         for (provider, decision) in
             route_unit(&unit.requirements(), universe, selectors, event_trusted)?
@@ -218,7 +220,7 @@ pub(crate) fn fanout(
                         runs_on,
                         platform: unit.platform,
                         trust: unit.trust,
-                        command_digest: unit.command_digest.clone(),
+                        command_digest: execution_digest.clone(),
                         bootstrap: BootstrapLane::for_provider(
                             provider,
                             needs_lane_verification(unit.capabilities),
@@ -232,7 +234,7 @@ pub(crate) fn fanout(
                 }),
             }
         }
-        digest_units.push((unit.unit_id.clone(), routed, unit.command_digest.clone()));
+        digest_units.push((unit.unit_id.clone(), routed, execution_digest));
     }
     exclusions.sort_by(|left, right| {
         (&left.unit_id, left.provider).cmp(&(&right.unit_id, right.provider))
@@ -339,7 +341,7 @@ mod tests {
             for lane in &lanes {
                 assert_eq!(
                     lane.command_digest,
-                    format!("digest-of-{unit_id}"),
+                    format!("platform=linux-x64;payload=digest-of-{unit_id}"),
                     "lane {} diverged from the planned inputs",
                     lane.provider
                 );

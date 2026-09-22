@@ -79,7 +79,7 @@ fn write_workflow_config(root: &Path, workflow: &str) {
 }
 
 /// Write visibility evidence bound to the fixture slug: the scan path
-/// requires it, and the singleton policy resolves the universe from it.
+/// requires it, but provider placement remains explicit config.
 fn write_visibility(root: &Path, visibility: &str) {
     fs::write(
         root.join(".github-gen/visibility.toml"),
@@ -157,32 +157,6 @@ fn generate(root: &Path) -> Generated {
     Generated { output }
 }
 
-/// Run generation expecting the singleton policy to reject the tree:
-/// return the stderr for the rejection assertion.
-fn generate_fails(root: &Path) -> String {
-    let output = root.parent().unwrap().join(format!(
-        "{}-out",
-        root.file_name().and_then(|name| name.to_str()).unwrap()
-    ));
-    let _ = fs::remove_dir_all(&output);
-    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
-        .args([
-            "--plain",
-            "--default-branch",
-            "main",
-            "--output",
-            output.to_str().unwrap(),
-            root.to_str().unwrap(),
-        ])
-        .output()
-        .expect("run velnor-workflow");
-    assert!(
-        !outcome.status.success(),
-        "generation must fail closed for a contradictory universe"
-    );
-    String::from_utf8_lossy(&outcome.stderr).into_owned()
-}
-
 fn parse_jobs(yaml: &str) -> BTreeMap<String, Value> {
     let doc: Value = serde_yaml::from_str(yaml).expect("parse workflow yaml");
     doc.get("jobs")
@@ -221,16 +195,26 @@ fn aggregate_provider_caller_id(job_id: &str) -> Option<(&str, &str)> {
 }
 
 #[test]
-fn multi_provider_universe_is_rejected() {
-    let root = unique_dir("multi-provider-rejected");
+fn exact_three_provider_universe_emits_all_three_callers() {
+    let root = unique_dir("three-provider-universe");
     write_rust_fixture(&root, 3);
     write_workflow_config(&root, &all_providers_config());
     write_visibility(&root, "public");
-    let stderr = generate_fails(&root);
-    assert!(
-        stderr.contains("unsupported provider `github-self-hosted`"),
-        "a multi-provider universe fails closed, never silently: {stderr}"
-    );
+    let generated = generate(&root);
+    let pr = parse_jobs(&generated.workflow("ci-pr.yml"));
+    for provider in ["github-hosted", "github-self-hosted", "velnor"] {
+        assert!(
+            pr.keys().any(|id| id.starts_with(&format!("{provider}-"))),
+            "three-provider surface must emit {provider} callers: {pr:?}"
+        );
+    }
+    let kind = parse_jobs(&generated.workflow("ci-unit-rust.yml"));
+    for provider in ["github-hosted", "github-self-hosted", "velnor"] {
+        assert!(
+            kind.contains_key(&format!("verify-{provider}")),
+            "three-provider surface must emit {provider} verify job: {kind:?}"
+        );
+    }
 }
 
 #[test]
