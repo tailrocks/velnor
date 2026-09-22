@@ -524,6 +524,96 @@ fn validate_rebuild(unit: &Unit, product: &NamedProduct) -> Result<(), Generator
     Ok(())
 }
 
+fn validate_product<'a>(
+    unit: &'a Unit,
+    product: &'a NamedProduct,
+    owners: &mut BTreeMap<&'a str, (&'a str, &'a str)>,
+) -> Result<(), GeneratorError> {
+    let mut seen_inputs = BTreeSet::new();
+    for input in &product.inputs {
+        if !valid_product_input(input) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with input `{input}`, which is not a repo-relative path or glob in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+                unit.id, product.name,
+            )));
+        }
+        if !seen_inputs.insert(input.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` input `{input}` twice; one entry per pattern",
+                unit.id, product.name,
+            )));
+        }
+    }
+    for gap in &product.inputs_unknown {
+        if !valid_env_value(gap) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with an unprintable closure gap; keep gap entries to printable text",
+                unit.id, product.name,
+            )));
+        }
+    }
+    if let Some(digest) = product.inputs_digest.as_deref() {
+        if !crate::s2::primitives::prepared_tools::is_digest(digest) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with inputs digest `{digest}`, which is not a lowercase hex SHA-256; digests are generator-computed and cannot be declared by hand",
+                unit.id, product.name,
+            )));
+        }
+        if !product.inputs_unknown.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with both an inputs digest and closure gaps; a digest over an incomplete closure would be a false identity",
+                unit.id, product.name,
+            )));
+        }
+    }
+    for output in &product.outputs {
+        if !valid_product_output(output) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` declares product `{}` with output `{output}`, which is not a repo-relative path in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+                unit.id, product.name,
+            )));
+        }
+        if let Some((owner_unit, owner_product)) =
+            owners.insert(output.as_str(), (unit.id.as_str(), product.name.as_str()))
+        {
+            if owner_unit == unit.id && owner_product == product.name {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` declares product `{}` output `{output}` twice; one entry per path",
+                    unit.id, product.name,
+                )));
+            }
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` product `{}` claims output `{output}`, already claimed by unit `{owner_unit}` product `{owner_product}`; one producer per path",
+                unit.id, product.name,
+            )));
+        }
+    }
+    validate_output_files(unit, product)?;
+    validate_bindings(unit, product)?;
+    if let Some(identity) = &product.identity {
+        identity.validate(&format!("unit `{}` product `{}`", unit.id, product.name))?;
+        if identity.producer != unit.id {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` product `{}` identity names producer `{}`, but the owning unit is `{}`",
+                unit.id, product.name, identity.producer, unit.id
+            )));
+        }
+        if identity.product != product.name {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` product `{}` identity names product `{}`",
+                unit.id, product.name, identity.product
+            )));
+        }
+        if identity.inputs_digest != product.inputs_digest {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` product `{}` identity inputs_digest disagrees with product inputs_digest",
+                unit.id, product.name
+            )));
+        }
+    }
+    validate_rebuild(unit, product)
+}
+
 /// Validate the product graph before compilation: every declared output is a
 /// normal-form repo-relative path claimed by exactly one product, every
 /// expected output file is a duplicate-free normal-form path under a claimed
@@ -539,89 +629,7 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
     let mut owners: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
     for unit in &config.units {
         for product in &unit.products {
-            let mut seen_inputs = BTreeSet::new();
-            for input in &product.inputs {
-                if !valid_product_input(input) {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` declares product `{}` with input `{input}`, which is not a repo-relative path or glob in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
-                        unit.id, product.name,
-                    )));
-                }
-                if !seen_inputs.insert(input.as_str()) {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` declares product `{}` input `{input}` twice; one entry per pattern",
-                        unit.id, product.name,
-                    )));
-                }
-            }
-            for gap in &product.inputs_unknown {
-                if !valid_env_value(gap) {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` declares product `{}` with an unprintable closure gap; keep gap entries to printable text",
-                        unit.id, product.name,
-                    )));
-                }
-            }
-            if let Some(digest) = product.inputs_digest.as_deref() {
-                if !crate::s2::primitives::prepared_tools::is_digest(digest) {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` declares product `{}` with inputs digest `{digest}`, which is not a lowercase hex SHA-256; digests are generator-computed and cannot be declared by hand",
-                        unit.id, product.name,
-                    )));
-                }
-                if !product.inputs_unknown.is_empty() {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` declares product `{}` with both an inputs digest and closure gaps; a digest over an incomplete closure would be a false identity",
-                        unit.id, product.name,
-                    )));
-                }
-            }
-            for output in &product.outputs {
-                if !valid_product_output(output) {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` declares product `{}` with output `{output}`, which is not a repo-relative path in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
-                        unit.id, product.name,
-                    )));
-                }
-                if let Some((owner_unit, owner_product)) =
-                    owners.insert(output.as_str(), (unit.id.as_str(), product.name.as_str()))
-                {
-                    if owner_unit == unit.id && owner_product == product.name {
-                        return Err(GeneratorError::usage(format!(
-                            "unit `{}` declares product `{}` output `{output}` twice; one entry per path",
-                            unit.id, product.name,
-                        )));
-                    }
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` product `{}` claims output `{output}`, already claimed by unit `{owner_unit}` product `{owner_product}`; one producer per path",
-                        unit.id, product.name,
-                    )));
-                }
-            }
-            validate_output_files(unit, product)?;
-            validate_bindings(unit, product)?;
-            if let Some(identity) = &product.identity {
-                identity.validate(&format!("unit `{}` product `{}`", unit.id, product.name))?;
-                if identity.producer != unit.id {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` product `{}` identity names producer `{}`, but the owning unit is `{}`",
-                        unit.id, product.name, identity.producer, unit.id
-                    )));
-                }
-                if identity.product != product.name {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` product `{}` identity names product `{}`",
-                        unit.id, product.name, identity.product
-                    )));
-                }
-                if identity.inputs_digest != product.inputs_digest {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` product `{}` identity inputs_digest disagrees with product inputs_digest",
-                        unit.id, product.name
-                    )));
-                }
-            }
-            validate_rebuild(unit, product)?;
+            validate_product(unit, product, &mut owners)?;
         }
         for prerequisite in &unit.prerequisites {
             if prerequisite.producer == unit.id {
