@@ -44,6 +44,10 @@ pub(crate) const STAGED_OUTPUTS_DIR: &str = "outputs";
 pub(crate) const OUTPUTS_ENV: &str = "VELNOR_TRANSPORT_OUTPUTS";
 /// Newline-separated declared structural files for `verify-product`.
 pub(crate) const OUTPUT_FILES_ENV: &str = "VELNOR_TRANSPORT_OUTPUT_FILES";
+/// Typed product identity is transported through a YAML block scalar and
+/// expanded by the shell. Keeping JSON out of a plain `run:` scalar prevents
+/// JSON mapping punctuation from becoming workflow YAML syntax.
+const PRODUCT_IDENTITY_ENV: &str = "VELNOR_PRODUCT_IDENTITY";
 /// Same-run artifacts live only for the consuming jobs.
 const ARTIFACT_RETENTION_DAYS: u32 = 1;
 
@@ -200,6 +204,16 @@ fn identity_digest(identity: &ProductIdentity) -> Result<String, GeneratorError>
 
 fn identity_json(identity: &ProductIdentity) -> Option<String> {
     serde_json::to_string(identity).ok()
+}
+
+fn identity_env_and_arg(identity: Option<&ProductIdentity>) -> (String, String) {
+    let Some(json) = identity.and_then(identity_json) else {
+        return (String::new(), String::new());
+    };
+    (
+        format!("          {PRODUCT_IDENTITY_ENV}: |\n            {json}\n"),
+        format!(" --identity \"${PRODUCT_IDENTITY_ENV}\""),
+    )
 }
 
 fn parse_identity(
@@ -869,6 +883,7 @@ pub(crate) fn render_producer_block_with_identity(
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
     let digest = product.inputs_digest.clone().unwrap_or_default();
+    let (identity_env, identity_arg) = identity_env_and_arg(identity);
     let mut command = format!(
         "velnor-workflow stage-product --producer {} --product {}",
         shell_quote(producer),
@@ -877,15 +892,13 @@ pub(crate) fn render_producer_block_with_identity(
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
     }
-    if let Some(identity) = identity.and_then(identity_json) {
-        let _ = write!(command, " --identity {}", shell_quote(&identity));
-    }
+    command.push_str(&identity_arg);
     let _ = write!(
         command,
         " --stage \"$RUNNER_TEMP/velnor-products/{artifact}\""
     );
     format!(
-        "      - name: Stage product {artifact}\n        env:\n          {OUTPUTS_ENV}: |\n{}\n        run: {command}\n      - name: Upload product {artifact}\n        uses: {upload_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n          if-no-files-found: error\n          retention-days: {ARTIFACT_RETENTION_DAYS}\n",
+        "      - name: Stage product {artifact}\n        env:\n          {OUTPUTS_ENV}: |\n{}\n{identity_env}        run: {command}\n      - name: Upload product {artifact}\n        uses: {upload_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n          if-no-files-found: error\n          retention-days: {ARTIFACT_RETENTION_DAYS}\n",
         indent_block(&product.outputs.join("\n"), "            "),
     )
 }
@@ -902,6 +915,7 @@ pub(crate) fn render_consumer_block_with_identity(
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
     let digest = product.inputs_digest.clone().unwrap_or_default();
+    let (identity_env, identity_arg) = identity_env_and_arg(identity);
     let mut command = format!(
         "velnor-workflow verify-product --producer {} --product {}",
         shell_quote(producer),
@@ -910,9 +924,7 @@ pub(crate) fn render_consumer_block_with_identity(
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
     }
-    if let Some(identity) = identity.and_then(identity_json) {
-        let _ = write!(command, " --identity {}", shell_quote(&identity));
-    }
+    command.push_str(&identity_arg);
     let _ = write!(
         command,
         " --stage \"$RUNNER_TEMP/velnor-products/{artifact}\" --marker {marker}"
@@ -930,7 +942,7 @@ pub(crate) fn render_consumer_block_with_identity(
         )
     };
     format!(
-        "      - name: Download product {artifact}\n        uses: {download_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n      - name: Verify product {artifact}\n        env:\n{outputs_value}{files_value}        run: {command}\n",
+        "      - name: Download product {artifact}\n        uses: {download_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n      - name: Verify product {artifact}\n        env:\n{outputs_value}{files_value}{identity_env}        run: {command}\n",
     )
 }
 
@@ -979,6 +991,8 @@ pub(crate) fn render_native_product_cache_restore_block(
     let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
     let digest = product.inputs_digest.as_deref().unwrap_or_default();
     let identity_json = identity_json(identity)?;
+    let identity_env =
+        format!("          {PRODUCT_IDENTITY_ENV}: |\n            {identity_json}\n");
     let mut command = format!(
         "velnor-workflow verify-product --producer {} --product {}",
         shell_quote(producer),
@@ -989,8 +1003,7 @@ pub(crate) fn render_native_product_cache_restore_block(
     }
     let _ = write!(
         command,
-        " --identity {} --stage \"{shell_path}\" --marker {}",
-        shell_quote(&identity_json),
+        " --identity \"${PRODUCT_IDENTITY_ENV}\" --stage \"{shell_path}\" --marker {}",
         shell_quote(marker)
     );
     let outputs_value = format!(
@@ -1006,7 +1019,7 @@ pub(crate) fn render_native_product_cache_restore_block(
         )
     };
     Some(format!(
-        "      - name: Restore exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Verify exact native product cache {artifact}\n        id: {verify_id}\n        if: steps.{restore_id}.outputs.cache-hit == 'true'\n        continue-on-error: true\n        env:\n{outputs_value}{files_value}        run: |\n          set -o pipefail\n          stage=\"{shell_path}\"\n          log=\"$RUNNER_TEMP/{artifact}-cache-verify.log\"\n          if [[ ! -f \"$stage/{MANIFEST_FILE}\" ]]; then\n            outcome=corrupt\n          else\n            rc=0\n            {command} 2>&1 | tee \"$log\" || rc=$?\n            if (( rc == 0 )); then\n              outcome=hit\n            elif grep -Eiq 'identity|schema mismatch|owner mismatch|inputs_digest' \"$log\"; then\n              outcome=wrong-identity\n            else\n              outcome=corrupt\n            fi\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n          echo \"outcome=$outcome\" >> \"$GITHUB_OUTPUT\"\n          echo \"usable=$([[ $outcome == hit ]] && echo true || echo false)\" >> \"$GITHUB_OUTPUT\"\n          if [[ \"$outcome\" != hit ]]; then\n            rm -rf -- \"$stage\"\n          fi\n      - name: Report exact native product cache {artifact}\n        if: always()\n        env:\n          RESTORE_OUTCOME: ${{{{ steps.{restore_id}.outcome }}}}\n          CACHE_HIT: ${{{{ steps.{restore_id}.outputs.cache-hit }}}}\n          VERIFY_OUTCOME: ${{{{ steps.{verify_id}.outputs.outcome }}}}\n        run: |\n          if [[ \"$RESTORE_OUTCOME\" != success || \"$CACHE_HIT\" != true ]]; then\n            outcome=miss\n          else\n            outcome=$VERIFY_OUTCOME\n            [[ -n \"$outcome\" ]] || outcome=corrupt\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n"
+        "      - name: Restore exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Verify exact native product cache {artifact}\n        id: {verify_id}\n        if: steps.{restore_id}.outputs.cache-hit == 'true'\n        continue-on-error: true\n        env:\n{outputs_value}{files_value}{identity_env}        run: |\n          set -o pipefail\n          stage=\"{shell_path}\"\n          log=\"$RUNNER_TEMP/{artifact}-cache-verify.log\"\n          if [[ ! -f \"$stage/{MANIFEST_FILE}\" ]]; then\n            outcome=corrupt\n          else\n            rc=0\n            {command} 2>&1 | tee \"$log\" || rc=$?\n            if (( rc == 0 )); then\n              outcome=hit\n            elif grep -Eiq 'identity|schema mismatch|owner mismatch|inputs_digest' \"$log\"; then\n              outcome=wrong-identity\n            else\n              outcome=corrupt\n            fi\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n          echo \"outcome=$outcome\" >> \"$GITHUB_OUTPUT\"\n          echo \"usable=$([[ $outcome == hit ]] && echo true || echo false)\" >> \"$GITHUB_OUTPUT\"\n          if [[ \"$outcome\" != hit ]]; then\n            rm -rf -- \"$stage\"\n          fi\n      - name: Report exact native product cache {artifact}\n        if: always()\n        env:\n          RESTORE_OUTCOME: ${{{{ steps.{restore_id}.outcome }}}}\n          CACHE_HIT: ${{{{ steps.{restore_id}.outputs.cache-hit }}}}\n          VERIFY_OUTCOME: ${{{{ steps.{verify_id}.outputs.outcome }}}}\n        run: |\n          if [[ \"$RESTORE_OUTCOME\" != success || \"$CACHE_HIT\" != true ]]; then\n            outcome=miss\n          else\n            outcome=$VERIFY_OUTCOME\n            [[ -n \"$outcome\" ]] || outcome=corrupt\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n"
     ))
 }
 
@@ -1034,6 +1047,8 @@ pub(crate) fn render_native_product_cache_save_block(
     let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
     let digest = product.inputs_digest.as_deref().unwrap_or_default();
     let identity_json = identity_json(identity)?;
+    let identity_env =
+        format!("          {PRODUCT_IDENTITY_ENV}: |\n            {identity_json}\n");
     let mut command = format!(
         "velnor-workflow stage-product --producer {} --product {}",
         shell_quote(producer),
@@ -1044,8 +1059,7 @@ pub(crate) fn render_native_product_cache_save_block(
     }
     let _ = write!(
         command,
-        " --identity {} --stage \"{shell_path}\"",
-        shell_quote(&identity_json)
+        " --identity \"${PRODUCT_IDENTITY_ENV}\" --stage \"{shell_path}\""
     );
     let save_gate = format!(
         "({trusted_save_gate}) && steps.{restore_id}.outputs.cache-hit != 'true' && steps.{stage_id}.outcome == 'success'"
@@ -1055,7 +1069,7 @@ pub(crate) fn render_native_product_cache_save_block(
         indent_block(&product.outputs.join("\n"), "            ")
     );
     Some(format!(
-        "      - name: Probe exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Stage exact native product cache {artifact}\n        id: {stage_id}\n        continue-on-error: true\n        env:\n{outputs_value}        run: {command}\n      - name: Save exact native product cache {artifact}\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: {action_path}\n          key: {key}\n"
+        "      - name: Probe exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Stage exact native product cache {artifact}\n        id: {stage_id}\n        continue-on-error: true\n        env:\n{outputs_value}{identity_env}        run: {command}\n      - name: Save exact native product cache {artifact}\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: {action_path}\n          key: {key}\n"
     ))
 }
 
