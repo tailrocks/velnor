@@ -1170,6 +1170,59 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
 }
 
 #[test]
+fn regen_gate_keeps_bootstrap_unit_legacy_and_gate_first() {
+    let root = unique_dir("regen-gate-bootstrap-legacy");
+    write_rust_fixture(&root, 2);
+    let config_path = root.join(".github-gen/velnor-workflow.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str(
+        "\n[[declare]]\nprimitive = \"regen-gate\"\nunits = [\"rust-crate00\"]\n\n[declare.args]\ncommand = \"echo regen gate\"\n",
+    );
+    fs::write(config_path, config).unwrap();
+
+    let generated = generate(&root);
+    let project = fs::read_to_string(generated.output.join(".github/ci/project.toml")).unwrap();
+    let document: toml::Value = toml::from_str(&project).unwrap();
+    let unit = document["unit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|unit| unit["id"].as_str() == Some("rust-crate00"))
+        .expect("regen-gated unit is in the runtime contract");
+
+    assert!(unit.get("phases").is_none(), "bootstrap phases: {unit}");
+    assert!(
+        unit.get("check_commands").is_none(),
+        "bootstrap check commands: {unit}"
+    );
+
+    let mut command_vectors = 0;
+    for key in [
+        "github_pr_commands",
+        "github_full_commands",
+        "velnor_pr_commands",
+        "velnor_full_commands",
+    ] {
+        let Some(commands) = unit.get(key).and_then(toml::Value::as_array) else {
+            continue;
+        };
+        command_vectors += 1;
+        assert_eq!(
+            commands[0].as_str(),
+            Some("echo regen gate"),
+            "{key} must run the bootstrap gate first"
+        );
+        assert!(
+            commands[1]
+                .as_str()
+                .is_some_and(|command| command.contains(" fmt ")),
+            "{key} must retain the Rust checks after the gate: {commands:?}"
+        );
+    }
+    assert_eq!(command_vectors, 4, "schema-1 lane command vectors: {unit}");
+}
+
+#[test]
 fn kind_reusable_consumes_caller_plan_shas() {
     let root = unique_dir("plan-shas");
     write_rust_fixture(&root, 2);
