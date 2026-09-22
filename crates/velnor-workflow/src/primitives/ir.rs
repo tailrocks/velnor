@@ -4,7 +4,6 @@
 //! against: which lanes exist, which runner each lane uses, and which tools a
 //! unit needs provisioned. It carries no repository knowledge of its own; every
 //! value comes from the scanned shape and the repo-owned generation config.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -166,9 +165,8 @@ mod tests {
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
-        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
-        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
-        WorkflowIr, WorkflowKind,
+        lane_input, AutomaticEvent, DispatchChoice::*, GraphNode, LaneAdmission, Pins, RunnerMode,
+        Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
     };
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -746,22 +744,6 @@ mod tests {
         }
     }
 
-    fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
-        let mut flagged = Vec::new();
-        for unit in &ir.units {
-            for caller in ir.unit_lane_callers(unit, "ci-unit-rust.yml", None) {
-                if caller
-                    .inputs
-                    .iter()
-                    .any(|(name, value)| *name == lane_input::CANDIDATE_PUBLISH && value == "true")
-                {
-                    flagged.push(caller.job_id.clone());
-                }
-            }
-        }
-        flagged
-    }
-
     #[expect(
         clippy::panic,
         reason = "tests need setup failures to name their root cause"
@@ -828,69 +810,6 @@ mod tests {
         assert!(
             !rust_workflow.contains("runs-on: macos-15"),
             "{rust_workflow}"
-        );
-    }
-
-    #[test]
-    fn candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate() {
-        let owner = workflow_setup_action_repository().to_owned();
-        let mut documentation = rust_unit("docs-generator-root", "crates/velnor-workflow");
-        documentation.kind = UnitKind::Docs;
-        let units = vec![
-            rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-            rust_unit("rust-sibling-crate", "crates/sibling"),
-            rust_unit("rust-workspace-root", "."),
-            documentation,
-        ];
-        let ir = owner_test_ir(&owner, units);
-        for unit in &ir.units {
-            for lane in [RunnerMode::Github, RunnerMode::Velnor] {
-                let contract = ir.default_unit_contract(unit, false);
-                let facts = ir.unit_lane_facts(unit, &contract, lane);
-                assert_eq!(
-                    facts.candidate_publish,
-                    lane == RunnerMode::Github && unit_owns_workflow_crate(unit),
-                    "candidate_publish for {} on {lane:?}",
-                    unit.id
-                );
-            }
-        }
-        assert_eq!(
-            ir.units
-                .iter()
-                .filter(|unit| unit_owns_workflow_crate(unit))
-                .count(),
-            1,
-            "exactly one unit owns the generator crate"
-        );
-
-        // A consumer tree that happens to carry the same crate root still
-        // publishes nothing: the owner repository check comes first.
-        let foreign = owner_test_ir(
-            "example/foreign",
-            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
-        );
-        for unit in &foreign.units {
-            for lane in [RunnerMode::Github, RunnerMode::Velnor] {
-                let contract = foreign.default_unit_contract(unit, false);
-                assert!(
-                    !foreign
-                        .unit_lane_facts(unit, &contract, lane)
-                        .candidate_publish,
-                    "foreign trees never publish on {lane:?}"
-                );
-            }
-        }
-        let anonymous = owner_test_ir(
-            "",
-            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
-        );
-        let contract = anonymous.default_unit_contract(&anonymous.units[0], false);
-        assert!(
-            !anonymous
-                .unit_lane_facts(&anonymous.units[0], &contract, RunnerMode::Github)
-                .candidate_publish,
-            "an empty repository is not the owner"
         );
     }
 
@@ -1128,42 +1047,6 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_caller_per_run_passes_candidate_publish() {
-        let owner = workflow_setup_action_repository().to_owned();
-        let ir = owner_test_ir(
-            &owner,
-            vec![
-                rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-                rust_unit("rust-sibling-crate", "crates/sibling"),
-            ],
-        );
-        assert_eq!(candidate_flagged_callers(&ir).len(), 1);
-
-        let nodes = ir
-            .units
-            .iter()
-            .map(|unit| GraphNode::Unit {
-                unit_id: unit.id.clone(),
-                job_id: stack_group_job_id(unit.kind),
-                name: sidebar_group_name(unit),
-                file: nested_unit_workflow_file(unit),
-            })
-            .collect::<Vec<_>>();
-        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
-        assert_eq!(
-            pr.matches("candidate_publish: true").count(),
-            1,
-            "one publishing caller per run: {pr}"
-        );
-        let flagged = candidate_flagged_callers(&ir);
-        let only = must_some(flagged.first(), "one caller passes the flag");
-        assert!(
-            pr.contains(&format!("  {only}:\n")),
-            "the publishing caller renders: {pr}"
-        );
-    }
-
-    #[test]
     fn no_lane_fetches_pin_history_the_tool_self_fetches() {
         let owner = workflow_setup_action_repository().to_owned();
         let mut checker = rust_unit("rust-generator-crate", "crates/velnor-workflow");
@@ -1195,299 +1078,379 @@ mod tests {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "one consumer contract pinned clause by clause"
+        reason = "the bootstrap contract is pinned clause by clause"
     )]
     #[test]
-    fn candidate_steps_match_the_policy_consumer_contract() {
+    fn candidate_bootstrap_matches_control_plane_contract() {
         let owner = workflow_setup_action_repository().to_owned();
         let ir = owner_test_ir(
             &owner,
-            vec![
-                rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-                rust_unit("rust-sibling-crate", "crates/sibling"),
-            ],
+            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
         );
-        let content = must_render_kind(&ir);
-        assert!(
-            content.contains(
-                "      candidate_publish:\n        required: false\n        type: boolean\n        default: false\n"
-            ),
-            "the callee declares the flag: {content}"
+        let mut plan = String::new();
+        ir.render_plan(&mut plan, RunnerMode::Both, false);
+        let bootstrap = must_some(
+            plan.find("Bootstrap candidate generator product"),
+            "candidate bootstrap renders",
         );
-        let (hosted, velnor) = must_some(
-            content.split_once("\n  verify-velnor:\n"),
-            "both lane jobs render",
+        let publish = must_some(
+            plan.find("Publish candidate generator product"),
+            "candidate publish renders",
         );
-        assert!(
-            !velnor.contains("candidate generator product"),
-            "the Velnor lane never publishes: {velnor}"
-        );
-        let checks = must_some(hosted.find("- name: Run unit checks"), "checks render");
-        let start = must_some(
-            hosted.find("      - name: Prepare candidate generator product"),
-            "prepare step renders",
+        let select = must_some(plan.find("Select affected units"), "plan step renders");
+        let restore = must_some(
+            plan.find("Restore pinned generator runtime"),
+            "pinned runtime restore renders",
         );
         assert!(
-            checks < start,
-            "packaging reuses the checks' own build, after it: {hosted}"
+            bootstrap < publish && publish < select && select < restore,
+            "{plan}"
         );
-        let end = must_some(
-            hosted.find("      - name: Report phase timings"),
-            "report step renders",
-        );
-        let candidate = &hosted[start..end];
         assert_eq!(
-            hosted
-                .matches(
-                    "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
-                )
+            plan.matches("Bootstrap candidate generator product")
                 .count(),
             1,
-            "the prepare step carries the input gate merged with the pull-request same-repo gate: {hosted}"
+            "one control-plane bootstrap per plan: {plan}"
         );
+        assert_eq!(
+            plan.matches("Publish candidate generator product").count(),
+            1,
+            "one candidate artifact publication per plan: {plan}"
+        );
+        let candidate = &plan[bootstrap..select];
         assert!(
-            hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true') }}"
+            candidate.contains(
+                "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
             ),
-            "the publish step additionally gates on the prepare step's skip output: {hosted}"
+            "same-repository gate is explicit: {candidate}"
         );
-        assert!(
-            candidate.contains("CANDIDATE_MERGE_SHA: ${{ inputs.head_sha }}"),
-            "the merge SHA names the checked-out tree: {candidate}"
-        );
-        assert!(
-            candidate.contains("CANDIDATE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}"),
-            "the PR-head SHA anchors the published identity: {candidate}"
-        );
-        assert!(
-            candidate.contains("CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}"),
-            "the base SHA anchors the skip gate: {candidate}"
-        );
-        assert!(
-            !candidate.contains("CANDIDATE_HEAD_SHA"),
-            "nothing keys off the merge tree alone anymore: {candidate}"
-        );
-        for sha in ["$PR_HEAD", "$BASE", "$base_pin"] {
+        for binding in [
+            "CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+            "CANDIDATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'refs/heads/main' }}",
+        ] {
+            assert!(candidate.contains(binding), "candidate binds {binding}: {candidate}");
+        }
+        for fetch in [
+            "git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$HEAD\"",
+            "git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$BASE\"",
+            "git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$base_pin\"",
+        ] {
             assert!(
-                candidate.contains(&format!(
-                    "git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"{sha}\""
-                )),
-                "an unauthenticated shallow fetch pins {sha}: {candidate}"
+                candidate.contains(fetch),
+                "candidate fetches {fetch}: {candidate}"
             );
         }
         for probe in [
-            "\"$PR_HEAD^{commit}\"",
-            "\"$BASE^{commit}\"",
-            "\"$base_pin^{commit}\"",
+            "git cat-file -e \"$HEAD^{commit}\"",
+            "git cat-file -e \"$BASE^{commit}\"",
+            "git cat-file -e \"$base_pin^{commit}\"",
         ] {
             assert!(
-                candidate.contains(&format!("git cat-file -e {probe}")),
-                "the fetch is skipped when {probe} is already local: {candidate}"
+                candidate.contains(probe),
+                "candidate guards {probe}: {candidate}"
             );
         }
         assert!(
-            !candidate.contains("GH_TOKEN"),
-            "fetches are unauthenticated reads of the public repository: {candidate}"
+            candidate.contains("velnor-workflow closure --rev=\"$HEAD\" --candidate")
+                && candidate.contains("velnor-workflow closure --rev=\"$base_pin\" --candidate"),
+            "closure comparison uses the head and pinned runtime: {candidate}"
         );
         assert!(
-            !candidate.contains("actions/checkout@"),
-            "no second checkout: the job extends its own history with fetches: {candidate}"
+            candidate.contains("git show \"$BASE:.github-gen/velnor-workflow.toml\"")
+                && candidate.contains("git show \"$BASE:.github/workflows/ci-policy.yml\""),
+            "base pin lookup has both declared sources: {candidate}"
         );
         assert!(
-            candidate.contains("velnor-workflow closure --rev=\"$PR_HEAD\" --candidate"),
-            "the head candidate closure names the artifact: {candidate}"
+            candidate.contains("if [[ \"$head_closure\" == \"$base_closure\" ]]")
+                && candidate.contains("echo \"skip=true\" >> \"$GITHUB_OUTPUT\""),
+            "unchanged generator trees skip publication: {candidate}"
         );
         assert!(
-            candidate.contains("velnor-workflow closure --rev=\"$base_pin\" --candidate"),
-            "the base candidate closure feeds the skip gate: {candidate}"
-        );
-        assert!(
-            candidate
-                .contains("velnor-workflow closure --rev=\"$CANDIDATE_MERGE_SHA\" --candidate"),
-            "the merge candidate closure selects the fast path: {candidate}"
-        );
-        assert!(
-            candidate.contains("git show \"$BASE:.github-gen/velnor-workflow.toml\""),
-            "the base pin is read from the base tree: {candidate}"
-        );
-        assert!(
-            candidate.contains("git show \"$BASE:.github/workflows/ci-policy.yml\""),
-            "the entrypoint literal is the fallback pin source: {candidate}"
-        );
-        assert!(
-            candidate.contains("echo \"skip=true\" >> \"$GITHUB_OUTPUT\""),
-            "an unchanged generator skips the publish: {candidate}"
-        );
-        assert!(
-            candidate.contains("test -x target/debug/velnor-workflow"),
-            "the fast path reuses the job's own binary: {candidate}"
-        );
-        assert!(
-            candidate.contains("binary=\"target/debug/velnor-workflow\"")
-                && candidate.contains("build_rev=\"$CANDIDATE_MERGE_SHA\""),
-            "the fast path records the merge tree as the build revision: {candidate}"
-        );
-        assert!(
-            candidate.contains("use_unit_binary=false")
-                && candidate.contains(
-                    "if [[ \"$(target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
-                )
-                && candidate.contains("if [[ \"$use_unit_binary\" == true ]]; then"),
-            "the fast path reuses the checks' binary only when it already reports the head closure (the checks may build wider features): {candidate}"
+            candidate.contains("test ! -e \"$worktree\"")
+                && candidate.contains("git worktree add --detach \"$worktree\" \"$HEAD\"")
+                && candidate.contains("trap 'git worktree remove --force \"$worktree\"' EXIT"),
+            "candidate build uses a private detached worktree with cleanup: {candidate}"
         );
         assert_eq!(
             candidate.matches("cargo build").count(),
             1,
-            "the slow path builds exactly once: {candidate}"
+            "candidate bootstrap builds exactly once: {candidate}"
         );
         assert!(
-            candidate.contains("cargo build --locked -p velnor-workflow"),
-            "the slow build pins the lockfile and the generator package: {candidate}"
+            candidate.contains("cargo build --locked -p velnor-workflow")
+                && candidate
+                    .contains("--manifest-path \"$worktree/crates/velnor-workflow/Cargo.toml\""),
+            "candidate build is locked and comes from the audited head: {candidate}"
         );
         assert!(
-            candidate.contains("--manifest-path \"$worktree/crates/velnor-workflow/Cargo.toml\""),
-            "the slow build compiles the head worktree: {candidate}"
+            candidate.contains("test ! -e \"$stage\"")
+                && candidate.contains("mkdir \"$stage\"")
+                && candidate.contains("install -m 0755 \"$binary\" \"$stage/velnor-workflow\""),
+            "candidate staging refuses pre-existing paths and installs one binary: {candidate}"
         );
         assert!(
-            !candidate.contains("--no-default-features")
-                && !candidate.contains("--all-features")
-                && !candidate.contains("cargo install"),
-            "the slow build uses default features, the candidate feature set: {candidate}"
+            !candidate.contains("rm -rf") && candidate.contains("git worktree remove --force"),
+            "bootstrap has no broad recursive deletion: {candidate}"
         );
         assert!(
-            candidate.contains("git worktree add --detach \"$worktree\" \"$PR_HEAD\""),
-            "the slow path checks the head out beside the job: {candidate}"
-        );
-        assert!(
-            candidate.contains("trap 'git worktree remove --force \"$worktree\"' EXIT"),
-            "the worktree is cleaned up on failure: {candidate}"
-        );
-        assert!(
-            candidate.contains(
-                "git worktree remove --force \"$worktree\"\n            trap - EXIT"
-            ),
-            "the explicit worktree removal disarms the EXIT trap so the step cannot double-remove: {candidate}"
-        );
-        assert!(
-            candidate.contains("binary=\"$worktree/target/debug/velnor-workflow\"")
-                && candidate.contains("build_rev=\"$PR_HEAD\""),
-            "the slow path records the head as the build revision: {candidate}"
-        );
-        assert!(
-            candidate.contains("\"$stage/velnor-workflow\" --closure")
-                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]"),
-            "the staged binary proves the head closure before upload: {candidate}"
+            candidate.contains("sha256sum \"$stage/velnor-workflow\"")
+                && candidate.contains("\"$stage/velnor-workflow\" --closure")
+                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]")
+                && candidate.contains("binary_sha256: $binary_sha256"),
+            "staged binary digest and self-reported closure are bound: {candidate}"
         );
         for argument in [
             "--arg profile debug",
-            "--arg platform \"${RUNNER_OS}-${RUNNER_ARCH}\"",
+            "--arg platform \"$RUNNER_OS-$RUNNER_ARCH\"",
             "--arg repository \"$GITHUB_REPOSITORY\"",
             "--arg run_id \"$GITHUB_RUN_ID\"",
-            "--arg revision \"$PR_HEAD\"",
+            "--arg revision \"$HEAD\"",
             "--arg closure \"$head_closure\"",
-            "--arg build_revision \"$build_rev\"",
+            "--arg build_revision \"$HEAD\"",
             "--arg binary_sha256 \"$digest\"",
         ] {
             assert!(
                 candidate.contains(argument),
-                "the manifest carries {argument}: {candidate}"
+                "manifest carries {argument}: {candidate}"
             );
         }
         assert!(
-            candidate.contains("build_revision: $build_revision"),
-            "the manifest object records the build revision: {candidate}"
-        );
-        assert!(
             candidate.contains(
-                "echo \"name=velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""
+                "name=velnor-workflow-candidate-${head_closure:0:16}-$RUNNER_OS-$RUNNER_ARCH"
             ),
-            "the artifact name derives exactly like the policy consumer's: {candidate}"
+            "artifact name derives from the head closure and platform: {candidate}"
+        );
+        let publication = &plan[publish..select];
+        assert!(
+            publication.contains("uses: actions/upload-artifact@")
+                && publication.contains("name: ${{ steps.candidate.outputs.name }}")
+                && publication.contains("path: ${{ runner.temp }}/velnor-workflow-candidate")
+                && publication.contains("retention-days: 1"),
+            "the staged candidate is published with short retention: {publication}"
         );
         assert!(
-            !candidate.contains("head_candidate"),
-            "the merge-tree closure name is gone: {candidate}"
+            plan.contains("PATH=$stage:$PATH") && plan.contains("PATH=$VELNOR_WORKFLOW_BASE_PATH"),
+            "plan consumes the candidate then restores the pinned runtime: {plan}"
         );
         assert!(
-            candidate.contains("actions/upload-artifact@"),
-            "the publish step uses the pinned upload action: {candidate}"
+            plan.contains("velnor-workflow plan --config .github/ci/project.toml"),
+            "{plan}"
         );
         assert!(
-            candidate.contains("name: ${{ steps.candidate.outputs.name }}")
-                && candidate.contains("path: ${{ runner.temp }}/velnor-workflow-candidate")
-                && candidate.contains("retention-days: 1"),
-            "the publish step uploads the staged directory with short retention: {candidate}"
+            !plan.contains("candidate_publish"),
+            "the old post-check publisher is gone: {plan}"
         );
     }
 
     #[test]
-    fn solo_kind_keeps_the_bare_event_gate() {
-        // A kind with no sibling keeps the bare event gate: every member
-        // publishes, so no input gate is needed.
+    fn hosted_rust_acquires_candidate_before_config_run() {
         let owner = workflow_setup_action_repository().to_owned();
-        let solo = owner_test_ir(
-            &owner,
-            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
-        );
-        let solo_content = must_render_kind(&solo);
-        assert_eq!(
-            solo_content
-                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository\n")
-                .count(),
-            1,
-            "the prepare step keeps the bare pull-request same-repo gate: {solo_content}"
-        );
-        assert_eq!(
-            solo_content
-                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n")
-                .count(),
-            1,
-            "the publish step adds the skip gate: {solo_content}"
-        );
-        assert!(
-            !solo_content.contains("inputs.candidate_publish &&"),
-            "no presence gate when every member publishes: {solo_content}"
-        );
-    }
-
-    #[test]
-    fn candidate_step_gates_sit_directly_after_their_name_lines() {
-        // The presence-gate combiner only merges an `if:` it finds directly
-        // after the step's `name:` line.
-        let steps = super::candidate_publish_steps("actions/upload-artifact@pinned");
-        assert!(
-            steps.contains("      - name: Prepare candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository\n"),
-            "the prepare gate is the pull-request same-repo gate: {steps}"
-        );
-        assert!(
-            steps.contains("      - name: Publish candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n"),
-            "the publish gate adds the skip output: {steps}"
-        );
-    }
-
-    #[test]
-    fn foreign_trees_render_no_candidate_surface() {
         let ir = owner_test_ir(
-            "example/foreign",
+            &owner,
             vec![
                 rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-                rust_unit("rust-sibling-crate", "crates/sibling"),
+                rust_unit("rust-sibling", "crates/sibling"),
             ],
         );
         let content = must_render_kind(&ir);
-        assert!(
-            !content.contains("candidate generator product")
-                && !content.contains("inputs.candidate_publish"),
-            "foreign trees render no candidate steps or gates: {content}"
+        let (hosted, velnor) = must_some(
+            content.split_once("\n  verify-velnor:\n"),
+            "both lane jobs render",
         );
+        let acquire = must_some(
+            hosted.find("Acquire candidate generator runtime"),
+            "candidate acquire renders",
+        );
+        let run = must_some(
+            hosted.find("velnor-workflow run --config"),
+            "config run renders",
+        );
+        assert!(acquire < run, "{hosted}");
+        assert_eq!(
+            hosted
+                .matches("Acquire candidate generator runtime")
+                .count(),
+            1,
+            "one candidate consumer step in the hosted Rust job: {hosted}"
+        );
+        let candidate = &hosted[acquire..run];
         assert!(
-            content.contains(
-                "      candidate_publish:\n        required: false\n        type: boolean\n        default: false\n"
+            candidate.contains(
+                "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
             ),
-            "the input declaration stays for every kind: {content}"
+            "consumer is confined to same-repository code: {candidate}"
+        );
+        for binding in [
+            "CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}",
+            "CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}",
+            "velnor-workflow closure --rev=\"$HEAD\" --candidate",
+            "velnor-workflow closure --rev=\"$base_pin\" --candidate",
+        ] {
+            assert!(
+                candidate.contains(binding),
+                "consumer binds {binding}: {candidate}"
+            );
+        }
+        assert!(
+            candidate.contains("gh run download \"$GITHUB_RUN_ID\" --name \"$name\"")
+                && candidate.contains("jq -e --arg platform")
+                && candidate.contains("jq -er .binary_sha256")
+                && candidate.contains("::error::candidate digest mismatch")
+                && candidate.contains("\"$stage/velnor-workflow\" --closure")
+                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]")
+                && candidate.contains("echo \"PATH=$stage:$PATH\" >> \"$GITHUB_ENV\""),
+            "consumer downloads, validates, and exports the candidate: {candidate}"
         );
         assert!(
-            candidate_flagged_callers(&ir).is_empty(),
-            "no caller passes the flag"
+            !candidate.contains("rm -rf")
+                && candidate.contains("test ! -e \"$stage\"")
+                && candidate.contains("mkdir \"$stage\""),
+            "consumer has no broad recursive deletion: {candidate}"
+        );
+        assert!(
+            candidate.contains(
+                "name=\"velnor-workflow-candidate-${head_closure:0:16}-$RUNNER_OS-$RUNNER_ARCH\""
+            ),
+            "consumer derives the same artifact name as the publisher: {candidate}"
+        );
+        assert!(
+            !velnor.contains("Acquire candidate generator runtime"),
+            "local Velnor jobs do not consume hosted artifacts: {velnor}"
+        );
+    }
+
+    #[test]
+    fn non_owner_tree_has_no_candidate_bootstrap_surface() {
+        for repository in ["example/foreign", ""] {
+            let ir = owner_test_ir(
+                repository,
+                vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
+            );
+            let mut plan = String::new();
+            ir.render_plan(&mut plan, RunnerMode::Both, false);
+            assert!(
+                !plan.contains("Bootstrap candidate generator product"),
+                "{repository}: {plan}"
+            );
+            let content = must_render_kind(&ir);
+            assert!(
+                !content.contains("Acquire candidate generator runtime")
+                    && !content.contains("candidate_publish"),
+                "{repository} has no candidate transport: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_transport_has_one_control_plane_owner_and_no_unit_flag() {
+        let owner = workflow_setup_action_repository().to_owned();
+        let mut documentation = rust_unit("docs-generator-root", "crates/velnor-workflow");
+        documentation.kind = UnitKind::Docs;
+        let ir = owner_test_ir(
+            &owner,
+            vec![
+                rust_unit("rust-generator-crate", "crates/velnor-workflow"),
+                rust_unit("rust-sibling-crate", "crates/sibling"),
+                rust_unit("rust-workspace-root", "."),
+                documentation,
+            ],
+        );
+        let mut plan = String::new();
+        ir.render_plan(&mut plan, RunnerMode::Both, false);
+        assert_eq!(
+            plan.matches("Bootstrap candidate generator product")
+                .count(),
+            1,
+            "the plan owns the bootstrap once, independent of unit count: {plan}"
+        );
+        assert_eq!(
+            plan.matches("Publish candidate generator product").count(),
+            1,
+            "the plan owns publication once, independent of unit count: {plan}"
+        );
+        let content = must_render_kind(&ir);
+        assert_eq!(
+            content
+                .matches("Acquire candidate generator runtime")
+                .count(),
+            1,
+            "one collapsed hosted Rust consumer owns acquisition: {content}"
+        );
+        assert!(
+            !content.contains("candidate_publish") && !content.contains("Publish candidate"),
+            "unit callers carry no obsolete publisher flag or step: {content}"
+        );
+        let nodes = ir
+            .units
+            .iter()
+            .map(|unit| GraphNode::Unit {
+                unit_id: unit.id.clone(),
+                job_id: stack_group_job_id(unit.kind),
+                name: sidebar_group_name(unit),
+                file: nested_unit_workflow_file(unit),
+            })
+            .collect::<Vec<_>>();
+        for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
+            let rendered = ir.render_nested(kind, &nodes, None);
+            assert!(
+                !rendered.contains("candidate_publish: true"),
+                "{kind:?} callers pass no legacy candidate flag: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_bootstrap_gates_follow_their_step_names() {
+        let steps = crate::candidate_bootstrap_steps("actions/upload-artifact@pinned");
+        assert!(
+            steps.contains(
+                "      - name: Bootstrap candidate generator product\n        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository\n        id: candidate\n"
+            ),
+            "the bootstrap gate is directly attached to its step: {steps}"
+        );
+        assert!(
+            steps.contains(
+                "      - name: Publish candidate generator product\n        if: steps.candidate.outputs.name != ''\n        uses: actions/upload-artifact@pinned\n"
+            ),
+            "publication is directly gated on the bootstrap output: {steps}"
+        );
+        assert!(
+            !steps.contains("rm -rf")
+                && steps.contains("test ! -e \"$worktree\"")
+                && steps.contains("test ! -e \"$stage\""),
+            "the helper rejects pre-existing scoped paths without recursive deletion: {steps}"
+        );
+    }
+
+    #[test]
+    fn policy_workflow_consumes_the_bootstrapped_candidate_contract() {
+        let owner = workflow_setup_action_repository().to_owned();
+        let ir = owner_test_ir(
+            &owner,
+            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
+        );
+        let nodes = ir
+            .units
+            .iter()
+            .map(|unit| GraphNode::Unit {
+                unit_id: unit.id.clone(),
+                job_id: stack_group_job_id(unit.kind),
+                name: sidebar_group_name(unit),
+                file: nested_unit_workflow_file(unit),
+            })
+            .collect::<Vec<_>>();
+        let policy = ir.render_nested(WorkflowKind::Main, &nodes, None);
+        assert!(
+            policy.contains("Acquire candidate generator product")
+                && policy.contains("--candidate-manifest")
+                && policy.contains(
+                    "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
+                ),
+            "the generated policy job consumes and binds the candidate artifact: {policy}"
+        );
+        assert!(
+            !policy.contains("pin_candidate"),
+            "policy does not regress to a pin-anchored candidate: {policy}"
         );
     }
 
@@ -2544,129 +2507,6 @@ fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
 /// the checks run with the network restricted.
 pub(crate) fn unit_runs_workflow_plain_check(unit: &Unit) -> bool {
     unit_commands(unit).any(|command| command.contains("--plain --check"))
-}
-
-/// Whether the unit owns the generator crate itself: a Rust unit rooted at
-/// the generator crate's manifest directory. The scan mints one unit per
-/// manifest root, so at most one unit per repository matches; the owner
-/// repository's tree carries exactly that unit, and fixture trees carry
-/// none. The match is structural (kind plus root), never the unit id, so a
-/// renamed unit cannot silently gain or lose the publish.
-fn unit_owns_workflow_crate(unit: &Unit) -> bool {
-    unit.kind == UnitKind::Rust && unit.root == "crates/velnor-workflow"
-}
-
-/// Stage-1 candidate packaging steps for the collapsed hosted lane job,
-/// head-anchored: everything keys off the pull-request head tree, the same
-/// identity the owner policy run waits for and verifies.
-///
-/// The unit job checks out the merge commit, but the policy consumer waits
-/// for an artifact named by the audited head's candidate closure and verifies
-/// the audited PR-head tree's closure. Naming the artifact from the merge
-/// tree flakes whenever main advances in closure paths (rebase/merge-state
-/// decides pass/fail), so the prepare step fetches the PR head, the base,
-/// and the base pin (shallow, unauthenticated, each skipped when already
-/// local) and computes all closures from those.
-///
-/// The step skips the publish (`skip=true`, exit 0) when the head candidate
-/// closure equals the base pin's: no generator change, nothing to publish.
-/// Otherwise the fast path reuses the checks' own `target/debug/velnor-workflow`
-/// when the merge closure equals the head closure (zero builds), and the slow
-/// path builds the generator once from an explicit head worktree in this same
-/// step (same job, same toolchain, warm cargo home — a separate job would
-/// duplicate checkout, toolchain, and cache for a rare event). Either way the
-/// step stages the binary, proves it self-reports the head closure, and writes
-/// the manifest the policy consumer verifies (`profile`, `platform`,
-/// `repository`, `run_id`, `revision` = PR-head SHA, `closure` = head
-/// candidate closure, `build_revision` = tree the binary compiled from,
-/// `binary_sha256`). The publish step uploads both files under the name the
-/// policy derives the same way (`velnor-workflow-candidate-<closure16>-<os>-<arch>`).
-///
-/// Both steps carry the pull-request same-repo gate directly after their name
-/// line (the presence-gate combiner only merges an `if:` it finds there),
-/// and the publish step additionally gates on the prepare step's `skip`
-/// output, so the collapsed renderer can add the per-unit input gate without
-/// touching them.
-fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
-    format!(
-        r#"      - name: Prepare candidate generator product
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        id: candidate
-        env:
-          CANDIDATE_MERGE_SHA: ${{{{ inputs.head_sha }}}}
-          CANDIDATE_PR_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
-          CANDIDATE_BASE_SHA: ${{{{ inputs.base_sha }}}}
-        run: |
-          set -euo pipefail
-          PR_HEAD="$CANDIDATE_PR_HEAD_SHA"
-          BASE="$CANDIDATE_BASE_SHA"
-          if ! git cat-file -e "$PR_HEAD^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PR_HEAD"
-          fi
-          head_closure="$(velnor-workflow closure --rev="$PR_HEAD" --candidate)"
-          if ! git cat-file -e "$BASE^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
-          fi
-          base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{{40}})".*/\1/p' | head -n 1)"
-          test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{{40}}).*/\1/p' | head -n 1)"
-          test "$base_pin" != '' || {{ echo "::error::base $BASE declares no generator pin" >&2; exit 1; }}
-          if ! git cat-file -e "$base_pin^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
-          fi
-          base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
-          if [[ "$head_closure" == "$base_closure" ]]; then
-            echo "head $PR_HEAD shares the base pin's candidate closure; no candidate to publish"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          merge_closure="$(velnor-workflow closure --rev="$CANDIDATE_MERGE_SHA" --candidate)"
-          worktree=""
-          use_unit_binary=false
-          if [[ "$merge_closure" == "$head_closure" ]]; then
-            test -x target/debug/velnor-workflow || {{ echo "::error::candidate packaging needs the unit's own target/debug/velnor-workflow; the checks must build the generator binary" >&2; exit 1; }}
-            # The checks may build with different features than the candidate
-            # profile stamps, so only reuse their binary when it already
-            # reports the head closure; otherwise fall through to a clean
-            # default-features build below.
-            if [[ "$(target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
-              use_unit_binary=true
-            fi
-          fi
-          if [[ "$use_unit_binary" == true ]]; then
-            binary="target/debug/velnor-workflow"
-            build_rev="$CANDIDATE_MERGE_SHA"
-          else
-            worktree="$RUNNER_TEMP/velnor-workflow-head"
-            rm -rf "$worktree"
-            git worktree add --detach "$worktree" "$PR_HEAD"
-            trap 'git worktree remove --force "$worktree"' EXIT
-            cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
-            binary="$worktree/target/debug/velnor-workflow"
-            build_rev="$PR_HEAD"
-          fi
-          stage="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          install -m 0755 "$binary" "$stage/velnor-workflow"
-          digest="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
-          reported="$("$stage/velnor-workflow" --closure)"
-          [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }}
-          jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
-          if [[ "$worktree" != "" ]]; then
-            git worktree remove --force "$worktree"
-            trap - EXIT
-          fi
-          echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
-      - name: Publish candidate generator product
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
-        uses: {upload_artifact_pin}
-        with:
-          name: ${{{{ steps.candidate.outputs.name }}}}
-          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
-          if-no-files-found: error
-          retention-days: 1
-"#,
-    )
 }
 
 /// Whether any of the unit's commands drive the test runner through Cargo or
@@ -3813,11 +3653,6 @@ pub(crate) mod lane_input {
     /// for the unit's generator `--check`; hosted lanes carry it in the
     /// Planning runtime artifact unconditionally.
     pub(crate) const POLICY_RUNTIME: &str = "policy_runtime";
-    /// `true` when the hosted lane job must publish its own debug product of
-    /// the generator crate as the Stage-1 candidate artifact the owner
-    /// policy run consumes. Only the generator crate's owning Rust unit sets
-    /// it, on the hosted lane, in the owner repository, on pull requests.
-    pub(crate) const CANDIDATE_PUBLISH: &str = "candidate_publish";
     /// `true` when the unit needs the Apple executor: a kind whose members
     /// split across the default and Apple executors renders one collapsed
     /// job per executor, and each job admits only its own callers.
@@ -3856,7 +3691,6 @@ pub(crate) mod lane_input {
         CARGO_NET_OFFLINE,
         HOST_WARM_LAYERS,
         POLICY_RUNTIME,
-        CANDIDATE_PUBLISH,
         APPLE_EXECUTOR,
         UNIT_DEPENDENCIES,
         UNIT_ADMISSION,
@@ -3876,7 +3710,6 @@ pub(crate) mod lane_input {
                 | CARGO_FETCH_SKIP_WHEN_WARM
                 | CARGO_NET_OFFLINE
                 | POLICY_RUNTIME
-                | CANDIDATE_PUBLISH
                 | APPLE_EXECUTOR
         )
     }
@@ -3955,7 +3788,6 @@ pub(crate) struct LaneStepFacts {
     pub(crate) cargo_net_offline: bool,
     pub(crate) host_warm_layers: Vec<&'static str>,
     pub(crate) policy_runtime: bool,
-    pub(crate) candidate_publish: bool,
     pub(crate) apple_executor: bool,
     pub(crate) unit_dependencies: Vec<String>,
     pub(crate) unit_admission: LaneAdmission,
@@ -4029,9 +3861,6 @@ impl LaneStepFacts {
         }
         if self.policy_runtime {
             values.push((lane_input::POLICY_RUNTIME, "true".to_owned()));
-        }
-        if self.candidate_publish {
-            values.push((lane_input::CANDIDATE_PUBLISH, "true".to_owned()));
         }
         if self.apple_executor {
             values.push((lane_input::APPLE_EXECUTOR, "true".to_owned()));
@@ -5466,10 +5295,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 Vec::new()
             },
             policy_runtime: lane == RunnerMode::Velnor && unit_runs_workflow_plain_check(unit),
-            candidate_publish: lane == RunnerMode::Github
-                && !self.repository.is_empty()
-                && self.repository == crate::workflow_setup_action_repository()
-                && unit_owns_workflow_crate(unit),
             apple_executor: github_lane && unit.platform.requires_apple(),
             unit_dependencies: unit.depends_on.clone(),
             unit_admission: LaneAdmission::for_unit(lane, unit),
@@ -5834,6 +5659,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_ci_cargo_fetch_end_marker(output);
         }
 
+        if github_lane
+            && self.repository == crate::workflow_setup_action_repository()
+            && kind == UnitKind::Rust
+        {
+            output.push_str(crate::candidate_runtime_acquire_steps());
+        }
+
         // Verification. No pin-fetch step: the tool fetches the declared pin
         // itself before closure verification, so no lane needs its own.
         // Units with validation phases verify through one step per runnable
@@ -5889,19 +5721,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
             );
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
-        }
-
-        // Stage-1 candidate packaging, after the checks that build the
-        // binary it reuses: only the hosted job of the generator crate's
-        // owning unit publishes, only on pull requests (the steps carry
-        // that event gate themselves), and only on success (no `always()`).
-        let candidate = FeatureCoverage::over(&facts, |facts| facts.candidate_publish);
-        if github_lane && candidate.any {
-            output.push_str(&gated(
-                candidate_publish_steps(self.pins.upload_artifact),
-                candidate,
-                lane_input::CANDIDATE_PUBLISH,
-            ));
         }
 
         // Cache collection.
@@ -6457,6 +6276,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &crate::workflow_setup_install_rev(&self.repository, &self.workflow_revision),
             )
         };
+        let candidate_bootstrap = if runners == RunnerMode::Github
+            && self.repository == crate::workflow_setup_action_repository()
+        {
+            crate::candidate_bootstrap_steps(self.pins.upload_artifact)
+        } else {
+            String::new()
+        };
+        let runtime_setup = format!("{runtime_setup}{candidate_bootstrap}");
         let base_sha = self.base_sha_expression();
         // Planning consumes the admitted lanes, so the expected-work scope
         // always equals the scheduled lane scope: a velnor-only dispatch
@@ -6516,6 +6343,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             expected_work_file = EXPECTED_WORK_FILE,
             expected_work_dir = EXPECTED_WORK_DIR,
         );
+        if runners == RunnerMode::Github
+            && self.repository == crate::workflow_setup_action_repository()
+        {
+            output.push_str(crate::candidate_bootstrap_restore_step());
+        }
         output.push_str(&render_expected_work_upload_step(self.pins.upload_artifact));
         if runners != RunnerMode::Velnor {
             output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));

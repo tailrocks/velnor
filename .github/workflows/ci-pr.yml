@@ -66,6 +66,66 @@ jobs:
           rev: 37e7814995995c107fc704e62096fb86c4709bea
       - name: Set trusted workflow policy revision
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=37e7814995995c107fc704e62096fb86c4709bea" >> "$GITHUB_ENV"
+      - name: Bootstrap candidate generator product
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        id: candidate
+        env:
+          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CANDIDATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          HEAD="$CANDIDATE_HEAD_SHA"
+          BASE="$CANDIDATE_BASE_SHA"
+          test "$HEAD" != '' || { echo "::error::candidate head SHA is empty" >&2; exit 1; }
+          test "$BASE" != '' || { echo "::error::candidate base SHA is empty" >&2; exit 1; }
+          if ! git cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$HEAD"
+          fi
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+          fi
+          head_closure="$(velnor-workflow closure --rev="$HEAD" --candidate)"
+          base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || { echo "::error::base $BASE declares no generator pin" >&2; exit 1; }
+          if ! git cat-file -e "$base_pin^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
+          fi
+          base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
+          if [[ "$head_closure" == "$base_closure" ]]; then
+            echo "head $HEAD shares the base generator closure; the pinned runtime remains authoritative"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test -n "${RUNNER_TEMP:-}" || { echo "::error::RUNNER_TEMP is empty" >&2; exit 1; }
+          worktree="$RUNNER_TEMP/velnor-workflow-head"
+          test ! -e "$worktree" || { echo "::error::candidate worktree path already exists: $worktree" >&2; exit 1; }
+          git worktree add --detach "$worktree" "$HEAD"
+          trap 'git worktree remove --force "$worktree"' EXIT
+          GH_TOKEN='' GITHUB_TOKEN='' cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
+          binary="$worktree/target/debug/velnor-workflow"
+          stage="$RUNNER_TEMP/velnor-workflow-candidate"
+          test ! -e "$stage" || { echo "::error::candidate staging path already exists: $stage" >&2; exit 1; }
+          mkdir "$stage"
+          install -m 0755 "$binary" "$stage/velnor-workflow"
+          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+          reported="$(GH_TOKEN='' GITHUB_TOKEN='' "$stage/velnor-workflow" --closure)"
+          [[ "$reported" == "$head_closure" ]] || { echo "::error::candidate reports closure $reported, head $HEAD declares $head_closure" >&2; exit 1; }
+          jq -n --arg profile debug --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$HEAD" --arg closure "$head_closure" --arg build_revision "$HEAD" --arg binary_sha256 "$digest" '{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}' > "$stage/candidate-manifest.json"
+          git worktree remove --force "$worktree"
+          trap - EXIT
+          echo "binary=$stage/velnor-workflow" >> "$GITHUB_OUTPUT"
+          echo "name=velnor-workflow-candidate-${head_closure:0:16}-$RUNNER_OS-$RUNNER_ARCH" >> "$GITHUB_OUTPUT"
+          echo "VELNOR_WORKFLOW_BASE_PATH=$PATH" >> "$GITHUB_ENV"
+          echo "PATH=$stage:$PATH" >> "$GITHUB_ENV"
+      - name: Publish candidate generator product
+        if: steps.candidate.outputs.name != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.candidate.outputs.name }}
+          path: ${{ runner.temp }}/velnor-workflow-candidate
+          if-no-files-found: error
+          retention-days: 1
       - name: Select affected units
         id: plan
         env:
@@ -82,6 +142,12 @@ jobs:
           mkdir -p .velnor-ci-expected-work
           velnor-workflow plan --config .github/ci/project.toml
 
+      - name: Restore pinned generator runtime
+        if: steps.candidate.outputs.name != ''
+        run: |
+          set -euo pipefail
+          test "$VELNOR_WORKFLOW_BASE_PATH" != ''
+          echo "PATH=$VELNOR_WORKFLOW_BASE_PATH" >> "$GITHUB_ENV"
       - name: Publish expected work
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -862,7 +928,6 @@ jobs:
         rust-toolchain
       cargo_root: "crates/velnor-workflow"
       cargo_net_offline: true
-      candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-runner

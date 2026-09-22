@@ -106,10 +106,6 @@ on:
         required: false
         type: boolean
         default: false
-      candidate_publish:
-        required: false
-        type: boolean
-        default: false
       apple_executor:
         required: false
         type: boolean

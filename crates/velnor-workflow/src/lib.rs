@@ -5322,9 +5322,10 @@ fn policy_candidate_step(revision: &str) -> String {
             sleep 15
           done
           [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
+          test -n "${{RUNNER_TEMP:-}}" || {{ echo "::error::RUNNER_TEMP is empty" >&2; exit 1; }}
           candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
+          test ! -e "$candidate" || {{ echo "::error::candidate staging path already exists: $candidate" >&2; exit 1; }}
+          mkdir "$candidate"
           gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
           jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
           if command -v sha256sum >/dev/null 2>&1; then
@@ -5344,6 +5345,147 @@ fn policy_candidate_step(revision: &str) -> String {
 "#,
         pin_script = audited_pin_script(),
     )
+}
+
+/// Bootstrap the generator candidate before the control-plane plan parses the
+/// checked-in CI configuration. The pinned runtime cannot parse a schema that
+/// this candidate introduces, so this path intentionally uses only source
+/// checkout, the stable closure probe, Cargo, and artifact transport. The
+/// candidate is published before `plan`; policy and every hosted Rust unit
+/// consume the same immutable artifact afterward.
+pub(crate) fn candidate_bootstrap_steps(upload_artifact_pin: &str) -> String {
+    format!(
+        r#"      - name: Bootstrap candidate generator product
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        id: candidate
+        env:
+          CANDIDATE_HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
+          CANDIDATE_BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before || 'refs/heads/main' }}}}
+        run: |
+          set -euo pipefail
+          HEAD="$CANDIDATE_HEAD_SHA"
+          BASE="$CANDIDATE_BASE_SHA"
+          test "$HEAD" != '' || {{ echo "::error::candidate head SHA is empty" >&2; exit 1; }}
+          test "$BASE" != '' || {{ echo "::error::candidate base SHA is empty" >&2; exit 1; }}
+          if ! git cat-file -e "$HEAD^{{commit}}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$HEAD"
+          fi
+          if ! git cat-file -e "$BASE^{{commit}}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+          fi
+          head_closure="$(velnor-workflow closure --rev="$HEAD" --candidate)"
+          base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{{40}})".*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{{40}}).*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || {{ echo "::error::base $BASE declares no generator pin" >&2; exit 1; }}
+          if ! git cat-file -e "$base_pin^{{commit}}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
+          fi
+          base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
+          if [[ "$head_closure" == "$base_closure" ]]; then
+            echo "head $HEAD shares the base generator closure; the pinned runtime remains authoritative"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test -n "${{RUNNER_TEMP:-}}" || {{ echo "::error::RUNNER_TEMP is empty" >&2; exit 1; }}
+          worktree="$RUNNER_TEMP/velnor-workflow-head"
+          test ! -e "$worktree" || {{ echo "::error::candidate worktree path already exists: $worktree" >&2; exit 1; }}
+          git worktree add --detach "$worktree" "$HEAD"
+          trap 'git worktree remove --force "$worktree"' EXIT
+          GH_TOKEN='' GITHUB_TOKEN='' cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
+          binary="$worktree/target/debug/velnor-workflow"
+          stage="$RUNNER_TEMP/velnor-workflow-candidate"
+          test ! -e "$stage" || {{ echo "::error::candidate staging path already exists: $stage" >&2; exit 1; }}
+          mkdir "$stage"
+          install -m 0755 "$binary" "$stage/velnor-workflow"
+          digest="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
+          reported="$(GH_TOKEN='' GITHUB_TOKEN='' "$stage/velnor-workflow" --closure)"
+          [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $HEAD declares $head_closure" >&2; exit 1; }}
+          jq -n --arg profile debug --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$HEAD" --arg closure "$head_closure" --arg build_revision "$HEAD" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+          git worktree remove --force "$worktree"
+          trap - EXIT
+          echo "binary=$stage/velnor-workflow" >> "$GITHUB_OUTPUT"
+          echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-$RUNNER_OS-$RUNNER_ARCH" >> "$GITHUB_OUTPUT"
+          echo "VELNOR_WORKFLOW_BASE_PATH=$PATH" >> "$GITHUB_ENV"
+          echo "PATH=$stage:$PATH" >> "$GITHUB_ENV"
+      - name: Publish candidate generator product
+        if: steps.candidate.outputs.name != ''
+        uses: {upload_artifact_pin}
+        with:
+          name: ${{{{ steps.candidate.outputs.name }}}}
+          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
+          if-no-files-found: error
+          retention-days: 1
+"#,
+    )
+}
+
+/// Acquire the control-plane candidate in a hosted Rust unit before its first
+/// `run --config`. The step uses the same closure/name/manifest contract as
+/// [`candidate_bootstrap_steps`], then places the verified binary first in
+/// `PATH`; no unit needs to know whether the plan used the candidate.
+pub(crate) fn candidate_runtime_acquire_steps() -> &'static str {
+    r#"      - name: Acquire candidate generator runtime
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          HEAD="$CANDIDATE_HEAD_SHA"
+          BASE="$CANDIDATE_BASE_SHA"
+          test "$HEAD" != '' || { echo "::error::candidate head SHA is empty" >&2; exit 1; }
+          test "$BASE" != '' || { echo "::error::candidate base SHA is empty" >&2; exit 1; }
+          if ! git cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$HEAD"
+          fi
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+          fi
+          head_closure="$(velnor-workflow closure --rev="$HEAD" --candidate)"
+          base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || { echo "::error::base $BASE declares no generator pin" >&2; exit 1; }
+          if ! git cat-file -e "$base_pin^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
+          fi
+          base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
+          if [[ "$head_closure" == "$base_closure" ]]; then
+            echo "head $HEAD shares the base generator closure; no candidate artifact is required"
+            exit 0
+          fi
+          name="velnor-workflow-candidate-${head_closure:0:16}-$RUNNER_OS-$RUNNER_ARCH"
+          test -n "${RUNNER_TEMP:-}" || { echo "::error::RUNNER_TEMP is empty" >&2; exit 1; }
+          stage="$RUNNER_TEMP/velnor-workflow-candidate"
+          test ! -e "$stage" || { echo "::error::candidate staging path already exists: $stage" >&2; exit 1; }
+          mkdir "$stage"
+          gh run download "$GITHUB_RUN_ID" --name "$name" --dir "$stage" --repo "$GITHUB_REPOSITORY"
+          jq -e --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg repo "$GITHUB_REPOSITORY" --arg run "$GITHUB_RUN_ID" --arg revision "$HEAD" --arg closure "$head_closure" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and .revision == $revision and .closure == $closure and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$stage/candidate-manifest.json" >/dev/null
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+          else
+            actual="$(shasum -a 256 "$stage/velnor-workflow" | awk '{print $1}')"
+          fi
+          expected="$(jq -er .binary_sha256 "$stage/candidate-manifest.json")"
+          [[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }
+          chmod 0755 "$stage/velnor-workflow"
+          reported="$(GH_TOKEN='' GITHUB_TOKEN='' "$stage/velnor-workflow" --closure)"
+          [[ "$reported" == "$head_closure" ]] || { echo "::error::candidate reports closure $reported, expected $head_closure" >&2; exit 1; }
+          echo "PATH=$stage:$PATH" >> "$GITHUB_ENV"
+"#
+}
+
+/// Restore the pinned binary after the plan has consumed the candidate. The
+/// plan job still packages the pinned runtime artifact and later policy steps
+/// from the base product, so the candidate's PATH scope ends at planning.
+pub(crate) const fn candidate_bootstrap_restore_step() -> &'static str {
+    r#"      - name: Restore pinned generator runtime
+        if: steps.candidate.outputs.name != ''
+        run: |
+          set -euo pipefail
+          test "$VELNOR_WORKFLOW_BASE_PATH" != ''
+          echo "PATH=$VELNOR_WORKFLOW_BASE_PATH" >> "$GITHUB_ENV"
+"#
 }
 
 /// Consumer policy steps acquiring the audited tree's declared generator as
@@ -18209,6 +18351,12 @@ channel = "stable"
         assert!(
             owner.contains("\"$reported\" == \"$manifest_closure\""),
             "the self-report gate requires the binary to report the manifest closure: {owner}"
+        );
+        assert!(
+            owner.contains("test ! -e \"$candidate\"")
+                && owner.contains("mkdir \"$candidate\"")
+                && !owner.contains("rm -rf \"$candidate\""),
+            "candidate download refuses a pre-existing scoped path without recursive deletion: {owner}"
         );
         for clause in [
             ".platform == $platform",

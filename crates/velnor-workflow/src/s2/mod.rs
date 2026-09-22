@@ -5506,9 +5506,10 @@ fn policy_candidate_step(revision: &str) -> String {
             sleep 15
           done
           [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
+          test -n "${{RUNNER_TEMP:-}}" || {{ echo "::error::RUNNER_TEMP is empty" >&2; exit 1; }}
           candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
+          test ! -e "$candidate" || {{ echo "::error::candidate staging path already exists: $candidate" >&2; exit 1; }}
+          mkdir "$candidate"
           gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
           jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
           if command -v sha256sum >/dev/null 2>&1; then
@@ -19831,6 +19832,12 @@ lockfile = true
         assert!(
             owner.contains("\"$reported\" == \"$manifest_closure\""),
             "the self-report gate requires the binary to report the manifest closure: {owner}"
+        );
+        assert!(
+            owner.contains("test ! -e \"$candidate\"")
+                && owner.contains("mkdir \"$candidate\"")
+                && !owner.contains("rm -rf \"$candidate\""),
+            "candidate download refuses a pre-existing scoped path without recursive deletion: {owner}"
         );
         for clause in [
             ".platform == $platform",
