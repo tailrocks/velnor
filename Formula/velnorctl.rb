@@ -6,8 +6,8 @@ require "json"
 # latest-release URL.
 SOURCE_COMMIT = "796c46110274a474572de100b12dadc4aa50f47b".freeze
 SOURCE_ARCHIVE_SHA256 = "e61990d897dc714e018cfe4c1563391e8d602f3badf8cd483016814111c60b04".freeze
-PACKAGING_COMMIT = "8ff29a5c3dd5e9a428ddca393da2ec75d28253bd".freeze
-LAUNCH_SHA256 = "4a725baeec24c2905281b1debb2b493f52411ff53018b07d1c82e431adbda7ee".freeze
+PACKAGING_COMMIT = "fb77e44e548e8d79ad7e0b71b4860f4ceefef679".freeze
+LAUNCH_SHA256 = "e86fbd6a6af01c75bd535f070735f8387829ee5d765c4ccf92405796dc9d5efc".freeze
 PLIST_SHA256 = "c7d3f69454e8d04a7913dfcfa0b7c0ea36b37c6339118cff580f1d4eb31493f5".freeze
 SOURCE_URL = "https://github.com/tailrocks/velnor/archive/#{SOURCE_COMMIT}.tar.gz".freeze
 GH_CLI_REQUIRED_FLAGS = %w[
