@@ -14,6 +14,7 @@ mod aggregate;
 mod cache;
 pub(crate) mod check_profiles;
 pub(crate) mod docs_site;
+mod github_action;
 mod ir;
 mod package_release;
 mod pipeline;
@@ -73,6 +74,11 @@ pub(crate) const OPENTOFU: &str = "opentofu-pipeline";
 pub(crate) const DOCKER_IMAGE: &str = "docker-image-pipeline";
 pub(crate) const HOMEBREW_TAP: &str = "homebrew-tap-pipeline";
 pub(crate) const DOCS_LINT: &str = "docs-lint-pipeline";
+/// The generic GitHub Action metadata and entrypoint verification pipeline.
+pub(crate) const GITHUB_ACTION: &str = "github-action-pipeline";
+/// A unit contract that appends checked-in consumer success/failure fixtures
+/// to a scanned GitHub Action unit.
+pub(crate) const ACTION_FIXTURES: &str = "github-action-fixtures";
 /// The `docs.yml` documentation-site pipeline: build, link checks, spelling,
 /// Pages deployment, and post-deployment verification from one `[docs]`
 /// consumer contract.
@@ -457,7 +463,6 @@ pub(crate) struct RenderCtx<'a> {
     /// The pinned action references every emitted job uses. A primitive that
     /// spells an action reference itself takes it from here, never from a
     /// literal, so the reviewed pin table stays the single source.
-    #[expect(dead_code, reason = "primitives render pins through the lane context")]
     pub(crate) pins: &'a Pins,
     /// The resolved lane matrix and the toolchain environment behind it.
     pub(crate) providers: &'a providers::ResolvedProviders,
@@ -885,6 +890,7 @@ pub(crate) fn pipeline_id(kind: UnitKind) -> &'static str {
         UnitKind::Docker => DOCKER_IMAGE,
         UnitKind::Homebrew => HOMEBREW_TAP,
         UnitKind::Docs => DOCS_LINT,
+        UnitKind::GithubAction => GITHUB_ACTION,
     }
 }
 
@@ -906,6 +912,8 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(pipeline::DockerImage),
         Box::new(pipeline::HomebrewTap),
         Box::new(pipeline::DocsLint),
+        Box::new(pipeline::GithubAction),
+        Box::new(github_action::GithubActionFixtures),
         Box::new(release::Release),
         Box::new(release::Preview),
         Box::new(package_release::PackageRelease),
@@ -1014,6 +1022,10 @@ pub(crate) fn generate(
     // surface, and the project config records the same result.
     let providers = providers::resolve(config, &rows)?;
     let mut units = config.units.clone();
+    // Contract primitives may contribute checked-in consumer workflows as well
+    // as unit mutations. Keep those files in the same collision-checked map
+    // as ordinary renderers.
+    let mut files = BTreeMap::new();
     for row in rows.iter().filter(|row| row.unit_contract) {
         let primitive = lookup(&row.primitive)?;
         // An empty `units` list means every unit: a contract is repository
@@ -1043,6 +1055,14 @@ pub(crate) fn generate(
             ),
             &row.args(),
         )?;
+        for (path, content) in rendered.files {
+            if files.insert(path.clone(), content).is_some() {
+                return Err(GeneratorError::usage(format!(
+                    "two declared primitives both render {}",
+                    path.display()
+                )));
+            }
+        }
         apply_units(&mut units, rendered.units, &row.primitive)?;
     }
     let mut resolved = config.clone();
@@ -1053,7 +1073,6 @@ pub(crate) fn generate(
     let providers = providers::resolve(&resolved, &rows)?;
 
     // Per-unit pipelines, then the plan, then the aggregates that compose both.
-    let mut files = BTreeMap::new();
     let mut nodes = Vec::new();
     let mut contracts = BTreeMap::new();
     for row in rows.iter().filter(|row| !row.unit_contract) {
@@ -1366,6 +1385,7 @@ const PIPELINES: &[&str] = &[
     DOCKER_IMAGE,
     HOMEBREW_TAP,
     DOCS_LINT,
+    GITHUB_ACTION,
 ];
 
 fn is_pipeline(primitive: &str) -> bool {
@@ -1374,7 +1394,10 @@ fn is_pipeline(primitive: &str) -> bool {
 
 /// Contract rows mutate unit contracts before any file is rendered.
 fn is_unit_contract(primitive: &str) -> bool {
-    matches!(primitive, WATCH_GRAPH | REGEN_GATE | PREPARED_TOOL)
+    matches!(
+        primitive,
+        WATCH_GRAPH | REGEN_GATE | PREPARED_TOOL | ACTION_FIXTURES
+    )
 }
 
 #[derive(Clone, Debug)]

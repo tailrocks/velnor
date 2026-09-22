@@ -7,9 +7,9 @@
 //!
 //! # Closure inputs
 //!
-//! * the `crates/velnor-workflow` subtree (all sources, `build.rs`, the
-//!   crate manifest, and embedded templates — captured as a file set, so a
-//!   newly added file can never escape the digest);
+//! * the `crates/velnor-workflow` and `crates/velnor-model` subtrees (all
+//!   sources, manifests, and embedded templates — captured as a file set, so
+//!   a newly added file can never escape the digest);
 //! * the workspace root `Cargo.toml` (profiles, lints, workspace settings);
 //! * `Cargo.lock` (every dependency version, including git revisions);
 //! * the toolchain pins (`rust-toolchain.toml`, `rust-toolchain`);
@@ -83,6 +83,7 @@ pub(crate) const PRODUCT_TAG_PREFIX: &str = "velnor-workflow-runtime-v1-";
 /// files inside these directories are covered without updating this list.
 pub(crate) const CLOSURE_PATHS: &[&str] = &[
     "crates/velnor-workflow",
+    "crates/velnor-model",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -542,6 +543,44 @@ mod tests {
         false
     }
 
+    fn local_path_is_covered(
+        manifest_dir: &std::path::Path,
+        workspace: &std::path::Path,
+        code: &str,
+    ) -> bool {
+        let Some(path_start) = code.find("path") else {
+            return true;
+        };
+        let value = code[path_start + "path".len()..].trim_start();
+        let Some(value) = value.strip_prefix('=') else {
+            return true;
+        };
+        let value = value.trim_start();
+        let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|quote| *quote == '\'' || *quote == '"')
+        else {
+            return true;
+        };
+        let value = &value[quote.len_utf8()..];
+        let Some(end) = value.find(quote) else {
+            return false;
+        };
+        let Ok(dependency) = std::fs::canonicalize(manifest_dir.join(&value[..end])) else {
+            return false;
+        };
+        let Ok(relative) = dependency.strip_prefix(workspace) else {
+            return false;
+        };
+        let relative = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        CLOSURE_PATHS
+            .iter()
+            .any(|covered| relative == *covered || relative.starts_with(&format!("{covered}/")))
+    }
+
     #[test]
     fn crate_inputs_stay_closure_complete() {
         // A local path dependency outside the closure paths would silently
@@ -550,6 +589,13 @@ mod tests {
         // here until its tree is folded into `CLOSURE_PATHS` (or the
         // dependency goes away).
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = must(
+            manifest_dir
+                .ancestors()
+                .nth(2)
+                .ok_or_else(|| "crate manifest has no workspace root".to_owned()),
+            "locate the workspace root",
+        );
         let manifest = must(
             std::fs::read_to_string(manifest_dir.join("Cargo.toml")),
             "read crate manifest for closure completeness",
@@ -558,7 +604,7 @@ mod tests {
             for line in &lines {
                 let code = line.split('#').next().unwrap_or_default();
                 assert!(
-                    !names_local_path(code),
+                    !names_local_path(code) || local_path_is_covered(&manifest_dir, workspace, code),
                     "section [{section}] names a local path dependency that the source closure does not cover: {line}"
                 );
             }
@@ -579,13 +625,6 @@ mod tests {
         }
         // Workspace-inherited dependencies resolve in the workspace root:
         // a `path` there would escape the same way.
-        let workspace = must(
-            manifest_dir
-                .ancestors()
-                .nth(2)
-                .ok_or_else(|| "crate manifest has no workspace root".to_owned()),
-            "locate the workspace root",
-        );
         let root_manifest = must(
             std::fs::read_to_string(workspace.join("Cargo.toml")),
             "read workspace manifest for closure completeness",
