@@ -1610,3 +1610,45 @@ fn raw_storage_io_error(error: RawStorageError) -> io::Error {
     };
     io::Error::new(kind, "raw store namespace reconciliation failed")
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() -> io::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-github-raw-store-unit-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root)?;
+
+        let result = (|| {
+            let directory = File::open(&root)?;
+            let mut temporary = TemporaryFile::create(&directory)
+                .map_err(|error| io::Error::other(format!("create temporary file: {error:?}")))?;
+            temporary.file.write_all(b"creator-temporary-file")?;
+            temporary.file.sync_all()?;
+            let temporary_path = root.join(OsStr::from_bytes(temporary.name.to_bytes()));
+            let replacement = root.join("replacement");
+            fs::write(&replacement, b"attacker-temporary-file")?;
+            fs::rename(&replacement, &temporary_path)?;
+
+            drop(temporary);
+
+            assert!(fs::metadata(&temporary_path)?.file_type().is_file());
+            assert_eq!(fs::read(&temporary_path)?, b"attacker-temporary-file");
+            Ok::<(), io::Error>(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        result?;
+        cleanup?;
+        Ok(())
+    }
+}
