@@ -264,6 +264,10 @@ struct WorkflowSection {
     /// direct `depends_on` Rust unit jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rust_needs: Option<String>,
+    /// When true, the generated PR aggregate also runs from GitHub's merge
+    /// queue. The event is full-scope and uses its merge-group base identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge_group: Option<bool>,
     /// When set, generated local-provider PR aggregate workflows derive a
     /// pull-request-scoped concurrency group from this value so limited
     /// local capacity admits one verification run at a time across pull
@@ -1783,6 +1787,11 @@ impl RepoGenerationConfig {
     /// The declared Rust unit `needs:` topology.
     pub(crate) fn rust_needs(&self) -> Option<&str> {
         self.workflow.rust_needs.as_deref()
+    }
+
+    /// Whether the generated PR aggregate opts into GitHub's merge queue.
+    pub(crate) fn merge_group(&self) -> Option<bool> {
+        self.workflow.merge_group
     }
 
     /// The declared repository-scoped local-provider concurrency group.
@@ -4954,6 +4963,21 @@ mod tests {
             config.check_profiles()[0].permissions().get("actions"),
             Some(&"read".to_owned())
         );
+    }
+
+    #[test]
+    fn merge_group_is_an_explicit_generation_opt_in() {
+        let enabled = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmerge_group = true\n",
+        );
+        assert_eq!(enabled.merge_group(), Some(true));
+        must(
+            enabled.validate(&[], &[], &BTreeSet::new()),
+            "validate merge-group opt-in",
+        );
+
+        let absent = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(absent.merge_group(), None);
     }
 
     #[test]

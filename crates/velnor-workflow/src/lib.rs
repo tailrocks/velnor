@@ -6198,7 +6198,12 @@ pub(crate) fn render_tree(
             config.workflow_files.push(file.clone());
         }
     }
-    let files = generated_files_with_surface(&config, Some(&surface))?;
+    let merge_group = scanned
+        .generation
+        .as_ref()
+        .and_then(config::RepoGenerationConfig::merge_group)
+        .unwrap_or(false);
+    let files = generated_files_with_surface(&config, Some(&surface), merge_group)?;
     let inputs = scanned.inputs;
     Ok(RenderedTree {
         config,
@@ -6210,7 +6215,7 @@ pub(crate) fn render_tree(
 
 #[cfg(any(feature = "tui", test))]
 fn generated_files(config: &ProjectConfig) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
-    generated_files_with_surface(config, None)
+    generated_files_with_surface(config, None, false)
 }
 
 /// The generated surface, with the workflow families the declared primitives
@@ -6241,13 +6246,14 @@ fn add_owner_runtime_products_file(config: &mut ProjectConfig) {
 fn generated_files_with_surface(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
+    merge_group: bool,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     let mut config = config.clone();
     add_owner_runtime_products_file(&mut config);
     // The trust-gated shape is a rendering input; refuse to render before the
     // IR silently falls back to skips for an undecided config.
     runners::validate_trusted_runner_availability(&config)?;
-    let workflow = WorkflowIr::from_config(&config);
+    let workflow = WorkflowIr::from_config_with_merge_group(&config, merge_group);
     primitives::validate_cache_transports(&workflow)?;
     // The toolchain contract is a generation precondition, checked here so no
     // rendering path — scanned or declared — can emit a Rust job without a
@@ -17171,7 +17177,7 @@ channel = "stable"
             "fixture rust unit",
         );
         let baseline = must(
-            generated_files_with_surface(&config, None),
+            generated_files_with_surface(&config, None, false),
             "generate the baseline surface",
         );
         let baseline_rust = must_some(
@@ -17193,7 +17199,7 @@ channel = "stable"
             config.units.push(unit);
         }
         let padded = must(
-            generated_files_with_surface(&config, None),
+            generated_files_with_surface(&config, None, false),
             "generate the padded surface",
         );
         let padded_rust = must_some(
@@ -18272,6 +18278,36 @@ channel = "stable"
             .as_deref(),
             Some("full")
         );
+    }
+
+    #[test]
+    fn merge_group_opt_in_binds_identity_and_required_admission() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let generator = WorkflowIr::from_config_with_merge_group(&config, true);
+        let pr = generator.render(WorkflowKind::PullRequest);
+        assert!(pr.contains("on:\n  pull_request:\n  merge_group:\n"));
+        assert!(pr.contains("github.event.merge_group.base_sha"));
+        assert!(pr.contains(
+            "group: ci-${{ github.workflow }}-${{ github.event_name == 'merge_group' && github.sha || github.event.pull_request.number || github.ref }}"
+        ));
+        assert!(pr.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"));
+        assert!(pr.contains("github.event_name=='merge_group'"));
+        assert!(pr.contains("LANE_ADMITTED_GITHUB"));
+        assert!(pr.contains("ci-required:\n    name:"));
+        assert!(pr.contains("if: ${{ !cancelled() }}"));
+
+        let nested =
+            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None);
+        assert!(nested.contains("merge_group:\n"));
+        let main = generator.render(WorkflowKind::Main);
+        assert!(!main.contains("merge_group:\n"));
+        assert!(!main.contains("github.event.merge_group.base_sha"));
+        assert!(main.contains("cancel-in-progress: false"));
+        let nightly = generator.render_nightly_dispatcher();
+        assert!(!nightly.contains("merge_group:\n"));
+        assert!(!nightly.contains("github.event.merge_group.base_sha"));
+        assert!(nightly.contains("cancel-in-progress: false"));
+        assert!(runtime::scope_for_event_values("merge_group", Some("affected")).is_err());
     }
 
     /// The job-level `if:` gate of the named job in a rendered workflow,

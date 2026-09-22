@@ -235,6 +235,10 @@ struct WorkflowSection {
     /// false: self-hosted jobs stay on the trusted default-branch gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pull_request_on_velnor: Option<bool>,
+    /// When true, the generated PR aggregate also runs from GitHub's merge
+    /// queue. The event is full-scope and uses its merge-group base identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge_group: Option<bool>,
     /// Default `runner` choice for `workflow_dispatch` on generated CI
     /// aggregates. Absent keeps the generator default (`github`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1652,6 +1656,11 @@ impl RepoGenerationConfig {
     /// When true, automatic `pull_request` runs on the Velnor lane.
     pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
         self.workflow.pull_request_on_velnor
+    }
+
+    /// Whether the generated PR aggregate opts into GitHub's merge queue.
+    pub(crate) fn merge_group(&self) -> Option<bool> {
+        self.workflow.merge_group
     }
 
     /// The declared self-hosted runner labels.
@@ -4418,6 +4427,21 @@ mod tests {
                 "validate accepted workflow runner mode",
             );
         }
+    }
+
+    #[test]
+    fn merge_group_is_an_explicit_generation_opt_in() {
+        let enabled = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmerge_group = true\n",
+        );
+        assert_eq!(enabled.merge_group(), Some(true));
+        must(
+            enabled.validate(&[], &[], &BTreeSet::new()),
+            "validate merge-group opt-in",
+        );
+
+        let absent = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(absent.merge_group(), None);
     }
 
     #[test]
