@@ -204,6 +204,11 @@ pub(crate) fn local_skips_pinned_rust_toolchain(provider: ProviderId) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "cache-key tests use explicit expectations for fixed valid and invalid identities"
+    )]
+
     use super::*;
     use crate::s2::platform::{ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
     use crate::s2::CachePurpose;

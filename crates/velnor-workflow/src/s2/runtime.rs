@@ -7089,7 +7089,7 @@ workspace_check = true
             ),
             "selected typed Swift phase executes",
         );
-        assert!(marker.is_file(), "selected phase command ran: {:?}", marker);
+        assert!(marker.is_file(), "selected phase command ran: {marker:?}");
         let _ = std::fs::remove_file(marker);
     }
 
