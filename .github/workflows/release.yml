@@ -2292,7 +2292,7 @@ jobs:
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$pin"
           fi
 
-      - name: Formatting check ("Rust crate (velnor-workflow)")
+      - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow
@@ -2302,43 +2302,7 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow --phase fmt
-
-      - name: Clippy check ("Rust crate (velnor-workflow)")
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-workflow
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow --phase clippy
-
-      - name: Tests ("Rust crate (velnor-workflow)")
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-workflow
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow --phase test
-
-      - name: Doctests ("Rust crate (velnor-workflow)")
-        env:
-          CI_SCOPE: full
-          CI_UNIT_ID: rust-velnor-workflow
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.sha }}
-          CARGO_NET_OFFLINE: "true"
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow --phase doctest
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow
 
   release-github-hosted-rust-velnor-workflow-contract:
     name: "github-hosted / Rust / rust-velnor-workflow-contract"

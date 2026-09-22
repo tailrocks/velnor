@@ -867,7 +867,6 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-runner
       unit_admission: github-hosted
-      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') && (true) }}
