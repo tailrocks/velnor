@@ -2414,6 +2414,201 @@ mod tests {
     }
 
     #[test]
+    fn adoption_rejects_newer_provision_pending_row_without_downgrade() {
+        let dir = unique_test_dir("adopt-newer-provision");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4249");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let current_generation;
+        let newer_generation;
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            current_generation = global.begin_epoch().unwrap();
+            newer_generation = current_generation + 1;
+        }
+
+        let state_dir = state_root.join(ownership.slug());
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry.set_generation(newer_generation);
+        registry
+            .upsert(
+                &key,
+                "op-newer",
+                4249,
+                "velnor-7-4249",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::ProvisionIntent)
+            .unwrap();
+        drop(registry);
+
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-newer",
+                &crate::scaleset::intents::provision_ownership_id(7, "velnor-7-4249"),
+                7,
+                4249,
+                "velnor-7-4249",
+                "sha256:runner",
+                "sha256:dind",
+                newer_generation,
+            )
+            .unwrap();
+        drop(intents);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut lane = test_lane(
+            &db,
+            &ledger,
+            &state_root,
+            Box::new(CleanupRunner::missing(
+                identity.runner_container(),
+                seen.clone(),
+            )),
+        );
+        assert_eq!(lane.generation, current_generation);
+
+        let error = lane.adopt_live_workers().unwrap_err();
+        assert!(error.to_string().contains("newer generation"));
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.generation, newer_generation);
+        assert_eq!(row.worker_state, ScaleSetWorkerState::ProvisionIntent);
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(lane.live_workers(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adoption_claims_stale_uncertain_without_release_or_provision() {
+        let dir = unique_test_dir("adopt-stale-uncertain");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4250");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let holder = permit_holder(7, 4250);
+        let previous_generation;
+        let current_generation;
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            previous_generation = global.begin_epoch().unwrap();
+            let now = velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp()
+                .max(0) as u64;
+            global
+                .observe_demand(
+                    &holder,
+                    velnor_control::permit_ledger::PermitLane::ScaleSet,
+                    "scaleset/7",
+                    now,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                global
+                    .acquire(
+                        &holder,
+                        velnor_control::permit_ledger::PermitLane::ScaleSet,
+                        velnor_control::permit_ledger::PermitState::Acquiring,
+                        previous_generation,
+                        None,
+                    )
+                    .unwrap(),
+                velnor_control::permit_ledger::AcquireOutcome::Acquired
+            );
+            global
+                .transition(
+                    &holder,
+                    velnor_control::permit_ledger::PermitState::Uncertain,
+                    previous_generation,
+                )
+                .unwrap();
+            current_generation = global.begin_epoch().unwrap();
+        }
+
+        let state_dir = state_root.join(ownership.slug());
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry.set_generation(previous_generation);
+        registry
+            .upsert(
+                &key,
+                "op-uncertain",
+                4250,
+                "velnor-7-4250",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::AcquireIntent)
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::Uncertain)
+            .unwrap();
+        drop(registry);
+
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-uncertain",
+                &crate::scaleset::intents::provision_ownership_id(7, "velnor-7-4250"),
+                7,
+                4250,
+                "velnor-7-4250",
+                "sha256:runner",
+                "sha256:dind",
+                previous_generation,
+            )
+            .unwrap();
+        drop(intents);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut lane = test_lane(
+            &db,
+            &ledger,
+            &state_root,
+            Box::new(CleanupRunner::missing(
+                identity.runner_container(),
+                seen.clone(),
+            )),
+        );
+        assert_eq!(lane.generation, current_generation);
+
+        let report = lane.adopt_live_workers().unwrap();
+        assert_eq!(report.awaiting_provision, 1);
+        assert_eq!(report.adopted, 0);
+        assert_eq!(report.failed, 0);
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.generation, current_generation);
+        assert_eq!(row.worker_state, ScaleSetWorkerState::Uncertain);
+        assert_eq!(
+            lane.ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        assert_eq!(lane.ledger.occupied().unwrap(), 1);
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(lane.live_workers(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn terminal_diagnostics_export_is_persisted_once_before_teardown() {
         let dir = unique_test_dir("terminal-diagnostics-once");
         let db = dir.join("state.db");

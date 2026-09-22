@@ -138,6 +138,7 @@ run_launcher() {
     -u VELNOR_DOCKER_HOST \
     -u DOCKER_CONTEXT \
     -u DOCKER_HOST \
+    -u VELNOR_GITHUB_HTTP_TRANSPORT \
     FAKE_DOCKER_CONFIG="$config_path" \
     FAKE_DOCKER_CONTEXT_NAME=desktop-linux \
     FAKE_DOCKER_DESCRIPTION="Docker Desktop" \
@@ -193,6 +194,15 @@ grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=curl' "$tmp/success.runner-env" >/dev/null
 run_launcher explicit_native 'VELNOR_DOCKER_CONTEXT=desktop-linux
 VELNOR_GITHUB_HTTP_TRANSPORT=native'
 grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=native' "$tmp/explicit_native.runner-env" >/dev/null
+
+run_launcher explicit_curl 'VELNOR_DOCKER_CONTEXT=desktop-linux
+VELNOR_GITHUB_HTTP_TRANSPORT=curl'
+grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=curl' "$tmp/explicit_curl.runner-env" >/dev/null
+
+run_launcher invalid_transport 'VELNOR_DOCKER_CONTEXT=desktop-linux
+VELNOR_GITHUB_HTTP_TRANSPORT=invalid'
+grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=invalid' "$tmp/invalid_transport.runner-env" >/dev/null
+! grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=curl' "$tmp/invalid_transport.runner-env" >/dev/null
 
 run_failure() {
   case_name=$1
