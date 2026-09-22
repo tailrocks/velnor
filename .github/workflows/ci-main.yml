@@ -46,6 +46,7 @@ jobs:
       bun_matrix: ${{ steps.plan.outputs.bun_matrix }}
       docker_matrix: ${{ steps.plan.outputs.docker_matrix }}
       docs_matrix: ${{ steps.plan.outputs.docs_matrix }}
+      homebrew_matrix: ${{ steps.plan.outputs.homebrew_matrix }}
       opentofu_matrix: ${{ steps.plan.outputs.opentofu_matrix }}
       rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
       # Presence-only no-work marker: `planned_no_work` is `true` or absent,
@@ -361,6 +362,24 @@ jobs:
       cache_key_files: |
         package-lock.json
         bun.lock
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_admission: github-hosted
+  github-hosted-homebrew:
+    name: "Homebrew · Homebrew · github-hosted — homebrew"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"homebrew"') && (true) }}
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-unit-homebrew.yml
+    with:
+      unit: homebrew
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: github-hosted
@@ -1242,7 +1261,7 @@ jobs:
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [plan, policy, github-hosted-bun-velnor, github-hosted-docker, github-hosted-docs, github-hosted-opentofu, github-hosted-rust-policy, github-hosted-rust-unit-collector, github-hosted-rust-velnor-bench, github-hosted-rust-velnor-client, github-hosted-rust-velnor-control, github-hosted-rust-velnor-model, github-hosted-rust-velnor-render, github-hosted-rust-velnor-runner, github-hosted-rust-velnor-tools, github-hosted-rust-velnor-workflow, github-hosted-rust-velnor-workflow-contract, github-hosted-rust-velnorctl, github-hosted-rust-production-topology]
+    needs: [plan, policy, github-hosted-bun-velnor, github-hosted-docker, github-hosted-docs, github-hosted-homebrew, github-hosted-opentofu, github-hosted-rust-policy, github-hosted-rust-unit-collector, github-hosted-rust-velnor-bench, github-hosted-rust-velnor-client, github-hosted-rust-velnor-control, github-hosted-rust-velnor-model, github-hosted-rust-velnor-render, github-hosted-rust-velnor-runner, github-hosted-rust-velnor-tools, github-hosted-rust-velnor-workflow, github-hosted-rust-velnor-workflow-contract, github-hosted-rust-velnorctl, github-hosted-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1327,7 +1346,7 @@ jobs:
           SELECTED_UNITS: ${{ needs.plan.outputs.units }}
           PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}
           EXCLUDED: ${{ needs.plan.outputs.excluded }}
-          EXPECTED_CALLERS: "[{\"job_id\":\"github-hosted-bun-velnor\",\"provider\":\"github-hosted\",\"unit_id\":\"bun-velnor\"},{\"job_id\":\"github-hosted-docker\",\"provider\":\"github-hosted\",\"unit_id\":\"docker\"},{\"job_id\":\"github-hosted-docs\",\"provider\":\"github-hosted\",\"unit_id\":\"docs\"},{\"job_id\":\"github-hosted-opentofu\",\"provider\":\"github-hosted\",\"unit_id\":\"opentofu\"},{\"job_id\":\"github-hosted-rust-policy\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-policy\"},{\"job_id\":\"github-hosted-rust-unit-collector\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-unit-collector\"},{\"job_id\":\"github-hosted-rust-velnor-bench\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-bench\"},{\"job_id\":\"github-hosted-rust-velnor-client\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-client\"},{\"job_id\":\"github-hosted-rust-velnor-control\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-control\"},{\"job_id\":\"github-hosted-rust-velnor-model\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-model\"},{\"job_id\":\"github-hosted-rust-velnor-render\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-render\"},{\"job_id\":\"github-hosted-rust-velnor-runner\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-runner\"},{\"job_id\":\"github-hosted-rust-velnor-tools\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-tools\"},{\"job_id\":\"github-hosted-rust-velnor-workflow\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-workflow\"},{\"job_id\":\"github-hosted-rust-velnor-workflow-contract\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-workflow-contract\"},{\"job_id\":\"github-hosted-rust-velnorctl\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnorctl\"},{\"job_id\":\"github-hosted-rust-production-topology\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-production-topology\"}]"
+          EXPECTED_CALLERS: "[{\"job_id\":\"github-hosted-bun-velnor\",\"provider\":\"github-hosted\",\"unit_id\":\"bun-velnor\"},{\"job_id\":\"github-hosted-docker\",\"provider\":\"github-hosted\",\"unit_id\":\"docker\"},{\"job_id\":\"github-hosted-docs\",\"provider\":\"github-hosted\",\"unit_id\":\"docs\"},{\"job_id\":\"github-hosted-homebrew\",\"provider\":\"github-hosted\",\"unit_id\":\"homebrew\"},{\"job_id\":\"github-hosted-opentofu\",\"provider\":\"github-hosted\",\"unit_id\":\"opentofu\"},{\"job_id\":\"github-hosted-rust-policy\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-policy\"},{\"job_id\":\"github-hosted-rust-unit-collector\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-unit-collector\"},{\"job_id\":\"github-hosted-rust-velnor-bench\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-bench\"},{\"job_id\":\"github-hosted-rust-velnor-client\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-client\"},{\"job_id\":\"github-hosted-rust-velnor-control\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-control\"},{\"job_id\":\"github-hosted-rust-velnor-model\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-model\"},{\"job_id\":\"github-hosted-rust-velnor-render\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-render\"},{\"job_id\":\"github-hosted-rust-velnor-runner\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-runner\"},{\"job_id\":\"github-hosted-rust-velnor-tools\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-tools\"},{\"job_id\":\"github-hosted-rust-velnor-workflow\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-workflow\"},{\"job_id\":\"github-hosted-rust-velnor-workflow-contract\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnor-workflow-contract\"},{\"job_id\":\"github-hosted-rust-velnorctl\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-velnorctl\"},{\"job_id\":\"github-hosted-rust-production-topology\",\"provider\":\"github-hosted\",\"unit_id\":\"rust-production-topology\"}]"
           PROVIDER_ADMITTED_GITHUB_HOSTED: ${{ true }}
           PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED: ${{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
         shell: bash
@@ -1433,6 +1452,29 @@ jobs:
               skipped) ;;
               success) echo "unexpected CI job github-hosted-docs succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
               *) echo "unexpected CI job github-hosted-docs ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "homebrew" "github-hosted"; then
+            result="$(result_for_job github-hosted-homebrew)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-homebrew was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-homebrew was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-homebrew did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-homebrew ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-homebrew)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-homebrew succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-homebrew ran outside the expected set: $result" >&2; exit 1 ;;
             esac
           fi
           if plan_expects "opentofu" "github-hosted"; then

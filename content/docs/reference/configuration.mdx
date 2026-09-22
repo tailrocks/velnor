@@ -81,7 +81,7 @@ missing or invalid selection is an error.
 | `VELNOR_SLOTS` | Concurrent native daemon slots |
 | `VELNOR_MAX_JOBS` | Host-wide permit limit shared by Native and Scale Set; an explicit positive value configures `N` |
 | `VELNOR_PERMIT_LEDGER` | Optional path to the single host-wide permit ledger; every daemon scope must resolve the same file |
-| `VELNOR_SCALE_SET_CONFIG` | Optional Scale Set TOML path; unset disables the Scale Set lane |
+| `VELNOR_SCALE_SET_CONFIG` | Scale Set TOML path required by `scale-set-only`/`both`; unset disables that lane in native-only mode |
 | `VELNOR_QUEUE_WAIT_SECS` | Maximum wait for an unassigned slot |
 | `VELNOR_CAPACITY_WAIT_SECS` | Maximum wait for disk/capacity reservation |
 | `VELNOR_CAPABILITY_VALIDATION` | Must be `strict` |
@@ -102,9 +102,11 @@ it, set `VELNOR_SCALE_SET_CONFIG` in the service's environment file
 (`/etc/velnor/velnor.env` for the default service, or
 `/etc/velnor/NAME.env` for a named service) to a Scale Set TOML file. When
 enabled, the adapter runs beside native slots and uses the same host-wide
-`VELNOR_MAX_JOBS` permit limit and ledger. The Scale Set TOML has no per-lane
-ledger setting; all daemon scopes must resolve the same `VELNOR_PERMIT_LEDGER`
-path and use the same explicit `VELNOR_MAX_JOBS` value if set.
+`VELNOR_MAX_JOBS` permit limit and ledger. In scale-set mode the TOML must set
+`ledger_path` to the same absolute file as `VELNOR_PERMIT_LEDGER` and must
+include all six non-empty `[admission]` allowlists (`owner`, `repository`,
+`ref`, `source`, `workflow`, `event`). Every daemon scope must resolve the same
+ledger path and use the same explicit positive `VELNOR_MAX_JOBS` value.
 
 Fatal Scale Set startup errors in registration reconciliation, adoption-state
 setup, or session creation reach the supervised daemon loop, which retries the
@@ -125,6 +127,15 @@ owner = "OWNER"
 group_name = "velnor-runners"
 set_name = "velnor"
 labels = ["self-hosted", "linux", "x64"]
+ledger_path = "/var/lib/velnor/permit-ledger.db"
+
+[admission]
+owner = ["OWNER"]
+repository = ["OWNER/REPOSITORY"]
+ref = ["refs/heads/main"]
+source = ["OWNER/REPOSITORY"]
+workflow = [".github/workflows/ci.yml"]
+event = ["push"]
 
 [auth.app]
 client_id = "GITHUB_APP_CLIENT_ID"

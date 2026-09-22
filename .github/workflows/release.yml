@@ -226,6 +226,59 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docs
 
+  release-github-hosted-homebrew:
+    name: "github-hosted / Homebrew / homebrew"
+    needs: [verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: ./.github/actions/setup-velnor-workflow
+        with:
+          rev: 37e7814995995c107fc704e62096fb86c4709bea
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=37e7814995995c107fc704e62096fb86c4709bea" >> "$GITHUB_ENV"
+      - name: Prepare Linuxbrew path
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v brew >/dev/null 2>&1; then
+            exit 0
+          fi
+          linuxbrew_bin=/home/linuxbrew/.linuxbrew/bin
+          linuxbrew_sbin=/home/linuxbrew/.linuxbrew/sbin
+          if [[ ! -x "$linuxbrew_bin/brew" ]]; then
+            printf '%s\n' 'Homebrew unavailable: install brew or expose it on PATH' >&2
+            exit 1
+          fi
+          [[ -n "${GITHUB_PATH:-}" ]] || { printf '%s\n' 'GITHUB_PATH is unavailable' >&2; exit 1; }
+          printf '%s\n%s\n' "$linuxbrew_bin" "$linuxbrew_sbin" >> "$GITHUB_PATH"
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
+      - name: Run Homebrew checks
+        env:
+          CI_SCOPE: full
+          CI_UNIT_ID: homebrew
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit homebrew
+
   release-github-hosted-opentofu:
     name: "github-hosted / OpenTofu / opentofu"
     needs: [verify]
@@ -2881,7 +2934,7 @@ jobs:
 
   build:
     name: Build / ${{ matrix.target }}
-    needs: [verify, image-admission, release-github-hosted-bun-velnor, release-github-hosted-docker, release-github-hosted-docs, release-github-hosted-opentofu, release-github-hosted-rust-policy, release-github-hosted-rust-unit-collector, release-github-hosted-rust-velnor-bench, release-github-hosted-rust-velnor-client, release-github-hosted-rust-velnor-control, release-github-hosted-rust-velnor-model, release-github-hosted-rust-velnor-render, release-github-hosted-rust-velnor-runner, release-github-hosted-rust-velnor-tools, release-github-hosted-rust-velnor-workflow, release-github-hosted-rust-velnor-workflow-contract, release-github-hosted-rust-velnorctl, release-github-hosted-rust-production-topology]
+    needs: [verify, image-admission, release-github-hosted-bun-velnor, release-github-hosted-docker, release-github-hosted-docs, release-github-hosted-homebrew, release-github-hosted-opentofu, release-github-hosted-rust-policy, release-github-hosted-rust-unit-collector, release-github-hosted-rust-velnor-bench, release-github-hosted-rust-velnor-client, release-github-hosted-rust-velnor-control, release-github-hosted-rust-velnor-model, release-github-hosted-rust-velnor-render, release-github-hosted-rust-velnor-runner, release-github-hosted-rust-velnor-tools, release-github-hosted-rust-velnor-workflow, release-github-hosted-rust-velnor-workflow-contract, release-github-hosted-rust-velnorctl, release-github-hosted-rust-production-topology]
     strategy:
       fail-fast: false
       matrix:
@@ -2893,7 +2946,7 @@ jobs:
             provider: github-hosted
             runner: ubuntu-24.04
     runs-on: ubuntu-24.04
-    if: ${{ always() && needs.verify.result == 'success' && (needs.release-github-hosted-bun-velnor.result == 'success' && needs.release-github-hosted-docker.result == 'success' && needs.release-github-hosted-docs.result == 'success' && needs.release-github-hosted-opentofu.result == 'success' && needs.release-github-hosted-rust-policy.result == 'success' && needs.release-github-hosted-rust-unit-collector.result == 'success' && needs.release-github-hosted-rust-velnor-bench.result == 'success' && needs.release-github-hosted-rust-velnor-client.result == 'success' && needs.release-github-hosted-rust-velnor-control.result == 'success' && needs.release-github-hosted-rust-velnor-model.result == 'success' && needs.release-github-hosted-rust-velnor-render.result == 'success' && needs.release-github-hosted-rust-velnor-runner.result == 'success' && needs.release-github-hosted-rust-velnor-tools.result == 'success' && needs.release-github-hosted-rust-velnor-workflow.result == 'success' && needs.release-github-hosted-rust-velnor-workflow-contract.result == 'success' && needs.release-github-hosted-rust-velnorctl.result == 'success' && needs.release-github-hosted-rust-production-topology.result == 'success') && (github.event_name == 'workflow_dispatch' || (true)) && (github.event_name != 'workflow_dispatch' || github.ref_type == 'tag') && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
+    if: ${{ always() && needs.verify.result == 'success' && (needs.release-github-hosted-bun-velnor.result == 'success' && needs.release-github-hosted-docker.result == 'success' && needs.release-github-hosted-docs.result == 'success' && needs.release-github-hosted-homebrew.result == 'success' && needs.release-github-hosted-opentofu.result == 'success' && needs.release-github-hosted-rust-policy.result == 'success' && needs.release-github-hosted-rust-unit-collector.result == 'success' && needs.release-github-hosted-rust-velnor-bench.result == 'success' && needs.release-github-hosted-rust-velnor-client.result == 'success' && needs.release-github-hosted-rust-velnor-control.result == 'success' && needs.release-github-hosted-rust-velnor-model.result == 'success' && needs.release-github-hosted-rust-velnor-render.result == 'success' && needs.release-github-hosted-rust-velnor-runner.result == 'success' && needs.release-github-hosted-rust-velnor-tools.result == 'success' && needs.release-github-hosted-rust-velnor-workflow.result == 'success' && needs.release-github-hosted-rust-velnor-workflow-contract.result == 'success' && needs.release-github-hosted-rust-velnorctl.result == 'success' && needs.release-github-hosted-rust-production-topology.result == 'success') && (github.event_name == 'workflow_dispatch' || (true)) && (github.event_name != 'workflow_dispatch' || github.ref_type == 'tag') && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
     timeout-minutes: 90
     permissions:
       contents: read
