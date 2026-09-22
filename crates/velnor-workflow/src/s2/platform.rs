@@ -961,7 +961,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
         if let Some(commands) = prepared.remove(&unit.id) {
-            prepend_prepare_commands(unit, &commands);
+            prepend_prepare_commands(unit, &commands)?;
         }
     }
     Ok(())
@@ -992,19 +992,11 @@ fn materialize_product_input_watches(config: &mut ProjectConfig) {
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every provider and in
 /// local runs, which read the same serialized vectors.
-fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
-    let mut pr_commands = commands.to_vec();
-    pr_commands.extend(unit.pr_commands.iter().cloned());
-    unit.pr_commands = pr_commands;
-    let mut full_commands = commands.to_vec();
-    full_commands.extend(unit.full_commands.iter().cloned());
-    unit.full_commands = full_commands;
-    // Prepare commands carry no phase tags and shift every position: the unit
-    // keeps the product rebuild ahead of its checks and verifies through the
-    // single legacy step.
-    unit.clear_phases();
+fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) -> Result<(), GeneratorError> {
+    unit.prepend_precondition_commands(commands)?;
     unit.watch.sort();
     unit.watch.dedup();
+    Ok(())
 }
 
 /// The job-level env a collapsed kind workflow agrees on: every member's env
@@ -1047,7 +1039,9 @@ mod tests {
     };
     use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
     use crate::s2::scan::default_selectors;
-    use crate::s2::{AnalysisSummary, MaintenanceSpec, ProjectConfig, RustNeeds, Unit, UnitKind};
+    use crate::s2::{
+        AnalysisSummary, MaintenanceSpec, ProjectConfig, RustNeeds, Unit, UnitKind, ValidationPhase,
+    };
     use std::collections::{BTreeMap, BTreeSet};
 
     #[expect(
@@ -1191,6 +1185,48 @@ mod tests {
             prepare_command("build-xcframework", &std::collections::BTreeMap::new()),
             "mise run build-xcframework"
         );
+    }
+
+    #[test]
+    fn phased_apple_prepare_retains_typed_validation_phases() {
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.pr_commands = vec![
+            "xcodegen generate".to_owned(),
+            "swift build".to_owned(),
+            "swift run app".to_owned(),
+            "swift test".to_owned(),
+        ];
+        consumer.full_commands = consumer.pr_commands.clone();
+        consumer.phases = vec![
+            ValidationPhase::XcodegenGenerate,
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftRun,
+            ValidationPhase::SwiftTest,
+        ];
+        let prepare = "mise run build-xcframework".to_owned();
+
+        must_ok(
+            super::prepend_prepare_commands(&mut consumer, std::slice::from_ref(&prepare)),
+            "Apple prepare insertion",
+        );
+        must_ok(
+            crate::s2::validate_unit_phases(&project_config(vec![consumer.clone()])),
+            "Apple precondition phase shape",
+        );
+
+        assert_eq!(consumer.pr_commands[0], prepare);
+        assert_eq!(consumer.full_commands, consumer.pr_commands);
+        assert_eq!(
+            consumer.phases,
+            vec![
+                ValidationPhase::Precondition,
+                ValidationPhase::XcodegenGenerate,
+                ValidationPhase::SwiftBuild,
+                ValidationPhase::SwiftRun,
+                ValidationPhase::SwiftTest,
+            ]
+        );
+        assert!(consumer.check_commands.is_empty());
     }
 
     #[test]
