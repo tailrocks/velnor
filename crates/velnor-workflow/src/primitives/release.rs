@@ -34,6 +34,21 @@ pub(crate) const RELEASE_SIDE_FILES: &[(&str, &str)] = &[
     ("ci-release-package-signer.yml", RELEASE_SIGNER),
 ];
 
+/// The controller-owned source revision for hosted release events. Keep the
+/// schema-1 release surface aligned with schema 2 until the legacy renderer
+/// is removed.
+const RELEASE_SOURCE_SHA_EXPRESSION: &str = "github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha";
+
+fn release_source_sha_expression() -> String {
+    github_expression(RELEASE_SOURCE_SHA_EXPRESSION)
+}
+
+fn release_base_sha_expression(default_branch: &str) -> String {
+    github_expression(&format!(
+        "github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{default_branch}'"
+    ))
+}
+
 /// The canonical file a declared release-side family renders, when the family
 /// is pinned to one name.
 pub(crate) fn canonical_release_side_file(primitive: &str) -> Option<&'static str> {
@@ -3452,7 +3467,13 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let cargo_offline = checks_env(unit);
-    render_release_check_steps(output, unit, &verify_name, &cargo_offline);
+    render_release_check_steps(
+        output,
+        unit,
+        &verify_name,
+        &cargo_offline,
+        &config.default_branch,
+    );
     id
 }
 
@@ -3464,12 +3485,15 @@ fn render_release_check_steps(
     unit: &Unit,
     verify_name: &str,
     cargo_offline: &str,
+    default_branch: &str,
 ) {
+    let source_sha = release_source_sha_expression();
+    let base_sha = release_base_sha_expression(default_branch);
     let runnable = unit.runnable_phases();
     if runnable.is_empty() {
         let _ = writeln!(
             output,
-            "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+            "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: {base_sha}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          SOURCE_SHA: {source_sha}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
             yaml_scalar(&unit.id),
             yaml_scalar(&unit.id)
         );
@@ -3477,7 +3501,7 @@ fn render_release_check_steps(
         for phase in runnable {
             let _ = writeln!(
                 output,
-                "      - name: {} ({verify_name})\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} --phase {}\n",
+                "      - name: {} ({verify_name})\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: {base_sha}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          SOURCE_SHA: {source_sha}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} --phase {}\n",
                 phase.step_name(),
                 yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id),
@@ -6101,7 +6125,7 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "11df400e5887ca8e517e85517fb5f1e3385f85ee804076d5ace072b47f47f317",
+                "e2618e92329f0fadf7b3a16e6a4baa9519446d1caa9564b7c193c71698a05d85",
             ),
             (
                 "preview.yml",
@@ -6228,7 +6252,7 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5bb7a1a0357af6b295d2c1a571b8d9e0d915d7e20168c90afa93735db7f41df1",
+                "707494f38f6690b6c6b4f03a36df151826172bbb70590478d9093ec873cac0d3",
             ),
             (
                 "preview.yml",
@@ -11056,5 +11080,34 @@ cp "$record" "$out"
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hosted_release_run_steps_bind_source_head_and_base() {
+        let config = native_identity_config(&["release.yml"]);
+        let release = must_some(config.release.as_ref(), "native release fixture");
+        let workflow = super::render_release(&config, release);
+        let source_sha = release_source_sha_expression();
+        let base_sha = release_base_sha_expression("main");
+        let mut run_steps = 0;
+        for step in workflow.split("      - name: ").skip(1) {
+            if step.contains("run: velnor-workflow run --config") {
+                run_steps += 1;
+                assert!(step.contains(&format!("BASE_SHA: {base_sha}")), "{step}");
+                assert!(step.contains("HEAD_SHA: ${{ github.sha }}"), "{step}");
+                assert!(
+                    step.contains(&format!("SOURCE_SHA: {source_sha}")),
+                    "{step}"
+                );
+            }
+        }
+        assert!(
+            run_steps > 0,
+            "release fixture rendered no run steps: {workflow}"
+        );
+        assert!(
+            workflow.contains("on:\n  push:\n    tags: [\"v*\"]"),
+            "{workflow}"
+        );
     }
 }

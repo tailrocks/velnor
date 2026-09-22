@@ -152,12 +152,14 @@ mod tests {
     )]
     #![expect(clippy::panic, reason = "a test whose setup fails should panic loudly")]
 
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::s2::planner::{fanout, BootstrapLane};
     use crate::s2::provider::ProviderSelector;
     use crate::s2::provider::{
         Capabilities, ExclusionReason, ObservedOutcome, Platform, ProviderSet, ResultIdentity,
-        SelectorMap, TrustReq,
+        SelectorMap, TrustReq, UnitIdentity,
     };
 
     fn selectors() -> SelectorMap {
@@ -205,30 +207,52 @@ mod tests {
     fn frozen_single() -> (ExpectedSet, RunIdentity) {
         let plan = fanout(&[planned("rust-a")], None, &universe(), &selectors(), true).unwrap();
         let plan_digest = plan.digest.clone();
-        let digests = plan.command_digests();
+        let unit_identities = plan
+            .executions
+            .iter()
+            .map(|execution| {
+                (
+                    execution.unit_id.clone(),
+                    UnitIdentity {
+                        platform: execution.platform,
+                        trust: execution.trust,
+                        command_digest: execution.command_digest.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
         let run = RunIdentity {
             repository_id: "123".to_owned(),
             source_sha: "abc".to_owned(),
+            audited_sha: "head".to_owned(),
+            base_sha: "base".to_owned(),
             run_id: "42".to_owned(),
             run_attempt: "1".to_owned(),
             plan_digest,
-            command_digests: digests,
+            unit_identities,
         };
         (frozen, run)
     }
 
     fn identity(run: &RunIdentity, unit: &str, provider: ProviderId) -> ResultIdentity {
+        let unit_identity = run
+            .unit_identities
+            .get(unit)
+            .expect("test unit identity is frozen");
         ResultIdentity {
             repository_id: run.repository_id.clone(),
             source_sha: run.source_sha.clone(),
+            audited_sha: run.audited_sha.clone(),
+            base_sha: run.base_sha.clone(),
             run_id: run.run_id.clone(),
             run_attempt: run.run_attempt.clone(),
             plan_digest: run.plan_digest.clone(),
             unit_id: unit.to_owned(),
             provider,
-            platform: Platform::LinuxX64,
-            command_digest: run.command_digests.get(unit).cloned().unwrap_or_default(),
+            platform: unit_identity.platform,
+            trust: unit_identity.trust,
+            command_digest: unit_identity.command_digest.clone(),
         }
     }
 
@@ -349,6 +373,43 @@ mod tests {
     }
 
     #[test]
+    fn candidate_and_unit_identity_mismatch_fails_closed() {
+        let (frozen, run) = frozen_single();
+
+        let mut audited = all_green(&run);
+        audited[2].identity.audited_sha = "other-candidate".to_owned();
+        let failures = frozen.verdict(&audited, &run);
+        assert!(
+            failure_classes(&failures).contains(&"identity-mismatch"),
+            "{failures:?}"
+        );
+
+        let mut based = all_green(&run);
+        based[2].identity.base_sha = "other-base".to_owned();
+        let failures = frozen.verdict(&based, &run);
+        assert!(
+            failure_classes(&failures).contains(&"identity-mismatch"),
+            "{failures:?}"
+        );
+
+        let mut platform = all_green(&run);
+        platform[2].identity.platform = Platform::LinuxArm64;
+        let failures = frozen.verdict(&platform, &run);
+        assert!(
+            failure_classes(&failures).contains(&"identity-mismatch"),
+            "{failures:?}"
+        );
+
+        let mut trust = all_green(&run);
+        trust[2].identity.trust = TrustReq::TrustedOnly;
+        let failures = frozen.verdict(&trust, &run);
+        assert!(
+            failure_classes(&failures).contains(&"identity-mismatch"),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
     fn stale_attempt_fails() {
         let (frozen, run) = frozen_single();
         let mut observed = all_green(&run);
@@ -369,15 +430,30 @@ mod tests {
         )
         .unwrap();
         let plan_digest = plan.digest.clone();
-        let digests = plan.command_digests();
+        let unit_identities = plan
+            .executions
+            .iter()
+            .map(|execution| {
+                (
+                    execution.unit_id.clone(),
+                    UnitIdentity {
+                        platform: execution.platform,
+                        trust: execution.trust,
+                        command_digest: execution.command_digest.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
         let run = RunIdentity {
             repository_id: "123".to_owned(),
             source_sha: "abc".to_owned(),
+            audited_sha: "head".to_owned(),
+            base_sha: "base".to_owned(),
             run_id: "42".to_owned(),
             run_attempt: "1".to_owned(),
             plan_digest,
-            command_digests: digests,
+            unit_identities,
         };
         // A local lane claims the hosted-only unit: wrong provider, and the
         // expected hosted record is missing.

@@ -2629,10 +2629,12 @@ fn normalize_gate_expression(value: &str) -> String {
 }
 
 /// The normalized trusted-event conjunct every local-provider admission
-/// carries: fork and bot pull requests are untrusted, everything else is
-/// trusted.
-fn trusted_event_conjunct() -> &'static str {
-    "!(github.event_name=='pull_request'&&(github.event.pull_request.head.repo.fork||github.event.pull_request.user.type=='Bot'))"
+/// carries. Source this from the generator's one canonical predicate so the
+/// strict policy parser cannot silently accept an obsolete trust contract.
+fn trusted_event_conjunct() -> String {
+    crate::s2::TRUSTED_EVENT_EXPRESSION
+        .split_whitespace()
+        .collect()
 }
 
 /// Whether `value` is the generated admission for a local provider:

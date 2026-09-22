@@ -37,6 +37,24 @@ pub(crate) const RELEASE_SIDE_FILES: &[(&str, &str)] = &[
     ("ci-release-package-signer.yml", RELEASE_SIGNER),
 ];
 
+/// The controller-owned source revision for hosted release events. Pushes
+/// cover both branch and tag releases; dispatches run against the selected
+/// ref's commit. Keep this identical to the schema-2 plan/run identity.
+const RELEASE_SOURCE_SHA_EXPRESSION: &str = "github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha";
+
+fn release_source_sha_expression() -> String {
+    github_expression(RELEASE_SOURCE_SHA_EXPRESSION)
+}
+
+/// The optional base identity used by the planner/runtime on events that
+/// carry one. The fallback matches the schema-2 plan contract for push,
+/// tag, and dispatch events.
+fn release_base_sha_expression(default_branch: &str) -> String {
+    github_expression(&format!(
+        "github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{default_branch}'"
+    ))
+}
+
 /// The canonical file a declared release-side family renders, when the family
 /// is pinned to one name.
 pub(crate) fn canonical_release_side_file(primitive: &str) -> Option<&'static str> {
@@ -3673,6 +3691,8 @@ struct ReleaseUnitJobContext<'a> {
     root_needs: &'a [String],
     checkout_ref: Option<&'a str>,
     head_sha: &'a str,
+    source_sha: &'a str,
+    base_sha: &'a str,
     gate: Option<&'a str>,
     admit_rehearse_dispatch: bool,
 }
@@ -3705,10 +3725,15 @@ fn render_release_unit_cache_restore(
     }
 }
 
-fn render_release_selection_plan_step(output: &mut String, head_sha: &str) {
+fn render_release_selection_plan_step(
+    output: &mut String,
+    head_sha: &str,
+    source_sha: &str,
+    base_sha: &str,
+) {
     let _ = writeln!(
         output,
-        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n",
+        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: {base_sha}\n          HEAD_SHA: {head_sha}\n          SOURCE_SHA: {source_sha}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n",
     );
 }
 
@@ -3718,12 +3743,14 @@ fn render_release_unit_checks_step(
     unit: &Unit,
     verify_name: &str,
     head_sha: &str,
+    source_sha: &str,
+    base_sha: &str,
     cargo_offline: &str,
     token_env: &str,
 ) {
     let _ = writeln!(
         output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: {base_sha}\n          HEAD_SHA: {head_sha}\n          SOURCE_SHA: {source_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
         yaml_scalar(&unit.id),
         yaml_scalar(&unit.id),
     );
@@ -3837,7 +3864,12 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let token_env = docker_build_token_env_for_members(&[unit]);
-    render_release_selection_plan_step(output, context.head_sha);
+    render_release_selection_plan_step(
+        output,
+        context.head_sha,
+        context.source_sha,
+        context.base_sha,
+    );
     // The generator's self-check resolves the D19 pin's closure from local
     // history, but release checkouts are shallow: the hosted leg fetches the
     // pin before the checks, like the unit provider job.
@@ -3847,6 +3879,8 @@ fn render_release_unit_job(
         unit,
         &verify_name,
         context.head_sha,
+        context.source_sha,
+        context.base_sha,
         &cargo_offline,
         token_env,
     );
@@ -3861,6 +3895,8 @@ fn render_release_check_steps(
     unit: &Unit,
     verify_name: &str,
     head_sha: &str,
+    source_sha: &str,
+    base_sha: &str,
     cargo_offline: &str,
     token_env: &str,
 ) {
@@ -3871,6 +3907,8 @@ fn render_release_check_steps(
             unit,
             verify_name,
             head_sha,
+            source_sha,
+            base_sha,
             cargo_offline,
             token_env,
         );
@@ -3878,7 +3916,7 @@ fn render_release_check_steps(
         for phase in runnable {
             let _ = writeln!(
                 output,
-                "      - name: {} ({verify_name})\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} --phase {}\n",
+                "      - name: {} ({verify_name})\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: {base_sha}\n          HEAD_SHA: {head_sha}\n          SOURCE_SHA: {source_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} --phase {}\n",
                 phase.step_name(),
                 yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id),
@@ -3916,11 +3954,15 @@ fn release_unit_runs_on(workflow: &WorkflowIr, provider: ProviderId, unit: &Unit
 
 fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
     let root_needs = ["verify".to_owned()];
+    let source_sha = release_source_sha_expression();
+    let base_sha = release_base_sha_expression(&config.default_branch);
     render_release_unit_jobs_with_context(
         config,
         &root_needs,
         None,
         "${{ github.sha }}",
+        &source_sha,
+        &base_sha,
         None,
         false,
     )
@@ -3936,30 +3978,34 @@ fn render_preview_release_unit_jobs(
     release: &ReleaseSpec,
     native: bool,
 ) -> (String, Vec<String>) {
-    let (root_needs, checkout_ref, head_sha, gate): (
+    let (root_needs, checkout_ref, head_sha, source_sha, gate): (
         Vec<String>,
-        Option<&str>,
-        &str,
+        Option<String>,
+        String,
+        String,
         Option<String>,
     ) = if has_producer_binding(release) {
         (
             vec!["source".to_owned(), "publish-gate".to_owned()],
-            Some("${{ needs.source.outputs.sha }}"),
-            "${{ needs.source.outputs.sha }}",
+            Some("${{ needs.source.outputs.sha }}".to_owned()),
+            "${{ needs.source.outputs.sha }}".to_owned(),
+            "${{ needs.source.outputs.sha }}".to_owned(),
             Some("needs.publish-gate.outputs.admitted == 'true'".to_owned()),
         )
     } else if native {
         (
             vec!["identity".to_owned()],
-            Some("${{ needs.identity.outputs.commit }}"),
-            "${{ needs.identity.outputs.commit }}",
+            Some("${{ needs.identity.outputs.commit }}".to_owned()),
+            "${{ needs.identity.outputs.commit }}".to_owned(),
+            "${{ needs.identity.outputs.commit }}".to_owned(),
             None,
         )
     } else {
         (
             Vec::new(),
             None,
-            "${{ github.sha }}",
+            "${{ github.sha }}".to_owned(),
+            release_source_sha_expression(),
             Some(release_verification_dispatch_gate(
                 &config.default_branch,
                 has_release_modes(release),
@@ -3969,8 +4015,10 @@ fn render_preview_release_unit_jobs(
     render_release_unit_jobs_with_context(
         config,
         &root_needs,
-        checkout_ref,
-        head_sha,
+        checkout_ref.as_deref(),
+        &head_sha,
+        &source_sha,
+        &release_base_sha_expression(&config.default_branch),
         gate.as_deref(),
         has_release_modes(release),
     )
@@ -3981,6 +4029,8 @@ fn render_release_unit_jobs_with_context(
     root_needs: &[String],
     checkout_ref: Option<&str>,
     head_sha: &str,
+    source_sha: &str,
+    base_sha: &str,
     gate: Option<&str>,
     admit_rehearse_dispatch: bool,
 ) -> (String, Vec<String>) {
@@ -3989,6 +4039,8 @@ fn render_release_unit_jobs_with_context(
         root_needs,
         checkout_ref,
         head_sha,
+        source_sha,
+        base_sha,
         gate,
         admit_rehearse_dispatch,
     };
@@ -6737,11 +6789,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "ccb41bed96febf991764dcf752169bc5e56d2f8a83593199b96e16d24df9ea9f",
+                "1d26eef9ef461aa3ad2e044716a5a5b46b7d8d17cae5267b151c3ab09701d577",
             ),
             (
                 "preview.yml",
-                "9a860863d29563a89c267e04b9eb0b2f95e6f17ffbf02042feedfbef55a09a94",
+                "dd7cf06bfae0624aa9dabe70b92753c5f76a6036b3e95ff64b5b359863f32525",
             ),
             (
                 "maintenance.yml",
@@ -6868,11 +6920,11 @@ cp "$record" "$out"
             // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "d41173c905e9d6b2627f21da8f3f9a7e1fed164720b5c928e76030b39dd2b2a2",
+                "24acfdefd0632bf2f173e400cdb6542798b219ae788d4eeadeb52466e991ca79",
             ),
             (
                 "preview.yml",
-                "b462ebf6c21ec929e45a99b108689011f2ae079dbcac21d45cc9f0c8df043a27",
+                "af9fc81daa6a10e2d97f7fb36a053328d04aa604375690be6ccb1e49cd832191",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7406,6 +7458,101 @@ cp "$record" "$out"
         );
     }
 
+    /// Every hosted release verification command carries the complete typed
+    /// event identity. This is deliberately mutation-shaped: deleting any
+    /// one env export from either the unphased or phased renderer fails the
+    /// assertion for the affected `run` step.
+    #[test]
+    fn release_run_steps_bind_source_head_and_base_for_push_tag_and_dispatch() {
+        fn assert_identity(job: &str, source_sha: &str, head_sha: &str, base_sha: &str) {
+            let mut run_steps = 0;
+            for step in job.split("      - name: ").skip(1) {
+                if step.contains("run: velnor-workflow run --config") {
+                    run_steps += 1;
+                    assert!(step.contains(&format!("BASE_SHA: {base_sha}")), "{step}");
+                    assert!(step.contains(&format!("HEAD_SHA: {head_sha}")), "{step}");
+                    assert!(
+                        step.contains(&format!("SOURCE_SHA: {source_sha}")),
+                        "{step}"
+                    );
+                }
+            }
+            assert!(
+                run_steps > 0,
+                "release fixture rendered no hosted run steps: {job}"
+            );
+            let plan = yaml_step(job, "Plan full release selection");
+            assert!(plan.contains(&format!("BASE_SHA: {base_sha}")), "{plan}");
+            assert!(plan.contains(&format!("HEAD_SHA: {head_sha}")), "{plan}");
+            assert!(
+                plan.contains(&format!("SOURCE_SHA: {source_sha}")),
+                "{plan}"
+            );
+        }
+
+        let source_event = release_source_sha_expression();
+        let base_event = release_base_sha_expression("main");
+        assert!(source_event.contains("github.event_name == 'push' && github.event.after"));
+        assert!(source_event.contains("github.event_name == 'workflow_dispatch' && github.sha"));
+
+        let base_config = config(&["release.yml", "preview.yml"], Some(native_spec()));
+        let release = must_some(base_config.release.as_ref(), "native release fixture");
+        let stable = super::render_release(&base_config, release);
+        assert!(
+            stable.contains("on:\n  push:\n    tags: [\"v*\"]"),
+            "{stable}"
+        );
+        assert_identity(
+            yaml_job(&stable, "release-github-hosted-rust-example"),
+            &source_event,
+            "${{ github.sha }}",
+            &base_event,
+        );
+
+        let preview = super::render_preview(&base_config, Some(release));
+        assert!(
+            preview.contains("on:\n  push:\n    branches: [main]"),
+            "{preview}"
+        );
+        assert!(preview.contains("  workflow_dispatch:\n"), "{preview}");
+        assert_identity(
+            yaml_job(&preview, "release-github-hosted-rust-example"),
+            &source_event,
+            "${{ github.sha }}",
+            &base_event,
+        );
+
+        let identity_config = native_identity_config(&["preview.yml"]);
+        let identity_release = must_some(
+            identity_config.release.as_ref(),
+            "native identity release fixture",
+        );
+        let identity_preview = super::render_preview(&identity_config, Some(identity_release));
+        assert_identity(
+            yaml_job(&identity_preview, "release-github-hosted-rust-example"),
+            "${{ needs.identity.outputs.commit }}",
+            "${{ needs.identity.outputs.commit }}",
+            &release_base_sha_expression("main"),
+        );
+
+        let mut dispatch_config = config(&["release.yml"], Some(native_spec()));
+        let dispatch_release = dispatch_config
+            .release
+            .as_mut()
+            .expect("dispatch release fixture");
+        dispatch_release.modes = vec!["validate".to_owned()];
+        let dispatch_release =
+            must_some(dispatch_config.release.as_ref(), "dispatch release fixture");
+        let dispatch = super::render_release(&dispatch_config, dispatch_release);
+        assert!(dispatch.contains("  workflow_dispatch:\n"), "{dispatch}");
+        assert_identity(
+            yaml_job(&dispatch, "release-github-hosted-rust-example"),
+            &source_event,
+            "${{ github.sha }}",
+            &base_event,
+        );
+    }
+
     #[test]
     fn producer_bound_preview_verification_uses_admitted_source_sha() {
         let mut cfg = config(&["preview.yml"], Some(native_spec()));
@@ -7430,7 +7577,9 @@ cp "$record" "$out"
         assert!(
             verifier.contains("if: ${{ needs.publish-gate.outputs.admitted == 'true' }}")
                 && verifier.contains("ref: ${{ needs.source.outputs.sha }}")
-                && verifier.contains("HEAD_SHA: ${{ needs.source.outputs.sha }}"),
+                && verifier.contains("BASE_SHA: ${{ github.event.pull_request.base.sha")
+                && verifier.contains("HEAD_SHA: ${{ needs.source.outputs.sha }}")
+                && verifier.contains("SOURCE_SHA: ${{ needs.source.outputs.sha }}"),
             "producer-bound verification must use the admitted source SHA: {verifier}"
         );
         let build = yaml_job(&preview, "build");
@@ -7813,7 +7962,9 @@ cp "$record" "$out"
     #[test]
     fn maintenance_prune_gate_conjoins_trusted_event_on_local_lanes_only() {
         const BARE: &str = "    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}";
-        const GATED: &str = "    if: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}";
+        let gated = format!(
+            "    if: ${{{{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')) && ({TRUSTED_EVENT_EXPRESSION}) }}}}"
+        );
         fn prune_if(workflow: &str) -> &str {
             workflow
                 .lines()
@@ -7831,7 +7982,7 @@ cp "$record" "$out"
             assert_eq!(first, second, "maintenance render must be deterministic");
             assert_eq!(
                 prune_if(&first),
-                GATED,
+                gated,
                 "local prune must carry the trusted-event conjunct: {first}"
             );
         }
@@ -12190,7 +12341,7 @@ verification_providers = ["github-hosted"]
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "ecfe5139ad9f64a1ea7936abcfcdf72e853dc4bdb9fbc45ac06a19414178369b",
+            "a0d1bb82706d0d9c2b8d80f57274ae2b75eaea1279d4a187b69ad3529ae7e770",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));

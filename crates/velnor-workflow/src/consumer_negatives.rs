@@ -592,7 +592,26 @@ impl ConsumerFixture {
         let mut products = serde_json::Map::new();
         products.insert(
             FIXTURE_PLATFORM.to_owned(),
-            serde_json::json!({"binary": binary_digest, "asset": asset}),
+            serde_json::json!({
+                "binary": binary_digest,
+                "asset": asset,
+                "build": {
+                    "schema": "velnor-workflow.runtime-build-identity.v1",
+                    "source_revision": revision,
+                    "toolchain": "1.91.1-x86_64-unknown-linux-gnu",
+                    "rustc": "rustc 1.91.1 (fixture)",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "host": "x86_64-unknown-linux-gnu",
+                    "platform": FIXTURE_PLATFORM,
+                    "profile": profile,
+                    "features": features,
+                    "rustflags": "",
+                    "cargo_encoded_rustflags": "",
+                    "linker": "",
+                    "cc": "",
+                    "cflags": ""
+                }
+            }),
         );
         serde_json::json!({
             "closure": closure,

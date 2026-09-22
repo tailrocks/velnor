@@ -15,10 +15,10 @@
 //! arrived" to "tool on PATH" that bypasses it.
 //!
 //! Requested and resolved keys are distinct types ([`RequestedKey`] vs
-//! [`ResolvedKey`]). A consumer asks under its current run; a historical
-//! fallback resolves under the producer run that built it. [`save_is_legal`]
-//! refuses any save whose key names a run the manifest does not, so fallback
-//! bytes can never be stored under the requested exact key.
+//! [`ResolvedKey`]). A consumer asks under its current run, and only a
+//! successful bundle produced by that same run can resolve. Historical
+//! bundles fail closed until the manifest and request carry a complete typed
+//! producer identity.
 //!
 //! Every failure is one [`HandoffFailure`]: [`HandoffFailure::Miss`],
 //! [`HandoffFailure::Corrupt`], [`HandoffFailure::Denied`], or
@@ -64,8 +64,8 @@ pub(crate) struct ToolFile {
 }
 
 /// The outcome the producer run recorded for the bundle. Only
-/// [`ToolOutcome::Success`] is installable; anything else fails closed as
-/// [`HandoffFailure::Denied`], never as a rebuild hint.
+/// [`ToolOutcome::Success`] is installable; terminal non-success outcomes
+/// fail closed as [`HandoffFailure::Denied`], never as a rebuild hint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ToolOutcome {
@@ -74,11 +74,16 @@ pub(crate) enum ToolOutcome {
     /// The producer run failed. The bundle exists only as a record and is
     /// never installed.
     Failed,
+    /// The producer run was skipped and never produced an installable bundle.
+    Skipped,
+    /// The producer run was cancelled and never produced an installable bundle.
+    Cancelled,
 }
 
 /// The producer identity that built a bundle: the producer slug the
 /// repository authorized, and the run that produced these exact bytes.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProducerIdentity {
     /// The producer slug, as listed in the request's authorized set.
     pub(crate) producer: String,
@@ -264,6 +269,18 @@ impl HandoffFailure {
     }
 }
 
+impl ToolOutcome {
+    /// The stable wire spelling used in diagnostics and canonical bytes.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 impl std::fmt::Display for HandoffFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -365,13 +382,7 @@ impl ToolManifest {
             ("platform_abi", self.platform_abi.clone()),
             ("producer", self.producer.producer.clone()),
             ("run_id", self.producer.run_id.clone()),
-            (
-                "outcome",
-                match self.outcome {
-                    ToolOutcome::Success => "success".to_owned(),
-                    ToolOutcome::Failed => "failed".to_owned(),
-                },
-            ),
+            ("outcome", self.outcome.as_str().to_owned()),
             ("tool_id", self.tool_id.clone()),
         ] {
             if !canonical.ends_with('{') {
@@ -453,10 +464,8 @@ pub(crate) fn resolved_key(manifest: &ToolManifest) -> ResolvedKey {
 }
 
 /// Whether saving `manifest`'s bytes under `save_key` is legal: the key must
-/// name the run the manifest's own producer identity names. A fallback bundle
-/// saved under the requested exact key — the current run instead of the
-/// producer run — is refused, so historical bytes can never shadow the exact
-/// entry a future run restores.
+/// name the run the manifest's own producer identity names. This preserves
+/// exact current-run identity if a caller attempts to save any bundle.
 pub(crate) fn save_is_legal(save_key: &str, manifest: &ToolManifest) -> bool {
     save_key
         .rsplit_once("-run-")
@@ -465,8 +474,7 @@ pub(crate) fn save_is_legal(save_key: &str, manifest: &ToolManifest) -> bool {
 
 /// A resolution: the manifest selected for a request, carrying the requested
 /// and resolved keys as two distinct values. They agree on an exact
-/// current-run hit and differ on a historical fallback — and tests pin them
-/// apart, so the two identities can never collapse into one field.
+/// current-run hit and remain equal because historical fallback is disabled.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Resolution {
     /// The key the consumer asked under.
@@ -477,16 +485,20 @@ pub(crate) struct Resolution {
     pub(crate) is_exact: bool,
 }
 
-/// Select the bundle a request resolves to: the exact current-run output when
-/// a candidate names this run with a success outcome from an authorized
-/// producer, otherwise the first fully matching historical candidate.
+/// Select the bundle a request resolves to: only the exact current-run output
+/// with a success outcome from an authorized producer. Historical candidates
+/// are refused because these manifest/request types do not carry the typed
+/// source revision, repository/workflow, run attempt, plan, retention, and
+/// trust/event identity required to authorize them.
+///
 /// Candidates arrive newest-first; selection compares identity fields only —
 /// byte integrity is proven later by [`verify`], never assumed here.
 ///
 /// # Errors
 /// Returns [`HandoffFailure::Miss`] when no candidate matches the request's
-/// tool id, inputs digest, platform ABI, authorized producers, and success
-/// outcome.
+/// tool id, inputs digest, platform ABI, and authorized producers. Returns
+/// [`HandoffFailure::Denied`] when a matching candidate is historical or has
+/// a terminal non-success outcome; neither case grants rebuild permission.
 pub(crate) fn resolve<'a, I>(
     request: &ToolRequest,
     candidates: I,
@@ -494,19 +506,36 @@ pub(crate) fn resolve<'a, I>(
 where
     I: IntoIterator<Item = &'a ToolManifest>,
 {
-    fn matches(request: &ToolRequest, manifest: &ToolManifest) -> bool {
+    fn identity_matches(request: &ToolRequest, manifest: &ToolManifest) -> bool {
         manifest.tool_id == request.tool_id
             && manifest.inputs_digest == request.inputs_digest
             && manifest.platform_abi == request.platform_abi
-            && manifest.outcome == ToolOutcome::Success
             && request
                 .authorized_producers
                 .contains(&manifest.producer.producer)
     }
 
-    let mut fallback: Option<&'a ToolManifest> = None;
+    let mut exact_denial = None;
+    let mut historical_denial = None;
     for manifest in candidates {
-        if !matches(request, manifest) {
+        if !identity_matches(request, manifest) {
+            continue;
+        }
+        let is_exact = manifest.producer.run_id == request.run_id;
+        if manifest.outcome != ToolOutcome::Success {
+            let denial = HandoffFailure::Denied {
+                detail: format!(
+                    "tool `{}` from run {} records `{}`; terminal producer outcomes never authorize a rebuild",
+                    manifest.tool_id,
+                    manifest.producer.run_id,
+                    manifest.outcome.as_str(),
+                ),
+            };
+            if is_exact {
+                exact_denial = Some(denial);
+            } else if historical_denial.is_none() {
+                historical_denial = Some(denial);
+            }
             continue;
         }
         if manifest.producer.run_id == request.run_id {
@@ -519,30 +548,24 @@ where
                 manifest,
             ));
         }
-        if fallback.is_none() {
-            fallback = Some(manifest);
+        if historical_denial.is_none() {
+            historical_denial = Some(HandoffFailure::Denied {
+                detail: format!(
+                    "historical tool `{}` from run {} refused: producer identity lacks the typed source, repository/workflow, attempt, plan, retention, and trust/event context required for reuse",
+                    manifest.tool_id, manifest.producer.run_id
+                ),
+            });
         }
     }
-    fallback.map_or_else(
-        || {
-            Err(HandoffFailure::Miss {
-                detail: format!(
-                    "no bundle for tool `{}` at inputs `{}` on `{}` from an authorized producer",
-                    request.tool_id, request.inputs_digest, request.platform_abi
-                ),
-            })
-        },
-        |manifest| {
-            Ok((
-                Resolution {
-                    requested: requested_key(request),
-                    resolved: resolved_key(manifest),
-                    is_exact: false,
-                },
-                manifest,
-            ))
-        },
-    )
+    if let Some(failure) = exact_denial.or(historical_denial) {
+        return Err(failure);
+    }
+    Err(HandoffFailure::Miss {
+        detail: format!(
+            "no exact current-run bundle for tool `{}` at inputs `{}` on `{}` from an authorized producer",
+            request.tool_id, request.inputs_digest, request.platform_abi
+        ),
+    })
 }
 
 /// A tool bundle proven from request to bytes: the only value that reaches
@@ -1136,12 +1159,10 @@ pub(crate) fn parse_tool_declarations(
 }
 
 /// Classify one restored manifest against its request, then prove it:
-/// [`resolve`] over the single candidate decides exact current-run hit vs
-/// historical fallback and yields the requested/resolved key pair, and
-/// [`verify`] proves identity and byte integrity. When resolve refuses a
-/// manifest that exists, verify still runs so the caller gets the precise
-/// verdict — wrong ABI, unauthorized producer, tampered bytes — instead of a
-/// generic miss.
+/// [`verify`] proves identity and byte integrity, then [`resolve`] admits only
+/// an exact current-run success. Verification runs first so callers still get
+/// the precise verdict — wrong ABI, unauthorized producer, or tampered bytes
+/// — instead of a generic miss.
 ///
 /// # Errors
 /// Returns [`HandoffFailure::Corrupt`] for any identity, integrity, or path
@@ -1152,18 +1173,8 @@ pub(crate) fn classify_and_verify(
     manifest: &ToolManifest,
     files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<(Resolution, VerifiedBundle), HandoffFailure> {
-    let classified = resolve(request, [manifest])
-        .ok()
-        .map(|(resolution, _)| resolution);
     let bundle = verify(request, manifest, files)?;
-    // A verify success after a resolve refusal contradicts resolve's match
-    // predicate, which is weaker than verify's proof; recompute the keys
-    // rather than assume the contradiction impossible.
-    let resolution = classified.unwrap_or_else(|| Resolution {
-        requested: requested_key(request),
-        resolved: resolved_key(manifest),
-        is_exact: manifest.producer.run_id == request.run_id,
-    });
+    let (resolution, _) = resolve(request, [manifest])?;
     Ok((resolution, bundle))
 }
 
@@ -1198,9 +1209,7 @@ pub(crate) fn format_failure_output(failure: &HandoffFailure) -> String {
 }
 
 /// The step outputs a successful save-key check records: the checked key,
-/// proven legal for the verified bytes, and the check outcome. A save step
-/// consumes `save-key` instead of rebuilding the key, so fallback bytes can
-/// never be saved under the requested exact key by construction.
+/// proven legal for the verified bytes, and the check outcome.
 pub(crate) fn format_save_check_output(save_key: &str) -> String {
     format!("save-key={save_key}\noutcome=save-allowed\n")
 }
@@ -1323,14 +1332,22 @@ pub(crate) fn fetch_producer_conclusion(
         let rate_limited = response_is_rate_limited(response.status, &response.headers);
         match api_failure(response.status, rate_limited) {
             None => {
-                return run_conclusion(&response.body).map_err(|()| {
+                let conclusion = run_conclusion(&response.body).map_err(|()| {
                     OutcomeFetchError::Failure(HandoffFailure::Transient {
                         detail: format!(
                             "the actions api answered {} for run {run_id} with an unreadable run body",
                             response.status
                         ),
                     })
-                });
+                })?;
+                if conclusion != "success" && conclusion != "in_progress" {
+                    return Err(OutcomeFetchError::Failure(HandoffFailure::Denied {
+                        detail: format!(
+                            "producer run {run_id} concluded `{conclusion}`, not `success`; terminal outcomes never authorize a rebuild"
+                        ),
+                    }));
+                }
+                return Ok(conclusion);
             }
             // The retry decision reads the taxonomy, not the variant: only
             // transient outcomes loop, whatever future variants exist. Both
@@ -1397,26 +1414,13 @@ pub(crate) fn exact_key_expression(tool_id: &str, inputs_digest: &str) -> String
     )
 }
 
-/// The fallback restore prefix a consumer restores: the resolved identity
-/// without a run, so the cache service returns the newest historical bundle
-/// for this tool, ABI, and inputs. Requested and resolved stay two distinct
-/// rendered values — the prefix can never name the current run.
-pub(crate) fn restore_prefix_expression(tool_id: &str, inputs_digest: &str) -> String {
-    format!(
-        "{KEY_NAMESPACE}-{PREPARED_TOOL_SCHEMA}-{tool_id}-{}-{}-run-",
-        "${{ runner.os }}-${{ runner.arch }}",
-        inputs_digest.get(..INPUTS_DIGEST_CHARS).unwrap_or(""),
-    )
-}
-
-/// Render one need's consumer steps: restore the exact current-run key with
-/// the historical fallback prefix, then verify and install through the
-/// runtime verb — the same [`verify`] the unit tests prove, running in CI.
-/// A restore that brings no manifest fails closed as a miss: the producer
-/// slice turns that outcome into a build, but until it lands a consumer
-/// without its tool cannot proceed. Installed binaries land on `PATH` via
-/// the tool's `bin/` directory, the layout every bundle carries its
-/// executables under.
+/// Render one need's consumer steps: restore only the exact current-run key,
+/// then verify and install through the runtime verb — the same [`verify`]
+/// the unit tests prove, running in CI. A restore that brings no manifest
+/// fails closed as a miss: the producer slice turns that outcome into a
+/// build, but a historical bundle is never a substitute. Installed binaries
+/// land on `PATH` via the tool's `bin/` directory, the layout every bundle
+/// carries its executables under.
 pub(crate) fn render_consumer_steps(
     output: &mut String,
     cache_restore_pin: &str,
@@ -1424,7 +1428,6 @@ pub(crate) fn render_consumer_steps(
 ) {
     for need in needs {
         let exact = exact_key_expression(&need.tool_id, &need.inputs_digest);
-        let prefix = restore_prefix_expression(&need.tool_id, &need.inputs_digest);
         let inputs_prefix = need.inputs_digest.get(..INPUTS_DIGEST_CHARS).unwrap_or("");
         let producers = need
             .authorized_producers
@@ -1434,12 +1437,12 @@ pub(crate) fn render_consumer_steps(
             .join(",");
         let _ = writeln!(
             output,
-            "      - name: Restore prepared tool {}\n        id: prepared-tool-{}\n        uses: {}\n        with:\n          path: {PREPARED_TOOL_CACHE_DIR}/{}\n          key: {exact}\n          restore-keys: |\n            {prefix}",
+            "      - name: Restore prepared tool {}\n        id: prepared-tool-{}\n        uses: {}\n        with:\n          path: {PREPARED_TOOL_CACHE_DIR}/{}\n          key: {exact}",
             need.tool_id, need.tool_id, cache_restore_pin, need.tool_id,
         );
         let _ = writeln!(
             output,
-            "      - name: Install prepared tool {}\n        id: prepared-tool-{}-install\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          dir=\"{PREPARED_TOOL_CACHE_DIR}/{}\"\n          if [[ ! -f \"$dir/manifest.json\" ]]; then\n            echo \"::error::prepared-tool miss: no bundle for tool `{}` at inputs `{inputs_prefix}` (exact key and fallback prefix both missed)\" >&2\n            exit 1\n          fi\n          dest=\"{PREPARED_TOOL_INSTALL_HOME}/{}\"\n          velnor-workflow prepared-tool-install \\\n            --manifest \"$dir/manifest.json\" \\\n            --dir \"$dir\" \\\n            --dest \"$dest\" \\\n            --tool \"{}\" \\\n            --inputs \"{}\" \\\n            --abi \"$RUNNER_OS-$RUNNER_ARCH\" \\\n            --producers \"{producers}\" \\\n            --run-id \"$GITHUB_RUN_ID\" \\\n            --repo \"$GITHUB_REPOSITORY\"\n          echo \"$dest/bin\" >> \"$GITHUB_PATH\"",
+            "      - name: Install prepared tool {}\n        id: prepared-tool-{}-install\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          dir=\"{PREPARED_TOOL_CACHE_DIR}/{}\"\n          if [[ ! -f \"$dir/manifest.json\" ]]; then\n            echo \"::error::prepared-tool miss: no exact current-run bundle for tool `{}` at inputs `{inputs_prefix}`\" >&2\n            exit 1\n          fi\n          dest=\"{PREPARED_TOOL_INSTALL_HOME}/{}\"\n          velnor-workflow prepared-tool-install \\\n            --manifest \"$dir/manifest.json\" \\\n            --dir \"$dir\" \\\n            --dest \"$dest\" \\\n            --tool \"{}\" \\\n            --inputs \"{}\" \\\n            --abi \"$RUNNER_OS-$RUNNER_ARCH\" \\\n            --producers \"{producers}\" \\\n            --run-id \"$GITHUB_RUN_ID\" \\\n            --repo \"$GITHUB_REPOSITORY\"\n          echo \"$dest/bin\" >> \"$GITHUB_PATH\"",
             need.tool_id,
             need.tool_id,
             need.tool_id,
@@ -1623,23 +1626,18 @@ mod tests {
     }
 
     #[test]
-    fn historical_fallback_keeps_requested_and_resolved_apart() {
+    fn historical_bundle_fails_closed_without_typed_identity() {
         let request = request("99");
         let manifest = manifest_for("42");
-        let (resolution, selected) = must(resolve(&request, [&manifest]), "fallback resolves");
-        assert!(!resolution.is_exact);
-        assert_eq!(selected.producer.run_id, "42");
-        assert_ne!(resolution.requested.as_str(), resolution.resolved.as_str());
-        assert!(resolution.requested.as_str().ends_with("-run-99"));
-        assert!(resolution.resolved.as_str().ends_with("-run-42"));
-        // The historical bug, pinned shut: fallback bytes saved under the
-        // requested exact key would shadow the current run's own entry.
-        assert!(!save_is_legal(resolution.requested.as_str(), &manifest));
-        assert!(save_is_legal(resolution.resolved.as_str(), &manifest));
-        must(
-            verify(&request, &manifest, &arrived_bytes()),
-            "fallback bytes still verify",
-        );
+        let Err(failure) = resolve(&request, [&manifest]) else {
+            panic!("historical bundle resolved without typed producer identity")
+        };
+        assert!(matches!(failure, HandoffFailure::Denied { .. }));
+        let Err(failure) = classify_and_verify(&request, &manifest, &arrived_bytes()) else {
+            panic!("historical bundle verified without typed producer identity")
+        };
+        assert!(matches!(failure, HandoffFailure::Denied { .. }));
+        assert!(save_is_legal(resolved_key(&manifest).as_str(), &manifest));
     }
 
     #[test]
@@ -1716,16 +1714,22 @@ mod tests {
     #[test]
     fn failed_outcome_and_foreign_producer_are_denied() {
         let request = request("42");
-        let mut failed = manifest_for("42");
-        failed.outcome = ToolOutcome::Failed;
-        restamp(&mut failed);
-        let Err(failure) = verify(&request, &failed, &arrived_bytes()) else {
-            panic!("failed outcome verified")
-        };
-        assert!(
-            matches!(failure, HandoffFailure::Denied { .. }),
-            "failed outcome must be denied, got {failure}"
-        );
+        for outcome in [
+            ToolOutcome::Failed,
+            ToolOutcome::Skipped,
+            ToolOutcome::Cancelled,
+        ] {
+            let mut terminal = manifest_for("42");
+            terminal.outcome = outcome;
+            restamp(&mut terminal);
+            let Err(failure) = verify(&request, &terminal, &arrived_bytes()) else {
+                panic!("terminal outcome verified")
+            };
+            assert!(
+                matches!(failure, HandoffFailure::Denied { .. }),
+                "terminal outcome must be denied, got {failure}"
+            );
+        }
         let mut foreign = manifest_for("42");
         foreign.producer.producer = "intruder-job".to_owned();
         restamp(&mut foreign);
@@ -1867,16 +1871,29 @@ mod tests {
         let mut wrong_inputs = manifest_for("41");
         wrong_inputs.inputs_digest = OTHER_INPUTS.to_owned();
         restamp(&mut wrong_inputs);
-        let mut failed = manifest_for("42");
-        failed.outcome = ToolOutcome::Failed;
-        restamp(&mut failed);
-        let Err(failure) = resolve(&request, [&wrong_inputs, &failed]) else {
-            panic!("non-matching candidates resolved")
+        let Err(failure) = resolve(&request, [&wrong_inputs]) else {
+            panic!("a candidate with wrong inputs resolved")
         };
         assert!(
             matches!(failure, HandoffFailure::Miss { .. }),
             "no match must be a miss, got {failure}"
         );
+        for outcome in [
+            ToolOutcome::Failed,
+            ToolOutcome::Skipped,
+            ToolOutcome::Cancelled,
+        ] {
+            let mut terminal = manifest_for("42");
+            terminal.outcome = outcome;
+            restamp(&mut terminal);
+            let Err(failure) = resolve(&request, [&terminal]) else {
+                panic!("terminal producer outcome resolved as a bundle")
+            };
+            assert!(
+                matches!(failure, HandoffFailure::Denied { .. }),
+                "terminal outcome must deny, not become a rebuild miss: {failure}"
+            );
+        }
         let Err(failure) = resolve(&request, []) else {
             panic!("empty candidates resolved")
         };
@@ -1947,10 +1964,12 @@ mod tests {
             |m: &mut ToolManifest| m.producer.producer.push('x'),
             |m: &mut ToolManifest| m.producer.run_id.push('9'),
             |m: &mut ToolManifest| m.outcome = ToolOutcome::Failed,
+            |m: &mut ToolManifest| m.outcome = ToolOutcome::Skipped,
+            |m: &mut ToolManifest| m.outcome = ToolOutcome::Cancelled,
             |m: &mut ToolManifest| m.files[0].path.push('x'),
             |m: &mut ToolManifest| m.files[0].sha256.push('x'),
             |m: &mut ToolManifest| m.files[0].executable = !m.files[0].executable,
-        ] as [fn(&mut ToolManifest); 9]
+        ] as [fn(&mut ToolManifest); 11]
         {
             let mut changed = manifest.clone();
             mutate(&mut changed);
@@ -1978,6 +1997,36 @@ mod tests {
         let parsed = must(ToolManifest::from_json(&bytes), "manifest parses");
         assert_eq!(parsed, manifest);
         assert!(serde_json::from_slice::<ToolManifest>(b"not json").is_err());
+    }
+
+    #[test]
+    fn untyped_historical_identity_fields_fail_closed() {
+        let manifest = manifest_for("42");
+        for (field, value) in [
+            ("source_revision", serde_json::json!("deadbeef")),
+            (
+                "workflow_repository",
+                serde_json::json!("attacker/repository"),
+            ),
+            ("run_attempt", serde_json::json!(2)),
+            ("expires_at", serde_json::json!("2099-01-01T00:00:00Z")),
+        ] {
+            let mut json = must(serde_json::to_value(&manifest), "manifest serializes");
+            let producer = must_some(
+                json.get_mut("producer")
+                    .and_then(serde_json::Value::as_object_mut),
+                "producer is an object",
+            );
+            producer.insert(field.to_owned(), value);
+            let bytes = must(serde_json::to_vec(&json), "extended manifest serializes");
+            assert!(
+                matches!(
+                    ToolManifest::from_json(&bytes),
+                    Err(HandoffFailure::Corrupt { .. })
+                ),
+                "untyped historical field `{field}` must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -2275,13 +2324,10 @@ mod tests {
     fn classify_and_verify_names_precise_verdicts() {
         let request = request("99");
         let manifest = manifest_for("42");
-        let (resolution, _) = must(
+        assert!(matches!(
             classify_and_verify(&request, &manifest, &arrived_bytes()),
-            "fallback classifies",
-        );
-        assert!(!resolution.is_exact);
-        assert!(resolution.requested.as_str().ends_with("-run-99"));
-        assert!(resolution.resolved.as_str().ends_with("-run-42"));
+            Err(HandoffFailure::Denied { detail }) if detail.contains("historical tool")
+        ));
         // A manifest that exists but mismatches is never a miss: the caller
         // gets the exact break — producer, ABI, bytes, or completeness.
         let mut foreign = manifest_for("42");
@@ -2417,6 +2463,30 @@ mod tests {
         assert_eq!(conclusion, "success");
         assert_eq!(calls, 1);
         assert!(sleeps.is_empty());
+    }
+
+    #[test]
+    fn terminal_producer_outcomes_are_denied_not_rebuild_misses() {
+        for conclusion in ["failure", "skipped", "cancelled"] {
+            let bounds = TransferBounds::DEFAULT;
+            let mut executor = || -> Result<ApiResponse, String> {
+                Ok(api_response(
+                    200,
+                    &format!(r#"{{"conclusion":"{conclusion}"}}"#),
+                ))
+            };
+            let Err(OutcomeFetchError::Failure(failure)) =
+                fetch_producer_conclusion(&bounds, "42", &mut executor, &mut |_| {}, &mut || {
+                    Duration::ZERO
+                })
+            else {
+                panic!("terminal outcome `{conclusion}` authorized a rebuild")
+            };
+            assert!(
+                matches!(failure, HandoffFailure::Denied { .. }),
+                "terminal outcome `{conclusion}` must be denied, got {failure}"
+            );
+        }
     }
 
     #[test]
@@ -2589,13 +2659,10 @@ mod tests {
     #[test]
     fn key_expressions_keep_requested_and_resolved_apart() {
         let exact = exact_key_expression(TOOL, INPUTS);
-        let prefix = restore_prefix_expression(TOOL, INPUTS);
         assert!(exact.starts_with("prepared-tool-v1-test-runner-"));
         assert!(exact.contains(&INPUTS[..12]));
         assert!(exact.contains("${{ runner.os }}-${{ runner.arch }}"));
         assert!(exact.ends_with("-run-${{ github.run_id }}"));
-        assert!(!prefix.contains("github.run_id"));
-        assert_eq!(format!("{prefix}${{{{ github.run_id }}}}"), exact);
     }
 
     fn need() -> PreparedToolNeed {
@@ -2617,7 +2684,8 @@ mod tests {
         assert!(output.contains("Restore prepared tool test-runner"));
         assert!(output.contains("Install prepared tool test-runner"));
         assert!(output.contains(&exact_key_expression(TOOL, INPUTS)));
-        assert!(output.contains(&restore_prefix_expression(TOOL, INPUTS)));
+        assert!(!output.contains("restore-keys:"));
+        assert!(!output.contains("fallback prefix"));
         assert!(output.contains("velnor-workflow prepared-tool-install"));
         assert!(output.contains("--tool \"test-runner\""));
         assert!(output.contains(&format!("--inputs \"{INPUTS}\"")));
@@ -2636,12 +2704,12 @@ mod tests {
 
     #[test]
     fn install_outputs_name_the_resolved_key_as_the_save_key() {
-        let request = request("99");
+        let request = request("42");
         let manifest = manifest_for("42");
-        let (resolution, _) = must(resolve(&request, [&manifest]), "fallback resolves");
+        let (resolution, _) = must(resolve(&request, [&manifest]), "exact bundle resolves");
         let outputs = format_install_outputs(&resolution);
         assert!(outputs.contains(&format!("save-key={}\n", resolution.resolved.as_str())));
-        assert!(outputs.contains("is-exact=false\n"));
+        assert!(outputs.contains("is-exact=true\n"));
         assert!(outputs.contains("outcome=installed\n"));
         assert!(outputs.contains(&format!(
             "requested-key={}\n",

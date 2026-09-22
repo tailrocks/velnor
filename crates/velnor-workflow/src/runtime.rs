@@ -429,7 +429,8 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
 
 /// `velnor-workflow promote --rev SHA|HEAD --publication-readiness PATH
 /// [--repo PATH] [--generator-repo PATH] [--default-branch BRANCH]
-/// [--runners MODE] [--message TEXT] [--dry-run]`:
+/// [--runners MODE] [--message TEXT] [--dry-run]
+/// [--retire-runtime-bootstrap]`:
 /// stamp the D19 pin and regenerate the whole tree in one atomic commit. The
 /// running binary must render with exactly the source closure the pin names
 /// (render with X ⇒ stamp X), and the trusted publication-readiness handoff
@@ -484,16 +485,28 @@ fn visibility_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let (flags, rest): (Vec<&OsString>, Vec<&OsString>) = arguments
-        .iter()
-        .partition(|argument| argument.to_str().is_some_and(|value| value == "--dry-run"));
-    if flags.len() > 1 {
-        return Err(GeneratorError::usage(
-            "duplicate option: --dry-run".to_owned(),
-        ));
+    let mut dry_run = false;
+    let mut retire_runtime_bootstrap = false;
+    let mut rest = Vec::new();
+    for argument in arguments {
+        match argument.to_str() {
+            Some("--dry-run") if !dry_run => dry_run = true,
+            Some("--dry-run") => {
+                return Err(GeneratorError::usage(
+                    "duplicate option: --dry-run".to_owned(),
+                ));
+            }
+            Some("--retire-runtime-bootstrap") if !retire_runtime_bootstrap => {
+                retire_runtime_bootstrap = true;
+            }
+            Some("--retire-runtime-bootstrap") => {
+                return Err(GeneratorError::usage(
+                    "duplicate option: --retire-runtime-bootstrap".to_owned(),
+                ));
+            }
+            _ => rest.push(argument.clone()),
+        }
     }
-    let dry_run = !flags.is_empty();
-    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
     let options = parse_options(
         &rest,
         &[
@@ -536,6 +549,7 @@ fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
         runners,
         message: options.get("message").cloned(),
         dry_run,
+        retire_runtime_bootstrap,
     })?;
     print!("{}", crate::promote::render_report(&report));
     Ok(())

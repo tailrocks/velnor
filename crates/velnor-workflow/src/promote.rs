@@ -21,6 +21,8 @@
 //! untouched — never half-rendered.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,6 +42,10 @@ use super::{
 mod promote_readiness;
 
 use self::promote_readiness::PublicationReadinessManifest;
+
+const RUNTIME_PRODUCTS_BOOTSTRAP_FILE: &str = ".github/workflows/ci-runtime-products.yml";
+const RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE: &str =
+    ".github-gen/sources/workflows/runtime-products-bootstrap.yml";
 
 /// Validate the trusted publisher's local hand-off before promotion mutates a
 /// pin or generated file.  The caller supplies the exact closure/revision
@@ -83,6 +89,10 @@ pub(crate) struct PromoteOptions {
     pub(crate) message: Option<String>,
     /// Verify binding, render, and report without writing or committing.
     pub(crate) dry_run: bool,
+    /// Retire the temporary runtime-product bootstrap mapping and source
+    /// before rendering the canonical publisher. The two bridge files are a
+    /// single migration unit: a partial state fails before mutation.
+    pub(crate) retire_runtime_bootstrap: bool,
 }
 
 /// What one promotion did, for the CLI report and tests.
@@ -158,22 +168,43 @@ pub(crate) fn run_promote(options: &PromoteOptions) -> Result<PromoteReport, Gen
     }
     let pin_content = std::fs::read_to_string(&pin_path)
         .map_err(|error| GeneratorError::io("read generation config", &pin_path, &error))?;
-    let (stamped, old_pin) = stamp_pin(&pin_content, &options.rev)?;
+    let (retired_config, retire_source) = if options.retire_runtime_bootstrap {
+        retire_runtime_bootstrap_config(&repo, &pin_content)?
+    } else {
+        (pin_content.clone(), false)
+    };
+    let (stamped, old_pin) = stamp_pin(&retired_config, &options.rev)?;
     let default_branch = match &options.default_branch {
         Some(branch) => branch.clone(),
         None => resolve_default_branch(&repo)?,
     };
-    let mut snapshot = Snapshot::capture(&repo, [PathBuf::from(GENERATION_CONFIG)])?;
-    std::fs::write(&pin_path, &stamped)
-        .map_err(|error| GeneratorError::io("write generation config", &pin_path, &error))?;
-    let outcome = promote_rendered_tree(
-        options,
-        &repo,
-        &default_branch,
-        &mut snapshot,
-        &old_pin,
-        &closure,
-    );
+    let mut snapshot_paths = vec![PathBuf::from(GENERATION_CONFIG)];
+    if options.retire_runtime_bootstrap {
+        snapshot_paths.push(PathBuf::from(RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE));
+    }
+    let mut snapshot = Snapshot::capture(&repo, snapshot_paths)?;
+    let outcome = (|| {
+        std::fs::write(&pin_path, &stamped)
+            .map_err(|error| GeneratorError::io("write generation config", &pin_path, &error))?;
+        if retire_source {
+            let source_path = repo.join(RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE);
+            fs::remove_file(&source_path).map_err(|error| {
+                GeneratorError::io(
+                    "retire runtime-product bootstrap source",
+                    &source_path,
+                    &error,
+                )
+            })?;
+        }
+        promote_rendered_tree(
+            options,
+            &repo,
+            &default_branch,
+            &mut snapshot,
+            &old_pin,
+            &closure,
+        )
+    })();
     match outcome {
         Ok(report) => Ok(report),
         Err(error) => {
@@ -201,6 +232,7 @@ fn promote_rendered_tree(
     closure: &str,
 ) -> Result<PromoteReport, GeneratorError> {
     let rendered = PromotedRender::render(repo, options.runners, default_branch)?;
+    snapshot.extend(repo, recorded_generator_outputs(repo)?)?;
     snapshot.extend(
         repo,
         rendered
@@ -219,6 +251,11 @@ fn promote_rendered_tree(
     // still rejects manually modified files, and adopt stays false so unowned
     // workflows are never deleted.
     rendered.write(repo)?;
+    if std::env::var_os("VELNOR_TEST_PROMOTE_FAIL_AFTER_WRITE").is_some() {
+        return Err(GeneratorError::usage(
+            "injected post-write verification failure".to_owned(),
+        ));
+    }
     verify_promoted_tree(
         repo,
         rendered.files(),
@@ -245,6 +282,11 @@ fn promote_rendered_tree(
             PathBuf::from(GENERATION_CONFIG),
             PathBuf::from(OWNERSHIP_STATE),
         ])
+        .chain(
+            options
+                .retire_runtime_bootstrap
+                .then(|| PathBuf::from(RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE)),
+        )
         .collect();
     let changed = promotion_changes(repo, &owned)?;
     if changed.is_empty() {
@@ -429,6 +471,142 @@ fn runners_to_providers(runners: RunnerMode) -> Option<ProviderSet> {
             ProviderId::GithubSelfHosted,
         ])),
         RunnerMode::Velnor => Some(ProviderSet::from([ProviderId::Velnor])),
+    }
+}
+
+struct StaticFileBlock {
+    range: Range<usize>,
+    file: Option<String>,
+    source: Option<String>,
+}
+
+/// Locate `[[static_files]]` rows without reserializing the whole TOML file.
+/// Promotion must preserve comments and formatting outside the retired row.
+fn static_file_blocks(content: &str) -> Vec<StaticFileBlock> {
+    let mut lines = Vec::new();
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        let end = offset + line.len();
+        lines.push((offset, end, line));
+        offset = end;
+    }
+    if offset < content.len() {
+        lines.push((offset, content.len(), &content[offset..]));
+    }
+
+    let starts = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, line))| (line.trim() == "[[static_files]]").then_some(index))
+        .collect::<Vec<_>>();
+    starts
+        .into_iter()
+        .map(|start| {
+            let block_start = lines[start].0;
+            let block_end = lines
+                .iter()
+                .skip(start + 1)
+                .find(|(_, _, line)| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with('[') && trimmed.ends_with(']')
+                })
+                .map_or(content.len(), |(offset, _, _)| *offset);
+            let mut file = None;
+            let mut source = None;
+            for line in content[block_start..block_end].lines().skip(1) {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let value = value.trim();
+                match key.trim() {
+                    "file" => file = toml_string_value(value),
+                    "source" => source = toml_string_value(value),
+                    _ => {}
+                }
+            }
+            StaticFileBlock {
+                range: block_start..block_end,
+                file,
+                source,
+            }
+        })
+        .collect()
+}
+
+fn toml_string_value(value: &str) -> Option<String> {
+    let document = format!("value = {value}");
+    toml::from_str::<toml::Table>(&document)
+        .ok()
+        .and_then(|mut table| table.remove("value"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+}
+
+/// Validate and remove the bridge's two files as one migration unit. Both
+/// absent is an idempotent retry; exactly one present is a refused partial
+/// state. A runtime-products mapping for another source is also refused,
+/// because silently deleting only the known row could leave an ambiguous
+/// publisher owner behind.
+fn retire_runtime_bootstrap_config(
+    repo: &Path,
+    content: &str,
+) -> Result<(String, bool), GeneratorError> {
+    let mut mapping: Option<Range<usize>> = None;
+    for block in static_file_blocks(content) {
+        if block.file.as_deref() == Some(RUNTIME_PRODUCTS_BOOTSTRAP_FILE) {
+            if block.source.as_deref() != Some(RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE) {
+                return Err(GeneratorError::usage(format!(
+                    "runtime-product bootstrap mapping is partial or points at an unexpected source; expected {RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE}"
+                )));
+            }
+            if mapping.replace(block.range).is_some() {
+                return Err(GeneratorError::usage(
+                    "runtime-product bootstrap mapping is duplicated; refusing retirement"
+                        .to_owned(),
+                ));
+            }
+        } else if block.source.as_deref() == Some(RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE) {
+            return Err(GeneratorError::usage(
+                "runtime-product bootstrap source is mapped by an unexpected static file row; refusing retirement"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    let source_path = repo.join(RUNTIME_PRODUCTS_BOOTSTRAP_SOURCE);
+    let source_present = match fs::symlink_metadata(&source_path) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => {
+            return Err(GeneratorError::usage(format!(
+                "runtime-product bootstrap source {} is not a regular file; refusing retirement",
+                source_path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "inspect runtime-product bootstrap source",
+                &source_path,
+                &error,
+            ))
+        }
+    };
+
+    match (mapping, source_present) {
+        (None, false) => Ok((content.to_owned(), false)),
+        (None, true) => Err(GeneratorError::usage(
+            "runtime-product bootstrap source exists without its static mapping; refusing partial retirement"
+                .to_owned(),
+        )),
+        (Some(_), false) => Err(GeneratorError::usage(
+            "runtime-product bootstrap static mapping exists without its source; refusing partial retirement"
+                .to_owned(),
+        )),
+        (Some(range), true) => {
+            let mut retired = String::with_capacity(content.len());
+            retired.push_str(&content[..range.start]);
+            retired.push_str(&content[range.end..]);
+            Ok((retired, true))
+        }
     }
 }
 
@@ -688,6 +866,63 @@ struct Snapshot {
     seen: BTreeSet<PathBuf>,
 }
 
+/// Read the prior ownership ledger so promotion snapshots outputs that the
+/// writer may delete as stale, not only paths present in the new render.
+fn recorded_generator_outputs(repo: &Path) -> Result<Vec<PathBuf>, GeneratorError> {
+    let path = repo.join(OWNERSHIP_STATE);
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(GeneratorError::io("read ownership state", &path, &error)),
+    };
+    let mut lines = content.lines();
+    if lines.next() != Some("# Generated ownership state; do not edit.") {
+        return Err(GeneratorError::usage(format!(
+            "invalid generated ownership state: {}",
+            path.display()
+        )));
+    }
+    if lines.next() != Some("schema = 2") {
+        return Err(GeneratorError::usage(format!(
+            "invalid generated ownership state: {}",
+            path.display()
+        )));
+    }
+    let Some(()) = lines.find(|line| *line == "[outputs]").map(|_| ()) else {
+        return Err(GeneratorError::usage(format!(
+            "invalid generated ownership state: {}",
+            path.display()
+        )));
+    };
+    lines
+        .map(|line| {
+            let (raw_path, raw_digest) = line.split_once('\t').ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "invalid generated ownership state: {}",
+                    path.display()
+                ))
+            })?;
+            u64::from_str_radix(raw_digest, 16).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "invalid generated ownership state: {}",
+                    path.display()
+                ))
+            })?;
+            let relative = Path::new(raw_path);
+            if !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+                || !(raw_path.starts_with(".github/") || raw_path == "config/fleet/velnor-host.env")
+            {
+                return Err(GeneratorError::usage(
+                    "generated ownership state contains an unsafe path".to_owned(),
+                ));
+            }
+            Ok(relative.to_path_buf())
+        })
+        .collect()
+}
+
 impl Snapshot {
     fn capture(
         repo: &Path,
@@ -895,6 +1130,29 @@ mod tests {
             runners_to_providers(RunnerMode::Velnor),
             Some(ProviderSet::from([ProviderId::Velnor]))
         );
+    }
+
+    #[test]
+    fn malformed_ownership_state_fails_before_promotion_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-promote-malformed-state-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".github/ci")).expect("create ownership directory");
+        std::fs::write(
+            root.join(OWNERSHIP_STATE),
+            "# legacy ownership state\noutput = .github/workflows/stale.yml\n",
+        )
+        .expect("write malformed ownership state");
+        let error = must_fail(
+            recorded_generator_outputs(&root),
+            "malformed ownership state must fail closed",
+        );
+        assert!(error
+            .to_string()
+            .contains("invalid generated ownership state"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

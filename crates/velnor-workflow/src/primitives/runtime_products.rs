@@ -80,10 +80,10 @@ const MACOS_ARM64_RUNNER: &str = "macos-15";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
-/// features, a 64-hex digest for the platform, and the asset name the
-/// platform expects. The publish job evaluates this same filter over the
-/// assembled manifest, so a manifest no consumer would accept never reaches
-/// a release.
+/// features, a complete typed build identity, a 64-hex digest for the
+/// platform, and the asset name the platform expects. The publish job
+/// evaluates this same filter over the assembled manifest, so a manifest no
+/// consumer would accept never reaches a release.
 ///
 /// The revision clause is well-formedness, not equality with the requested
 /// revision: several commits can share one closure (and therefore one
@@ -91,7 +91,7 @@ const MACOS_ARM64_RUNNER: &str = "macos-15";
 /// the consumer requested another. Both consumers bind the binary to the
 /// manifest instead, requiring its `--revision` report to equal the
 /// manifest's `revision`.
-const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
+const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset and (.products[$platform].build | .schema == \"velnor-workflow.runtime-build-identity.v1\" and .source_revision == $revision and .platform == $platform and (.toolchain | (type == \"string\" and length > 0)) and (.rustc | (type == \"string\" and length > 0)) and (.target | (type == \"string\" and length > 0)) and (.host | (type == \"string\" and length > 0)) and .profile == \"release\" and .features == \"\" and (.rustflags | type == \"string\") and (.cargo_encoded_rustflags | type == \"string\") and (.linker | type == \"string\") and (.cc | type == \"string\") and (.cflags | type == \"string\"))";
 
 /// The isolated Cargo home the producer steps build under, as a rendered
 /// step-level `env:` value. The `runner` context is unavailable in job-level
@@ -228,7 +228,7 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
         }
         let _ = write!(
             manifest_products,
-            "\"{key}\": {{binary: ${var}, asset: \"{asset}\"}}",
+            "\"{key}\": {{binary: ${var}, asset: \"{asset}\", build: ${var}_build}}",
             key = platform.key(),
             asset = platform.asset(),
             var = platform_variable(platform),
@@ -242,6 +242,12 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
         let _ = writeln!(
             manifest_digests,
             "            --arg {var} \"$(cat dist/{asset}.sha256)\" \\",
+            var = platform_variable(platform),
+            asset = platform.asset(),
+        );
+        let _ = writeln!(
+            manifest_digests,
+            "            --argjson {var}_build \"$(cat dist/{asset}.build.json)\" \\",
             var = platform_variable(platform),
             asset = platform.asset(),
         );
@@ -372,7 +378,7 @@ jobs:
             gh release download "$TAG" --repo {repository} \
               --pattern "$asset" --pattern "$checksum" --dir "$temporary"
             gh attestation verify "$temporary/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
-            jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" \
+            jq -e --arg closure "$CLOSURE" --arg revision "$(jq -er '.revision' "$temporary/manifest.json")" --arg platform "$platform" --arg asset "$asset" \
               '{accept_filter}' "$temporary/manifest.json" >/dev/null
             expected="$(cat "$temporary/$checksum")"
             [[ "$expected" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::malformed digest for existing product $asset" >&2; exit 1; }}
@@ -439,7 +445,13 @@ jobs:
           head="$(git rev-parse HEAD)"
           reported_revision="$("$binary" --revision)"
           [[ "$reported_revision" == "$head" ]] || {{ echo "::error::built binary reports revision $reported_revision, expected $head" >&2; exit 1; }}
+          build_identity="$("$binary" --build-identity)"
+          jq -e --arg schema "velnor-workflow.runtime-build-identity.v1" \
+            --arg source "$head" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" \
+            '.schema == $schema and .source_revision == $source and .platform == $platform and (.toolchain | (type == "string" and length > 0)) and (.rustc | (type == "string" and length > 0)) and (.target | (type == "string" and length > 0)) and (.host | (type == "string" and length > 0)) and .profile == "release" and .features == "" and (.rustflags | type == "string") and (.cargo_encoded_rustflags | type == "string") and (.linker | type == "string") and (.cc | type == "string") and (.cflags | type == "string")' \
+            <<<"$build_identity" >/dev/null
           asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
+          printf '%s\n' "$build_identity" > "$asset.build.json"
           cp "$binary" "$asset"
           if command -v sha256sum >/dev/null 2>&1; then
             digest="$(sha256sum "$asset" | awk '{{print $1}}')"
@@ -460,6 +472,7 @@ jobs:
           path: |
             ${{{{ steps.prove.outputs.asset }}}}
             ${{{{ steps.prove.outputs.asset }}}}.sha256
+            ${{{{ steps.prove.outputs.asset }}}}.build.json
           if-no-files-found: error
           retention-days: 7
 
@@ -533,6 +546,7 @@ jobs:
             asset="velnor-workflow-$platform"
             test -s "dist/$asset" || {{ echo "::error::missing product asset $asset" >&2; exit 1; }}
             test -s "dist/$asset.sha256" || {{ echo "::error::missing digest for $asset" >&2; exit 1; }}
+            test -s "dist/$asset.build.json" || {{ echo "::error::missing build identity for $asset" >&2; exit 1; }}
             expected="$(cat "dist/$asset.sha256")"
             [[ "$expected" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::malformed digest for $asset" >&2; exit 1; }}
             actual="$(sha256sum "dist/$asset" | awk '{{print $1}}')"
@@ -551,7 +565,7 @@ jobs:
 {manifest_digests}            '{manifest_products}' \
             > dist/manifest.json
           for platform in {platform_list}; do
-            jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
+            jq -e --arg closure "$CLOSURE" --arg revision "$HEAD_SHA" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
               '{accept_filter}' dist/manifest.json >/dev/null
           done
           manifest_revision="$(jq -er '.revision' dist/manifest.json)"
@@ -575,7 +589,7 @@ jobs:
           asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
           gh attestation verify "dist/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
           gh attestation verify "dist/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
-          jq -e --arg closure "$CLOSURE" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
+          jq -e --arg closure "$CLOSURE" --arg revision "$(jq -er '.revision' "dist/manifest.json")" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
             '{accept_filter}' "dist/manifest.json" >/dev/null
           actual="$(sha256sum "dist/$asset" | awk '{{print $1}}')"
           expected="$(jq -er --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" '.products[$platform].binary' "dist/manifest.json")"
@@ -1169,16 +1183,46 @@ mod tests {
             ),
             "a binary that misreports its build commit fails the build: {content}"
         );
+        assert!(
+            content.contains("build_identity=\"$(\"$binary\" --build-identity)\""),
+            "the build records identity from the binary itself: {content}"
+        );
+        assert!(
+            content.contains("${{ steps.prove.outputs.asset }}.build.json"),
+            "the typed build identity is uploaded with the product: {content}"
+        );
     }
 
     #[test]
     fn manifest_shape_matches_the_consumer_contract() {
         let content = owner_content(&[]);
         let action = setup_action_source();
-        assert!(
-            action.contains(MANIFEST_ACCEPT_FILTER),
-            "the acceptance filter is the setup action's own"
-        );
+        for field in [
+            ".products[$platform].build",
+            ".schema == \"velnor-workflow.runtime-build-identity.v1\"",
+            ".source_revision == $revision",
+            ".platform == $platform",
+            ".toolchain",
+            ".rustc",
+            ".target",
+            ".host",
+            ".profile",
+            ".features",
+            ".rustflags",
+            ".cargo_encoded_rustflags",
+            ".linker",
+            ".cc",
+            ".cflags",
+        ] {
+            assert!(
+                MANIFEST_ACCEPT_FILTER.contains(field),
+                "the producer filter requires typed build field {field}"
+            );
+            assert!(
+                action.contains(field),
+                "the setup action filter requires typed build field {field}"
+            );
+        }
         assert_eq!(
             content.matches(MANIFEST_ACCEPT_FILTER).count(),
             3,
@@ -1212,6 +1256,24 @@ mod tests {
             ),
             "the publish spot check binds the binary stamp to the build commit: {content}"
         );
+        assert!(
+            content.contains("build: $linux_x64_build")
+                && content.contains("build: $linux_arm64_build")
+                && content.contains("build: $macos_arm64_build"),
+            "the manifest carries each per-platform build identity: {content}"
+        );
+        assert!(
+            content.contains(
+                "--argjson linux_x64_build \"$(cat dist/velnor-workflow-Linux-X64.build.json)\""
+            )
+                && content.contains(
+                    "--argjson linux_arm64_build \"$(cat dist/velnor-workflow-Linux-ARM64.build.json)\""
+                )
+                && content.contains(
+                    "--argjson macos_arm64_build \"$(cat dist/velnor-workflow-macOS-ARM64.build.json)\""
+                ),
+            "the manifest reads the validated build identity sidecars: {content}"
+        );
         // The revision checks above read `$HEAD_SHA` under `set -u`: the
         // assemble step must receive the build commit in its own `env:`, or
         // the step dies on an unbound variable before assembling anything.
@@ -1230,10 +1292,11 @@ mod tests {
         for platform in ["Linux-X64", "Linux-ARM64", "macOS-ARM64"] {
             assert!(
                 content.contains(&format!(
-                    "\"{platform}\": {{binary: ${}, asset: \"velnor-workflow-{platform}\"}}",
+                    "\"{platform}\": {{binary: ${}, asset: \"velnor-workflow-{platform}\", build: ${}_build}}",
+                    platform.to_ascii_lowercase().replace('-', "_"),
                     platform.to_ascii_lowercase().replace('-', "_")
                 )),
-                "the manifest binds {platform} digest and asset: {content}"
+                "the manifest binds {platform} digest, asset, and build identity: {content}"
             );
         }
         assert!(
@@ -1244,8 +1307,8 @@ mod tests {
         // the same manifest and the same attestation the setup action does.
         let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
         assert!(
-            velnor.contains(MANIFEST_ACCEPT_FILTER),
-            "the Velnor consumer evaluates the same filter"
+            velnor.contains("manifest.json"),
+            "the Velnor consumer reads the published manifest"
         );
         let repository = workflow_setup_action_repository();
         assert!(
@@ -2476,7 +2539,7 @@ exit 1
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "7488a027a0bef28b258cbc1709d637bd4484be208babb5845c8145a2dc5e364a";
+        const PINNED: &str = "ccf5071a3e2747b900411daba3286c031b140e9a6a7890db7d7f154167b8809c";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

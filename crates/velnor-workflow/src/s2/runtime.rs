@@ -31,8 +31,10 @@ use super::primitives::snapshot::{
 };
 use super::provider::{
     check_capabilities, eligibility, parse_provider_set, plan_digest, Capabilities,
-    ExclusionReason, Platform, ProviderId, ProviderSet, TrustReq,
+    ExclusionReason, PlanUnitIdentity, Platform, ProviderId, ProviderSelector, ProviderSet,
+    SelectorMap, TrustReq,
 };
+use super::trust::{evaluate_event, CheckoutRef, CiEvent, EventIdentity, EventKind, TrustVerdict};
 use super::{GeneratorError, UnitKind, ValidationPhase};
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
@@ -1663,147 +1665,54 @@ struct PlannedExclusion {
     reason: ExclusionReason,
 }
 
-/// A revision used to identify a source or audited tree. This remains
-/// textual because local plans intentionally accept symbolic revisions such
-/// as `HEAD` and `refs/heads/main`; the type prevents the two identities from
-/// collapsing into one unlabelled `String` in the planner.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Revision(String);
-
-impl Revision {
-    fn new(name: &str, value: impl Into<String>) -> Result<Self, GeneratorError> {
-        let value = value.into();
-        if value.is_empty() || value.contains(['\n', '\r']) {
-            return Err(GeneratorError::usage(format!(
-                "{name} must be a non-empty single-line revision"
-            )));
-        }
-        Ok(Self(value))
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Event kinds admitted by the planner. Parsing happens at the environment
-/// boundary; routing and scope selection consume this enum instead of
-/// branching on a caller-provided string.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EventKind {
-    PullRequest,
-    Push,
-    Schedule,
-    MergeGroup,
-    WorkflowDispatch,
-    Local,
-}
-
-impl EventKind {
-    fn parse(value: &str) -> Result<Self, GeneratorError> {
-        match value {
-            "pull_request" => Ok(Self::PullRequest),
-            "push" => Ok(Self::Push),
-            "schedule" => Ok(Self::Schedule),
-            "merge_group" => Ok(Self::MergeGroup),
-            "workflow_dispatch" => Ok(Self::WorkflowDispatch),
-            "" => Ok(Self::Local),
-            other => Err(GeneratorError::usage(format!(
-                "unsupported CI event `{other}`"
-            ))),
-        }
-    }
-
-    fn from_env() -> Result<Self, GeneratorError> {
-        Self::parse(&env::var("EVENT_NAME").unwrap_or_default())
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::PullRequest => "pull_request",
-            Self::Push => "push",
-            Self::Schedule => "schedule",
-            Self::MergeGroup => "merge_group",
-            Self::WorkflowDispatch => "workflow_dispatch",
-            Self::Local => "",
-        }
-    }
-
-    const fn requires_full_scope(self) -> bool {
-        matches!(self, Self::Push | Self::Schedule | Self::MergeGroup)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EventTrust {
-    Trusted,
-    Untrusted,
-}
-
-impl EventTrust {
-    const fn is_trusted(self) -> bool {
-        matches!(self, Self::Trusted)
-    }
-}
-
-/// The complete event identity admitted to planning. `source` is the source
-/// commit supplied by the event (for a PR, the PR head); `audited` is the
-/// exact checkout being planned (for a PR, GitHub's synthetic merge commit).
-/// They are deliberately separate even when push-like events carry the same
-/// revision in both fields.
+/// The complete typed event identity admitted to planning. Trust is evaluated
+/// once here and the resulting verdict remains attached to the same event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EventContext {
-    kind: EventKind,
-    source: Revision,
-    audited: Revision,
-    base: Option<Revision>,
-    trust: EventTrust,
+    event: CiEvent,
+    trust: TrustVerdict,
 }
 
 impl EventContext {
     fn from_env() -> Result<Self, GeneratorError> {
         let kind = EventKind::from_env()?;
-        let audited = revision_from_env("HEAD_SHA", kind == EventKind::Local, "HEAD")?;
-        let source = revision_from_env("SOURCE_SHA", kind == EventKind::Local, audited.as_str())?;
-        let base = env::var("BASE_SHA")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map(|value| Revision::new("BASE_SHA", value))
-            .transpose()?;
-        let trust = event_trust_from_env(kind)?;
-        if kind == EventKind::PullRequest && base.is_none() {
-            return Err(GeneratorError::usage(
-                "pull_request planning requires explicit BASE_SHA",
-            ));
-        }
-        Ok(Self {
-            kind,
-            source,
-            audited,
-            base,
-            trust,
-        })
+        let identity = if kind == EventKind::Local {
+            let audited = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+            let source = env::var("SOURCE_SHA").unwrap_or_else(|_| audited.clone());
+            let base = env::var("BASE_SHA").ok().filter(|value| !value.is_empty());
+            EventIdentity::local(source, audited, base)
+        } else {
+            event_identity_from_env(kind)?
+        };
+        Self::from_identity(kind, identity)
     }
 
-    const fn kind(&self) -> EventKind {
-        self.kind
+    fn from_identity(kind: EventKind, identity: EventIdentity) -> Result<Self, GeneratorError> {
+        let event = CiEvent::from_identity(kind, identity)?;
+        let trust = evaluate_event(&event)?;
+        validate_trust_claims(&event, &trust)?;
+        Ok(Self { event, trust })
     }
 
-    const fn trusted(&self) -> bool {
-        self.trust.is_trusted()
+    fn kind(&self) -> EventKind {
+        self.event.kind()
+    }
+
+    fn trusted(&self) -> bool {
+        self.trust.trusted
     }
 
     #[cfg(test)]
     fn source_sha(&self) -> &str {
-        self.source.as_str()
+        &self.event.identity().source_sha
     }
 
     fn audited_sha(&self) -> &str {
-        self.audited.as_str()
+        &self.event.identity().audited_sha
     }
 
     fn base_sha(&self) -> &str {
-        self.base.as_ref().map_or("", Revision::as_str)
+        self.event.identity().base_sha.as_deref().unwrap_or("")
     }
 
     #[cfg(test)]
@@ -1814,60 +1723,529 @@ impl EventContext {
         base: Option<&str>,
         trusted: bool,
     ) -> Self {
-        Self {
-            kind,
-            source: Revision(source.to_owned()),
-            audited: Revision(audited.to_owned()),
-            base: base.map(|value| Revision(value.to_owned())),
-            trust: if trusted {
-                EventTrust::Trusted
+        let source_repository = if trusted { "example/repo" } else { "fork/repo" };
+        let identity = EventIdentity {
+            repository: "example/repo".to_owned(),
+            source_repository: source_repository.to_owned(),
+            source_sha: source.to_owned(),
+            audited_sha: audited.to_owned(),
+            base_sha: base.map(ToOwned::to_owned),
+            reference: "refs/heads/main".to_owned(),
+            run_id: "42".to_owned(),
+            run_attempt: "1".to_owned(),
+            source_is_fork: !trusted,
+            author_is_bot: false,
+            source_verified: true,
+            ref_protected: (kind == EventKind::WorkflowDispatch).then_some(true),
+            default_branch: (kind == EventKind::WorkflowDispatch).then(|| "main".to_owned()),
+            checkout: if kind == EventKind::PullRequestTarget {
+                CheckoutRef::Base
             } else {
-                EventTrust::Untrusted
+                CheckoutRef::Head
             },
+        };
+        match Self::from_identity(kind, identity) {
+            Ok(context) => context,
+            Err(error) => panic!("test event identity must be valid: {error}"),
         }
     }
 }
 
-fn revision_from_env(
-    name: &str,
-    allow_default: bool,
-    default: &str,
-) -> Result<Revision, GeneratorError> {
-    match env::var(name).ok().filter(|value| !value.is_empty()) {
-        Some(value) => Revision::new(name, value),
-        None if allow_default => Revision::new(name, default),
-        None => Err(GeneratorError::usage(format!(
-            "{name} is required for hosted event planning"
+fn required_env(name: &str) -> Result<String, GeneratorError> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            GeneratorError::usage(format!("{name} is required for hosted event planning"))
+        })
+}
+
+fn optional_env(name: &str) -> Result<Option<String>, GeneratorError> {
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) => Err(GeneratorError::usage(format!(
+            "{name} cannot be empty when supplied"
         ))),
+        Err(_) => Ok(None),
     }
 }
 
-fn event_trust_from_env(kind: EventKind) -> Result<EventTrust, GeneratorError> {
-    let value = env::var("VELNOR_EVENT_TRUSTED").ok();
-    match kind {
-        EventKind::PullRequest | EventKind::WorkflowDispatch => match value.as_deref() {
-            Some("true") => Ok(EventTrust::Trusted),
-            Some("false") => Ok(EventTrust::Untrusted),
-            Some(other) => Err(GeneratorError::usage(format!(
-                "VELNOR_EVENT_TRUSTED must be true or false, got `{other}`"
-            ))),
-            None => Err(GeneratorError::usage(format!(
-                "{} planning requires explicit VELNOR_EVENT_TRUSTED",
-                kind.name()
+fn optional_bool_env(name: &str) -> Result<Option<bool>, GeneratorError> {
+    match optional_env(name)? {
+        None => Ok(None),
+        Some(value) => match value.as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            other => Err(GeneratorError::usage(format!(
+                "{name} must be true or false, got `{other}`"
             ))),
         },
-        EventKind::Push | EventKind::Schedule | EventKind::MergeGroup => match value.as_deref() {
-            None | Some("true") => Ok(EventTrust::Trusted),
-            Some("false") => Err(GeneratorError::usage(format!(
-                "{} is controller-trusted and cannot carry VELNOR_EVENT_TRUSTED=false",
-                kind.name()
-            ))),
-            Some(other) => Err(GeneratorError::usage(format!(
-                "VELNOR_EVENT_TRUSTED must be true or false, got `{other}`"
-            ))),
-        },
-        EventKind::Local => Ok(EventTrust::Trusted),
     }
+}
+
+fn event_payload() -> Result<serde_json::Value, GeneratorError> {
+    let path = required_env("GITHUB_EVENT_PATH")?;
+    let bytes = fs::read(&path).map_err(|error| {
+        GeneratorError::usage(format!("read GITHUB_EVENT_PATH `{path}`: {error}"))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        GeneratorError::usage(format!("parse GITHUB_EVENT_PATH `{path}`: {error}"))
+    })
+}
+
+fn payload_string(
+    payload: &serde_json::Value,
+    pointer: &str,
+    name: &str,
+) -> Result<String, GeneratorError> {
+    payload
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| GeneratorError::usage(format!("event payload is missing {name}")))
+}
+
+fn optional_payload_string(payload: &serde_json::Value, pointer: &str) -> Option<String> {
+    payload
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn payload_bool(
+    payload: &serde_json::Value,
+    pointer: &str,
+    name: &str,
+) -> Result<bool, GeneratorError> {
+    payload
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| GeneratorError::usage(format!("event payload is missing {name}")))
+}
+
+fn payload_u64(
+    payload: &serde_json::Value,
+    pointer: &str,
+    name: &str,
+) -> Result<u64, GeneratorError> {
+    payload
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| GeneratorError::usage(format!("event payload is missing {name}")))
+}
+
+fn payload_sender_is_bot(payload: &serde_json::Value) -> Result<bool, GeneratorError> {
+    let sender_type = payload_string(payload, "/sender/type", "sender.type")?;
+    if sender_type.eq_ignore_ascii_case("bot") {
+        Ok(true)
+    } else if sender_type.eq_ignore_ascii_case("user") {
+        Ok(false)
+    } else {
+        Err(GeneratorError::usage(format!(
+            "event payload sender.type `{sender_type}` is not an explicitly supported human or bot identity"
+        )))
+    }
+}
+
+fn bind_sender_bot_claim(
+    payload: &serde_json::Value,
+    bot_claim: Option<bool>,
+) -> Result<bool, GeneratorError> {
+    let author_is_bot = payload_sender_is_bot(payload)?;
+    if let Some(claim) = bot_claim
+        && claim != author_is_bot
+    {
+        return Err(GeneratorError::usage(
+            "AUTHOR_IS_BOT disagrees with the event payload sender.type",
+        ));
+    }
+    Ok(author_is_bot)
+}
+
+fn validate_pull_request_target_binding(
+    default_branch: &str,
+    reference: &str,
+    ref_type: &str,
+    audited_sha: &str,
+    base_sha: &str,
+) -> Result<(), GeneratorError> {
+    require_equal("pull_request_target ref type", ref_type, "branch")?;
+    require_equal(
+        "pull_request_target ref",
+        reference,
+        &format!("refs/heads/{default_branch}"),
+    )?;
+    require_equal("pull_request_target audited SHA", audited_sha, base_sha)
+}
+
+fn require_equal(name: &str, actual: &str, expected: &str) -> Result<(), GeneratorError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(GeneratorError::usage(format!(
+            "typed event identity {name} mismatch: got `{actual}`, expected `{expected}`"
+        )))
+    }
+}
+
+fn source_repository_claim(payload_repository: &str) -> Result<String, GeneratorError> {
+    let source_repository = optional_env("SOURCE_REPOSITORY")?;
+    let head_repository = optional_env("HEAD_REPOSITORY")?;
+    if let (Some(source), Some(head)) = (&source_repository, &head_repository) {
+        require_equal("source repository", source, head)?;
+    }
+    let source_repository = source_repository.or(head_repository);
+    if let Some(claim) = source_repository {
+        require_equal("source repository", &claim, payload_repository)?;
+        Ok(claim)
+    } else {
+        Ok(payload_repository.to_owned())
+    }
+}
+
+fn validate_merge_group_payload(
+    payload: &serde_json::Value,
+    source_sha: &str,
+    base_sha: Option<&str>,
+    reference: &str,
+) -> Result<String, GeneratorError> {
+    let payload_source_sha =
+        payload_string(payload, "/merge_group/head_sha", "merge_group.head_sha")?;
+    require_equal("merge-group source SHA", source_sha, &payload_source_sha)?;
+    let payload_base_sha =
+        payload_string(payload, "/merge_group/base_sha", "merge_group.base_sha")?;
+    let base_sha = base_sha
+        .ok_or_else(|| GeneratorError::usage("merge_group planning requires explicit BASE_SHA"))?;
+    require_equal("merge-group base SHA", base_sha, &payload_base_sha)?;
+    if let Some(payload_ref) = optional_payload_string(payload, "/merge_group/ref") {
+        require_equal("merge-group ref", reference, &payload_ref)?;
+    }
+    Ok(base_sha.to_owned())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the hosted event boundary validates one complete identity atomically"
+)]
+fn event_identity_from_env(kind: EventKind) -> Result<EventIdentity, GeneratorError> {
+    let payload = event_payload()?;
+    let repository = required_env("GITHUB_REPOSITORY")?;
+    let payload_repository =
+        payload_string(&payload, "/repository/full_name", "repository.full_name")?;
+    require_equal("repository", &repository, &payload_repository)?;
+
+    let audited_sha = required_env("HEAD_SHA")?;
+    let github_sha = required_env("GITHUB_SHA")?;
+    require_equal("audited SHA", &audited_sha, &github_sha)?;
+    let source_sha = required_env("SOURCE_SHA")?;
+    let reference = required_env("GITHUB_REF")?;
+    let run_id = required_env("GITHUB_RUN_ID")?;
+    let run_attempt = required_env("GITHUB_RUN_ATTEMPT")?;
+    let base_env = optional_env("BASE_SHA")?;
+    let source_fork_claim = optional_bool_env("SOURCE_IS_FORK")?;
+    let bot_claim = optional_bool_env("AUTHOR_IS_BOT")?;
+    let default_branch = optional_payload_string(&payload, "/repository/default_branch");
+    let ref_protected = optional_bool_env("GITHUB_REF_PROTECTED")?;
+    let sender_author_is_bot = match kind {
+        EventKind::Push | EventKind::Schedule | EventKind::Tag | EventKind::WorkflowDispatch => {
+            Some(bind_sender_bot_claim(&payload, bot_claim)?)
+        }
+        _ => None,
+    };
+
+    let (source_repository, source_is_fork, author_is_bot, base_sha, payload_verified) = match kind
+    {
+        EventKind::PullRequest | EventKind::PullRequestTarget => {
+            let source_repository = payload_string(
+                &payload,
+                "/pull_request/head/repo/full_name",
+                "pull_request.head.repo.full_name",
+            )?;
+            let base_repository = payload_string(
+                &payload,
+                "/pull_request/base/repo/full_name",
+                "pull_request.base.repo.full_name",
+            )?;
+            require_equal(
+                "pull request base repository",
+                &base_repository,
+                &repository,
+            )?;
+            let payload_source_sha =
+                payload_string(&payload, "/pull_request/head/sha", "pull_request.head.sha")?;
+            require_equal("pull request source SHA", &source_sha, &payload_source_sha)?;
+            let payload_base_sha =
+                payload_string(&payload, "/pull_request/base/sha", "pull_request.base.sha")?;
+            let base_sha = base_env.ok_or_else(|| {
+                GeneratorError::usage("pull_request planning requires explicit BASE_SHA")
+            })?;
+            require_equal("pull request base SHA", &base_sha, &payload_base_sha)?;
+            let source_is_fork = payload_bool(
+                &payload,
+                "/pull_request/head/repo/fork",
+                "pull_request.head.repo.fork",
+            )?;
+            if let Some(claim) = source_fork_claim
+                && claim != source_is_fork
+            {
+                return Err(GeneratorError::usage(
+                    "SOURCE_IS_FORK disagrees with the controller event payload",
+                ));
+            }
+            let author_type = payload_string(
+                &payload,
+                "/pull_request/user/type",
+                "pull_request.user.type",
+            )?;
+            let author_is_bot = author_type.eq_ignore_ascii_case("bot");
+            if let Some(claim) = bot_claim
+                && claim != author_is_bot
+            {
+                return Err(GeneratorError::usage(
+                    "AUTHOR_IS_BOT disagrees with the controller event payload",
+                ));
+            }
+            if kind == EventKind::PullRequest {
+                let number = payload_u64(&payload, "/number", "number")?;
+                require_equal(
+                    "pull request checkout ref",
+                    &reference,
+                    &format!("refs/pull/{number}/merge"),
+                )?;
+            } else {
+                let default_branch = default_branch.as_deref().ok_or_else(|| {
+                    GeneratorError::usage(
+                        "pull_request_target payload is missing repository.default_branch",
+                    )
+                })?;
+                let ref_type = required_env("GITHUB_REF_TYPE")?;
+                validate_pull_request_target_binding(
+                    default_branch,
+                    &reference,
+                    &ref_type,
+                    &audited_sha,
+                    &base_sha,
+                )?;
+            }
+            let source_repository_claim = source_repository_claim(&source_repository)?;
+            (
+                source_repository_claim,
+                source_is_fork,
+                author_is_bot,
+                Some(base_sha),
+                true,
+            )
+        }
+        EventKind::MergeGroup => {
+            if source_fork_claim.is_some() || bot_claim.is_some() {
+                return Err(GeneratorError::usage(
+                    "merge_group has no independently verified constituent fork or bot facts",
+                ));
+            }
+            let base_sha = validate_merge_group_payload(
+                &payload,
+                &source_sha,
+                base_env.as_deref(),
+                &reference,
+            )?;
+            let source_repository = source_repository_claim(&repository)?;
+            // The payload proves the merge-group/base identity only. It does
+            // not prove the provenance of every queued pull request, so this
+            // event can never create a trusted verdict from payload shape.
+            (source_repository, false, false, Some(base_sha), false)
+        }
+        EventKind::Push | EventKind::Tag => {
+            let source_repository = source_repository_claim(&repository)?;
+            require_equal("source SHA", &source_sha, &audited_sha)?;
+            let payload_source_sha = payload_string(&payload, "/after", "after")?;
+            require_equal("push source SHA", &source_sha, &payload_source_sha)?;
+            let payload_ref = payload_string(&payload, "/ref", "ref")?;
+            require_equal("ref", &reference, &payload_ref)?;
+            let ref_type = required_env("GITHUB_REF_TYPE")?;
+            if kind == EventKind::Tag {
+                require_equal("tag ref type", &ref_type, "tag")?;
+                if !reference.starts_with("refs/tags/") {
+                    return Err(GeneratorError::usage(
+                        "tag event ref must be a refs/tags reference",
+                    ));
+                }
+            } else {
+                require_equal("push ref type", &ref_type, "branch")?;
+                if !reference.starts_with("refs/heads/") {
+                    return Err(GeneratorError::usage(
+                        "push event ref must be a refs/heads reference",
+                    ));
+                }
+            }
+            if source_fork_claim == Some(true) {
+                return Err(GeneratorError::usage(
+                    "controller-owned events cannot claim a fork source",
+                ));
+            }
+            (
+                source_repository,
+                false,
+                sender_author_is_bot.ok_or_else(|| {
+                    GeneratorError::usage("push/tag event is missing sender bot binding")
+                })?,
+                base_env,
+                true,
+            )
+        }
+        EventKind::Schedule => {
+            let source_repository = source_repository_claim(&repository)?;
+            require_equal("source SHA", &source_sha, &audited_sha)?;
+            if let Some(payload_ref) = optional_payload_string(&payload, "/ref") {
+                require_equal("ref", &reference, &payload_ref)?;
+            }
+            if source_fork_claim == Some(true) {
+                return Err(GeneratorError::usage(
+                    "controller-owned events cannot claim a fork source",
+                ));
+            }
+            (
+                source_repository,
+                false,
+                sender_author_is_bot.ok_or_else(|| {
+                    GeneratorError::usage("schedule event is missing sender bot binding")
+                })?,
+                base_env,
+                true,
+            )
+        }
+        EventKind::WorkflowDispatch => {
+            let source_repository = source_repository_claim(&repository)?;
+            require_equal("source SHA", &source_sha, &audited_sha)?;
+            let default_branch = default_branch.as_deref().ok_or_else(|| {
+                GeneratorError::usage(
+                    "workflow_dispatch payload is missing repository.default_branch",
+                )
+            })?;
+            require_equal(
+                "workflow_dispatch ref",
+                &reference,
+                &format!("refs/heads/{default_branch}"),
+            )?;
+            let ref_type = required_env("GITHUB_REF_TYPE")?;
+            require_equal("workflow_dispatch ref type", &ref_type, "branch")?;
+            if let Some(payload_ref) = optional_payload_string(&payload, "/ref") {
+                require_equal("ref", &reference, &payload_ref)?;
+            }
+            if source_fork_claim == Some(true) {
+                return Err(GeneratorError::usage(
+                    "workflow_dispatch cannot claim a fork source",
+                ));
+            }
+            if ref_protected.is_none() {
+                return Err(GeneratorError::usage(
+                    "workflow_dispatch requires the runner's GITHUB_REF_PROTECTED fact",
+                ));
+            }
+            (
+                source_repository,
+                false,
+                sender_author_is_bot.ok_or_else(|| {
+                    GeneratorError::usage("workflow_dispatch is missing sender bot binding")
+                })?,
+                base_env,
+                true,
+            )
+        }
+        EventKind::Local => {
+            return Err(GeneratorError::usage(
+                "local event identity must be constructed without hosted inputs",
+            ));
+        }
+    };
+    let source_verified =
+        payload_verified && optional_bool_env("VELNOR_SOURCE_VERIFIED")?.unwrap_or(true);
+    Ok(EventIdentity {
+        repository,
+        source_repository,
+        source_sha,
+        audited_sha,
+        base_sha,
+        reference,
+        run_id,
+        run_attempt,
+        source_is_fork,
+        author_is_bot,
+        source_verified,
+        ref_protected,
+        default_branch,
+        checkout: if kind == EventKind::PullRequestTarget {
+            CheckoutRef::Base
+        } else {
+            CheckoutRef::Head
+        },
+    })
+}
+
+fn validate_trust_claims(event: &CiEvent, verdict: &TrustVerdict) -> Result<(), GeneratorError> {
+    if let Some(claim) = optional_bool_env("VELNOR_EVENT_TRUSTED")?
+        && claim != verdict.trusted
+    {
+        return Err(GeneratorError::usage(format!(
+            "VELNOR_EVENT_TRUSTED disagrees with typed {:?} trust verdict",
+            verdict.event
+        )));
+    }
+    if let Some(claim) = optional_bool_env("VELNOR_SOURCE_VERIFIED")?
+        && claim != event.identity().source_verified
+    {
+        return Err(GeneratorError::usage(
+            "VELNOR_SOURCE_VERIFIED disagrees with typed event identity",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate optional reusable-workflow inputs at the same typed boundary as
+/// the event verdict. The generated owner workflow does not need this
+/// transport; callers that provide it cannot use an untrusted event to select
+/// a provider, checkout, or trust lane.
+fn validate_plan_trust_inputs(verdict: &TrustVerdict) -> Result<(), GeneratorError> {
+    let workflow_inputs = match optional_env("VELNOR_WORKFLOW_INPUTS")? {
+        None => BTreeMap::new(),
+        Some(raw) => serde_json::from_str::<BTreeMap<String, String>>(&raw).map_err(|error| {
+            GeneratorError::usage(format!(
+                "VELNOR_WORKFLOW_INPUTS must be a JSON string map: {error}"
+            ))
+        })?,
+    };
+    super::trust::check_workflow_inputs(&workflow_inputs, verdict)?;
+
+    let Some(raw_labels) = optional_env("VELNOR_REQUESTED_LABELS")? else {
+        return Ok(());
+    };
+    let requested_labels = raw_labels
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if requested_labels.is_empty() {
+        return Err(GeneratorError::usage(
+            "VELNOR_REQUESTED_LABELS must contain at least one selector",
+        ));
+    }
+    let selectors: SelectorMap = ProviderId::ALL
+        .into_iter()
+        .map(|provider| {
+            (
+                provider,
+                ProviderSelector {
+                    // This typed transport names providers, not arbitrary
+                    // runner labels. Actual runner labels remain generator
+                    // configuration and cannot be supplied by a caller.
+                    runs_on: vec![provider.as_str().to_owned()],
+                },
+            )
+        })
+        .collect();
+    super::trust::check_label_spoof(&requested_labels, &selectors, verdict).map(|_| ())
 }
 
 /// Everything `plan` reads from its environment, as one injectable bundle.
@@ -1914,6 +2292,7 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
 )]
 fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
+    validate_plan_trust_inputs(&inputs.context.trust)?;
     let scope = match scope_for_event_values(
         inputs.context.kind().name(),
         inputs.scope_override.as_deref(),
@@ -1994,16 +2373,26 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     excluded.sort_by(|left, right| {
         (&left.unit_id, left.provider).cmp(&(&right.unit_id, right.provider))
     });
-    let digest_input: Vec<(String, ProviderSet, String)> = planned
-        .iter()
-        .map(|unit| {
-            (
-                unit.unit_id.clone(),
-                unit.providers.clone(),
-                unit.command_digest.clone(),
-            )
-        })
-        .collect();
+    let mut digest_input = Vec::with_capacity(planned.len());
+    for planned_unit in &planned {
+        let config_unit = config
+            .unit
+            .iter()
+            .find(|unit| unit.id == planned_unit.unit_id)
+            .ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "planned unit `{}` disappeared before digesting",
+                    planned_unit.unit_id
+                ))
+            })?;
+        digest_input.push(PlanUnitIdentity {
+            unit_id: planned_unit.unit_id.clone(),
+            providers: planned_unit.providers.clone(),
+            platform: config_unit.platform()?,
+            trust: config_unit.trust()?,
+            command_digest: planned_unit.command_digest.clone(),
+        });
+    }
     let exclusion_input: Vec<(String, ProviderId, ExclusionReason)> = excluded
         .iter()
         .map(|exclusion| {
@@ -2206,13 +2595,13 @@ pub(crate) fn scope_for_event_values(
     override_scope: Option<&str>,
 ) -> Result<Option<String>, GeneratorError> {
     match event {
-        // Merge-queue validation is a trusted event like push and schedule:
-        // the ephemeral merge ref has no pull_request base to diff against,
-        // so it always runs full scope.
-        "push" | "schedule" | "merge_group" => {
+        // Merge-queue validation is prospective-main coverage. It has no
+        // pull_request base to diff against, so it always runs full scope;
+        // trust admission still keeps it hosted-only at runtime.
+        "push" | "schedule" | "merge_group" | "tag" => {
             if override_scope.is_some_and(|scope| scope != "full") {
                 return Err(GeneratorError::usage(
-                    "trusted events require full CI scope",
+                    "full-scope events require full CI scope",
                 ));
             }
             Ok(Some("full".to_owned()))
@@ -2224,7 +2613,7 @@ pub(crate) fn scope_for_event_values(
                 "unsupported CI scope override `{other}`"
             ))),
         },
-        "pull_request" => Ok(override_scope
+        "pull_request" | "pull_request_target" => Ok(override_scope
             .map(ToOwned::to_owned)
             .or_else(|| Some("affected".to_owned()))),
         "" => Ok(override_scope.map(ToOwned::to_owned)),
@@ -2264,8 +2653,15 @@ fn plan_providers_for_value(
 
 #[cfg(test)]
 mod scope_event_tests {
-    use super::{scope_for_event_values, EventContext, EventKind};
+    use super::{
+        bind_sender_bot_claim, payload_sender_is_bot, scope_for_event_values,
+        validate_execution_admission_for_runner, validate_execution_identity,
+        validate_merge_group_payload, validate_pull_request_target_binding, CheckoutRef,
+        EventContext, EventIdentity, EventKind, PlannedSelection, Scope,
+    };
     use crate::s2::GeneratorError;
+    use serde_json::json;
+    use std::collections::BTreeSet;
 
     #[expect(
         clippy::panic,
@@ -2306,12 +2702,68 @@ mod scope_event_tests {
             EventKind::MergeGroup,
             "merge-group",
             "merge-group",
-            None,
+            Some("base"),
             true,
         );
-        assert!(merge_group.trusted());
+        assert!(!merge_group.trusted());
         assert_eq!(merge_group.kind().name(), "merge_group");
-        assert_eq!(merge_group.base_sha(), "");
+        assert_eq!(merge_group.base_sha(), "base");
+    }
+
+    #[test]
+    fn plan_boundary_uses_typed_identity_verdict_not_a_boolean_claim() {
+        let identity = EventIdentity {
+            repository: "example/repo".to_owned(),
+            source_repository: "example/repo".to_owned(),
+            source_sha: "pr-head".to_owned(),
+            audited_sha: "synthetic-merge".to_owned(),
+            base_sha: Some("base".to_owned()),
+            reference: "refs/pull/7/merge".to_owned(),
+            run_id: "42".to_owned(),
+            run_attempt: "1".to_owned(),
+            source_is_fork: false,
+            author_is_bot: false,
+            source_verified: false,
+            ref_protected: None,
+            default_branch: None,
+            checkout: CheckoutRef::Head,
+        };
+        let error = must_fail(
+            EventContext::from_identity(EventKind::PullRequest, identity),
+            "same-repository unverified source must not enter planning",
+        );
+        assert!(
+            error.to_string().contains("not controller-verified"),
+            "{error}"
+        );
+
+        let trusted = EventContext::from_identity(
+            EventKind::PullRequest,
+            EventIdentity {
+                repository: "example/repo".to_owned(),
+                source_repository: "example/repo".to_owned(),
+                source_sha: "pr-head".to_owned(),
+                audited_sha: "synthetic-merge".to_owned(),
+                base_sha: Some("base".to_owned()),
+                reference: "refs/pull/7/merge".to_owned(),
+                run_id: "42".to_owned(),
+                run_attempt: "1".to_owned(),
+                source_is_fork: false,
+                author_is_bot: false,
+                source_verified: true,
+                ref_protected: None,
+                default_branch: None,
+                checkout: CheckoutRef::Head,
+            },
+        )
+        .unwrap();
+        assert!(trusted.trusted());
+        assert_eq!(trusted.kind(), EventKind::PullRequest);
+        assert_eq!(trusted.source_sha(), "pr-head");
+        assert_eq!(trusted.audited_sha(), "synthetic-merge");
+        assert_eq!(trusted.base_sha(), "base");
+        assert_eq!(trusted.trust.event, EventKind::PullRequest);
+        assert_eq!(trusted.trust.checkout, CheckoutRef::Head);
     }
 
     #[test]
@@ -2325,11 +2777,159 @@ mod scope_event_tests {
         ] {
             assert_eq!(EventKind::parse(name).ok(), Some(expected), "{name:?}");
         }
-        assert!(EventKind::parse("pull_request_target").is_err());
+        assert_eq!(
+            EventKind::parse("pull_request_target").ok(),
+            Some(EventKind::PullRequestTarget)
+        );
     }
 
     #[test]
-    fn merge_group_is_a_trusted_full_scope_event() {
+    fn sender_type_is_required_and_binds_author_bot_claims() {
+        assert!(payload_sender_is_bot(&json!({
+            "sender": {"type": "Bot"}
+        }))
+        .unwrap());
+        assert!(!payload_sender_is_bot(&json!({
+            "sender": {"type": "User"}
+        }))
+        .unwrap());
+        assert!(payload_sender_is_bot(&json!({"sender": {}})).is_err());
+        assert!(payload_sender_is_bot(&json!({
+            "sender": {"type": "Organization"}
+        }))
+        .is_err());
+        assert!(bind_sender_bot_claim(&json!({"sender": {"type": "Bot"}}), Some(false)).is_err());
+    }
+
+    #[test]
+    fn forged_merge_group_claims_are_rejected_before_hosted_admission() {
+        let payload = json!({
+            "merge_group": {
+                "head_sha": "head",
+                "base_sha": "base",
+                "ref": "refs/heads/gh-readonly-queue/main/pr-1"
+            }
+        });
+        assert_eq!(
+            validate_merge_group_payload(
+                &payload,
+                "head",
+                Some("base"),
+                "refs/heads/gh-readonly-queue/main/pr-1"
+            )
+            .unwrap(),
+            "base"
+        );
+        assert!(validate_merge_group_payload(
+            &payload,
+            "forged-head",
+            Some("base"),
+            "refs/heads/gh-readonly-queue/main/pr-1"
+        )
+        .is_err());
+        assert!(validate_merge_group_payload(
+            &payload,
+            "head",
+            Some("forged-base"),
+            "refs/heads/gh-readonly-queue/main/pr-1"
+        )
+        .is_err());
+        assert!(validate_merge_group_payload(
+            &payload,
+            "head",
+            Some("base"),
+            "refs/heads/gh-readonly-queue/main/pr-2"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pull_request_target_binds_default_branch_and_base_sha() {
+        assert!(validate_pull_request_target_binding(
+            "main",
+            "refs/heads/main",
+            "branch",
+            "base",
+            "base"
+        )
+        .is_ok());
+        assert!(validate_pull_request_target_binding(
+            "main",
+            "refs/pull/7/merge",
+            "branch",
+            "merge",
+            "base"
+        )
+        .is_err());
+        assert!(validate_pull_request_target_binding(
+            "main",
+            "refs/heads/main",
+            "branch",
+            "forged-audited",
+            "base"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn execution_admission_is_hosted_only_for_untrusted_contexts() {
+        let untrusted = EventContext::for_test(
+            EventKind::PullRequest,
+            "source",
+            "audited",
+            Some("base"),
+            false,
+        );
+        assert!(
+            validate_execution_admission_for_runner(&untrusted, Some("github-hosted"), true)
+                .is_ok()
+        );
+        assert!(
+            validate_execution_admission_for_runner(&untrusted, Some("self-hosted"), true).is_err()
+        );
+        assert!(validate_execution_admission_for_runner(&untrusted, None, true).is_err());
+
+        let trusted = EventContext::for_test(
+            EventKind::PullRequest,
+            "source",
+            "audited",
+            Some("base"),
+            true,
+        );
+        assert!(
+            validate_execution_admission_for_runner(&trusted, Some("self-hosted"), true).is_ok()
+        );
+    }
+
+    #[test]
+    fn execution_selection_binds_audited_and_base_shas() {
+        let context = EventContext::for_test(
+            EventKind::PullRequest,
+            "source",
+            "audited",
+            Some("base"),
+            true,
+        );
+        let selection = PlannedSelection {
+            base_sha: "base".to_owned(),
+            head_sha: "audited".to_owned(),
+            scope: Scope::Affected,
+            units: BTreeSet::new(),
+            full_units: BTreeSet::new(),
+            plan_digest: "digest".to_owned(),
+        };
+        assert!(validate_execution_identity(&context, &selection).is_ok());
+
+        let mut forged_head = selection.clone();
+        forged_head.head_sha = "forged".to_owned();
+        assert!(validate_execution_identity(&context, &forged_head).is_err());
+        let mut forged_base = selection;
+        forged_base.base_sha = "forged".to_owned();
+        assert!(validate_execution_identity(&context, &forged_base).is_err());
+    }
+
+    #[test]
+    fn merge_group_is_hosted_only_but_requires_full_scope() {
         assert_eq!(
             must(scope_for_event_values("merge_group", None), "resolve scope").as_deref(),
             Some("full")
@@ -2349,8 +2949,33 @@ mod scope_event_tests {
         assert!(
             error
                 .to_string()
-                .contains("trusted events require full CI scope"),
+                .contains("full-scope events require full CI scope"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn tag_and_pull_request_target_have_explicit_scope_mapping() {
+        assert_eq!(
+            must(scope_for_event_values("tag", None), "resolve tag scope").as_deref(),
+            Some("full")
+        );
+        assert!(scope_for_event_values("tag", Some("affected")).is_err());
+        assert_eq!(
+            must(
+                scope_for_event_values("pull_request_target", None),
+                "resolve pull_request_target scope"
+            )
+            .as_deref(),
+            Some("affected")
+        );
+        assert_eq!(
+            must(
+                scope_for_event_values("pull_request_target", Some("full")),
+                "resolve explicit pull_request_target scope"
+            )
+            .as_deref(),
+            Some("full")
         );
     }
 
@@ -2663,13 +3288,15 @@ pub(crate) fn run_units_with_selection_file(
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    let event = EventKind::from_env()?;
-    if event.requires_full_scope() && scope != Scope::Full {
+    let context = EventContext::from_env()?;
+    validate_execution_admission(&context)?;
+    if context.kind().requires_full_scope() && scope != Scope::Full {
         return Err(GeneratorError::usage(
-            "trusted events require full CI scope",
+            "full-scope events require full CI scope",
         ));
     }
     let selection = read_selection_file(selection_file)?;
+    validate_execution_identity(&context, &selection)?;
     validate_selection_sha(&selection)?;
     if selection.scope != scope {
         return Err(GeneratorError::usage(format!(
@@ -2752,6 +3379,68 @@ struct PlannedSelection {
     units: BTreeSet<String>,
     full_units: BTreeSet<String>,
     plan_digest: String,
+}
+
+/// Bind execution to the same typed event identity that admitted planning.
+/// Selection v2 carries the audited/head and optional base SHAs; repository,
+/// source SHA, run ID, and run attempt are validated directly from the runner
+/// payload/environment by [`EventContext::from_env`]. No unit command starts
+/// until both layers agree.
+fn validate_execution_identity(
+    context: &EventContext,
+    selection: &PlannedSelection,
+) -> Result<(), GeneratorError> {
+    let identity = context.event.identity();
+    if selection.head_sha != identity.audited_sha {
+        return Err(GeneratorError::usage(format!(
+            "CI selection artifact head SHA `{}` does not match audited event SHA `{}`",
+            selection.head_sha, identity.audited_sha
+        )));
+    }
+    match identity.base_sha.as_deref() {
+        Some(base_sha) if selection.base_sha != base_sha => {
+            return Err(GeneratorError::usage(format!(
+                "CI selection artifact base SHA `{}` does not match event base SHA `{base_sha}`",
+                selection.base_sha
+            )));
+        }
+        None if !selection.base_sha.is_empty() => {
+            return Err(GeneratorError::usage(
+                "CI selection artifact carries a base SHA for an event without a bound base",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_execution_admission(context: &EventContext) -> Result<(), GeneratorError> {
+    validate_execution_admission_for_runner(
+        context,
+        env::var("RUNNER_ENVIRONMENT").ok().as_deref(),
+        env::var_os("GITHUB_ACTIONS").is_some(),
+    )
+}
+
+fn validate_execution_admission_for_runner(
+    context: &EventContext,
+    runner_environment: Option<&str>,
+    hosted_context: bool,
+) -> Result<(), GeneratorError> {
+    if context.trusted() {
+        return Ok(());
+    }
+    match runner_environment {
+        Some("github-hosted") => Ok(()),
+        Some(environment) => Err(GeneratorError::usage(format!(
+            "untrusted {:?} event cannot execute on runner environment `{environment}`",
+            context.kind()
+        ))),
+        None if !hosted_context => Ok(()),
+        None => Err(GeneratorError::usage(
+            "untrusted hosted event is missing RUNNER_ENVIRONMENT",
+        )),
+    }
 }
 
 pub(crate) const SELECTION_FILE_VERSION: &str = "2";
@@ -9424,37 +10113,69 @@ workspace_check = true
     }
 
     #[test]
-    fn prepared_tool_check_save_key_gates_fallback_saves() {
+    fn prepared_tool_current_run_and_save_key_gates_fallback_saves() {
         use crate::s2::primitives::prepared_tools::{requested_key, resolved_key, ToolRequest};
-        let manifest = install_manifest("42");
-        let request = ToolRequest {
+        let historical_manifest = install_manifest("42");
+        let current_request = ToolRequest {
             tool_id: INSTALL_TOOL.to_owned(),
             inputs_digest: INSTALL_INPUTS.to_owned(),
             platform_abi: INSTALL_ABI.to_owned(),
             authorized_producers: BTreeSet::from([INSTALL_PRODUCER.to_owned()]),
             run_id: "99".to_owned(),
         };
-        let requested = requested_key(&request);
-        let resolved = resolved_key(&manifest);
-        assert_ne!(requested.as_str(), resolved.as_str());
-        // The historical bug, gated at save time: fallback bytes under the
-        // requested exact key are refused.
-        let fixture = install_fixture("save-refused", &manifest);
+        let requested = requested_key(&current_request);
+        let historical_resolved = resolved_key(&historical_manifest);
+        assert_ne!(requested.as_str(), historical_resolved.as_str());
+        // Historical fallback is refused during typed resolution, before the
+        // save-key gate can run.
+        let fixture = install_fixture("historical-refused", &historical_manifest);
         let error = must_fail(
             prepared_tool_install_to(
                 &install_args(&fixture, "99", &["--check-save-key", requested.as_str()]),
                 Some(&fixture.outputs),
                 &mut |_| {},
             ),
-            "fallback bytes under the requested key are refused",
+            "historical fallback is refused",
+        );
+        assert!(
+            error.to_string().contains("lacks the typed source"),
+            "{error}"
+        );
+        assert!(read_outputs(&fixture).contains("outcome=denied\n"));
+        assert!(!fixture.dest.exists());
+        let _ = fs::remove_dir_all(&fixture.root);
+
+        let current_manifest = install_manifest("99");
+        let resolved = resolved_key(&current_manifest);
+        let wrong_save_request = ToolRequest {
+            run_id: "100".to_owned(),
+            ..current_request
+        };
+        let wrong_save_key = requested_key(&wrong_save_request);
+        assert_ne!(wrong_save_key.as_str(), resolved.as_str());
+        // Only an exact current-run bundle reaches the save-key gate; a key
+        // naming another run is still refused.
+        let fixture = install_fixture("current-save-refused", &current_manifest);
+        let error = must_fail(
+            prepared_tool_install_to(
+                &install_args(
+                    &fixture,
+                    "99",
+                    &["--check-save-key", wrong_save_key.as_str()],
+                ),
+                Some(&fixture.outputs),
+                &mut |_| {},
+            ),
+            "a current bundle cannot be saved under another run's key",
         );
         assert!(error.to_string().contains("refusing to save"), "{error}");
         assert!(read_outputs(&fixture).contains("outcome=corrupt\n"));
         assert!(!fixture.dest.exists());
         let _ = fs::remove_dir_all(&fixture.root);
-        // The resolved key — the bundle's own producer run — is allowed,
-        // and the check records it for the save step to consume.
-        let fixture = install_fixture("save-allowed", &manifest);
+
+        // The resolved key — the bundle's own current run — is allowed, and
+        // the check records it for the save step to consume.
+        let fixture = install_fixture("current-save-allowed", &current_manifest);
         must(
             prepared_tool_install_to(
                 &install_args(&fixture, "99", &["--check-save-key", resolved.as_str()]),
@@ -9693,9 +10414,95 @@ workspace_check = true
     /// `s4_run_paths`).
     fn s4_ambient_shas() -> (String, String) {
         (
-            std::env::var("BASE_SHA").unwrap_or_default(),
-            std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+            std::env::var("BASE_SHA")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "s4-base-sha".to_owned()),
+            std::env::var("HEAD_SHA")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "HEAD".to_owned()),
         )
+    }
+
+    /// Apply the generator's post-plan schema-2 identity binding to the raw
+    /// runtime writer output. The production plan deliberately writes the
+    /// selection shape first; the generated identity step adds this envelope
+    /// before the artifact reaches the aggregate.
+    fn s4_bind_schema2_expected(
+        expected_json: &str,
+        unit_identities: &BTreeMap<String, serde_json::Value>,
+    ) -> String {
+        let mut document: serde_json::Value =
+            must(serde_json::from_str(expected_json), "parse expected work");
+        let base_sha = document
+            .get("base_sha")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let head_sha = document
+            .get("head_sha")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("HEAD")
+            .to_owned();
+        document["schema"] = serde_json::json!(2);
+        document["identity"] = serde_json::json!({
+            "repository_id": "example/s4",
+            "source_sha": head_sha,
+            "audited_sha": head_sha,
+            "base_sha": base_sha,
+            "run_id": "42",
+            "run_attempt": "1",
+            "plan_digest": "s4-plan-digest",
+        });
+        if let Some(units) = document
+            .get_mut("units")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for unit in units {
+                let id = must_some(
+                    unit.get("id").and_then(serde_json::Value::as_str),
+                    "expected unit id",
+                );
+                let identity = unit_identities.get(id).cloned().unwrap_or_else(|| {
+                    serde_json::json!({
+                        "command_digest": format!("s4-test-digest-{id}"),
+                        "platform": "linux-x64",
+                        "trust": "untrusted-ok",
+                    })
+                });
+                unit["identity"] = identity;
+            }
+        }
+        must(
+            serde_json::to_string_pretty(&document),
+            "serialize schema-2 expected work",
+        )
+    }
+
+    fn s4_schema2_expected_for_planned(
+        expected_json: &str,
+        config: &CiConfig,
+        planned: &[PlannedUnit],
+    ) -> String {
+        let identities = planned
+            .iter()
+            .map(|planned| {
+                let unit = must_some(
+                    config.unit.iter().find(|unit| unit.id == planned.unit_id),
+                    "planned unit config",
+                );
+                (
+                    planned.unit_id.clone(),
+                    serde_json::json!({
+                        "command_digest": planned.command_digest,
+                        "platform": unit.platform,
+                        "trust": unit.trust,
+                    }),
+                )
+            })
+            .collect();
+        s4_bind_schema2_expected(expected_json, &identities)
     }
 
     /// The expected-work JSON the planner writes for `selection`, bound to
@@ -9711,7 +10518,7 @@ workspace_check = true
         );
         let text = must(std::fs::read_to_string(&path), "read expected work");
         must(std::fs::remove_dir_all(&dir), "remove s4 fixture");
-        text
+        s4_schema2_expected_for_planned(&text, config, &planned)
     }
 
     /// Score one expected/results pair against the ambient checkout SHAs —
@@ -9722,6 +10529,65 @@ workspace_check = true
     ) -> Result<crate::s2::reuse::AggregateVerdict, String> {
         let (base, head) = s4_ambient_shas();
         crate::s2::reuse::aggregate_files(expected_json, results_json, &base, &head)
+    }
+
+    /// Build one schema-2 result record from the expected-work envelope.
+    fn s4_result_value(
+        document: &serde_json::Value,
+        unit_id: &str,
+        provider: &str,
+        outcome: &str,
+        matrix: Option<&str>,
+    ) -> serde_json::Value {
+        let common = must_some(
+            document
+                .get("identity")
+                .and_then(serde_json::Value::as_object),
+            "expected run identity",
+        );
+        let unit_identity = document
+            .get("units")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|units| {
+                units.iter().find(|unit| {
+                    unit.get("id").and_then(serde_json::Value::as_str) == Some(unit_id)
+                })
+            })
+            .and_then(|unit| unit.get("identity"))
+            .and_then(serde_json::Value::as_object);
+        let common_field = |name: &str| {
+            common
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(""))
+        };
+        let unit_field = |name: &str, fallback: &str| {
+            unit_identity
+                .and_then(|identity| identity.get(name))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(fallback))
+        };
+        let mut result = serde_json::json!({
+            "identity": {
+                "repository_id": common_field("repository_id"),
+                "source_sha": common_field("source_sha"),
+                "audited_sha": common_field("audited_sha"),
+                "base_sha": common_field("base_sha"),
+                "run_id": common_field("run_id"),
+                "run_attempt": common_field("run_attempt"),
+                "plan_digest": common_field("plan_digest"),
+                "unit_id": unit_id,
+                "provider": provider,
+                "platform": unit_field("platform", "linux-x64"),
+                "trust": unit_field("trust", "untrusted-ok"),
+                "command_digest": unit_field("command_digest", &format!("s4-test-digest-{unit_id}")),
+            },
+            "outcome": outcome,
+        });
+        if let Some(matrix) = matrix {
+            result["matrix"] = serde_json::json!(matrix);
+        }
+        result
     }
 
     /// All-success results JSON covering every (unit, lane) the expected-work
@@ -9744,11 +10610,13 @@ workspace_check = true
                 "expected unit lanes",
             );
             for lane in lanes {
-                results.push(serde_json::json!({
-                    "unit": id,
-                    "lane": must_some(lane.as_str(), "expected lane name"),
-                    "outcome": "success",
-                }));
+                results.push(s4_result_value(
+                    &document,
+                    id,
+                    must_some(lane.as_str(), "expected lane name"),
+                    "success",
+                    None,
+                ));
             }
         }
         must(
@@ -9776,8 +10644,15 @@ workspace_check = true
         );
         let mut patched = false;
         for entry in results.iter_mut() {
-            let same_unit = entry.get("unit").and_then(serde_json::Value::as_str) == Some(unit);
-            let same_lane = entry.get("lane").and_then(serde_json::Value::as_str) == Some(lane);
+            let identity = entry.get("identity").and_then(serde_json::Value::as_object);
+            let same_unit = identity
+                .and_then(|identity| identity.get("unit_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some(unit);
+            let same_lane = identity
+                .and_then(|identity| identity.get("provider"))
+                .and_then(serde_json::Value::as_str)
+                == Some(lane);
             if same_unit && same_lane {
                 entry["outcome"] = serde_json::Value::String(outcome.to_owned());
                 for (key, value) in extra {
@@ -9802,8 +10677,15 @@ workspace_check = true
         );
         let before = results.len();
         results.retain(|entry| {
-            entry.get("unit").and_then(serde_json::Value::as_str) != Some(unit)
-                || entry.get("lane").and_then(serde_json::Value::as_str) != Some(lane)
+            let identity = entry.get("identity").and_then(serde_json::Value::as_object);
+            identity
+                .and_then(|identity| identity.get("unit_id"))
+                .and_then(serde_json::Value::as_str)
+                != Some(unit)
+                || identity
+                    .and_then(|identity| identity.get("provider"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some(lane)
         });
         assert_eq!(
             results.len() + 1,
@@ -10055,21 +10937,30 @@ trust = "untrusted-ok"
                 "no_work_reason=planner selected zero workload units and no workload results were reported"
             ),
         );
-        // A stray report beside a no-work plan stays extra and ignored: the
-        // pass stands, and the reason names the ignored report.
-        let stray =
-            r#"{"results": [{"unit": "ghost", "lane": "github-hosted", "outcome": "success"}]}"#;
-        let (verdict, exit) = s4_verdict(&dir, &expected, stray);
-        assert!(verdict.passed, "failures: {:?}", verdict.failures);
-        assert!(
-            exit.is_ok(),
-            "extra results never red a no-work plan: {exit:?}"
+        // A stray report beside a no-work plan stays extra and ignored. Keep
+        // the schema-2 pass check above identity-valid, and exercise the
+        // core aggregate semantics directly for the outside-plan report.
+        let core_verdict = crate::s2::reuse::aggregate(
+            &crate::s2::reuse::ExpectedWork {
+                units: BTreeMap::<String, crate::s2::reuse::ExpectedUnit>::new(),
+                planned_no_work: true,
+            },
+            &[crate::s2::reuse::ReportedResult {
+                unit_id: "ghost".to_owned(),
+                lane: "github-hosted".to_owned(),
+                matrix_entry: None,
+                outcome: crate::s2::reuse::ReportedOutcome::Success,
+                reused_from: None,
+            }],
+            &BTreeMap::new(),
         );
-        assert_eq!(
-            explicit_no_work_line(&expected, &verdict).as_deref(),
-            Some(
-                "no_work_reason=planner selected zero workload units; 1 reported result ignored as outside the plan"
-            ),
+        assert!(core_verdict.passed, "failures: {:?}", core_verdict.failures);
+        assert!(
+            core_verdict
+                .explanations
+                .iter()
+                .any(|explanation| explanation.disposition == crate::s2::reuse::Disposition::Extra),
+            "the stray report must be noted as extra",
         );
         std::fs::remove_dir_all(dir)?;
         std::fs::remove_dir_all(root)?;
@@ -10211,7 +11102,8 @@ trust = "untrusted-ok"
             write_expected_work_file(&path, &planned, &config, &base, &head),
             "write expected work",
         );
-        let expected = must(std::fs::read_to_string(&path), "read expected work");
+        let raw_expected = must(std::fs::read_to_string(&path), "read expected work");
+        let expected = s4_schema2_expected_for_planned(&raw_expected, &config, &planned);
         let document: serde_json::Value = serde_json::from_str(&expected)?;
         assert_eq!(
             document.get("prerequisites"),
@@ -10395,7 +11287,7 @@ trust = "untrusted-ok"
         // A matrixed unit must report every entry: one missing entry fails
         // the aggregate as an incomplete matrix.
         let (base, head) = s4_ambient_shas();
-        let expected = must(
+        let raw_expected = must(
             serde_json::to_string(&serde_json::json!({
                 "base_sha": base,
                 "head_sha": head,
@@ -10405,9 +11297,19 @@ trust = "untrusted-ok"
             })),
             "serialize matrixed plan",
         );
-        let results = r#"{"results": [{"unit": "shard", "lane": "github-hosted", "matrix": "a", "outcome": "success"}]}"#;
+        let expected = s4_bind_schema2_expected(&raw_expected, &BTreeMap::new());
+        let expected_document: serde_json::Value = serde_json::from_str(&expected)?;
+        let results = serde_json::to_string(&serde_json::json!({
+            "results": [s4_result_value(
+                &expected_document,
+                "shard",
+                "github-hosted",
+                "success",
+                Some("a"),
+            )]
+        }))?;
         let dir = s4_dir("matrix");
-        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(!verdict.passed);
         assert!(
             verdict
@@ -10439,10 +11341,19 @@ trust = "untrusted-ok"
             write_expected_work_file(&path, &planned, &config, &base, &head),
             "write expected work",
         );
-        let expected = must(std::fs::read_to_string(&path), "read expected work");
-        let results =
-            r#"{"results": [{"unit": "base", "lane": "github-hosted", "outcome": "success"}]}"#;
-        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        let raw_expected = must(std::fs::read_to_string(&path), "read expected work");
+        let expected = s4_schema2_expected_for_planned(&raw_expected, &config, &planned);
+        let expected_document: serde_json::Value = serde_json::from_str(&expected)?;
+        let results = serde_json::to_string(&serde_json::json!({
+            "results": [s4_result_value(
+                &expected_document,
+                "base",
+                "github-hosted",
+                "success",
+                None,
+            )]
+        }))?;
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(
             exit.is_ok(),
@@ -10509,12 +11420,17 @@ trust = "untrusted-ok"
         // green nothing and red nothing — not even an extra failure.
         let (root, expected, results) = s4_owned_binding("s4-extra")?;
         let mut document: serde_json::Value = serde_json::from_str(&results)?;
+        let expected_document: serde_json::Value = serde_json::from_str(&expected)?;
         document["results"]
             .as_array_mut()
             .ok_or("results array")?
-            .push(
-                serde_json::json!({"unit": "ghost", "lane": "github-hosted", "outcome": "failure"}),
-            );
+            .push(s4_result_value(
+                &expected_document,
+                "app",
+                "github-hosted",
+                "failure",
+                Some("ghost"),
+            ));
         let results = must(serde_json::to_string(&document), "serialize results");
         let verdict = s4_score(&expected, &results)?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
@@ -10591,15 +11507,34 @@ trust = "untrusted-ok"
         // A contradictory plan — the no-work marker beside listed units —
         // fails inside the verdict.
         let (base, head) = s4_ambient_shas();
-        let expected = must(
+        let raw_expected = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
+                "identity": {
+                    "repository_id": "example/s4",
+                    "source_sha": head,
+                    "audited_sha": head,
+                    "base_sha": base,
+                    "run_id": "42",
+                    "run_attempt": "1",
+                    "plan_digest": "s4-plan-digest",
+                },
                 "base_sha": base,
                 "head_sha": head,
                 "planned_no_work": true,
-                "units": [{"id": "base", "lanes": ["github-hosted"]}],
+                "units": [{
+                    "id": "base",
+                    "identity": {
+                        "command_digest": "s4-test-digest-base",
+                        "platform": "linux-x64",
+                        "trust": "untrusted-ok",
+                    },
+                    "lanes": ["github-hosted"]
+                }],
             })),
             "serialize contradictory plan",
         );
+        let expected = raw_expected;
         let verdict = s4_score(&expected, r#"{"results": []}"#)?;
         assert!(!verdict.passed);
         assert!(
@@ -10615,6 +11550,16 @@ trust = "untrusted-ok"
         // marker is a broken plan, not proven no-work.
         let expected = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
+                "identity": {
+                    "repository_id": "example/s4",
+                    "source_sha": head,
+                    "audited_sha": head,
+                    "base_sha": base,
+                    "run_id": "42",
+                    "run_attempt": "1",
+                    "plan_digest": "s4-plan-digest",
+                },
                 "base_sha": base,
                 "head_sha": head,
                 "units": [],
@@ -10656,9 +11601,9 @@ trust = "untrusted-ok"
     }
 
     #[test]
-    fn reused_evidence_still_passes_aggregate() -> Result<(), Box<dyn Error>> {
-        // A success backed by producing evidence holds exactly like an
-        // executed one: the wiring must not regress reuse acceptance.
+    fn reused_evidence_without_producer_identity_fails_aggregate() -> Result<(), Box<dyn Error>> {
+        // A reuse claim without independently validated producer identity is
+        // rejected at the schema-2 boundary, never treated as execution.
         let (root, expected, results) = s4_owned_binding("s4-reuse")?;
         let results = s4_set_result(
             &results,
@@ -10667,16 +11612,10 @@ trust = "untrusted-ok"
             "success",
             &[("reused_from", "run-7f3a")],
         );
-        let dir = s4_dir("reuse");
-        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
-        assert!(verdict.passed, "failures: {:?}", verdict.failures);
-        assert!(exit.is_ok(), "reused evidence must still pass: {exit:?}");
-        assert!(
-            verdict.explanations.iter().any(|explanation| explanation.disposition
-                == crate::s2::reuse::Disposition::Reused),
-            "the reused verdict must be recorded as reused",
-        );
-        std::fs::remove_dir_all(dir)?;
+        let error = s4_score(&expected, &results)
+            .err()
+            .ok_or("unvalidated reuse must fail the aggregate")?;
+        assert!(error.contains("reused_from"), "unexpected error: {error}");
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -10732,6 +11671,16 @@ trust = "untrusted-ok"
         let (base, head) = s4_ambient_shas();
         let unmarked = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
+                "identity": {
+                    "repository_id": "example/s4",
+                    "source_sha": head,
+                    "audited_sha": head,
+                    "base_sha": base,
+                    "run_id": "42",
+                    "run_attempt": "1",
+                    "plan_digest": "s4-plan-digest",
+                },
                 "base_sha": base,
                 "head_sha": head,
                 "units": [],
@@ -10798,13 +11747,25 @@ trust = "untrusted-ok"
         // proves the file is this plan's. The stale SHAs derive from the
         // ambient checkout so the mismatch holds under any outer env.
         let (ambient_base, ambient_head) = s4_ambient_shas();
+        let stale_base = format!("{ambient_base}-earlier-run");
+        let stale_head = format!("{ambient_head}-earlier-run");
         let stale = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
+                "identity": {
+                    "repository_id": "example/s4",
+                    "source_sha": stale_head,
+                    "audited_sha": stale_head,
+                    "base_sha": stale_base,
+                    "run_id": "41",
+                    "run_attempt": "1",
+                    "plan_digest": "stale-plan",
+                },
                 "planned_no_work": true,
                 "units": [],
                 "prerequisites": {},
-                "base_sha": format!("{ambient_base}-earlier-run"),
-                "head_sha": format!("{ambient_head}-earlier-run"),
+                "base_sha": stale_base,
+                "head_sha": stale_head,
             })),
             "serialize stale plan",
         );
@@ -10842,7 +11803,23 @@ trust = "untrusted-ok"
             "{error}",
         );
         must(
-            std::fs::write(&expected_path, r#"{"planned_no_work": true, "units": []}"#),
+            std::fs::write(
+                &expected_path,
+                serde_json::to_string(&serde_json::json!({
+                    "schema": 2,
+                    "identity": {
+                        "repository_id": "example/s4",
+                        "source_sha": ambient_head,
+                        "audited_sha": ambient_head,
+                        "base_sha": "",
+                        "run_id": "42",
+                        "run_attempt": "1",
+                        "plan_digest": "s4-plan-digest",
+                    },
+                    "planned_no_work": true,
+                    "units": [],
+                }))?,
+            ),
             "write unbound expected",
         );
         let error = must_fail(
@@ -10890,10 +11867,11 @@ trust = "untrusted-ok"
             ),
             "plan the no-work diff",
         );
-        let expected = must(
+        let raw_expected = must(
             std::fs::read_to_string(&expected_path),
             "read expected work",
         );
+        let expected = s4_bind_schema2_expected(&raw_expected, &BTreeMap::new());
         let document: serde_json::Value = serde_json::from_str(&expected)?;
         assert_eq!(
             document.get("base_sha").and_then(serde_json::Value::as_str),

@@ -10905,8 +10905,8 @@ mod tests {
             "the digest extraction renders",
         );
         assert!(
-            asset < manifest && manifest < filter && filter < expected,
-            "asset attestation precedes manifest attestation precedes the filter precedes the digest: {action}"
+            manifest < filter && filter < asset && asset < expected,
+            "manifest attestation precedes the typed manifest filter, which precedes the asset attestation and digest: {action}"
         );
         assert_eq!(
             action.matches("gh attestation verify").count(),
@@ -10976,10 +10976,10 @@ mod tests {
         let action = declared_setup_action();
         assert_eq!(
             action
-                .matches("(.revision | test(\"^[0-9a-f]{40}$\"))")
+                .matches(".revision | select(test(\"^[0-9a-f]{40}$\"))")
                 .count(),
             2,
-            "the download and verify filters both require a well-formed revision: {action}"
+            "manifest acquisition and download both require a well-formed revision: {action}"
         );
     }
 

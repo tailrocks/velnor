@@ -5484,7 +5484,7 @@ pub(crate) fn control_plane_runner(config: &ProjectConfig) -> Result<String, Gen
 /// conjoins onto its functional `if:` condition. One literal, shared by the
 /// IR and every standalone control-plane workflow, so the gate shape cannot
 /// drift between lanes.
-pub(crate) const TRUSTED_EVENT_EXPRESSION: &str = "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))";
+pub(crate) const TRUSTED_EVENT_EXPRESSION: &str = "!(github.event_name == 'merge_group' || github.event_name == 'schedule' || (github.event_name == 'push' && github.event.sender.type == 'Bot') || (github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')) || (github.event_name == 'pull_request_target' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.type == 'Bot')) || (github.event_name == 'workflow_dispatch' && (github.ref_protected != true || github.event.sender.type == 'Bot' || github.ref != format('refs/heads/{0}', github.event.repository.default_branch))))";
 
 /// The control-plane admission gate for standalone workflow files: local
 /// control planes conjoin the trusted-event predicate, hosted ones keep the
@@ -5521,7 +5521,7 @@ impl ControlPlaneGate {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
     format!(
-        "    if: ${{{{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/{default_branch}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}}}\n"
+        "    if: ${{{{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.type != 'Bot') || (github.ref == 'refs/heads/{default_branch}' && github.ref_protected == true && ((github.event_name == 'push' && github.event.sender.type != 'Bot') || (github.event_name == 'workflow_dispatch' && github.event.sender.type != 'Bot'))) }}}}\n"
     )
 }
 
@@ -10485,7 +10485,12 @@ mod tests {
             !home_plan.contains(&format!("rev: {}", github_expression("github.sha"))),
             "owner Planning must not resolve the runtime at an event SHA: {home_plan}"
         );
-        assert!(workflow.contains("name: Publish Velnor workflow runtime"));
+        assert!(
+            plan.contains("name: Set up Velnor workflow runtime"),
+            "hosted Planning consumes the published runtime through the setup action: {plan}"
+        );
+        assert!(!workflow.contains("name: Prepare Velnor workflow runtime"));
+        assert!(!workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(!workflow.contains("candidate_publish: true"));
         let kind = must_some(
             must(
@@ -10495,14 +10500,11 @@ mod tests {
             "rust kind has members",
         )
         .1;
-        assert!(kind.contains("name: Download Velnor workflow runtime"));
-        assert!(kind.contains("name: Verify Velnor workflow runtime"));
-        assert!(kind.contains(".run_id == $run_id"));
-        assert!(kind.contains(".platform == $platform"));
-        assert!(kind.contains("runtime digest mismatch"));
-        assert!(kind.contains("name: velnor-workflow-runtime-"));
-        assert!(kind.contains("${{ runner.os }}-${{ runner.arch }}"));
-        assert!(kind.contains("manifest.json"));
+        assert!(kind.contains("name: Set up Velnor workflow runtime"));
+        assert!(kind.contains("setup-velnor-workflow"));
+        assert!(!kind.contains("name: Download Velnor workflow runtime"));
+        assert!(!kind.contains("name: Verify Velnor workflow runtime"));
+        assert!(!kind.contains("name: velnor-workflow-runtime-"));
         assert!(!kind.contains("cargo install --locked --git"));
     }
 
@@ -10652,18 +10654,17 @@ mod tests {
         let workflow = generated_ci_main(&WorkflowIr::from_config(&config));
         let plan = yaml_job(&workflow, "plan");
         assert!(
-            plan.contains("name: Prepare Velnor workflow runtime"),
-            "a hosted plan prepares the runtime artifact: {plan}"
+            plan.contains("name: Set up Velnor workflow runtime"),
+            "a hosted plan consumes the published runtime through the setup action: {plan}"
         );
-        assert!(
-            plan.contains("name: Publish Velnor workflow runtime"),
-            "a hosted plan publishes the runtime artifact: {plan}"
-        );
+        assert!(!plan.contains("name: Prepare Velnor workflow runtime"));
+        assert!(!plan.contains("name: Publish Velnor workflow runtime"));
         let required = yaml_job(&workflow, "ci-required");
         assert!(
-            required.contains("name: Download Velnor workflow runtime"),
-            "a hosted ci-required downloads the runtime for its aggregate step: {required}"
+            required.contains("name: Set up Velnor workflow runtime"),
+            "a hosted ci-required consumes the published runtime through the setup action: {required}"
         );
+        assert!(!required.contains("name: Download Velnor workflow runtime"));
     }
 
     #[test]
@@ -11001,8 +11002,8 @@ mod tests {
             "the digest extraction renders",
         );
         assert!(
-            asset < manifest && manifest < filter && filter < expected,
-            "asset attestation precedes manifest attestation precedes the filter precedes the digest: {action}"
+            manifest < filter && filter < asset && asset < expected,
+            "manifest attestation precedes the filter, asset attestation, and asset digest verification: {action}"
         );
         assert_eq!(
             action.matches("gh attestation verify").count(),
@@ -13134,11 +13135,11 @@ mod tests {
         }
     }
 
-    /// A `workflow_dispatch` selecting a provider is admitted on any ref:
-    /// dispatch authorship is write-authorized, so the predicate never reads
-    /// `github.ref`.
+    /// A trusted `workflow_dispatch` selecting a provider is admitted only on
+    /// the protected default branch. Runtime validation repeats this binding;
+    /// the rendered admission must reject the event before local scheduling.
     #[test]
-    fn provider_admits_workflow_dispatch_on_any_ref() {
+    fn provider_admits_workflow_dispatch_only_on_protected_default_branch() {
         for (universe, automatic) in [
             (all_providers(), all_providers()),
             (
@@ -13158,7 +13159,13 @@ mod tests {
             );
             assert!(
                 !velnor.contains("github.ref =="),
-                "{universe:?}/{automatic:?}: dispatch is not ref-gated: {velnor}"
+                "{universe:?}/{automatic:?}: dispatch gate must use the shared negative predicate: {velnor}"
+            );
+            assert!(
+                velnor.contains(
+                    "github.ref != format('refs/heads/{0}', github.event.repository.default_branch)"
+                ),
+                "{universe:?}/{automatic:?}: dispatch is not default-branch-gated: {velnor}"
             );
             assert!(
                 velnor.contains("github.event.pull_request.head.repo.fork"),
@@ -13170,7 +13177,7 @@ mod tests {
             );
             let automatic_velnor = automatic.contains(&ProviderId::Velnor);
             assert_eq!(
-                velnor.contains("github.event_name == 'workflow_dispatch'"),
+                velnor.starts_with("(github.event_name == 'workflow_dispatch')"),
                 !automatic_velnor,
                 "{universe:?}/{automatic:?}: an automatic provider runs every event, a manual one runs dispatch alone: {velnor}"
             );
@@ -13370,8 +13377,9 @@ mod tests {
         );
         let pr = PathBuf::from(".github/workflows/ci-pr.yml");
         let callee = PathBuf::from(".github/workflows/ci-unit-rust.yml");
-        let admission = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
-        let ref_gated = "(github.ref == 'refs/heads/main' && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))))";
+        let admission = TRUSTED_EVENT_EXPRESSION;
+        let ref_gated =
+            format!("(github.ref == 'refs/heads/main' && ({TRUSTED_EVENT_EXPRESSION}))");
 
         // The callee re-introduces a default-branch gate.
         let mut drifted = files.clone();
@@ -13379,7 +13387,7 @@ mod tests {
         assert!(velnor_job.contains(admission), "{velnor_job}");
         drifted.insert(
             callee.clone(),
-            files[&callee].replace(&velnor_job, &velnor_job.replace(admission, ref_gated)),
+            files[&callee].replace(&velnor_job, &velnor_job.replace(admission, &ref_gated)),
         );
         let error = must_fail(
             validate_provider_admission_single_source(&drifted),
@@ -13402,7 +13410,7 @@ mod tests {
         let header = "  velnor-rust-fixture:\n";
         let start = must_some(files[&pr].find(header), "velnor caller block");
         let (before, rest) = files[&pr].split_at(start + header.len());
-        let drifted_gate = caller_job.replace(admission, ref_gated);
+        let drifted_gate = caller_job.replace(admission, &ref_gated);
         let rest = rest.replacen(&caller_job, &drifted_gate, 1);
         drifted.insert(pr.clone(), format!("{before}{rest}"));
         let error = must_fail(
@@ -17767,7 +17775,7 @@ lockfile = true
         assert!(workflow.contains("  workflow_dispatch:\n    inputs:\n      scope:\n"));
         assert!(workflow.contains("BASE_SHA: ${{ github.event.pull_request.base.sha"));
         assert!(workflow
-            .contains("SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}"));
+            .contains("SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}"));
         assert!(workflow.contains("HEAD_SHA: ${{ github.sha }}"));
         assert!(workflow.contains("persist-credentials: false"));
         assert!(rust.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
@@ -19474,7 +19482,7 @@ lockfile = true
 
     /// Every file the schema-2 pipeline renders for this repository: the
     /// scan, surface, and file stages of `run` without the write.
-    fn rendered_repository_files() -> BTreeMap<PathBuf, String> {
+    fn rendered_repository() -> (ProjectConfig, BTreeMap<PathBuf, String>) {
         let root = must(
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
@@ -19500,10 +19508,74 @@ lockfile = true
                 config.workflow_files.push(file.clone());
             }
         }
-        must(
+        let files = must(
             generated_files_with_surface(&config, Some(&surface)),
             "render this repository's generated files",
+        );
+        (config, files)
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum CheckedInWorkflowComparison {
+        Compare,
+        SkipClosureMismatch {
+            declared_pin: String,
+            declared_closure: String,
+            current_closure: String,
+        },
+    }
+
+    /// A checked-in tree can intentionally remain on the published renderer
+    /// while this checkout carries an unpublished renderer closure. Only a
+    /// proven closure mismatch permits the byte comparison to be skipped;
+    /// missing or malformed identity fails closed.
+    fn classify_checked_in_workflow_comparison(
+        declared_pin: &str,
+        declared_closure: &str,
+        current_closure: &str,
+    ) -> Result<CheckedInWorkflowComparison, String> {
+        if !is_full_revision(declared_pin) {
+            return Err(format!(
+                "declared generator pin is not a full revision: {declared_pin}"
+            ));
+        }
+        if !crate::s2::closure::is_full_closure(declared_closure) {
+            return Err(format!(
+                "declared generator pin has no full source closure: {declared_closure}"
+            ));
+        }
+        if !crate::s2::closure::is_full_closure(current_closure) {
+            return Err(format!(
+                "current renderer has no full source closure: {current_closure}"
+            ));
+        }
+        if declared_closure == current_closure {
+            return Ok(CheckedInWorkflowComparison::Compare);
+        }
+        Ok(CheckedInWorkflowComparison::SkipClosureMismatch {
+            declared_pin: declared_pin.to_owned(),
+            declared_closure: declared_closure.to_owned(),
+            current_closure: current_closure.to_owned(),
+        })
+    }
+
+    fn checked_in_workflow_comparison(
+        root: &Path,
+        declared_pin: &str,
+    ) -> Result<CheckedInWorkflowComparison, String> {
+        if !is_full_revision(declared_pin) {
+            return Err(format!(
+                "declared generator pin is not a full revision: {declared_pin}"
+            ));
+        }
+        let declared_closure = crate::s2::closure::closure_of_tree(
+            root,
+            declared_pin,
+            crate::SOURCE_FEATURES,
+            crate::SOURCE_PROFILE,
         )
+        .map_err(|error| format!("compute declared generator pin closure: {error}"))?;
+        classify_checked_in_workflow_comparison(declared_pin, &declared_closure, SOURCE_CLOSURE)
     }
 
     /// The schema-2 pipeline refuses a schema-1 repository: the dogfood
@@ -19535,6 +19607,33 @@ lockfile = true
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn checked_in_workflow_comparison_fails_closed_and_skips_only_mismatched_closure() {
+        let current = "a".repeat(64);
+        let declared = "b".repeat(64);
+        assert_eq!(
+            classify_checked_in_workflow_comparison("1".repeat(40).as_str(), &current, &current),
+            Ok(CheckedInWorkflowComparison::Compare)
+        );
+        assert_eq!(
+            classify_checked_in_workflow_comparison("1".repeat(40).as_str(), &declared, &current),
+            Ok(CheckedInWorkflowComparison::SkipClosureMismatch {
+                declared_pin: "1".repeat(40),
+                declared_closure: declared.clone(),
+                current_closure: current.clone(),
+            })
+        );
+        assert!(
+            classify_checked_in_workflow_comparison("not-a-revision", &declared, &current).is_err()
+        );
+        assert!(
+            classify_checked_in_workflow_comparison(&"1".repeat(40), "unknown", &current).is_err()
+        );
+        assert!(
+            classify_checked_in_workflow_comparison(&"1".repeat(40), &declared, "unknown").is_err()
+        );
+    }
+
     /// The checked-in workflows are byte-identical to what the schema-2
     /// pipeline renders for this repository: regeneration is a fixed
     /// point, so a template change without its regen (or a hand-edit)
@@ -19548,7 +19647,24 @@ lockfile = true
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
-        let files = rendered_repository_files();
+        let (config, files) = rendered_repository();
+        let comparison = must(
+            checked_in_workflow_comparison(&root, &config.workflow_revision),
+            "prove renderer closure relationship",
+        );
+        match comparison {
+            CheckedInWorkflowComparison::Compare => {}
+            CheckedInWorkflowComparison::SkipClosureMismatch {
+                declared_pin,
+                declared_closure,
+                current_closure,
+            } => {
+                eprintln!(
+                    "skipping checked-in workflow byte comparison: declared pin {declared_pin} has source closure {declared_closure}, current renderer has {current_closure}; active-tree equality remains proven by the pinned policy renderer"
+                );
+                return;
+            }
+        }
         let entries = must(
             fs::read_dir(root.join(".github/workflows")),
             "read checked-in workflows",
@@ -19632,7 +19748,7 @@ lockfile = true
         let main = generated_ci_main(&generator);
         assert!(pr.contains("name: CI / PR\nrun-name: CI / PR"));
         assert!(pr.contains("pull_request:"));
-        assert!(!pr.contains("merge_group:"));
+        assert!(pr.contains("merge_group:"));
         assert!(pr.contains("permissions:\n  actions: read\n  contents: read"));
         assert!(pr.contains("cancel-in-progress: true"));
         assert!(pr.contains("  ci-required:\n    name: ci-required"));
@@ -19681,20 +19797,21 @@ lockfile = true
     }
 
     #[test]
-    fn generated_pr_workflow_omits_merge_group() {
+    fn generated_pr_workflow_covers_merge_group_only_on_github_lane() {
         for runners in [provider_set([ProviderId::GithubHosted]), all_providers()] {
+            let has_velnor = runners.contains(&ProviderId::Velnor);
             let config = scanned_fixture(runners);
             let generator = WorkflowIr::from_config(&config);
             let pr = generated_ci_pr(&generator);
             assert!(
-                !pr.contains("merge_group:"),
-                "PR triggers must not carry the dead merge_group trigger: {pr}"
+                pr.contains("on:\n  pull_request:\n  merge_group:\n"),
+                "GitHub PR triggers must cover merge-queue validation: {pr}"
             );
             let nested =
                 generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None);
             assert!(
-                !nested.contains("merge_group:"),
-                "the nested PR render must omit merge_group too: {nested}"
+                nested.contains("on:\n  pull_request:\n  merge_group:\n"),
+                "the nested PR render must cover merge-queue validation too: {nested}"
             );
             for (name, other) in [
                 ("main", generated_ci_main(&generator)),
@@ -19720,10 +19837,26 @@ lockfile = true
                 "rust kind has members",
             )
             .1;
+            let hosted_gate = job_gate(&kind, "verify-github-hosted");
             assert!(
-                !kind.contains("github.event_name == 'merge_group'"),
-                "provider gates must not admit merge_group: {kind}"
+                !hosted_gate.is_empty(),
+                "the hosted provider gate must be present: {kind}"
             );
+            assert!(
+                !hosted_gate.contains("github.event_name == 'merge_group'"),
+                "the hosted provider gate must admit merge_group: {hosted_gate}"
+            );
+            let velnor_gate = job_gate(&kind, "verify-velnor");
+            if has_velnor {
+                assert!(
+                    !velnor_gate.is_empty(),
+                    "the Velnor provider gate must be present: {kind}"
+                );
+                assert!(
+                    velnor_gate.contains("github.event_name == 'merge_group'"),
+                    "the local Velnor provider gate must reject merge_group: {velnor_gate}"
+                );
+            }
             for surface in [pr.as_str(), nested.as_str()] {
                 assert!(
                     job_gate(surface, "plan").is_empty(),
@@ -19758,9 +19891,10 @@ lockfile = true
             "rust kind has members",
         )
         .1;
+        let velnor_gate = job_gate(&kind, "verify-velnor");
         assert!(
-            !kind.contains("github.event_name == 'merge_group'"),
-            "a velnor-only surface admits merge_group nowhere: {kind}"
+            velnor_gate.contains("github.event_name == 'merge_group'"),
+            "the local Velnor provider gate must reject merge_group: {velnor_gate}"
         );
         assert_eq!(
             must(
@@ -20614,6 +20748,20 @@ lockfile = true
         );
         assert!(!save.contains("pull_request"));
         assert!(!save.contains("merge_group"));
+    }
+
+    #[test]
+    fn trusted_event_admission_excludes_merge_groups_and_bot_payloads() {
+        assert!(TRUSTED_EVENT_EXPRESSION.contains("github.event_name == 'merge_group'"));
+        assert!(TRUSTED_EVENT_EXPRESSION.contains("github.event_name == 'schedule'"));
+        assert!(TRUSTED_EVENT_EXPRESSION.contains("github.event.sender.type == 'Bot'"));
+        assert!(TRUSTED_EVENT_EXPRESSION.contains(
+            "github.event_name == 'pull_request_target' && (github.event.pull_request.head.repo.full_name != github.repository"
+        ));
+        assert!(TRUSTED_EVENT_EXPRESSION.contains("github.ref_protected != true"));
+        let gate = control_plane_trusted_gate("main");
+        assert!(gate.contains("github.event.sender.type != 'Bot'"));
+        assert!(!gate.contains("github.event_name == 'schedule'"));
     }
 
     /// Where verification starts in a rendered kind reusable: the earliest
@@ -24112,7 +24260,7 @@ lockfile = true
         let nightly = generated_nightly(&workflow);
 
         assert!(pr.contains("pull_request:"));
-        assert!(!pr.contains("merge_group:"));
+        assert!(pr.contains("merge_group:"));
         assert!(pr.contains("runs-on: ubuntu-24.04"));
         assert!(pr.contains("  github-"));
         assert!(pr.contains("  velnor-"));
