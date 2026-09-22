@@ -186,6 +186,10 @@ struct WorkflowSection {
     /// available, otherwise the sole configured backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic: Option<String>,
+    /// Enables the fail-closed empty-selection proof in generated required
+    /// aggregates. Absent keeps the historical workflow bytes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_selection_proof: Option<bool>,
     /// Velnor runner labels for self-hosted lanes. A surface that renders
     /// self-hosted jobs without them is a configuration error, never an empty
     /// `runs-on`.
@@ -1807,6 +1811,12 @@ impl RepoGenerationConfig {
     /// Whether the generated CI aggregate should be required.
     pub(crate) fn ci_required(&self) -> Option<bool> {
         self.policy.ci_required
+    }
+
+    /// Whether generated required aggregates must prove legitimate empty
+    /// selections instead of allowing an empty caller set to pass vacuously.
+    pub(crate) fn empty_selection_proof(&self) -> Option<bool> {
+        self.workflow.empty_selection_proof
     }
 
     /// Whether every commit must carry a `Signed-off-by` trailer.
@@ -4987,6 +4997,28 @@ mod tests {
             declared.validate(&[], &[], &BTreeSet::new()),
             "validate declared lane defaults",
         );
+    }
+
+    #[test]
+    fn workflow_empty_selection_proof_is_optional_and_explicit() {
+        let absent = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(absent.empty_selection_proof(), None);
+        assert!(!must(absent.canonical_json(), "canonicalize absent proof")
+            .contains("empty_selection_proof"));
+
+        let enabled = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nempty_selection_proof = true\n",
+        );
+        assert_eq!(enabled.empty_selection_proof(), Some(true));
+        must(
+            enabled.validate(&[], &[], &BTreeSet::new()),
+            "validate enabled empty-selection proof",
+        );
+
+        let disabled = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nempty_selection_proof = false\n",
+        );
+        assert_eq!(disabled.empty_selection_proof(), Some(false));
     }
 
     #[test]
