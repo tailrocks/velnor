@@ -1243,22 +1243,12 @@ fn select_command(
             "no affected base; fell back to full",
         ));
     }
-    let Some(lines) = git_name_status(root, base, head)? else {
+    let Some(changes) = changed_paths_for_diff(root, base, head)? else {
         return print_selection(&crate::s2::reuse::fallback_selection(
             &watched,
-            "git diff unavailable; fell back to full",
+            "git diff unavailable or unparseable; fell back to full",
         ));
     };
-    let mut changes = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let Some(change) = crate::s2::reuse::parse_name_status_line(line) else {
-            return print_selection(&crate::s2::reuse::fallback_selection(
-                &watched,
-                "unparseable change entry; fell back to full",
-            ));
-        };
-        changes.push(change);
-    }
     print_selection(&crate::s2::reuse::select_affected(
         &watched,
         &changes,
@@ -1274,28 +1264,15 @@ fn print_selection(selection: &crate::s2::reuse::AffectedSelection) -> Result<()
     Ok(())
 }
 
-fn git_name_status(
+fn changed_paths_for_diff(
     root: &Path,
     base: &str,
     head: &str,
-) -> Result<Option<Vec<String>>, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-status", "-M"])
-        .arg(format!("{base}...{head}"))
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
-    if !output.status.success() {
+) -> Result<Option<Vec<crate::s2::reuse::ChangedPath>>, GeneratorError> {
+    let Some(raw) = git_name_status_nul(root, base, head)? else {
         return Ok(None);
-    }
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-    ))
+    };
+    Ok(crate::s2::reuse::parse_name_status_nul(&raw))
 }
 
 /// One `fingerprint` report: the revision fingerprinted and the per-unit
@@ -2808,15 +2785,14 @@ fn selection_for_diff_with_closed_excluded<'a>(
         return full_selection(config, Some("no affected base; fell back to full"))
             .map(|selection| (selection, BTreeSet::new()));
     }
-    let Some(raw) = git_name_status_nul(root, base, head)? else {
-        return full_selection(config, Some("git diff unavailable; fell back to full"))
-            .map(|selection| (selection, BTreeSet::new()));
+    let Some(changes) = changed_paths_for_diff(root, base, head)? else {
+        return full_selection(
+            config,
+            Some("git diff unavailable or unparseable; fell back to full"),
+        )
+        .map(|selection| (selection, BTreeSet::new()));
     };
-    let Some(changed) = parse_name_status_nul(&raw) else {
-        return full_selection(config, Some("unparseable change entry; fell back to full"))
-            .map(|selection| (selection, BTreeSet::new()));
-    };
-    if changed.is_empty() {
+    if changes.is_empty() {
         return Ok((
             UnitSelection {
                 units: Vec::new(),
@@ -2831,7 +2807,7 @@ fn selection_for_diff_with_closed_excluded<'a>(
         root,
         base,
         head,
-        &changed,
+        &crate::s2::reuse::effective_paths(&changes),
         &config.unit,
         &config.workflow.version_bump_units,
     )? {
@@ -2858,8 +2834,8 @@ fn selection_for_diff_with_closed_excluded<'a>(
     let mut selected = BTreeSet::new();
     let mut opaque_reasons: Vec<String> = Vec::new();
     let mut closed_excluded: BTreeSet<String> = BTreeSet::new();
-    for file in &changed {
-        if let Some(verdict) = crate::s2::reuse::github_verdict(file) {
+    for file in crate::s2::reuse::effective_paths(&changes) {
+        if let Some(verdict) = crate::s2::reuse::github_verdict(&file) {
             match verdict {
                 crate::s2::reuse::GithubVerdict::Global { reason }
                 | crate::s2::reuse::GithubVerdict::Unknown { reason } => {
@@ -2881,7 +2857,7 @@ fn selection_for_diff_with_closed_excluded<'a>(
         }
         if let Some(reason) = fold_affected_file(
             &compiled,
-            file,
+            &file,
             &mut selected,
             &mut opaque_reasons,
             &mut closed_excluded,
@@ -3071,60 +3047,6 @@ fn git_name_status_nul(
         return Ok(None);
     }
     Ok(Some(output.stdout))
-}
-
-/// Parse `--name-status -z` bytes into the matchable path list, mirroring the
-/// select path's rename/delete semantics: a rename contributes its target
-/// then its source (both owners match), a copy contributes its target only,
-/// and a delete keeps its path (its owner still matches). `None` means the
-/// input is truncated, malformed, or non-UTF-8: the caller falls back to
-/// full instead of matching a mangled name.
-fn parse_name_status_nul(output: &[u8]) -> Option<Vec<String>> {
-    if output.is_empty() {
-        return Some(Vec::new());
-    }
-    let text = std::str::from_utf8(output).ok()?;
-    let mut records = text.split('\0');
-    let mut changed = Vec::new();
-    loop {
-        let status = records.next()?;
-        if status.is_empty() {
-            // The trailing NUL terminates the stream: anything after it is a
-            // malformed record, not an empty diff.
-            return records.next().is_none().then_some(changed);
-        }
-        if let Some(score) = status.strip_prefix('R') {
-            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            let from = records.next()?;
-            let to = records.next()?;
-            if from.is_empty() || to.is_empty() {
-                return None;
-            }
-            changed.push(to.to_owned());
-            changed.push(from.to_owned());
-        } else if let Some(score) = status.strip_prefix('C') {
-            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            let from = records.next()?;
-            let to = records.next()?;
-            if from.is_empty() || to.is_empty() {
-                return None;
-            }
-            changed.push(to.to_owned());
-        } else {
-            if !matches!(status, "A" | "M" | "T" | "D") {
-                return None;
-            }
-            let path = records.next()?;
-            if path.is_empty() {
-                return None;
-            }
-            changed.push(path.to_owned());
-        }
-    }
 }
 
 fn ordered_units<'a>(
@@ -7009,16 +6931,8 @@ workspace_check = true
             let (root, base, head) = selection_git_fixture("slice-c", changed)?;
             let runtime_selection =
                 selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-            let raw = git_name_status_nul(&root, &base, &head)?.ok_or("the diff must resolve")?;
-            let changed_files = parse_name_status_nul(&raw).ok_or("the diff must parse")?;
-            let changes: Vec<crate::s2::reuse::ChangedPath> = changed_files
-                .into_iter()
-                .map(|path| crate::s2::reuse::ChangedPath {
-                    path,
-                    previous: None,
-                    status: crate::s2::reuse::ChangeKind::Modified,
-                })
-                .collect();
+            let changes =
+                changed_paths_for_diff(&root, &base, &head)?.ok_or("the diff must parse")?;
             let model = crate::s2::reuse::select_affected(
                 &watched,
                 &changes,
@@ -7562,91 +7476,6 @@ workspace_check = true
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
-    }
-
-    #[test]
-    fn name_status_nul_parses_exact_paths() {
-        // Status entries arrive verbatim: spaces, quotes, unicode, newlines,
-        // and glob metacharacters survive because NUL delimits records.
-        // Renames contribute target then source; copies contribute the target
-        // only; deletes keep their path.
-        for (input, expected) in [
-            ("".as_bytes(), Vec::new()),
-            ("M\0src/lib.rs\0".as_bytes(), vec!["src/lib.rs".to_owned()]),
-            (
-                "A\0dir with space/f ile.txt\0".as_bytes(),
-                vec!["dir with space/f ile.txt".to_owned()],
-            ),
-            (
-                "M\0we\"ird?.rs\0".as_bytes(),
-                vec!["we\"ird?.rs".to_owned()],
-            ),
-            (
-                "M\0ünïcode/[bracket]*.rs\0".as_bytes(),
-                vec!["ünïcode/[bracket]*.rs".to_owned()],
-            ),
-            (
-                "M\0with\nnewline.txt\0".as_bytes(),
-                vec!["with\nnewline.txt".to_owned()],
-            ),
-            ("D\0gone.rs\0".as_bytes(), vec!["gone.rs".to_owned()]),
-            ("T\0link.rs\0".as_bytes(), vec!["link.rs".to_owned()]),
-            (
-                "R100\0old.rs\0new.rs\0".as_bytes(),
-                vec!["new.rs".to_owned(), "old.rs".to_owned()],
-            ),
-            (
-                "R050\0a.rs\0b.rs\0".as_bytes(),
-                vec!["b.rs".to_owned(), "a.rs".to_owned()],
-            ),
-            ("C75\0a.rs\0b.rs\0".as_bytes(), vec!["b.rs".to_owned()]),
-            (
-                "M\0a.rs\0D\0b.rs\0R100\0c.rs\0d.rs\0".as_bytes(),
-                vec![
-                    "a.rs".to_owned(),
-                    "b.rs".to_owned(),
-                    "d.rs".to_owned(),
-                    "c.rs".to_owned(),
-                ],
-            ),
-        ] {
-            assert_eq!(
-                parse_name_status_nul(input),
-                Some(expected),
-                "input {input:?} must parse exactly"
-            );
-        }
-    }
-
-    #[test]
-    fn name_status_nul_fails_closed_on_malformed_input() {
-        // Unknown statuses, truncated records, empty paths, trailing
-        // garbage, and non-UTF-8 bytes never parse: the caller falls back to
-        // full instead of matching a mangled name.
-        for input in [
-            "X\0a.rs\0".as_bytes(),
-            "U\0a.rs\0".as_bytes(),
-            "m\0a.rs\0".as_bytes(),
-            "R\0a.rs\0b.rs\0".as_bytes(),
-            "Rx\0a.rs\0b.rs\0".as_bytes(),
-            "C\0a.rs\0b.rs\0".as_bytes(),
-            "M\0".as_bytes(),
-            "M\0a.rs".as_bytes(),
-            "R100\0a.rs\0".as_bytes(),
-            "R100\0a.rs".as_bytes(),
-            "M\0\0".as_bytes(),
-            "R100\0\0b.rs\0".as_bytes(),
-            "M\0a.rs\0junk".as_bytes(),
-            "A\0a.rs\0\0".as_bytes(),
-            "\0".as_bytes(),
-            b"M\0\xff.rs\0".as_slice(),
-        ] {
-            assert_eq!(
-                parse_name_status_nul(input),
-                None,
-                "input {input:?} must fail closed"
-            );
-        }
     }
 
     #[test]
