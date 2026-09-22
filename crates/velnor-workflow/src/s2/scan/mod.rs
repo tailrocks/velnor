@@ -214,6 +214,13 @@ fn wire_native_edge(
         let recipe_commands = producer
             .recipe
             .commands(&producer.root, &producer.output, &surface);
+        let identity = native_product_identity(
+            shape,
+            producer_index,
+            consumer_index,
+            producer,
+            &product_name,
+        );
         // The product records the recipe's resolved floor — declared else
         // manifest — so resolution carries it into the consumer's job env
         // for `swift build`. The producer unit's own env stays untouched:
@@ -237,6 +244,7 @@ fn wire_native_edge(
                 inputs: producer.inputs.clone(),
                 inputs_unknown: producer.inputs_unknown.clone(),
                 inputs_digest: producer.inputs_digest.clone(),
+                identity: Some(identity),
                 rebuild: recipe_commands.clone(),
             });
         let unit = &mut shape.units[producer_index];
@@ -261,6 +269,96 @@ fn wire_native_edge(
         "{manifest} {} consumes {reference} `{name}` from BoltFFI manifest {} (crate `{}`); the producer step must materialize `{}` {materialization}.",
         consumer.manifest, producer.manifest, producer.crate_name, producer.output,
     ));
+}
+
+/// Build the product identity from facts proven by static scanning. Runtime
+/// SDK resolution is intentionally not guessed: an unpinned Xcode/SDK leaves
+/// `sdk` empty, which permits safe same-run transport but disables exact
+/// cross-run reuse.
+fn native_product_identity(
+    shape: &RepositoryShape,
+    producer_index: usize,
+    consumer_index: usize,
+    producer: &rust::BoltffiProducer,
+    product_name: &str,
+) -> crate::s2::platform::ProductIdentity {
+    let mut toolchain = BTreeMap::new();
+    if let Some(rust) = shape.units[producer_index].toolchain.as_ref() {
+        toolchain.insert("rust.channel".to_owned(), rust.channel().to_owned());
+        if let Some(profile) = rust.profile() {
+            toolchain.insert("rust.profile".to_owned(), profile.to_owned());
+        }
+        if !rust.components().is_empty() {
+            toolchain.insert("rust.components".to_owned(), rust.components().join(","));
+        }
+        if !rust.targets().is_empty() {
+            toolchain.insert("rust.targets".to_owned(), rust.targets().join(","));
+        }
+    }
+    if let Some(xcode) = shape.units[consumer_index].xcode.as_ref() {
+        toolchain.insert("xcode.version".to_owned(), xcode.version().to_owned());
+    }
+
+    let mut architectures = producer
+        .output_files
+        .iter()
+        .filter_map(|file| {
+            let relative = file.strip_prefix(&format!("{}/", producer.output))?;
+            let slice = relative.split('/').next()?;
+            (slice != "Info.plist").then_some(slice.to_owned())
+        })
+        .collect::<Vec<_>>();
+    architectures.sort();
+    architectures.dedup();
+
+    let target_triple = if architectures.iter().any(|slice| slice == "macos-arm64") {
+        "aarch64-apple-darwin"
+    } else if architectures.iter().any(|slice| slice == "macos-x86_64") {
+        "x86_64-apple-darwin"
+    } else {
+        "apple-xcframework"
+    };
+
+    let mut generation = BTreeMap::new();
+    generation.insert("framework".to_owned(), producer.framework.clone());
+    generation.insert("bindings_dir".to_owned(), producer.bindings_dir.clone());
+    generation.insert("bindings_file".to_owned(), producer.bindings_file.clone());
+    generation.insert("output".to_owned(), producer.output.clone());
+    generation.insert("recipe".to_owned(), producer.recipe.digest_identity());
+    if let Some(package_swift) = producer.package_swift.as_ref() {
+        generation.insert("package_swift".to_owned(), package_swift.clone());
+    }
+
+    crate::s2::platform::ProductIdentity {
+        schema: crate::s2::platform::PRODUCT_IDENTITY_SCHEMA.to_owned(),
+        producer: producer.unit.clone().unwrap_or_default(),
+        product: product_name.to_owned(),
+        adapter: "boltffi@0.30.1".to_owned(),
+        source: format!(
+            "{};crate={};framework={}",
+            producer.manifest, producer.crate_name, producer.framework
+        ),
+        inputs_digest: producer.inputs_digest.clone(),
+        host_abi: "macos-arm64".to_owned(),
+        target: "apple-xcframework".to_owned(),
+        target_triple: target_triple.to_owned(),
+        architectures,
+        // The scanner only knows the declared Xcode pin, not the installed
+        // SDK build. Keep this unknown until the bounded runtime probe.
+        sdk: String::new(),
+        deployment_target: producer.deployment_target.clone(),
+        toolchain,
+        profile: producer.recipe.profile.as_ref().map_or_else(
+            || "default".to_owned(),
+            |profile| profile.as_str().to_owned(),
+        ),
+        features: Vec::new(),
+        flags: [producer.recipe.locked.then_some("--locked".to_owned())]
+            .into_iter()
+            .flatten()
+            .collect(),
+        generation,
+    }
 }
 
 /// The product name for a framework: lowercase, shell-safe, within the

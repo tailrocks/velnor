@@ -1494,6 +1494,7 @@ impl UnitSection {
                 // Declared rows cannot claim a digest: only the scanner
                 // computes one, over bytes it actually read.
                 inputs_digest: None,
+                identity: None,
                 // Declared rows rebuild through their task; a recorded
                 // recipe arrives only from the scanner's adapter.
                 rebuild: Vec::new(),

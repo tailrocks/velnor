@@ -29,11 +29,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::s2::platform::{valid_env_name, valid_product_output, NamedProduct};
+use crate::s2::platform::{
+    valid_env_name, valid_product_output, NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA,
+};
 use crate::s2::{shell_quote, GeneratorError};
 
 /// The manifest schema the producer writes and the consumer requires.
-pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/1";
+pub(crate) const MANIFEST_SCHEMA: &str = "velnor-product-manifest/2";
 /// The manifest filename inside the staged artifact directory.
 pub(crate) const MANIFEST_FILE: &str = "velnor-product-manifest.json";
 /// The artifact-internal directory holding the copied output trees.
@@ -51,6 +53,23 @@ const ARTIFACT_RETENTION_DAYS: u32 = 1;
 #[must_use]
 pub(crate) fn transport_eligible(product: &NamedProduct) -> bool {
     !product.outputs.is_empty()
+}
+
+/// Whether a product has enough identity for an exact cross-run cache hit.
+/// Same-run transport deliberately has the weaker [`transport_eligible`]
+/// contract; this predicate is the fail-closed boundary for a future native
+/// product cache and is kept separate so an optional cache is never the data
+/// bus for required consumers.
+#[must_use]
+#[expect(dead_code, reason = "native exact-product cache uses this boundary")]
+pub(crate) fn exact_product_reuse_eligible(product: &NamedProduct) -> bool {
+    !product.outputs.is_empty()
+        && product.inputs_unknown.is_empty()
+        && product.inputs_digest.is_some()
+        && product
+            .identity
+            .as_ref()
+            .is_some_and(ProductIdentity::exact_reuse_allowed)
 }
 
 /// The workflow input record identifying one transported edge.
@@ -117,6 +136,8 @@ struct ProductManifest {
     producer: String,
     product: String,
     inputs_digest: String,
+    identity: Option<ProductIdentity>,
+    identity_digest: Option<String>,
     files: BTreeMap<String, String>,
     links: BTreeMap<String, LinkEntry>,
     dirs: Vec<String>,
@@ -127,6 +148,7 @@ pub(crate) struct StageRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) stage: PathBuf,
 }
@@ -138,11 +160,61 @@ pub(crate) struct VerifyRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
     pub(crate) inputs_digest: String,
+    pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) output_files: Vec<String>,
     pub(crate) stage: PathBuf,
     pub(crate) marker: String,
     pub(crate) env_file: PathBuf,
+}
+
+fn identity_digest(identity: &ProductIdentity) -> Result<String, GeneratorError> {
+    let bytes = serde_json::to_vec(identity)
+        .map_err(|error| GeneratorError::usage(format!("serialize product identity: {error}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(output, "{byte:02x}");
+    }
+    Ok(output)
+}
+
+fn identity_json(identity: &ProductIdentity) -> String {
+    // ProductIdentity contains only derived serde primitives, so this cannot
+    // fail in practice. Keep rendering total because workflow rendering is a
+    // string API; stage/verify still recompute and validate the digest.
+    serde_json::to_string(identity).unwrap_or_default()
+}
+
+fn parse_identity(
+    options: &BTreeMap<String, String>,
+    command: &str,
+) -> Result<Option<ProductIdentity>, GeneratorError> {
+    options
+        .get("identity")
+        .map(|raw| {
+            serde_json::from_str(raw).map_err(|error| {
+                GeneratorError::usage(format!("{command} --identity is not valid JSON: {error}"))
+            })
+        })
+        .transpose()
+}
+
+fn check_identity_shape(identity: &ProductIdentity, context: &str) -> Result<(), GeneratorError> {
+    identity.validate(context)?;
+    if identity.schema != PRODUCT_IDENTITY_SCHEMA {
+        return Err(GeneratorError::usage(format!(
+            "{context} product identity schema mismatch: {:?} != {:?}",
+            identity.schema, PRODUCT_IDENTITY_SCHEMA
+        )));
+    }
+    if identity.producer.is_empty() || identity.product.is_empty() || identity.adapter.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "{context} product identity must name producer, product, and adapter"
+        )));
+    }
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
@@ -331,6 +403,19 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             "stage-product needs a non-empty --producer and --product",
         ));
     }
+    if let Some(identity) = &request.identity {
+        check_identity_shape(identity, "stage-product")?;
+        if identity.producer != request.producer || identity.product != request.product {
+            return Err(GeneratorError::usage(
+                "stage-product product identity does not match producer/product",
+            ));
+        }
+        if identity.inputs_digest.as_deref() != Some(request.inputs_digest.as_str()) {
+            return Err(GeneratorError::usage(
+                "stage-product product identity inputs_digest does not match --digest",
+            ));
+        }
+    }
     let stage = root.join(&request.stage);
     if fs::symlink_metadata(&stage).is_ok() {
         fs::remove_dir_all(&stage)
@@ -370,6 +455,8 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
         producer: request.producer.clone(),
         product: request.product.clone(),
         inputs_digest: request.inputs_digest.clone(),
+        identity_digest: request.identity.as_ref().map(identity_digest).transpose()?,
+        identity: request.identity.clone(),
         files,
         links,
         dirs,
@@ -460,7 +547,9 @@ fn load_manifest(stage: &Path) -> Result<ProductManifest, GeneratorError> {
 }
 
 /// The manifest must name the expected schema, producer, product, and
-/// inputs digest, and it must list at least one file.
+/// inputs digest and typed product identity, and it must list at least one
+/// file. Identity is optional only for non-native products; when one side
+/// declares it, the other must carry the exact same canonical object.
 fn check_manifest_identity(
     manifest: &ProductManifest,
     request: &VerifyRequest,
@@ -487,6 +576,46 @@ fn check_manifest_identity(
             return Err(GeneratorError::usage(format!(
                 "product manifest {field} mismatch: {got:?} != {want:?}"
             )));
+        }
+    }
+    match (&manifest.identity, &request.identity) {
+        (None, None) => {}
+        (Some(got), Some(want)) => {
+            check_identity_shape(got, "product manifest")?;
+            check_identity_shape(want, "verify-product")?;
+            if got.producer != request.producer
+                || got.product != request.product
+                || want.producer != request.producer
+                || want.product != request.product
+            {
+                return Err(GeneratorError::usage(
+                    "product manifest typed identity producer/product mismatch".to_owned(),
+                ));
+            }
+            if got != want {
+                return Err(GeneratorError::usage(
+                    "product manifest typed identity mismatch".to_owned(),
+                ));
+            }
+            let got_digest = identity_digest(got)?;
+            let want_digest = identity_digest(want)?;
+            if manifest.identity_digest.as_deref() != Some(got_digest.as_str())
+                || got_digest != want_digest
+            {
+                return Err(GeneratorError::usage(
+                    "product manifest typed identity digest mismatch".to_owned(),
+                ));
+            }
+            if got.inputs_digest.as_deref() != Some(request.inputs_digest.as_str()) {
+                return Err(GeneratorError::usage(
+                    "product manifest typed identity inputs_digest mismatch".to_owned(),
+                ));
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(GeneratorError::usage(
+                "product manifest typed identity presence mismatch".to_owned(),
+            ));
         }
     }
     if manifest.files.is_empty() {
@@ -635,8 +764,10 @@ fn env_list(name: &str) -> Vec<String> {
 /// Run `stage-product` from the runtime CLI: `root` is the repository
 /// checkout, the outputs arrive via [`OUTPUTS_ENV`].
 pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options =
-        crate::s2::runtime::parse_options(arguments, &["producer", "product", "digest", "stage"])?;
+    let options = crate::s2::runtime::parse_options(
+        arguments,
+        &["producer", "product", "digest", "identity", "stage"],
+    )?;
     let missing = ["producer", "product", "stage"]
         .into_iter()
         .find(|name| !options.contains_key(*name));
@@ -649,6 +780,7 @@ pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        identity: parse_identity(&options, "stage-product")?,
         outputs: env_list(OUTPUTS_ENV),
         stage: PathBuf::from(&options["stage"]),
     };
@@ -670,7 +802,9 @@ pub(crate) fn verify_product_cli(
 ) -> Result<(), GeneratorError> {
     let options = crate::s2::runtime::parse_options(
         arguments,
-        &["producer", "product", "digest", "stage", "marker"],
+        &[
+            "producer", "product", "digest", "identity", "stage", "marker",
+        ],
     )?;
     let missing = ["producer", "product", "stage", "marker"]
         .into_iter()
@@ -687,6 +821,7 @@ pub(crate) fn verify_product_cli(
         producer: options["producer"].clone(),
         product: options["product"].clone(),
         inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        identity: parse_identity(&options, "verify-product")?,
         outputs: env_list(OUTPUTS_ENV),
         output_files: env_list(OUTPUT_FILES_ENV),
         stage: PathBuf::from(&options["stage"]),
@@ -721,6 +856,12 @@ pub(crate) fn render_producer_block(
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
     }
+    if let Some(identity) = &product.identity {
+        let json = identity_json(identity);
+        if !json.is_empty() {
+            let _ = write!(command, " --identity {}", shell_quote(&json));
+        }
+    }
     let _ = write!(
         command,
         " --stage \"$RUNNER_TEMP/velnor-products/{artifact}\""
@@ -750,6 +891,12 @@ pub(crate) fn render_consumer_block(
     );
     if !digest.is_empty() {
         let _ = write!(command, " --digest {}", shell_quote(&digest));
+    }
+    if let Some(identity) = &product.identity {
+        let json = identity_json(identity);
+        if !json.is_empty() {
+            let _ = write!(command, " --identity {}", shell_quote(&json));
+        }
     }
     let _ = write!(
         command,
@@ -787,13 +934,40 @@ mod tests {
         artifact_name, ready_records, stage_product, transport_eligible, verify_product,
         StageRequest, VerifyRequest,
     };
-    use crate::s2::platform::NamedProduct;
+    use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
 
     fn product(outputs: &[&str]) -> NamedProduct {
         NamedProduct {
             name: "xcframework-bridgecore".to_owned(),
             outputs: outputs.iter().map(ToString::to_string).collect(),
             ..NamedProduct::default()
+        }
+    }
+
+    fn identity() -> ProductIdentity {
+        ProductIdentity {
+            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            producer: "rust-ffi".to_owned(),
+            product: "xcframework-bridgecore".to_owned(),
+            adapter: "boltffi@0.30.1".to_owned(),
+            source: "libs/bridge-ffi/boltffi.toml;crate=bridge-core;framework=BridgeCore"
+                .to_owned(),
+            inputs_digest: Some("a".repeat(64)),
+            host_abi: "macos-arm64".to_owned(),
+            target: "apple-xcframework".to_owned(),
+            target_triple: "aarch64-apple-darwin".to_owned(),
+            architectures: vec!["macos-arm64".to_owned()],
+            sdk: "macos26.sdk-26.0".to_owned(),
+            deployment_target: "26.0".to_owned(),
+            toolchain: [("rust.channel".to_owned(), "1.97.1".to_owned())]
+                .into_iter()
+                .collect(),
+            profile: "release".to_owned(),
+            features: Vec::new(),
+            flags: vec!["--locked".to_owned()],
+            generation: [("framework".to_owned(), "BridgeCore".to_owned())]
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -919,6 +1093,7 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             stage: stage.to_path_buf(),
         }
@@ -929,6 +1104,7 @@ mod tests {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
             inputs_digest: "digest-1".to_owned(),
+            identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
             stage: stage.to_path_buf(),
@@ -1090,6 +1266,40 @@ mod tests {
         );
         let message = format!("{}", missing_file.expect_err("structural must fail"));
         assert!(message.contains("structural file"), "{message}");
+    }
+
+    #[test]
+    fn verify_rejects_typed_product_identity_mismatch_before_install() {
+        let producer = scratch("typed-identity-producer");
+        stage_fixture(&producer);
+        let mut staged_request = stage_request(&producer.join("stage"));
+        let mut expected = identity();
+        expected.product = "xcframework-foo".to_owned();
+        expected.inputs_digest = Some("d".repeat(64));
+        staged_request.inputs_digest = "d".repeat(64);
+        staged_request.identity = Some(expected.clone());
+        stage_product(&producer, &staged_request).expect("stage typed identity");
+
+        let consumer = scratch("typed-identity-consumer");
+        let env_file = consumer.join("github-env");
+        let mut wrong_architecture = expected;
+        wrong_architecture.architectures = vec!["macos-x86_64".to_owned()];
+        let result = verify_product(
+            &consumer,
+            &VerifyRequest {
+                identity: Some(wrong_architecture),
+                inputs_digest: "d".repeat(64),
+                stage: producer.join("stage"),
+                env_file: env_file.clone(),
+                ..verify_request(&producer.join("stage"), &env_file)
+            },
+        );
+        let message = format!("{}", result.expect_err("wrong architecture must fail"));
+        assert!(message.contains("typed identity mismatch"), "{message}");
+        assert!(
+            !consumer.join("out/Foo.xcframework").exists(),
+            "typed identity failure installs nothing"
+        );
     }
 
     #[test]

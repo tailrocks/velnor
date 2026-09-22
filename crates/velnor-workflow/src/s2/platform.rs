@@ -15,7 +15,140 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// Versioned identity of a produced native artifact.
+///
+/// `inputs_digest` describes the repository closure. The remaining fields
+/// describe dimensions that the closure alone cannot bind: adapter/source,
+/// host and target ABIs, SDK/deployment, toolchains, profile/flags, and
+/// generation settings. Empty identity dimensions are intentionally retained
+/// as unknown facts; callers may transport such a product within one run, but
+/// exact cross-run reuse must refuse it.
+pub(crate) const PRODUCT_IDENTITY_SCHEMA: &str = "velnor-native-product/1";
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ProductIdentity {
+    pub(crate) schema: String,
+    pub(crate) producer: String,
+    pub(crate) product: String,
+    pub(crate) adapter: String,
+    pub(crate) source: String,
+    pub(crate) inputs_digest: Option<String>,
+    pub(crate) host_abi: String,
+    pub(crate) target: String,
+    pub(crate) target_triple: String,
+    pub(crate) architectures: Vec<String>,
+    pub(crate) sdk: String,
+    pub(crate) deployment_target: String,
+    pub(crate) toolchain: BTreeMap<String, String>,
+    pub(crate) profile: String,
+    pub(crate) features: Vec<String>,
+    pub(crate) flags: Vec<String>,
+    pub(crate) generation: BTreeMap<String, String>,
+}
+
+impl ProductIdentity {
+    /// Validate the identity shape without requiring every dimension to be
+    /// known. Unknown runtime facts are a conservative exact-reuse miss, not
+    /// a malformed plan.
+    pub(crate) fn validate(&self, context: &str) -> Result<(), GeneratorError> {
+        if self.schema != PRODUCT_IDENTITY_SCHEMA {
+            return Err(GeneratorError::usage(format!(
+                "{context} product identity schema `{}` is not `{PRODUCT_IDENTITY_SCHEMA}`",
+                self.schema
+            )));
+        }
+        for (field, value) in [
+            ("producer", self.producer.as_str()),
+            ("product", self.product.as_str()),
+            ("adapter", self.adapter.as_str()),
+            ("source", self.source.as_str()),
+        ] {
+            if value.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "{context} product identity field `{field}` is empty"
+                )));
+            }
+        }
+        if let Some(digest) = self.inputs_digest.as_deref()
+            && !crate::s2::primitives::prepared_tools::is_digest(digest)
+        {
+            return Err(GeneratorError::usage(format!(
+                "{context} product identity inputs_digest `{digest}` is not a lowercase SHA-256"
+            )));
+        }
+        let mut architectures = BTreeSet::new();
+        for architecture in &self.architectures {
+            if architecture.is_empty() || !architectures.insert(architecture) {
+                return Err(GeneratorError::usage(format!(
+                    "{context} product identity has a duplicate or empty architecture"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return dimensions that make exact reuse unsafe when absent.
+    #[must_use]
+    #[expect(dead_code, reason = "exact-product cache admission uses this boundary")]
+    pub(crate) fn missing_dimensions(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.schema != PRODUCT_IDENTITY_SCHEMA {
+            missing.push("schema");
+        }
+        if self.producer.is_empty() {
+            missing.push("producer");
+        }
+        if self.product.is_empty() {
+            missing.push("product");
+        }
+        if self.adapter.is_empty() {
+            missing.push("adapter");
+        }
+        if self.source.is_empty() {
+            missing.push("source");
+        }
+        if self.inputs_digest.is_none() {
+            missing.push("inputs_digest");
+        }
+        if self.host_abi.is_empty() {
+            missing.push("host_abi");
+        }
+        if self.target.is_empty() {
+            missing.push("target");
+        }
+        if self.target_triple.is_empty() {
+            missing.push("target_triple");
+        }
+        if self.architectures.is_empty() {
+            missing.push("architectures");
+        }
+        if self.sdk.is_empty() {
+            missing.push("sdk");
+        }
+        if self.deployment_target.is_empty() {
+            missing.push("deployment_target");
+        }
+        if self.toolchain.is_empty() {
+            missing.push("toolchain");
+        }
+        if self.profile.is_empty() {
+            missing.push("profile");
+        }
+        if self.generation.is_empty() {
+            missing.push("generation");
+        }
+        missing
+    }
+
+    /// Whether every exact-reuse dimension is known.
+    #[must_use]
+    #[expect(dead_code, reason = "exact-product cache admission uses this boundary")]
+    pub(crate) fn exact_reuse_allowed(&self) -> bool {
+        self.missing_dimensions().is_empty()
+    }
+}
 
 use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
 
@@ -67,6 +200,11 @@ pub(crate) struct NamedProduct {
     pub(crate) inputs_unknown: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) inputs_digest: Option<String>,
+    /// Complete native identity when the scanner can describe one. The
+    /// identity is generation-time data and is also carried into the
+    /// verified transport manifest; absent dimensions disable exact reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<ProductIdentity>,
     /// Shell commands that rebuild the product from a clean checkout, in
     /// order. The scanner records the producer recipe here so a consumer
     /// whose producer did not run in this workflow can still materialize
@@ -464,6 +602,21 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
             }
             validate_output_files(unit, product)?;
             validate_bindings(unit, product)?;
+            if let Some(identity) = &product.identity {
+                identity.validate(&format!("unit `{}` product `{}`", unit.id, product.name))?;
+                if identity.product != product.name {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` product `{}` identity names product `{}`",
+                        unit.id, product.name, identity.product
+                    )));
+                }
+                if identity.inputs_digest != product.inputs_digest {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` product `{}` identity inputs_digest disagrees with product inputs_digest",
+                        unit.id, product.name
+                    )));
+                }
+            }
             validate_rebuild(unit, product)?;
         }
         for prerequisite in &unit.prerequisites {
@@ -884,6 +1037,7 @@ mod tests {
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
             inputs_digest: None,
+            identity: None,
             rebuild: Vec::new(),
         };
         let plain = Prerequisite {
@@ -930,6 +1084,7 @@ mod tests {
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
             inputs_digest: None,
+            identity: None,
             name: name.to_owned(),
             task: Some(format!("build-{name}")),
             env: BTreeMap::new(),
