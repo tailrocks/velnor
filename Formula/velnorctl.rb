@@ -4,11 +4,11 @@ require "json"
 # Product source is pinned; packaging assets are pinned separately until the
 # formula is rendered into a tap. Never replace either pin with a branch or
 # latest-release URL.
-SOURCE_COMMIT = "24889535c25db9002e2903dda35cb2ee252c13bb".freeze
-SOURCE_ARCHIVE_SHA256 = "3a5b6eb5ee589261775469845fab96867e0a1f260a6da7d60006553dd4457408".freeze
-PACKAGING_COMMIT = "5275fa1ff5a6754d96e2800f61b03da52c9ecc48".freeze
-LAUNCH_SHA256 = "99be28f27da6884e0b32fd7a216271fc3d05cbea712818135a24192cce887b5a".freeze
-PLIST_SHA256 = "c15a8518697755560cfcd659d405f3ef0304a78377036414ab55b90abf1cb6d3".freeze
+SOURCE_COMMIT = "796c46110274a474572de100b12dadc4aa50f47b".freeze
+SOURCE_ARCHIVE_SHA256 = "e61990d897dc714e018cfe4c1563391e8d602f3badf8cd483016814111c60b04".freeze
+PACKAGING_COMMIT = "8ff29a5c3dd5e9a428ddca393da2ec75d28253bd".freeze
+LAUNCH_SHA256 = "4a725baeec24c2905281b1debb2b493f52411ff53018b07d1c82e431adbda7ee".freeze
+PLIST_SHA256 = "c7d3f69454e8d04a7913dfcfa0b7c0ea36b37c6339118cff580f1d4eb31493f5".freeze
 SOURCE_URL = "https://github.com/tailrocks/velnor/archive/#{SOURCE_COMMIT}.tar.gz".freeze
 GH_CLI_REQUIRED_FLAGS = %w[
   --repo
