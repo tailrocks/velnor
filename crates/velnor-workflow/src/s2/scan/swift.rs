@@ -84,6 +84,8 @@ pub(crate) struct PackageFacts {
     pub(crate) tools_version: Option<String>,
     pub(crate) has_tests: bool,
     pub(crate) binary_targets: Vec<BinaryTarget>,
+    pub(crate) executable_products: Vec<String>,
+    pub(crate) has_dynamic_executable_products: bool,
 }
 
 /// Which manifest recorded a binary consumer: a `Package.swift`
@@ -170,6 +172,8 @@ impl Default for PackageFacts {
             tools_version: None,
             has_tests: true,
             binary_targets: Vec::new(),
+            executable_products: Vec::new(),
+            has_dynamic_executable_products: false,
         }
     }
 }
@@ -358,6 +362,162 @@ fn string_arg(group: &str, key: &str) -> Option<String> {
     None
 }
 
+fn skip_trivia(bytes: &[u8], mut index: usize) -> Option<usize> {
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'/') {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'*') {
+            index = skip_block_comment(bytes, index)?;
+            continue;
+        }
+        return Some(index);
+    }
+}
+
+fn identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// A top-level literal `key: "value"` argument in a Swift call. Nested
+/// target/dependency arguments, comments, interpolations, and expressions do
+/// not count: the scanner must never infer a product name from executable
+/// Swift.
+fn literal_string_arg(group: &str, key: &str) -> Option<String> {
+    let bytes = group.as_bytes();
+    let mut index = 0;
+    let mut nesting = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => index = skip_string(bytes, index)?,
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment(bytes, index)?;
+            }
+            b'(' | b'[' | b'{' => {
+                nesting += 1;
+                index += 1;
+            }
+            b')' | b']' | b'}' => {
+                nesting = nesting.saturating_sub(1);
+                index += 1;
+            }
+            _ => {
+                let matches_key = nesting == 0
+                    && group[index..].starts_with(key)
+                    && (index == 0 || !identifier_byte(bytes[index - 1]))
+                    && (index + key.len() == bytes.len()
+                        || !identifier_byte(bytes[index + key.len()]));
+                if !matches_key {
+                    let width = group[index..].chars().next().map_or(1, char::len_utf8);
+                    index += width;
+                    continue;
+                }
+                let colon = skip_trivia(bytes, index + key.len())?;
+                if bytes.get(colon) != Some(&b':') {
+                    index += key.len();
+                    continue;
+                }
+                let value = skip_trivia(bytes, colon + 1)?;
+                if bytes.get(value) != Some(&b'"')
+                    || bytes.get(value + 1) == Some(&b'"')
+                    || bytes.get(value + 2) == Some(&b'"')
+                {
+                    return None;
+                }
+                let end = skip_string(bytes, value)?;
+                let after = skip_trivia(bytes, end)?;
+                if after < bytes.len() && bytes[after] != b',' {
+                    return None;
+                }
+                return read_quoted(&group[value + 1..end]);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+struct ExecutableProductFacts {
+    names: Vec<String>,
+    has_dynamic_name: bool,
+}
+
+/// Discover only literal `.executable(name: "...")` product declarations.
+/// This lexer skips Swift strings/comments and never evaluates the manifest.
+fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
+    const MARKER: &str = ".executable";
+    let bytes = contents.as_bytes();
+    let mut names = BTreeSet::new();
+    let mut has_dynamic_name = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let Some(next) = skip_string(bytes, index) else {
+                    break;
+                };
+                index = next;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let Some(next) = skip_block_comment(bytes, index) else {
+                    break;
+                };
+                index = next;
+            }
+            b'.' if contents[index..].starts_with(MARKER)
+                && (index == 0
+                    || (!identifier_byte(bytes[index - 1]) && bytes[index - 1] != b'.'))
+                && (index + MARKER.len() == bytes.len()
+                    || !identifier_byte(bytes[index + MARKER.len()])) =>
+            {
+                let marker_end = index + MARKER.len();
+                let Some(group_start) = skip_trivia(bytes, marker_end) else {
+                    break;
+                };
+                if bytes.get(group_start) != Some(&b'(') {
+                    index = marker_end;
+                    continue;
+                }
+                let group = &contents[group_start..];
+                let Some((inner, after)) = balanced_group(group) else {
+                    break;
+                };
+                match literal_string_arg(inner, "name") {
+                    Some(name) if !name.is_empty() => {
+                        names.insert(name);
+                    }
+                    _ => has_dynamic_name = true,
+                }
+                index = group_start + group.len() - after.len();
+            }
+            _ => {
+                let width = contents[index..].chars().next().map_or(1, char::len_utf8);
+                index += width;
+            }
+        }
+    }
+    ExecutableProductFacts {
+        names: names.into_iter().collect(),
+        has_dynamic_name,
+    }
+}
+
 fn parse_binary_targets(contents: &str) -> Vec<BinaryTarget> {
     let mut targets = Vec::new();
     let mut rest = contents;
@@ -381,10 +541,13 @@ fn parse_binary_targets(contents: &str) -> Vec<BinaryTarget> {
 }
 
 fn parse_package_facts(contents: &str) -> PackageFacts {
+    let executable_products = parse_executable_products(contents);
     PackageFacts {
         tools_version: parse_tools_version(contents),
         has_tests: call_present(contents, ".testTarget"),
         binary_targets: parse_binary_targets(contents),
+        executable_products: executable_products.names,
+        has_dynamic_executable_products: executable_products.has_dynamic_name,
     }
 }
 
@@ -836,6 +999,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
         "{command_prefix}xcodegen generate --spec {}",
         shell_quote(spec_file)
     )];
+    let mut phases = vec![ValidationPhase::XcodegenGenerate];
     let mut label = format!("Apple project ({}, XcodeGen generate)", spec.name);
     let mut id_part = "generate".to_owned();
     if apps.len() == 1 {
@@ -853,7 +1017,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
             ));
             return (
                 Some(xcodegen_generate_unit(
-                    spec, &root, spec_file, commands, label, &id_part,
+                    spec, &root, spec_file, commands, phases, label, &id_part,
                 )),
                 notes,
             );
@@ -866,10 +1030,12 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
             commands.push(format!(
                 "{command_prefix}xcodebuild -project {project} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
             ));
+            phases.push(ValidationPhase::SwiftBuild);
             if testable {
                 commands.push(format!(
                     "{command_prefix}xcodebuild -project {project} -scheme {scheme_quoted}{test_destination} CODE_SIGNING_ALLOWED=NO test"
                 ));
+                phases.push(ValidationPhase::SwiftTest);
             }
             label = format!("Apple app ({scheme}, XcodeGen)");
             id_part = identifier_suffix(&scheme);
@@ -895,7 +1061,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
     }
     (
         Some(xcodegen_generate_unit(
-            spec, &root, spec_file, commands, label, &id_part,
+            spec, &root, spec_file, commands, phases, label, &id_part,
         )),
         notes,
     )
@@ -906,6 +1072,7 @@ fn xcodegen_generate_unit(
     root: &str,
     spec_file: &str,
     commands: Vec<String>,
+    phases: Vec<ValidationPhase>,
     label: String,
     id_part: &str,
 ) -> Unit {
@@ -943,7 +1110,7 @@ fn xcodegen_generate_unit(
         watch,
         pr_commands: commands.clone(),
         full_commands: commands,
-        phases: Vec::new(),
+        phases,
         check_commands: Vec::new(),
         depends_on: Vec::new(),
         pinned_lockfile: false,
@@ -986,6 +1153,12 @@ fn swift_package_unit(package_root: &str, facts: &PackageFacts) -> Unit {
     let prefix = path_prefix(package_root);
     let command_prefix = shell_change_dir(package_root);
     let mut commands = vec![format!("{command_prefix}swift build")];
+    for product in &facts.executable_products {
+        commands.push(format!(
+            "{command_prefix}swift run --skip-build --product {}",
+            shell_quote(product)
+        ));
+    }
     if facts.has_tests {
         commands.push(format!("{command_prefix}swift test --parallel"));
     }
@@ -1031,11 +1204,13 @@ fn swift_package_unit(package_root: &str, facts: &PackageFacts) -> Unit {
     // its toolchain provisions. Only Xcode scheme work below and local
     // binary-target consumers carry an Apple need.
     result.tool_version.clone_from(&facts.tools_version);
-    result.phases = if facts.has_tests {
-        vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
-    } else {
-        vec![ValidationPhase::SwiftBuild]
-    };
+    result.phases = vec![ValidationPhase::SwiftBuild];
+    for _ in &facts.executable_products {
+        result.phases.push(ValidationPhase::SwiftRun);
+    }
+    if facts.has_tests {
+        result.phases.push(ValidationPhase::SwiftTest);
+    }
     result
 }
 
@@ -1047,6 +1222,34 @@ fn xcode_scheme_referenced_container(contents: &str) -> Option<String> {
 
 fn xcode_project_is_ios(contents: &str) -> bool {
     contents.contains("IPHONEOS_DEPLOYMENT_TARGET") || contents.contains("SDKROOT = iphoneos")
+}
+
+fn xcode_scheme_has_test_action(contents: &str) -> bool {
+    const MARKER: &str = "<TestAction";
+    let mut index = 0;
+    while let Some(found) = contents[index..].find('<') {
+        let start = index + found;
+        if contents[start..].starts_with("<!--") {
+            let Some(end) = contents[start + 4..].find("-->") else {
+                return false;
+            };
+            index = start + 4 + end + 3;
+            continue;
+        }
+        if contents[start..].starts_with(MARKER) {
+            let after = start + MARKER.len();
+            if after == contents.len()
+                || matches!(
+                    contents.as_bytes().get(after),
+                    Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+                )
+            {
+                return true;
+            }
+        }
+        index = start + 1;
+    }
+    false
 }
 
 fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
@@ -1114,6 +1317,7 @@ fn xcode_scheme_unit(
         "-project"
     };
     let scheme_contents = fs::read_to_string(root.join(scheme)).unwrap_or_default();
+    let has_test_action = xcode_scheme_has_test_action(&scheme_contents);
     let referenced_project = if extension == "xcworkspace" {
         xcode_scheme_referenced_container(&scheme_contents)
             .and_then(|path| resolve_repo_path(&container_root, &path))
@@ -1144,14 +1348,14 @@ fn xcode_scheme_unit(
     let container_name = container.rsplit('/').next().unwrap_or(container);
     let container_quoted = shell_quote(container_name);
     let scheme_quoted = shell_quote(scheme_name);
-    let commands = vec![
-            format!(
-                "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
-            ),
-            format!(
-                "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{test_destination} CODE_SIGNING_ALLOWED=NO test"
-            ),
-        ];
+    let mut commands = vec![format!(
+        "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
+    )];
+    if has_test_action {
+        commands.push(format!(
+            "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{test_destination} CODE_SIGNING_ALLOWED=NO test"
+        ));
+    }
     let mut cache_key_files = vec![scheme.to_owned()];
     if extension == "xcodeproj" {
         cache_key_files.push(format!("{container}/project.pbxproj"));
@@ -1200,7 +1404,11 @@ fn xcode_scheme_unit(
         ],
         pr_commands: commands.clone(),
         full_commands: commands,
-        phases: Vec::new(),
+        phases: if has_test_action {
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        } else {
+            vec![ValidationPhase::SwiftBuild]
+        },
         check_commands: Vec::new(),
         depends_on: Vec::new(),
         pinned_lockfile: false,
@@ -1250,8 +1458,18 @@ pub(crate) fn detect(
             .map(|contents| parse_package_facts(&contents))
             .unwrap_or_default();
         if !facts.has_tests {
+            let command_kind = if facts.executable_products.is_empty() {
+                "build-only"
+            } else {
+                "build/run-only"
+            };
             shape.limitations.push(format!(
-                "Swift package {manifest} declares no test targets; emitting build-only commands."
+                "Swift package {manifest} declares no test targets; emitting {command_kind} commands."
+            ));
+        }
+        if facts.has_dynamic_executable_products {
+            shape.limitations.push(format!(
+                "Swift package {manifest} has executable products without literal names; the static scan does not evaluate Package.swift."
             ));
         }
         let mut unit = swift_package_unit(&package_root, &facts);
@@ -1440,6 +1658,90 @@ mod tests {
     }
 
     #[test]
+    fn executable_products_are_literal_sorted_and_comment_safe() {
+        let facts = parse_package_facts(
+            r#"
+            let computed = "dynamic"
+            let package = Package(
+                products: [
+                    // .executable(name: "CommentedOut"),
+                    .executable(
+                        targets: [.target(name: "NestedTarget")],
+                        name: "Zulu"
+                    ),
+                    .executable(name: computed),
+                    .executable(name: "Alpha" + computed),
+                    .executable(name: "Zulu"),
+                    Product.executable(name: "Qualified"),
+                ]
+            )
+            let text = ".executable(name: \"StringContent\")"
+            "#,
+        );
+        assert_eq!(
+            facts.executable_products,
+            vec!["Zulu".to_owned()],
+            "literal names are sorted and duplicate products are collapsed"
+        );
+        assert!(facts.has_dynamic_executable_products);
+    }
+
+    #[test]
+    fn swift_package_units_run_products_without_rebuilding() {
+        let facts = parse_package_facts(
+            r#"
+            .executable(name: "Zulu")
+            .executable(name: "Alpha")
+            .testTarget(name: "AppTests")
+            "#,
+        );
+        let unit = super::swift_package_unit("native", &facts);
+        assert_eq!(
+            unit.pr_commands,
+            vec![
+                "cd -- 'native' && swift build".to_owned(),
+                "cd -- 'native' && swift run --skip-build --product 'Alpha'".to_owned(),
+                "cd -- 'native' && swift run --skip-build --product 'Zulu'".to_owned(),
+                "cd -- 'native' && swift test --parallel".to_owned(),
+            ]
+        );
+        assert_eq!(
+            unit.phases,
+            vec![
+                ValidationPhase::SwiftBuild,
+                ValidationPhase::SwiftRun,
+                ValidationPhase::SwiftRun,
+                ValidationPhase::SwiftTest,
+            ]
+        );
+        assert_eq!(unit.pr_commands.len(), unit.phases.len());
+    }
+
+    #[test]
+    fn dynamic_products_are_reported_without_runtime_commands() {
+        let root = native_fixture(&[(
+            "native/Package.swift",
+            "import PackageDescription\nlet name = \"CLI\"\nlet package = Package(products: [.executable(name: name)])\n",
+        )]);
+        let shape = scan_native(&root);
+        let unit = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-package-native"),
+            "swift package unit",
+        );
+        assert_eq!(
+            unit.pr_commands,
+            vec!["cd -- 'native' && swift build".to_owned()]
+        );
+        assert!(shape.limitations.iter().any(|limitation| {
+            limitation.contains("executable products without literal names")
+        }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn swift_package_units_tag_build_and_test_commands() {
         let facts = parse_package_facts(".target(name: \"App\")\n.testTarget (name: \"AppTests\")");
         let unit = super::swift_package_unit("native", &facts);
@@ -1585,6 +1887,14 @@ mod tests {
         assert!(unit.pr_commands[1].contains("xcodebuild -project 'Widget.xcodeproj'"));
         assert!(unit.pr_commands[1].contains("-scheme 'WidgetApp'"));
         assert!(unit.pr_commands[1].contains("CODE_SIGNING_ALLOWED=NO build"));
+        assert_eq!(
+            unit.phases,
+            vec![
+                ValidationPhase::XcodegenGenerate,
+                ValidationPhase::SwiftBuild
+            ]
+        );
+        assert_eq!(unit.pr_commands.len(), unit.phases.len());
         assert_eq!(
             unit.mise_tools,
             vec![XCODEGEN_TOOL.to_owned()],
@@ -1739,7 +2049,10 @@ mod tests {
                 .any(|note| note.contains("Alpha") && note.contains("Beta")),
             "{notes:?}"
         );
-        assert_eq!(must_some(unit, "unit").pr_commands.len(), 1);
+        let unit = must_some(unit, "unit");
+        assert_eq!(unit.pr_commands.len(), 1);
+        assert_eq!(unit.phases, vec![ValidationPhase::XcodegenGenerate]);
+        assert_eq!(unit.pr_commands.len(), unit.phases.len());
     }
 
     #[test]
@@ -2762,7 +3075,7 @@ mod tests {
     fn xcode_scheme_unit_caches_intermediates_with_toolchain_pins() {
         let root = native_fixture(&[(
             "apps/one/One.xcodeproj/xcshareddata/xcschemes/App.xcscheme",
-            "<Scheme/>\n",
+            "<Scheme><TestAction/></Scheme>\n",
         )]);
         let shape = scan_native(&root);
         let unit = must_some(
@@ -2772,6 +3085,11 @@ mod tests {
                 .find(|unit| unit.id.starts_with("swift-xcodeproj-")),
             "xcode scheme unit",
         );
+        assert_eq!(
+            unit.phases,
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        );
+        assert_eq!(unit.pr_commands.len(), unit.phases.len());
         let cache = must_some(unit.cache.as_ref(), "scheme unit declares a cache");
         assert_eq!(
             cache.purpose,
@@ -2790,6 +3108,26 @@ mod tests {
                 cache.key_files
             );
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_only_shared_scheme_emits_no_test_command() {
+        let root = native_fixture(&[(
+            "apps/one/One.xcodeproj/xcshareddata/xcschemes/App.xcscheme",
+            "<Scheme><BuildAction/></Scheme>\n",
+        )]);
+        let shape = scan_native(&root);
+        let unit = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-xcodeproj-app"),
+            "build-only shared scheme",
+        );
+        assert_eq!(unit.phases, vec![ValidationPhase::SwiftBuild]);
+        assert_eq!(unit.pr_commands.len(), 1);
+        assert!(unit.pr_commands[0].ends_with("CODE_SIGNING_ALLOWED=NO build"));
         let _ = std::fs::remove_dir_all(root);
     }
 
