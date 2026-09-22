@@ -2935,6 +2935,11 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
             )));
         }
+        if Path::new(source).starts_with(".github/") {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source must stay outside `.github/`, found `{source}`"
+            )));
+        }
         let duplicate = rows
             .iter()
             .filter(|other| other.file.as_deref() == Some(file))
@@ -6053,6 +6058,23 @@ mod tests {
             "unknown workflow fields must be rejected",
         );
         assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn static_file_sources_cannot_be_taken_from_generated_github_tree() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/custom.yml\"\nsource = \".github/workflows/input.yml\"\n",
+        );
+        let error = must_fail(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "static source under .github must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("source must stay outside `.github/`"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
