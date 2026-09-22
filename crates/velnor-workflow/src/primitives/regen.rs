@@ -35,37 +35,64 @@ impl Primitive for RegenGate {
         let mut units = Vec::new();
         for unit in ctx.units {
             let mut unit = (*unit).clone();
-            // The gate runs before anything else, and only once. A phased
-            // unit gets a typed preflight tag in both command vectors, so
-            // insertion cannot invalidate the validation phases. An
-            // unphased custom unit keeps the legacy command order.
-            let in_pr = unit
-                .pr_commands
-                .iter()
-                .any(|candidate| candidate == &command);
-            let in_full = unit
-                .full_commands
-                .iter()
-                .any(|candidate| candidate == &command);
-            if unit.has_phases() {
-                if !in_pr || !in_full {
-                    unit.pr_commands.retain(|candidate| candidate != &command);
-                    unit.full_commands.retain(|candidate| candidate != &command);
-                    unit.prepend_preflight_commands(std::slice::from_ref(&command));
-                }
-            } else {
-                if !in_pr {
-                    unit.pr_commands.insert(0, command.clone());
-                }
-                if !in_full {
-                    unit.full_commands.insert(0, command.clone());
-                }
-            }
+            prepend_regen_command(&mut unit, &command);
             units.push(unit);
         }
         Ok(Rendered {
             units,
             ..Rendered::default()
         })
+    }
+}
+
+/// Insert the regeneration command before both command vectors. Inserting a
+/// command shifts every positional phase tag, so the bootstrap contract uses
+/// the legacy single-step unit after the mutation.
+fn prepend_regen_command(unit: &mut crate::Unit, command: &str) {
+    if !unit
+        .pr_commands
+        .iter()
+        .any(|candidate| candidate == command)
+    {
+        unit.pr_commands.insert(0, command.to_owned());
+        unit.clear_phases();
+    }
+    if !unit
+        .full_commands
+        .iter()
+        .any(|candidate| candidate == command)
+    {
+        unit.full_commands.insert(0, command.to_owned());
+        unit.clear_phases();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepend_regen_command;
+    use crate::{scan, UnitKind, ValidationPhase};
+
+    #[test]
+    fn regen_gate_clears_phases_after_inserting_command() {
+        let mut unit = scan::unit(
+            UnitKind::Rust,
+            ".",
+            Vec::new(),
+            vec!["fmt".to_owned(), "clippy".to_owned(), "test".to_owned()],
+            None,
+        );
+        unit.phases = vec![
+            ValidationPhase::Fmt,
+            ValidationPhase::Clippy,
+            ValidationPhase::Test,
+        ];
+        unit.check_commands = vec!["check".to_owned()];
+
+        prepend_regen_command(&mut unit, "regen");
+
+        assert_eq!(unit.pr_commands, ["regen", "fmt", "clippy", "test"]);
+        assert_eq!(unit.full_commands, unit.pr_commands);
+        assert!(unit.phases.is_empty());
+        assert!(unit.check_commands.is_empty());
     }
 }

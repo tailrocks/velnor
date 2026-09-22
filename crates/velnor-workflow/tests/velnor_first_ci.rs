@@ -1170,47 +1170,6 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
 }
 
 #[test]
-fn regen_gate_keeps_rust_renderer_phase_steps() {
-    let root = unique_dir("regen-gate-phases");
-    write_rust_fixture(&root, 2);
-    let config = root.join(".github-gen/velnor-workflow.toml");
-    let mut contents = fs::read_to_string(&config).unwrap();
-    contents.push_str(
-        "\n[[declare]]\nprimitive = \"regen-gate\"\nunits = [\"rust-crate00\"]\n\n[declare.args]\ncommand = \"echo regen gate\"\n",
-    );
-    fs::write(config, contents).unwrap();
-    let generated = generate(&root);
-    let project = fs::read_to_string(generated.output.join(".github/ci/project.toml")).unwrap();
-    let start = project
-        .find("id = \"rust-crate00\"")
-        .expect("regen-gated unit is in the runtime contract");
-    let end = project[start..]
-        .find("\n[[unit]]")
-        .map_or(project.len(), |offset| start + offset);
-    let unit = &project[start..end];
-    assert!(
-        unit.contains("phases = [\"preflight\", \"fmt\", \"clippy\", \"test\"]"),
-        "regen gate has a typed preflight phase: {unit}"
-    );
-    assert!(
-        unit.contains("echo regen gate"),
-        "gate command is retained: {unit}"
-    );
-    let workflow = generated.workflow("ci-unit-rust.yml");
-    for step in ["Formatting check", "Clippy check", "Tests"] {
-        assert_eq!(
-            workflow.matches(&format!("- name: {step}")).count(),
-            2,
-            "regen-gated Rust units retain one {step} step per lane"
-        );
-    }
-    assert!(
-        !workflow.contains("- name: Run unit checks"),
-        "the regen-gated Rust kind does not collapse to a legacy step"
-    );
-}
-
-#[test]
 fn kind_reusable_consumes_caller_plan_shas() {
     let root = unique_dir("plan-shas");
     write_rust_fixture(&root, 2);

@@ -600,9 +600,7 @@ fn materialize_product_input_watches(config: &mut ProjectConfig) {
 
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every lane and in
-/// local runs, which read the same serialized vectors. Phased units tag the
-/// inserted commands as typed preflight phases; custom units retain the
-/// legacy unphased contract.
+/// local runs, which read the same serialized vectors.
 fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
     unit.prepend_preflight_commands(commands);
     for commands_for_lane in [
@@ -618,6 +616,10 @@ fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
         prefixed.extend(commands_for_lane.iter().cloned());
         *commands_for_lane = prefixed;
     }
+    // Prepare commands carry no phase tags and shift every position: the unit
+    // keeps the product rebuild ahead of its checks and verifies through the
+    // single legacy step.
+    unit.clear_phases();
     unit.watch.sort();
     unit.watch.dedup();
 }
@@ -989,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tags_rust_task_prepare_without_collapsing_validation_phases() {
+    fn resolve_tags_rust_task_prepare_collapses_validation_phases() {
         let mut producer = unit("rust-ffi", UnitKind::Rust);
         producer.products = vec![product("xcframework", &["native/out/lib.xcframework"])];
         let mut consumer = unit("rust-app", UnitKind::Rust);
@@ -1009,15 +1011,8 @@ mod tests {
         let mut config = project_config(vec![producer, consumer]);
         must_ok(resolve(&mut config), "rust task product resolves");
         let prepared = &config.units[1];
-        assert_eq!(
-            prepared.phases,
-            vec![
-                crate::ValidationPhase::Preflight,
-                crate::ValidationPhase::Fmt,
-                crate::ValidationPhase::Clippy,
-                crate::ValidationPhase::Test,
-            ]
-        );
+        assert!(prepared.phases.is_empty());
+        assert!(prepared.check_commands.is_empty());
         assert!(prepared.pr_commands[0].starts_with("mise run build-xcframework"));
         assert_eq!(
             &prepared.pr_commands[1..],
@@ -1028,6 +1023,29 @@ mod tests {
             ]
         );
         assert_eq!(prepared.full_commands, prepared.pr_commands);
+    }
+
+    #[test]
+    fn typed_preflight_prefix_remains_available_as_standalone_capability() {
+        let mut unit = unit("rust-app", UnitKind::Rust);
+        unit.pr_commands = vec!["fmt".to_owned(), "clippy".to_owned()];
+        unit.full_commands.clone_from(&unit.pr_commands);
+        unit.phases = vec![crate::ValidationPhase::Fmt, crate::ValidationPhase::Clippy];
+        unit.check_commands = vec!["check".to_owned()];
+
+        unit.prepend_preflight_commands(&["prepare".to_owned()]);
+
+        assert_eq!(unit.pr_commands, ["prepare", "fmt", "clippy"]);
+        assert_eq!(unit.full_commands, unit.pr_commands);
+        assert_eq!(
+            unit.phases,
+            [
+                crate::ValidationPhase::Preflight,
+                crate::ValidationPhase::Fmt,
+                crate::ValidationPhase::Clippy,
+            ]
+        );
+        assert_eq!(unit.check_commands, ["check"]);
     }
 
     #[test]
