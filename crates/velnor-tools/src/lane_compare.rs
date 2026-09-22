@@ -721,16 +721,30 @@ fn fetch_velnor_job_log_artifacts(
     run_id: u64,
     expected_job_ids: &[u64],
 ) -> Result<BTreeMap<u64, String>> {
-    let payload = gh_api_bytes(&format!(
-        "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
-    ))?;
-    let response: serde_json::Value =
-        serde_json::from_slice(&payload).context("parse artifacts response")?;
-    let artifacts = response
-        .get("artifacts")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let mut artifacts = Vec::new();
+    let mut page = 1_u64;
+    loop {
+        let payload = gh_api_bytes(&format!(
+            "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100&page={page}"
+        ))?;
+        let response: serde_json::Value =
+            serde_json::from_slice(&payload).context("parse artifacts response")?;
+        let page_artifacts = response
+            .get("artifacts")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let fetched = page_artifacts.len();
+        let total_count = response.get("total_count").and_then(|value| value.as_u64());
+        artifacts.extend(page_artifacts);
+        if fetched == 0
+            || fetched < 100
+            || total_count.is_some_and(|total| artifacts.len() as u64 >= total)
+        {
+            break;
+        }
+        page += 1;
+    }
     let mut artifact_ids = BTreeMap::new();
     for artifact in artifacts {
         let name = artifact.get("name").and_then(|v| v.as_str()).unwrap_or("");
