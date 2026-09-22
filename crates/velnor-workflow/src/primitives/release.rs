@@ -1082,9 +1082,10 @@ fn debian_output_reset_step() -> &'static str {
     r"      - name: Reset cached Debian package outputs
         run: |
           set -euo pipefail
-          mkdir -p target dist
-          find target -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
-          find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
+          mkdir -p target/debian dist
+          rm -f target/debian/*.deb target/debian/*.deb.sha256
+          rm -f target/*/debian/*.deb target/*/debian/*.deb.sha256
+          rm -f dist/*.deb dist/*.deb.sha256
 "
 }
 
@@ -6243,11 +6244,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "a57b14781da54ec1a75013a03c2d5c23335919d5b46716f49157438a3fdb5dae",
+                "7e47f6efeb6793578a1b32b2968dc6fb59078df5baa2298f691c9219773519c5",
             ),
             (
                 "preview.yml",
-                "675d1b5256554f80cea1823fb4c9c9a210c4947e7b21d616224b5104fe87701b",
+                "2e47365204b9124a5a2bd55ddfed741e5c978a45681491178553d673072d5f6c",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -8324,13 +8325,15 @@ cp "$record" "$out"
             "cached output reset must precede packaging"
         );
         assert!(
-            debian.contains(
-                "find target -type f \\( -name '*.deb' -o -name '*.deb.sha256' \\) -delete"
-            ),
+            debian.contains("rm -f target/debian/*.deb target/debian/*.deb.sha256"),
             "{debian}"
         );
         assert!(
-            debian.contains("find dist -maxdepth 1 -type f \\( -name '*.deb' -o -name '*.deb.sha256' \\) -delete"),
+            debian.contains("rm -f target/*/debian/*.deb target/*/debian/*.deb.sha256"),
+            "{debian}"
+        );
+        assert!(
+            debian.contains("rm -f dist/*.deb dist/*.deb.sha256"),
             "{debian}"
         );
         // The rolling release is replaced under its Preview title, never

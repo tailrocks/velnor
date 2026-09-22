@@ -5270,22 +5270,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn debian_collect_rejects_two_distinct_debs_with_their_paths() {
-        // Two genuinely different file names are still an ambiguous pick:
-        // fail closed, and name both paths so the log diagnoses itself.
+    fn debian_collect_rejects_stale_cross_arch_outputs_in_both_roots() {
+        // A cached amd64 package and the current arm64 package are an
+        // ambiguous corpus even when cargo-deb left entries in both scan
+        // roots; fail closed and name both packages in the log.
         let (root, canonical, twin) = debian_output_fixture("distinct");
         let dist = root.join("dist");
-        must(
-            std::fs::write(canonical.join("widget_1.2.3_amd64.deb"), b"one"),
-            "write first deb",
-        );
-        must(
-            std::fs::write(twin.join("widget_1.2.4_amd64.deb"), b"two"),
-            "write second deb",
-        );
+        let stale_amd64 = "velnor-runner_0.1.277~preview.362+f7bc191_amd64.deb";
+        let current_arm64 = "velnor-runner_0.1.277~preview.369+507e722_arm64.deb";
+        for directory in [&canonical, &twin] {
+            must(
+                std::fs::write(directory.join(stale_amd64), b"stale amd64"),
+                "write stale amd64 deb",
+            );
+            must(
+                std::fs::write(directory.join(current_arm64), b"current arm64"),
+                "write current arm64 deb",
+            );
+        }
         let error = must_fail(
-            collect_debian_packages_from(&[canonical, twin], &dist, Some("widget-1.2.3-amd64.deb")),
-            "two distinct debs must fail closed",
+            collect_debian_packages_from(
+                &[canonical, twin],
+                &dist,
+                Some("velnor-runner-preview-0.1.277~preview.369+507e722-arm64.deb"),
+            ),
+            "stale cross-arch debs must fail closed",
         );
         let message = error.to_string();
         assert!(
@@ -5293,8 +5302,7 @@ pub(crate) mod tests {
             "unexpected error: {message}"
         );
         assert!(
-            message.contains("widget_1.2.3_amd64.deb")
-                && message.contains("widget_1.2.4_amd64.deb"),
+            message.contains(stale_amd64) && message.contains(current_arm64),
             "error must list both paths: {message}"
         );
         let _ = std::fs::remove_dir_all(&root);

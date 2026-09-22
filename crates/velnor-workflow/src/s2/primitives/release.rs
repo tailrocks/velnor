@@ -1249,9 +1249,10 @@ fn debian_output_reset_step() -> &'static str {
     r"      - name: Reset cached Debian package outputs
         run: |
           set -euo pipefail
-          mkdir -p target dist
-          find target -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
-          find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
+          mkdir -p target/debian dist
+          rm -f target/debian/*.deb target/debian/*.deb.sha256
+          rm -f target/*/debian/*.deb target/*/debian/*.deb.sha256
+          rm -f dist/*.deb dist/*.deb.sha256
 "
 }
 
@@ -6883,11 +6884,11 @@ cp "$record" "$out"
             // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "781448c315a6a8eb5453c0769f5499d30c8e3f6d38b335e409c304f2825c4437",
+                "20723cb32c484b2bed46b97bfa35a54387dc0e018eb87bd5962d1c14f7bff471",
             ),
             (
                 "preview.yml",
-                "104dc0b6e32253862381977598ed138e245a18d52d0d2c6b8bc0d1f886dc74c1",
+                "c15885d80825ef39fcdf5879f51f4da931a7d0860ff20a5b06f04c89f5c91e37",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -9606,13 +9607,15 @@ verification_providers = ["github-hosted"]
             "cached output reset must precede packaging"
         );
         assert!(
-            debian.contains(
-                "find target -type f \\( -name '*.deb' -o -name '*.deb.sha256' \\) -delete"
-            ),
+            debian.contains("rm -f target/debian/*.deb target/debian/*.deb.sha256"),
             "{debian}"
         );
         assert!(
-            debian.contains("find dist -maxdepth 1 -type f \\( -name '*.deb' -o -name '*.deb.sha256' \\) -delete"),
+            debian.contains("rm -f target/*/debian/*.deb target/*/debian/*.deb.sha256"),
+            "{debian}"
+        );
+        assert!(
+            debian.contains("rm -f dist/*.deb dist/*.deb.sha256"),
             "{debian}"
         );
         // The rolling release is replaced under its Preview title, never
