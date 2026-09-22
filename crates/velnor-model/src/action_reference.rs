@@ -76,9 +76,20 @@ impl RepositoryActionReference {
                 "reference must be owner/repository with an optional safe path",
             ));
         }
+        let source_path = if parts.len() > 2 {
+            let source_path = parts[2..].join("/");
+            SafeActionPath::parse(&source_path).map_err(|_| {
+                invalid_repository_action(
+                    "reference must be owner/repository with an optional safe path",
+                )
+            })?;
+            Some(source_path)
+        } else {
+            None
+        };
         Ok(Self {
             repository: format!("{}/{}", parts[0], parts[1]),
-            source_path: (parts.len() > 2).then(|| parts[2..].join("/")),
+            source_path,
             git_ref: git_ref.to_owned(),
         })
     }
@@ -192,6 +203,18 @@ impl SafeActionPath {
 /// missing-file diagnostic; every existing component is checked without
 /// following links.
 pub fn resolve_action_path(action_root: &Path, raw: &str) -> Result<PathBuf, InvalidActionPath> {
+    match std::fs::symlink_metadata(action_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(invalid_action_path("action root is a symlink"));
+        }
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
+        Err(error) => return Err(InvalidActionPath::Io(error)),
+    }
     let relative = SafeActionPath::parse(raw)?;
     let resolved = action_root.join(relative.as_path());
     let mut existing = action_root.to_path_buf();
@@ -328,7 +351,7 @@ fn is_dockerfile_reference(value: &str) -> bool {
     }
     let basename = value.rsplit('/').next().unwrap_or(value);
     let basename = basename.to_ascii_lowercase();
-    basename.starts_with("dockerfile.") || basename.ends_with("dockerfile")
+    basename == "dockerfile" || basename.starts_with("dockerfile.")
 }
 
 fn validate_name(name: &str) -> Result<(), InvalidImageReference> {

@@ -27,11 +27,12 @@ pub mod action_contract {
     use std::collections::BTreeMap;
 
     pub use crate::action::{
-        composite_action_invocations, parse_action_metadata, ActionInput, ActionMetadata,
-        ActionOutput, ActionRuns, ActionRuntime, CompositeActionInvocation, CompositeActionOutputs,
-        CompositeActionStep, LocalActionPlan, RepositoryActionPlan, ResolvedAction,
+        composite_action_invocations, parse_action_metadata, ActionMetadata, ActionRuntime,
+        CompositeActionInvocation, CompositeActionOutputs, CompositeActionStep, LocalActionPlan,
+        RepositoryActionPlan, ResolvedAction,
     };
     pub use crate::script_step::ScriptStep;
+    pub use velnor_model::action_contract::{ActionInput, ActionOutput, ActionRuns};
 
     /// Build the exact argv used by the runner for a composite `run` step.
     /// The generator's consumer harness uses this narrow test-support seam so

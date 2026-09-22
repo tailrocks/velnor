@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_yaml::{Mapping, Value};
+use velnor_model::action_reference::RepositoryActionReference;
 
 use super::{
     closure as closure_identity, config, runtime, GeneratorError, ProjectConfig, SOURCE_CLOSURE,
@@ -3054,9 +3055,7 @@ fn is_approved_local_reusable(value: &str) -> bool {
 }
 
 fn is_full_sha_reference(value: &str) -> bool {
-    value
-        .split_once('@')
-        .is_some_and(|(action, reference)| !action.is_empty() && super::is_full_revision(reference))
+    RepositoryActionReference::parse(value).is_ok()
 }
 
 /// A repository-local composite action, pinned by the audited tree itself:

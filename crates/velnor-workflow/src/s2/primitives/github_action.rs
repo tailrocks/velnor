@@ -1500,6 +1500,8 @@ runs:
         metadata
             .runs
             .steps
+            .as_deref()
+            .unwrap_or_default()
             .iter()
             .enumerate()
             .filter_map(|(index, step)| {
@@ -1535,7 +1537,14 @@ runs:
         scopes: &mut LocalCompositeScopes,
     ) -> usize {
         let mut invocation_count = 0;
-        for (index, step) in metadata.runs.steps.iter().enumerate() {
+        for (index, step) in metadata
+            .runs
+            .steps
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
             let step_id = composite_step_id(scope_prefix, step.id.as_deref(), index);
             let Some(uses) = step.uses.as_deref() else {
                 if step.run.is_some() {

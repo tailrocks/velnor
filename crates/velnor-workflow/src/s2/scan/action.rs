@@ -11,6 +11,9 @@ use std::path::Path;
 
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
+use velnor_model::action_contract::{
+    parse_action_metadata_value, ActionMetadata, ActionRuns, CompositeActionStep,
+};
 use velnor_model::action_reference::{
     resolve_action_path, ActionImageReference, RepositoryActionReference,
 };
@@ -32,70 +35,7 @@ struct ActionSource {
     kind: ActionSourceKind,
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ActionMetadata {
-    #[serde(default)]
-    inputs: serde_yaml::Value,
-    #[serde(default)]
-    outputs: serde_yaml::Value,
-    runs: ActionRuns,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ActionRuns {
-    using: String,
-    #[serde(default)]
-    main: Option<String>,
-    #[serde(default)]
-    pre: Option<String>,
-    #[serde(default)]
-    post: Option<String>,
-    #[serde(default, rename = "pre-if", alias = "preIf")]
-    pre_if: Option<String>,
-    #[serde(default, rename = "post-if", alias = "postIf")]
-    post_if: Option<String>,
-    #[serde(default)]
-    image: Option<String>,
-    #[serde(default)]
-    entrypoint: Option<String>,
-    #[serde(default, rename = "pre-entrypoint", alias = "preEntrypoint")]
-    pre_entrypoint: Option<String>,
-    #[serde(default, rename = "post-entrypoint", alias = "postEntrypoint")]
-    post_entrypoint: Option<String>,
-    #[serde(default)]
-    args: serde_yaml::Value,
-    #[serde(default)]
-    env: serde_yaml::Value,
-    #[serde(default)]
-    steps: Option<Vec<ActionStep>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ActionStep {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    run: Option<String>,
-    #[serde(default)]
-    uses: Option<String>,
-    #[serde(default)]
-    shell: Option<String>,
-    #[serde(default, rename = "if")]
-    condition: Option<String>,
-    #[serde(default, rename = "working-directory", alias = "workingDirectory")]
-    working_directory: Option<String>,
-    #[serde(default, rename = "continue-on-error", alias = "continueOnError")]
-    continue_on_error: Option<serde_yaml::Value>,
-    #[serde(default)]
-    with: serde_yaml::Value,
-    #[serde(default)]
-    env: serde_yaml::Value,
-}
+type ActionStep = CompositeActionStep;
 
 /// Check mapping keys before `serde_yaml::Value` converts them. Runner first
 /// converts scalar keys to strings, then applies schema-specific key checks
@@ -795,6 +735,11 @@ fn discover_action_sources(
             }
         }
     }
+    for directory in &referenced_roots {
+        if let Some(source) = candidates.get(directory) {
+            validate_local_action_source(root, source)?;
+        }
+    }
     Ok(candidates
         .into_iter()
         .filter_map(|(root, source)| match source.kind {
@@ -877,11 +822,13 @@ fn discovered_local_action_root(
     root: &Path,
     reference: &str,
 ) -> Result<Option<String>, crate::s2::GeneratorError> {
-    let reference = reference.trim();
     let relative = if let Some(relative) = reference.strip_prefix("./") {
         relative
     } else if let Some(relative) = reference.strip_prefix(".\\") {
-        relative
+        let _ = relative;
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub local action reference `{reference}` contains a backslash"
+        )));
     } else {
         if is_unsafe_local_action_reference(reference) {
             return Err(crate::s2::GeneratorError::usage(format!(
@@ -895,40 +842,35 @@ fn discovered_local_action_root(
             "GitHub local action reference `{reference}` must be static"
         )));
     }
-    let normalized = relative.replace('\\', "/");
-    if normalized.starts_with('/') || has_windows_drive_prefix(&normalized) {
-        return Err(crate::s2::GeneratorError::usage(format!(
-            "GitHub local action reference `{reference}` must stay inside the repository workspace"
-        )));
+    if relative.is_empty() {
+        // `./` denotes the repository root. Probe a canonical metadata path
+        // solely to apply the shared root/symlink boundary without requiring
+        // the final action file to exist yet.
+        resolve_action_path(root, "action.yml").map_err(|error| {
+            crate::s2::GeneratorError::usage(format!(
+                "GitHub local action reference `{reference}` is unsafe: {error}"
+            ))
+        })?;
+        return Ok(Some(".".to_owned()));
     }
-    let mut components = Vec::new();
-    for component in normalized.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => {
-                return Err(crate::s2::GeneratorError::usage(format!(
-                    "GitHub local action reference `{reference}` escapes the repository workspace"
-                )));
-            }
-            component if has_windows_drive_prefix(component) => {
-                return Err(crate::s2::GeneratorError::usage(format!(
-                    "GitHub local action reference `{reference}` must stay inside the repository workspace"
-                )));
-            }
-            component => components.push(component),
-        }
-    }
-    let repository_path = if components.is_empty() {
-        ".".to_owned()
-    } else {
-        components.join("/")
-    };
-    reject_symlink_components(root, &components, reference)?;
+    let resolved = resolve_action_path(root, relative).map_err(|error| {
+        crate::s2::GeneratorError::usage(format!(
+            "GitHub local action reference `{reference}` is unsafe: {error}"
+        ))
+    })?;
+    let repository_path = resolved
+        .strip_prefix(root)
+        .map_err(|_| {
+            crate::s2::GeneratorError::usage(format!(
+                "GitHub local action reference `{reference}` must stay inside the repository workspace"
+            ))
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
     Ok(Some(repository_path))
 }
 
 fn is_runner_local_action_reference(reference: &str) -> bool {
-    let reference = reference.trim();
     reference.starts_with("./") || reference.starts_with(".\\")
 }
 
@@ -956,7 +898,7 @@ fn reject_symlink_components(
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(crate::s2::GeneratorError::usage(format!(
-                    "GitHub local action reference `{reference}` traverses symlink `{}`",
+                    "GitHub Action path `{reference}` traverses symlink `{}`",
                     path.display()
                 )));
             }
@@ -971,7 +913,7 @@ fn reject_symlink_components(
             }
             Err(error) => {
                 return Err(crate::s2::GeneratorError::io(
-                    "inspect GitHub local action path",
+                    "inspect GitHub Action path",
                     &path,
                     &error,
                 ));
@@ -1096,7 +1038,7 @@ fn parse_metadata(
         })?;
     normalize_runner_tags(&mut document)?;
     validate_metadata_shape(&document)?;
-    let metadata: ActionMetadata = serde_yaml::from_value(&document).map_err(|error| {
+    let metadata: ActionMetadata = parse_action_metadata_value(document).map_err(|error| {
         crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {}: {error}",
             metadata_file.display()
@@ -1187,7 +1129,11 @@ fn validate_inputs(value: &serde_yaml::Value) -> Result<(), crate::s2::Generator
             if runner_ordinal_ignore_case_eq(field, "default")
                 || runner_ordinal_ignore_case_eq(field, "deprecationMessage")
             {
-                require_string(value, &format!("inputs.{field}"), false)?;
+                if runner_ordinal_ignore_case_eq(field, "default") {
+                    require_scalar_string_compatible(value, &format!("inputs.{field}"))?;
+                } else {
+                    require_string(value, &format!("inputs.{field}"), false)?;
+                }
             }
         }
     }
@@ -1317,6 +1263,30 @@ fn validate_string_mapping(
     Ok(())
 }
 
+fn validate_scalar_string_mapping(
+    value: &serde_yaml::Value,
+    field: &str,
+) -> Result<(), crate::s2::GeneratorError> {
+    let mapping = require_mapping(value, field)?;
+    for (name, value) in mapping {
+        mapping_key(name, field)?;
+        require_scalar_string_compatible(value, &format!("{field} entry"))?;
+    }
+    Ok(())
+}
+
+fn require_scalar_string_compatible(
+    value: &serde_yaml::Value,
+    field: &str,
+) -> Result<(), crate::s2::GeneratorError> {
+    if !value.is_null() && !value.is_string() && !value.is_bool() && !value.is_number() {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata `{field}` must be a scalar string-compatible value"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_composite_steps(value: &serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
     let steps = value.as_sequence().ok_or_else(|| {
         crate::s2::GeneratorError::usage(
@@ -1332,7 +1302,7 @@ fn validate_composite_steps(value: &serde_yaml::Value) -> Result<(), crate::s2::
                 "name" | "if" | "run" | "shell" | "working-directory" | "uses" => {
                     require_string(value, &format!("composite step {field}"), field == "uses")?;
                 }
-                "with" | "env" => validate_string_mapping(value, &format!("step.{field}"))?,
+                "with" | "env" => validate_scalar_string_mapping(value, &format!("step.{field}"))?,
                 "continue-on-error" => match value {
                     serde_yaml::Value::Bool(_) => {}
                     _ => require_string(value, "composite step continue-on-error", false)?,
@@ -1369,18 +1339,6 @@ fn validate_composite_steps(value: &serde_yaml::Value) -> Result<(), crate::s2::
                 "GitHub composite action step {index} must declare `shell`"
             )));
         }
-    }
-    Ok(())
-}
-
-fn validate_mapping(
-    value: &serde_yaml::Value,
-    field: &str,
-) -> Result<(), crate::s2::GeneratorError> {
-    if !value.is_mapping() {
-        return Err(crate::s2::GeneratorError::usage(format!(
-            "GitHub Action metadata `{field}` must be a mapping"
-        )));
     }
     Ok(())
 }
@@ -1575,24 +1533,9 @@ fn strip_action_path_marker(reference: &str) -> Option<&str> {
 }
 
 fn validate_composite_step(step: &ActionStep) -> Result<(), crate::s2::GeneratorError> {
-    // Keep GitHub's expression-bearing fields opaque, but preserve their
-    // mapping/value shapes instead of silently treating malformed metadata as
-    // a valid action. `if`, `id`, `name`, and `working-directory` remain
-    // untouched by the detector and therefore retain the action's semantics.
-    if !step.with.is_null() {
-        validate_mapping(&step.with, "step.with")?;
-    }
-    if !step.env.is_null() {
-        validate_mapping(&step.env, "step.env")?;
-    }
-    if let Some(continue_on_error) = &step.continue_on_error
-        && !continue_on_error.is_bool()
-        && !continue_on_error.is_string()
-    {
-        return Err(crate::s2::GeneratorError::usage(
-            "GitHub composite action step `continue-on-error` must be a boolean or expression string",
-        ));
-    }
+    // Shape and scalar coercion are checked before typed deserialization by
+    // `validate_composite_steps`; this function only handles invariants that
+    // remain visible in the shared runner contract.
     if step.id.as_deref().is_some_and(str::is_empty) {
         return Err(crate::s2::GeneratorError::usage(
             "GitHub composite action step `id` must not be empty",
@@ -1787,7 +1730,6 @@ fn add_local_action_reference(
     root: &Path,
     files: &[String],
 ) -> Result<(), crate::s2::GeneratorError> {
-    let reference = reference.trim();
     let Some(directory) = discovered_local_action_root(root, reference)? else {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub composite local action `{reference}` must start with `./` or `.\\`"
@@ -1797,12 +1739,35 @@ fn add_local_action_reference(
         .into_values()
         .find(|source| source.root == directory)
     {
+        validate_local_action_source(root, &source)?;
         references.insert(source.path);
         return Ok(());
     }
     Err(crate::s2::GeneratorError::usage(format!(
         "GitHub composite local action `{reference}` has no action metadata or Dockerfile under `{directory}`"
     )))
+}
+
+fn validate_local_action_source(
+    root: &Path,
+    source: &ActionSource,
+) -> Result<(), crate::s2::GeneratorError> {
+    match source.kind {
+        ActionSourceKind::Dockerfile => Err(crate::s2::GeneratorError::usage(format!(
+            "workflow-local action `{}` uses Docker runtime; only composite local actions are supported",
+            source.root
+        ))),
+        ActionSourceKind::Metadata => {
+            let metadata = parse_metadata(root, &source.path)?;
+            if !metadata.runs.using.eq_ignore_ascii_case("composite") {
+                return Err(crate::s2::GeneratorError::usage(format!(
+                    "workflow-local action `{}` uses runtime `{}`; only composite local actions are supported",
+                    source.root, metadata.runs.using
+                )));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn shell_references(command: &str) -> Vec<String> {
@@ -3167,12 +3132,16 @@ mod tests {
             fs::create_dir_all(root.join("actions/child")),
             "create local action target",
         );
-        for reference in ["./actions/child", ".\\actions\\child"] {
-            assert_eq!(
-                super::discovered_local_action_root(&root, reference)
-                    .unwrap_or_else(|error| panic!("{error}")),
-                Some("actions/child".to_owned()),
-                "Runner local marker did not resolve: {reference}"
+        assert_eq!(
+            super::discovered_local_action_root(&root, "./actions/child")
+                .unwrap_or_else(|error| panic!("{error}")),
+            Some("actions/child".to_owned()),
+            "Runner local marker did not resolve"
+        );
+        for reference in [".\\actions\\child", " ./actions/child "] {
+            assert!(
+                super::discovered_local_action_root(&root, reference).is_err(),
+                "non-canonical local action reference was accepted: {reference}"
             );
         }
         for reference in ["actions/child", ".actions/child"] {
@@ -3213,7 +3182,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_local_uses_proves_bare_dockerfile_action_without_manifest_guessing() {
+    fn workflow_local_uses_reject_non_composite_dockerfile_action() {
         let root = fixture("workflow-bare-docker");
         must(
             fs::write(root.join("Dockerfile"), "FROM scratch\n"),
@@ -3248,20 +3217,66 @@ mod tests {
             ),
             "write local action consumer workflow",
         );
-        let shape = must(
-            super::super::scan_shape_for_tests(&root, &providers(), "main", &[]),
-            "scan workflow-referenced Docker action",
+        let error = super::super::scan_shape_for_tests(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("workflow-local Docker action was accepted"));
+        assert!(
+            error
+                .to_string()
+                .contains("only composite local actions are supported"),
+            "{error}"
         );
-        let action = shape
-            .units
-            .iter()
-            .find(|unit| unit.kind == crate::s2::UnitKind::GithubAction)
-            .unwrap_or_else(|| panic!("workflow-referenced bare Dockerfile action missing"));
-        assert_eq!(action.root, ".");
-        assert!(action
-            .pr_commands
-            .iter()
-            .any(|command| command == "velnor-workflow verify-action --path 'Dockerfile'"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workflow_local_uses_reject_non_composite_metadata_action() {
+        let root = fixture("workflow-local-node");
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: node20\n  main: dist/index.js\n",
+            ),
+            "write workflow-referenced Node action",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"workflow-local-node\"\nversion = \"0.0.0\"\n",
+            ),
+            "write Rust manifest beside workflow-local Node action",
+        );
+        must(
+            fs::write(root.join("package.json"), "{}\n"),
+            "write package manifest beside workflow-local Node action",
+        );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"stable\"\n",
+            ),
+            "pin workflow fixture Rust toolchain",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create workflow source directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/consumer.yml"),
+                "name: consumer\njobs:\n  consume:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./\n",
+            ),
+            "write local action consumer workflow",
+        );
+        let error = super::super::scan_shape_for_tests(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("workflow-local Node action was accepted"));
+        assert!(
+            error
+                .to_string()
+                .contains("only composite local actions are supported"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

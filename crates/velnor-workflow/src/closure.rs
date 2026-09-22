@@ -91,6 +91,19 @@ pub(crate) const CLOSURE_PATHS: &[&str] = &[
     ".cargo",
 ];
 
+/// Published consumer closure until the expanded producer product has been
+/// published and the pin is promoted in a separate change. Consumers must
+/// not derive an unpublished product from a capability change in the same
+/// commit.
+pub(crate) const BOOTSTRAP_CLOSURE_PATHS: &[&str] = &[
+    "crates/velnor-workflow",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "rust-toolchain",
+    ".cargo",
+];
+
 /// Whether `value` is a full 64-hex closure digest.
 pub(crate) fn is_full_closure(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())

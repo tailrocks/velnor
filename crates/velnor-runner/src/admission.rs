@@ -27,7 +27,9 @@ use anyhow::Result;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::action::{native_action_adapter, ActionAdapter, ActionMetadata, NATIVE_ACTION_REF};
+use crate::action::{
+    native_action_adapter, ActionAdapter, ActionMetadata, ActionRuntime, NATIVE_ACTION_REF,
+};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
@@ -806,7 +808,7 @@ pub fn admit_job(
                 .path
                 .as_deref()
                 .or(reference.name.as_deref())
-                .map(|value| value.trim_start_matches("./").to_string())
+                .map(|value| value.strip_prefix("./").unwrap_or(value).to_string())
                 .unwrap_or_default();
             let ancestry = root.child(format!("step '{step_label}' (local ./{subpath})"));
             admit_local(
@@ -979,11 +981,31 @@ fn admit_remote(
     inputs: &BTreeMap<String, String>,
     step_label: &str,
 ) -> Result<(), AdmissionError> {
+    let native_ref = action_ref == NATIVE_ACTION_REF && subpath.is_none();
     let inputs = canonicalize_admission_inputs(inputs, ancestry)?;
     reject_runtime_capability_inputs(ancestry, repository, &inputs, walk.context_data)?;
     reject_unresolved_capability_inputs(ancestry, repository, &inputs)?;
     manifest::validate_resolved_action(step_label, repository, action_ref, subpath, &inputs)
         .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
+    let parsed = if native_ref {
+        None
+    } else {
+        Some(
+            RepositoryActionReference::from_parts(repository, subpath, action_ref).map_err(
+                |error| AdmissionError::malformed_manifest(ancestry, "uses", error.to_string()),
+            )?,
+        )
+    };
+    let (repository, action_ref, subpath) =
+        parsed
+            .as_ref()
+            .map_or((repository, action_ref, subpath), |reference| {
+                (
+                    reference.repository.as_str(),
+                    reference.git_ref.as_str(),
+                    reference.source_path.as_deref(),
+                )
+            });
     let adapter = manifest::find(repository)
         .map(|capability| capability.adapter)
         .ok_or_else(|| {
@@ -1069,42 +1091,57 @@ fn admit_local(
     provided_inputs: LocalInputSource<'_>,
     depth: usize,
 ) -> Result<(), AdmissionError> {
-    if subpath.starts_with('/')
-        || subpath
-            .split('/')
-            .any(|segment| segment == ".." || segment.is_empty())
-    {
-        return Err(AdmissionError::new(
+    let safe_subpath = SafeActionPath::parse(subpath).map_err(|error| {
+        AdmissionError::new(
             ancestry,
             "path",
-            "local action path escapes the workflow repository",
+            format!("local action path is unsafe: {error}"),
             Vec::new(),
-        ));
-    }
-    if !is_full_sha(sha) {
-        return Err(AdmissionError::new(
-            ancestry,
-            "ref",
-            "local action workflow ref must be an immutable full-SHA",
-            vec!["a 40-hex commit SHA".to_string()],
-        ));
-    }
+        )
+    })?;
+    let safe_subpath = safe_subpath.as_path().to_string_lossy().into_owned();
+    let parsed = RepositoryActionReference::from_parts(repository, Some(&safe_subpath), sha)
+        .map_err(|error| {
+            AdmissionError::new(
+                ancestry,
+                "ref",
+                error.to_string(),
+                vec!["owner/repository/path@<40-hex-SHA>".to_string()],
+            )
+        })?;
     let identity = ActionIdentity {
-        repository: repository.to_string(),
-        sha: sha.to_string(),
-        subpath: Some(subpath.to_string()),
+        repository: parsed.repository.clone(),
+        sha: parsed.git_ref.clone(),
+        subpath: parsed.source_path.clone(),
     };
-    let action_key = ActionKey::local(repository, sha, subpath);
+    let action_key = ActionKey::local(
+        &parsed.repository,
+        &parsed.git_ref,
+        parsed.source_path.as_deref().unwrap_or_default(),
+    );
     let index = walk
         .graph
         .intern(identity, AdmissionNodeKind::LocalAction, ancestry)?;
     walk.graph.link(parent, index, ancestry)?;
 
-    let metadata = cached_metadata(walk, &action_key, repository, sha, Some(subpath), ancestry)?;
-    if !is_composite(&metadata) {
-        // A local JavaScript/Docker action is trusted workflow-repository code;
-        // it is a closure leaf (matches the prior local preflight semantics).
-        return Ok(());
+    let metadata = cached_metadata(
+        walk,
+        &action_key,
+        &parsed.repository,
+        &parsed.git_ref,
+        parsed.source_path.as_deref(),
+        ancestry,
+    )?;
+    if metadata.runtime().map_err(|error| {
+        AdmissionError::malformed_manifest(ancestry, "runtime", error.to_string())
+    })? != ActionRuntime::Composite
+    {
+        return Err(AdmissionError::new(
+            ancestry,
+            "runtime",
+            "workflow-local action runtime is unsupported; only composite actions are executable",
+            vec!["composite".to_string()],
+        ));
     }
     let provided_inputs = provided_inputs
         .resolve()
@@ -1114,8 +1151,8 @@ fn admit_local(
         walk,
         ancestry,
         index,
-        repository,
-        sha,
+        &parsed.repository,
+        &parsed.git_ref,
         &provided_inputs,
         &metadata,
         depth,
@@ -1220,7 +1257,8 @@ fn recurse_composite(
             Vec::new(),
         ));
     }
-    if metadata.runs.steps.len() > MAX_COMPOSITE_STEPS {
+    let steps = metadata.runs.steps.as_deref().unwrap_or_default();
+    if steps.len() > MAX_COMPOSITE_STEPS {
         return Err(AdmissionError::new(
             ancestry,
             "steps",
@@ -1228,7 +1266,7 @@ fn recurse_composite(
             Vec::new(),
         ));
     }
-    walk.step_visits = walk.step_visits.saturating_add(metadata.runs.steps.len());
+    walk.step_visits = walk.step_visits.saturating_add(steps.len());
     if walk.step_visits > MAX_ADMISSION_STEP_VISITS {
         return Err(AdmissionError::new(
             ancestry,
@@ -1242,7 +1280,7 @@ fn recurse_composite(
     let composite_inputs = resolve_composite_inputs(metadata, provided_inputs);
     let inputs_context = inputs_context(&composite_inputs, walk.context_data);
 
-    for (child_index, step) in metadata.runs.steps.iter().enumerate() {
+    for (child_index, step) in steps.iter().enumerate() {
         let Some(uses) = step.uses.as_deref() else {
             continue;
         };
@@ -1362,10 +1400,6 @@ fn reject_runtime_capability_inputs(
         }
     }
     Ok(())
-}
-
-fn is_composite(metadata: &ActionMetadata) -> bool {
-    metadata.runs.using.eq_ignore_ascii_case("composite")
 }
 
 fn resolve_step_inputs(
@@ -1623,24 +1657,41 @@ fn validate_metadata_bounds(
         ("runs.post-if", metadata.runs.post_if.as_deref()),
         ("runs.image", metadata.runs.image.as_deref()),
         ("runs.entrypoint", metadata.runs.entrypoint.as_deref()),
+        (
+            "runs.pre-entrypoint",
+            metadata.runs.pre_entrypoint.as_deref(),
+        ),
+        (
+            "runs.post-entrypoint",
+            metadata.runs.post_entrypoint.as_deref(),
+        ),
     ] {
         validate_metadata_text(value, field, &mut total_string_bytes)?;
     }
     validate_action_metadata_paths(metadata)?;
-    if metadata.runs.args.len() > MAX_METADATA_MAP_ENTRIES {
+    validate_metadata_string_map(&metadata.runs.env, "runs.env", &mut total_string_bytes)?;
+    if metadata
+        .runs
+        .args
+        .as_ref()
+        .is_some_and(|args| args.len() > MAX_METADATA_MAP_ENTRIES)
+    {
         return Err(MetadataValidationFailure::policy(format!(
             "metadata argument count exceeds {MAX_METADATA_MAP_ENTRIES}"
         )));
     }
-    for value in &metadata.runs.args {
-        validate_metadata_text(Some(value), "runs.args", &mut total_string_bytes)?;
+    if let Some(args) = &metadata.runs.args {
+        for value in args {
+            validate_metadata_text(Some(value), "runs.args", &mut total_string_bytes)?;
+        }
     }
-    if metadata.runs.steps.len() > MAX_COMPOSITE_STEPS {
+    let steps = metadata.runs.steps.as_deref().unwrap_or_default();
+    if steps.len() > MAX_COMPOSITE_STEPS {
         return Err(MetadataValidationFailure::policy(format!(
             "metadata step count exceeds {MAX_COMPOSITE_STEPS}"
         )));
     }
-    for step in &metadata.runs.steps {
+    for step in steps {
         for (field, value) in [
             ("steps.id", step.id.as_deref()),
             ("steps.name", step.name.as_deref()),
@@ -1818,13 +1869,18 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
         metadata.runs.post_if.as_deref(),
         metadata.runs.image.as_deref(),
         metadata.runs.entrypoint.as_deref(),
+        metadata.runs.pre_entrypoint.as_deref(),
+        metadata.runs.post_entrypoint.as_deref(),
     ] {
         add(&mut total, value);
     }
-    for value in &metadata.runs.args {
-        total = total.saturating_add(value.len());
+    if let Some(args) = &metadata.runs.args {
+        for value in args {
+            total = total.saturating_add(value.len());
+        }
     }
-    for step in &metadata.runs.steps {
+    add_map(&mut total, &metadata.runs.env);
+    for step in metadata.runs.steps.as_deref().unwrap_or_default() {
         for value in [
             step.id.as_deref(),
             step.name.as_deref(),
@@ -2074,7 +2130,7 @@ mod tests {
         let source = FakeMetadataSource::new(&[
             (
                 "acme/repo/.github/actions/Foo@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                "runs:\n  using: node20\n  main: dist/index.js\n",
+                "runs:\n  using: composite\n  steps: []\n",
             ),
             (
                 "acme/repo/.github/actions/foo@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -2084,6 +2140,29 @@ mod tests {
         let error = admit_job(&job, &context, &source).unwrap_err();
         assert_eq!(source.reads(), 2);
         assert_eq!(error.field, "with.lookup-only");
+    }
+
+    #[test]
+    fn local_non_composite_actions_are_rejected_after_metadata_fetch() {
+        let sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let job = job(serde_json::json!([repo_step(
+            "./.github/actions/local-docker",
+            "",
+            Some("./.github/actions/local-docker"),
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[(
+            &format!("acme/repo/.github/actions/local-docker@{sha}"),
+            "runs:\n  using: docker\n  image: docker://alpine:3.20\n",
+        )]);
+
+        let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+
+        assert_eq!(source.reads(), 1);
+        assert_eq!(error.field, "runtime");
+        assert!(error
+            .to_string()
+            .contains("only composite actions are executable"));
     }
 
     #[test]

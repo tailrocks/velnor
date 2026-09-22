@@ -7,7 +7,6 @@ use crate::{
     script_step::{step_environment, value_truthy, ScriptStep},
 };
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Deserializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -18,107 +17,9 @@ use velnor_model::action_reference::{
     resolve_action_path, ActionImageReference, RepositoryActionReference,
 };
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionMetadata {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    pub runs: ActionRuns,
-    #[serde(default)]
-    pub inputs: BTreeMap<String, ActionInput>,
-    #[serde(default)]
-    pub outputs: BTreeMap<String, ActionOutput>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionInput {
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(
-        default,
-        rename = "default",
-        deserialize_with = "deserialize_optional_string_scalar"
-    )]
-    pub default_value: Option<String>,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionOutput {
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub value: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionRuns {
-    pub using: String,
-    #[serde(default)]
-    pub main: Option<String>,
-    #[serde(default)]
-    pub pre: Option<String>,
-    #[serde(default, rename = "pre-if", alias = "preIf")]
-    pub pre_if: Option<String>,
-    #[serde(default)]
-    pub post: Option<String>,
-    #[serde(default, rename = "post-if", alias = "postIf")]
-    pub post_if: Option<String>,
-    #[serde(default)]
-    pub image: Option<String>,
-    #[serde(default)]
-    pub entrypoint: Option<String>,
-    /// Docker-action pre/post entrypoints (`runs.pre-entrypoint` /
-    /// `runs.post-entrypoint`): upstream runs them as the Pre/Post stage
-    /// with the same image and args
-    /// (`ContainerActionHandler.cs: RunAsync(stage)`).
-    #[serde(default, rename = "pre-entrypoint", alias = "preEntrypoint")]
-    pub pre_entrypoint: Option<String>,
-    #[serde(default, rename = "post-entrypoint", alias = "postEntrypoint")]
-    pub post_entrypoint: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub steps: Vec<CompositeActionStep>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct CompositeActionStep {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub shell: Option<String>,
-    #[serde(default)]
-    pub run: Option<String>,
-    #[serde(default)]
-    pub uses: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_string_map")]
-    pub with: BTreeMap<String, String>,
-    #[serde(default, deserialize_with = "deserialize_string_map")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, rename = "if")]
-    pub condition: Option<String>,
-    #[serde(default, rename = "working-directory", alias = "workingDirectory")]
-    pub working_directory: Option<String>,
-    #[serde(
-        default,
-        rename = "continue-on-error",
-        alias = "continueOnError",
-        deserialize_with = "deserialize_optional_string_scalar"
-    )]
-    pub continue_on_error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionRuntime {
-    JavaScript { node: String, main: String },
-    Composite,
-    Docker { image: String },
-}
+pub use velnor_model::action_contract::{
+    parse_action_metadata, ActionMetadata, ActionRuntime, CompositeActionStep,
+};
 
 /// Dispatch class declared by the capability manifest. Generic action classes
 /// are deliberately separate from native adapters so an admitted action names
@@ -261,31 +162,6 @@ pub fn unsupported_action_error(repository: &str) -> Option<&'static str> {
     }
 }
 
-impl ActionMetadata {
-    pub fn runtime(&self) -> Result<ActionRuntime> {
-        let using = self.runs.using.to_ascii_lowercase();
-        if matches!(using.as_str(), "node12" | "node16" | "node20" | "node24") {
-            let main =
-                self.runs.main.clone().ok_or_else(|| {
-                    anyhow::anyhow!("JavaScript action metadata missing runs.main")
-                })?;
-            return Ok(ActionRuntime::JavaScript { node: using, main });
-        }
-        if using == "composite" {
-            return Ok(ActionRuntime::Composite);
-        }
-        if using == "docker" {
-            let image = self
-                .runs
-                .image
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("Docker action metadata missing runs.image"))?;
-            return Ok(ActionRuntime::Docker { image });
-        }
-        bail!("unsupported action runtime '{}'", self.runs.using)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryActionPlan {
     pub step_id: String,
@@ -321,13 +197,6 @@ pub enum CompositeActionInvocation {
 pub struct CompositeActionOutputs {
     pub step_id: String,
     pub outputs: BTreeMap<String, String>,
-}
-
-pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
-    if !metadata_document_within_budget(contents) {
-        bail!("action metadata nesting exceeds the admission parser budget");
-    }
-    serde_yaml::from_str(contents).context("parse action metadata")
 }
 
 const MAX_METADATA_PARSE_NESTING: usize = 64;
@@ -394,32 +263,6 @@ fn metadata_document_within_budget(contents: &str) -> bool {
     true
 }
 
-fn deserialize_optional_string_scalar<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(value.map(|value| input_value(&value)))
-}
-
-fn deserialize_string_map<'de, D>(
-    deserializer: D,
-) -> std::result::Result<BTreeMap<String, String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Some(object) = Option::<BTreeMap<String, serde_json::Value>>::deserialize(deserializer)?
-    else {
-        return Ok(BTreeMap::new());
-    };
-    Ok(object
-        .into_iter()
-        .map(|(name, value)| (name, input_value(&value)))
-        .collect())
-}
-
 pub fn repository_action_plans(
     steps: &[ActionStep],
     actions_host: &Path,
@@ -445,18 +288,19 @@ pub fn repository_action_plans(
             .git_ref
             .clone()
             .ok_or_else(|| anyhow::anyhow!("repository action '{repository}' missing ref"))?;
-        let repository_dir = repository_dir(actions_host, repository, &git_ref);
-        let action_dir = action_dir(
-            actions_host,
-            repository,
-            &git_ref,
-            reference.path.as_deref(),
-        )?;
+        let reference =
+            RepositoryActionReference::from_parts(repository, reference.path.as_deref(), &git_ref)
+                .map_err(|error| anyhow::anyhow!("invalid repository action reference: {error}"))?;
+        let repository = reference.repository;
+        let git_ref = reference.git_ref;
+        let source_path = reference.source_path;
+        let repository_dir = repository_dir(actions_host, &repository, &git_ref);
+        let action_dir = action_dir(actions_host, &repository, &git_ref, source_path.as_deref())?;
         plans.push(RepositoryActionPlan {
             step_id: step_id(step, plans.len()),
-            repository: repository.clone(),
+            repository,
             git_ref,
-            source_path: reference.path.clone(),
+            source_path,
             repository_dir,
             action_dir,
             inputs: string_inputs(step)?,
@@ -612,7 +456,15 @@ pub fn resolve_action(plan: &RepositoryActionPlan) -> Result<ResolvedAction> {
 
 pub fn resolve_local_action(plan: &LocalActionPlan) -> Result<ActionMetadata> {
     let metadata_path = action_metadata_path(&plan.action_dir)?;
-    parse_action_metadata(&read_bounded_file(&metadata_path)?)
+    let metadata = parse_action_metadata(&read_bounded_file(&metadata_path)?)?;
+    if metadata.runtime()? != ActionRuntime::Composite {
+        bail!(
+            "local action '{}' uses runtime '{}'; Velnor local action execution supports only composite actions",
+            plan.step_id,
+            metadata.runs.using
+        );
+    }
+    Ok(metadata)
 }
 
 fn read_bounded_file(path: &Path) -> Result<String> {
@@ -750,12 +602,24 @@ impl ResolvedAction {
         Ok(JavaScriptActionInvocation {
             node: node.clone(),
             pre_container_path,
-            pre_condition: self.metadata.runs.pre_if.clone(),
+            pre_condition: Some(
+                self.metadata
+                    .runs
+                    .pre_if
+                    .clone()
+                    .unwrap_or_else(|| "always()".to_string()),
+            ),
             main_container_path,
             post_container_path,
-            post_condition: self.metadata.runs.post_if.clone(),
+            post_condition: Some(
+                self.metadata
+                    .runs
+                    .post_if
+                    .clone()
+                    .unwrap_or_else(|| "always()".to_string()),
+            ),
             action_container_path,
-            inputs: self.plan.inputs.clone(),
+            inputs,
             env,
         })
     }
@@ -789,6 +653,15 @@ impl ResolvedAction {
                 .iter()
                 .map(|(name, value)| (input_env_name(name), value.clone())),
         );
+        for (name, value) in &self.metadata.runs.env {
+            let rendered = render_action_scoped_value(value, &inputs, &action_container_path)?;
+            if !env
+                .iter()
+                .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            {
+                env.push((name.clone(), rendered));
+            }
+        }
 
         let (image, build_context_host, dockerfile_host) = match ActionImageReference::parse(image)
             .map_err(|error| {
@@ -816,16 +689,21 @@ impl ResolvedAction {
             .metadata
             .runs
             .entrypoint
-            .as_ref()
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .or_else(|| input_value_case_insensitive(&inputs, "entryPoint").map(String::as_str))
             .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
             .transpose()?;
-        let args = self
-            .metadata
-            .runs
-            .args
-            .iter()
-            .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
-            .collect::<Result<Vec<_>>>()?;
+        let args = match self.metadata.runs.args.as_ref() {
+            Some(values) => values
+                .iter()
+                .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
+                .collect::<Result<Vec<_>>>()?,
+            None => input_value_case_insensitive(&inputs, "args")
+                .map(|value| parse_legacy_container_args(value))
+                .transpose()?
+                .unwrap_or_default(),
+        };
         let render_stage_entrypoint = |value: Option<&String>| {
             value
                 .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
@@ -839,14 +717,26 @@ impl ResolvedAction {
             build_context_host,
             dockerfile_host,
             action_container_path,
-            inputs: self.plan.inputs.clone(),
+            inputs,
             env,
             entrypoint,
             args,
             pre_entrypoint,
             post_entrypoint,
-            pre_condition: self.metadata.runs.pre_if.clone(),
-            post_condition: self.metadata.runs.post_if.clone(),
+            pre_condition: Some(
+                self.metadata
+                    .runs
+                    .pre_if
+                    .clone()
+                    .unwrap_or_else(|| "always()".to_string()),
+            ),
+            post_condition: Some(
+                self.metadata
+                    .runs
+                    .post_if
+                    .clone()
+                    .unwrap_or_else(|| "always()".to_string()),
+            ),
         })
     }
 
@@ -973,7 +863,14 @@ fn composite_action_invocations_with_path(
     let action_inputs = effective_inputs(metadata, inputs)?;
     let mut invocations = Vec::new();
     let mut step_ids = BTreeMap::new();
-    for (index, step) in metadata.runs.steps.iter().enumerate() {
+    for (index, step) in metadata
+        .runs
+        .steps
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("composite action metadata missing runs.steps"))?
+        .iter()
+        .enumerate()
+    {
         let step_id = composite_step_id(step_id_prefix, step.id.as_deref(), index);
         if let Some(id) = step.id.as_deref() {
             step_ids.insert(id.to_string(), step_id.clone());
@@ -1257,10 +1154,11 @@ fn local_action_path<'a>(name: Option<&'a str>, path: Option<&'a str>) -> Option
 }
 
 fn local_action_dir(workspace_host: &Path, source_path: &str) -> Result<PathBuf> {
-    if source_path.starts_with('/') || source_path.contains("..") {
-        bail!("unsupported local action path '{source_path}'")
-    }
-    Ok(workspace_host.join(source_path.trim_start_matches("./")))
+    let relative = source_path
+        .strip_prefix("./")
+        .ok_or_else(|| anyhow::anyhow!("unsupported local action path '{source_path}'"))?;
+    resolve_action_path(workspace_host, relative)
+        .map_err(|error| anyhow::anyhow!("unsupported local action path '{source_path}': {error}"))
 }
 
 fn workspace_container_path(workspace_container: &str, host_path: &Path) -> Result<String> {
@@ -1336,10 +1234,9 @@ fn action_dir(
 ) -> Result<PathBuf> {
     let mut dir = repository_dir(actions_host, repository, git_ref);
     if let Some(source_path) = source_path.filter(|path| !path.is_empty()) {
-        if source_path.starts_with('/') || source_path.contains("..") {
-            bail!("unsupported repository action path '{source_path}'")
-        }
-        dir = dir.join(source_path);
+        dir = resolve_action_path(&dir, source_path).map_err(|error| {
+            anyhow::anyhow!("unsupported repository action path '{source_path}': {error}")
+        })?;
     }
     Ok(dir)
 }
@@ -1821,12 +1718,66 @@ fn effective_inputs(
         if !declared_names.insert(canonical_name.clone()) {
             bail!("metadata input names differ only by ASCII case: {canonical_name}");
         }
-        if let Some(value) = &input.default_value {
-            inputs.insert(canonical_name, value.clone());
-        }
+        inputs.insert(
+            canonical_name,
+            input.default_value.clone().unwrap_or_default(),
+        );
     }
     inputs.extend(canonicalize_input_map(provided)?);
     Ok(inputs)
+}
+
+/// Tokenize the legacy Docker `args` input used when `runs.args` is absent.
+/// The runner keeps that value as a raw command-line string. Velnor's Docker
+/// argv boundary is typed, so perform only shell-style quote removal here and
+/// pass the resulting operands through the same `--`-protected builder as
+/// manifest sequence arguments. No shell is invoked.
+fn parse_legacy_container_args(value: &str) -> Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut in_word = false;
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some('"') if character == '\\' => {
+                let Some(next) = chars.next() else {
+                    bail!("legacy Docker args end with an escape");
+                };
+                current.push(next);
+            }
+            Some(_) => current.push(character),
+            None if character == '\'' || character == '"' => {
+                quote = Some(character);
+                in_word = true;
+            }
+            None if character.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None if character == '\\' => {
+                let Some(next) = chars.next() else {
+                    bail!("legacy Docker args end with an escape");
+                };
+                current.push(next);
+                in_word = true;
+            }
+            None => {
+                current.push(character);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        bail!("legacy Docker args contain an unterminated quote");
+    }
+    if in_word {
+        words.push(current);
+    }
+    Ok(words)
 }
 
 fn input_value_case_insensitive<'a>(
@@ -1979,7 +1930,10 @@ runs:
             }
         );
         assert_eq!(metadata.runs.entrypoint.as_deref(), Some("/entrypoint.sh"));
-        assert_eq!(metadata.runs.args, vec!["${{ inputs.image }}"]);
+        assert_eq!(
+            metadata.runs.args,
+            Some(vec!["${{ inputs.image }}".to_string()])
+        );
     }
 
     /// F4: docker `runs.pre-entrypoint` / `runs.post-entrypoint` (plus
@@ -2011,6 +1965,19 @@ runs:
     }
 
     #[test]
+    fn metadata_parser_requires_composite_steps_and_exact_runner_field_names() {
+        assert!(parse_action_metadata("runs:\n  using: composite\n").is_err());
+        assert!(parse_action_metadata(
+            "runs:\n  using: node20\n  main: dist/index.js\n  preIf: always()\n"
+        )
+        .is_err());
+        assert!(parse_action_metadata(
+            "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n      workingDirectory: .\n"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn metadata_parser_rejects_excessive_nesting_before_yaml_parse() {
         let nested = format!("{}true{}", "[".repeat(65), "]".repeat(65));
         assert!(parse_action_metadata(&nested).is_err());
@@ -2030,7 +1997,7 @@ runs:
 "#,
         )
         .unwrap();
-        assert_eq!(metadata.runs.steps.len(), 1);
+        assert_eq!(metadata.runs.steps.as_deref().unwrap().len(), 1);
     }
 
     #[test]
@@ -2055,10 +2022,19 @@ runs:
         .unwrap();
 
         assert_eq!(metadata.runtime().unwrap(), ActionRuntime::Composite);
-        assert_eq!(metadata.runs.steps[0].env["BOOL_VALUE"], "false");
-        assert_eq!(metadata.runs.steps[0].env["COUNT"], "7");
-        assert_eq!(metadata.runs.steps[1].with["cleanup"], "false");
-        assert_eq!(metadata.runs.steps[1].with["retries"], "3");
+        assert_eq!(
+            metadata.runs.steps.as_deref().unwrap()[0].env["BOOL_VALUE"],
+            "false"
+        );
+        assert_eq!(metadata.runs.steps.as_deref().unwrap()[0].env["COUNT"], "7");
+        assert_eq!(
+            metadata.runs.steps.as_deref().unwrap()[1].with["cleanup"],
+            "false"
+        );
+        assert_eq!(
+            metadata.runs.steps.as_deref().unwrap()[1].with["retries"],
+            "3"
+        );
     }
 
     #[test]
@@ -2159,7 +2135,7 @@ runs:
                 "reference": {
                     "type": "Repository",
                     "name": "actions/cache",
-                    "ref": "v5",
+                    "ref": "0123456789abcdef0123456789abcdef01234567",
                     "path": "sub/action"
                 },
                 "inputs": { "key": "cargo-linux", "cache-on-failure": true, "fetch-depth": 0 },
@@ -2173,13 +2149,13 @@ runs:
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].step_id, "setup");
         assert_eq!(plans[0].repository, "actions/cache");
-        assert_eq!(plans[0].git_ref, "v5");
+        assert_eq!(plans[0].git_ref, "0123456789abcdef0123456789abcdef01234567");
         assert_eq!(
             plans[0].repository_dir,
             Path::new("/tmp/actions")
                 .join("_actions")
                 .join("actions_cache")
-                .join("v5")
+                .join("0123456789abcdef0123456789abcdef01234567")
         );
         assert_eq!(plans[0].inputs["key"], "cargo-linux");
         assert_eq!(plans[0].inputs["cache-on-failure"], "true");
@@ -2193,7 +2169,7 @@ runs:
             Path::new("/tmp/actions")
                 .join("_actions")
                 .join("actions_cache")
-                .join("v5")
+                .join("0123456789abcdef0123456789abcdef01234567")
                 .join("sub/action")
         );
     }
@@ -2206,7 +2182,7 @@ runs:
                 "reference": {
                     "type": "Repository",
                     "name": "actions/cache",
-                    "ref": "v5"
+                    "ref": "0123456789abcdef0123456789abcdef01234567"
                 },
                 "inputs": {
                     "type": "map",
@@ -3485,6 +3461,7 @@ inputs:
     required: true
   fail-on-cache-miss:
     default: "false"
+  lookup-only: {}
 runs:
   using: node20
   main: dist/index.js
@@ -3507,6 +3484,11 @@ runs:
         assert!(invocation
             .env
             .contains(&("INPUT_FAIL-ON-CACHE-MISS".into(), "false".into())));
+        assert!(invocation
+            .env
+            .contains(&("INPUT_LOOKUP-ONLY".into(), "".into())));
+        assert_eq!(invocation.pre_condition.as_deref(), Some("always()"));
+        assert_eq!(invocation.post_condition.as_deref(), Some("always()"));
     }
 
     #[test]
@@ -3704,6 +3686,79 @@ runs:
         assert!(invocation
             .env
             .contains(&("LOG_LEVEL".into(), "debug".into())));
+    }
+
+    #[test]
+    fn builds_docker_invocation_with_env_and_legacy_entrypoint_args() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "legacy-docker".into(),
+            repository: "octo/legacy-docker".into(),
+            git_ref: "0123456789abcdef0123456789abcdef01234567".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/octo_legacy-docker/sha"),
+            action_dir: actions_host.join("_actions/octo_legacy-docker/sha"),
+            inputs: [
+                ("entryPoint".into(), "/legacy-entrypoint".into()),
+                ("args".into(), "--flag \"two words\" -- --user".into()),
+                ("name".into(), "velnor".into()),
+            ]
+            .into(),
+            env: vec![("ACTION_NAME".into(), "step-value".into())],
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  entryPoint: {}
+  args: {}
+  name: {}
+runs:
+  using: docker
+  image: docker://alpine:3.20
+  env:
+    ACTION_NAME: ${{ inputs.name }}
+    ACTION_PATH_VALUE: ${{ github.action_path }}
+"#,
+        )
+        .unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/octo_legacy-docker/sha/action.yml"),
+            runtime: metadata.runtime().unwrap(),
+            metadata,
+        };
+
+        let invocation = resolved.docker_invocation(actions_host).unwrap();
+
+        assert_eq!(invocation.entrypoint.as_deref(), Some("/legacy-entrypoint"));
+        assert_eq!(invocation.args, vec!["--flag", "two words", "--", "--user"]);
+        assert_eq!(
+            invocation
+                .env
+                .iter()
+                .find(|(name, _)| name == "ACTION_NAME")
+                .map(|(_, value)| value.as_str()),
+            Some("step-value")
+        );
+        assert!(invocation.env.contains(&(
+            "ACTION_PATH_VALUE".into(),
+            "/__a/_actions/octo_legacy-docker/sha".into()
+        )));
+        assert_eq!(invocation.pre_condition.as_deref(), Some("always()"));
+        assert_eq!(invocation.post_condition.as_deref(), Some("always()"));
+    }
+
+    #[test]
+    fn legacy_docker_args_reject_malformed_quotes() {
+        assert!(parse_legacy_container_args("--flag \\").is_err());
+        assert!(parse_legacy_container_args("'unterminated").is_err());
+        assert_eq!(
+            parse_legacy_container_args("'' \"two words\"").unwrap(),
+            vec!["", "two words"]
+        );
     }
 
     #[test]
@@ -3906,7 +3961,11 @@ runs:
             let error = resolved
                 .docker_invocation(actions_host)
                 .expect_err("unsafe Dockerfile path passed runner");
-            assert!(error.to_string().contains("unsafe action metadata path"));
+            assert!(
+                error.to_string().contains("unsafe action metadata path")
+                    || error.to_string().contains("invalid Docker image"),
+                "unexpected Docker path rejection: {error}"
+            );
         }
     }
 
@@ -4131,7 +4190,7 @@ runs:
                 if metadata.runtime().unwrap() != ActionRuntime::Composite {
                     continue;
                 }
-                for step in &metadata.runs.steps {
+                for step in metadata.runs.steps.as_deref().unwrap_or_default() {
                     let Some(uses) = step.uses.as_deref() else {
                         continue;
                     };

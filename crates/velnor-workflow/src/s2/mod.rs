@@ -6167,7 +6167,7 @@ pub(crate) fn workflow_pinned_policy_runtime_local(revision: &str, checkout: &st
     )
     .replace(
         "crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo",
-        &closure::CLOSURE_PATHS.join(" "),
+        &closure::BOOTSTRAP_CLOSURE_PATHS.join(" "),
     )
 }
 
@@ -11138,7 +11138,13 @@ mod tests {
         );
         // Closure resolution: local git first, trees API fallback, same
         // canonical bytes (byte-sorted ls-tree lines plus the footer).
-        assert!(action.contains("ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow crates/velnor-model Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"), "{action}");
+        assert!(action.contains("ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"), "{action}");
+        assert!(
+            !action.contains(
+                "ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow crates/velnor-model"
+            ),
+            "consumer must remain on the published bootstrap closure: {action}"
+        );
         assert!(
             action.contains("git/trees/$INSTALL_REV?recursive=1"),
             "{action}"

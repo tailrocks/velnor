@@ -1183,9 +1183,7 @@ fn subpath_violation(
     source_path: Option<&str>,
     capability: &ActionCapability,
 ) -> Option<CapabilityViolation> {
-    let subpath = source_path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+    let subpath = source_path.filter(|value| !value.is_empty())?;
     if is_unsafe_subpath(subpath) || !capability.allowed_subpaths.contains(&subpath) {
         let mut accepted = vec!["<root>".to_string()];
         accepted.extend(capability.allowed_subpaths.iter().map(|s| s.to_string()));
