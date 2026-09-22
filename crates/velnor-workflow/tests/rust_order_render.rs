@@ -5,6 +5,7 @@
     reason = "fixture setup failures should identify the failing assertion"
 )]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,6 +45,10 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn generated_project(schema: u8, use_nextest: bool) -> String {
+    generated_project_with_regen_gate(schema, use_nextest, false)
+}
+
+fn generated_project_with_regen_gate(schema: u8, use_nextest: bool, regen_gate: bool) -> String {
     let label = format!(
         "schema-{schema}-{}",
         if use_nextest { "nextest" } else { "test" }
@@ -57,10 +62,21 @@ fn generated_project(schema: u8, use_nextest: bool) -> String {
     let root = workspace.join("repo");
     copy_tree(&fixture, &root);
     let config_path = root.join(".github-gen/velnor-workflow.toml");
-    let config = fs::read_to_string(&config_path).unwrap().replace(
+    let mut config = fs::read_to_string(&config_path).unwrap().replace(
         "\n[workflow]",
         "\nrevision = \"1111111111111111111111111111111111111111\"\n\n[[units]]\nid = \"rust-policy-gate\"\nkind = \"rust\"\nroot = \".\"\nworkspace_check = true\nci_tasks = [\"check-smoke\"]\n\n[workflow]",
     );
+    if regen_gate {
+        let unit = if schema == 1 {
+            "rust-alpha"
+        } else {
+            "rust-fixture"
+        };
+        let _ = writeln!(
+            config,
+            "\n[[declare]]\nprimitive = \"regen-gate\"\nunits = [\"{unit}\"]\n\n[declare.args]\ncommand = \"mise run check-smoke\""
+        );
+    }
     fs::write(config_path, config).unwrap();
     fs::write(
         root.join("mise.toml"),
@@ -121,13 +137,29 @@ fn command_labels(commands: &[toml::Value]) -> Vec<&'static str> {
 /// crates through an explicit doctest phase. Schema 1's gamma is bin-only
 /// and schema 2's polyglot package ships no sources, so neither earns the
 /// phase; without nextest `cargo test` covers doctests inline.
-fn assert_rust_unit_phases(unit: &toml::Value, unit_id: &str, use_nextest: bool) -> bool {
+fn assert_rust_unit_phases(
+    unit: &toml::Value,
+    unit_id: &str,
+    schema: u8,
+    use_nextest: bool,
+    regen_gate: bool,
+) -> bool {
     let wants_doctest = use_nextest && !matches!(unit_id, "rust-gamma" | "rust-fixture");
-    let expected_phases: &[&str] = if wants_doctest {
-        &["fmt", "clippy", "test", "doctest"]
+    let mut expected_phases = if wants_doctest {
+        vec!["fmt", "clippy", "test", "doctest"]
     } else {
-        &["fmt", "clippy", "test"]
+        vec!["fmt", "clippy", "test"]
     };
+    let expect_preflight = regen_gate
+        && unit_id
+            == if schema == 1 {
+                "rust-alpha"
+            } else {
+                "rust-fixture"
+            };
+    if expect_preflight {
+        expected_phases.insert(0, "preflight");
+    }
     let phases = unit["phases"].as_array().unwrap();
     let phase_ids = phases
         .iter()
@@ -178,7 +210,7 @@ fn assert_policy_gate(units: &[toml::Value], keys: &[&str], schema: u8) {
     }
 }
 
-fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
+fn assert_rust_order(project: &str, schema: u8, use_nextest: bool, regen_gate: bool) {
     let document: toml::Value = toml::from_str(project).unwrap();
     let units = document["unit"].as_array().unwrap();
     let keys = if schema == 1 {
@@ -201,7 +233,13 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
         if unit_id == "rust-policy-gate" {
             continue;
         }
-        let wants_doctest = assert_rust_unit_phases(unit, unit_id, use_nextest);
+        let wants_doctest = assert_rust_unit_phases(unit, unit_id, schema, use_nextest, regen_gate);
+        let preflight_count = unit["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take_while(|phase| phase.as_str() == Some("preflight"))
+            .count();
         for key in keys {
             let commands = unit.get(*key).and_then(toml::Value::as_array);
             assert!(
@@ -209,7 +247,7 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
                 "{unit_id} omitted its {key} Rust command array"
             );
             let commands = commands.unwrap();
-            let labels = command_labels(commands);
+            let labels = command_labels(&commands[preflight_count..]);
             let expected: &[&str] = if wants_doctest {
                 &["fmt", "clippy", "nextest", "test"]
             } else if use_nextest {
@@ -219,7 +257,7 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
             };
             assert_eq!(
                 labels.len(),
-                commands.len(),
+                commands.len() - preflight_count,
                 "{unit_id} {key} contains an unknown Rust validation command"
             );
             assert_eq!(labels, expected, "{unit_id} {key}");
@@ -227,6 +265,13 @@ fn assert_rust_order(project: &str, schema: u8, use_nextest: bool) {
                 .iter()
                 .map(|command| command.as_str().unwrap())
                 .collect::<Vec<_>>();
+            if preflight_count > 0 {
+                assert_eq!(
+                    &command_text[..preflight_count],
+                    ["mise run check-smoke"],
+                    "{unit_id} {key} preflight"
+                );
+            }
             let clippy = command_text
                 .iter()
                 .find(|command| command.contains(" clippy "))
@@ -268,7 +313,17 @@ fn generated_rust_commands_keep_clippy_before_tests_in_both_schemas() {
     for schema in [1, 2] {
         for use_nextest in [false, true] {
             let project = generated_project(schema, use_nextest);
-            assert_rust_order(&project, schema, use_nextest);
+            assert_rust_order(&project, schema, use_nextest, false);
+        }
+    }
+}
+
+#[test]
+fn generated_regen_gate_keeps_rust_phases_in_both_schemas() {
+    for schema in [1, 2] {
+        for use_nextest in [false, true] {
+            let project = generated_project_with_regen_gate(schema, use_nextest, true);
+            assert_rust_order(&project, schema, use_nextest, true);
         }
     }
 }
