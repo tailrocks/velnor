@@ -747,7 +747,8 @@ impl UnitKind {
 }
 
 /// One typed validation phase of a unit's commands. The scan tags each
-/// command it structures (Rust fmt/clippy/test/doctest); generated jobs run
+/// command it structures (Rust fmt/clippy/test/doctest, `XcodeGen` generation,
+/// and Swift build/run/test); generated jobs run
 /// one step per runnable phase behind `--phase`, and the prerequisite tier
 /// selects the check phase. Phase membership is positional data, never
 /// substring detection on command text.
@@ -758,14 +759,32 @@ pub enum ValidationPhase {
     Clippy,
     Test,
     Doctest,
+    #[serde(rename = "xcodegen-generate")]
+    XcodegenGenerate,
+    #[serde(rename = "swift-build")]
+    SwiftBuild,
+    #[serde(rename = "swift-run")]
+    SwiftRun,
+    #[serde(rename = "swift-test")]
+    SwiftTest,
     Check,
 }
 
 impl ValidationPhase {
     /// The runnable phases in step order: formatting first, then lints, then
-    /// tests, then doctests. `Check` is prerequisite-only and never renders
-    /// a validation step.
-    pub(crate) const RUNNABLE: [Self; 4] = [Self::Fmt, Self::Clippy, Self::Test, Self::Doctest];
+    /// tests, then doctests, then `XcodeGen` generation, then Swift builds and
+    /// executable runs, then tests. `Check` is prerequisite-only and never
+    /// renders a validation step.
+    pub(crate) const RUNNABLE: [Self; 8] = [
+        Self::Fmt,
+        Self::Clippy,
+        Self::Test,
+        Self::Doctest,
+        Self::XcodegenGenerate,
+        Self::SwiftBuild,
+        Self::SwiftRun,
+        Self::SwiftTest,
+    ];
 
     /// The phase a `--phase` selector or `phases` TOML entry names.
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -774,6 +793,10 @@ impl ValidationPhase {
             "clippy" => Self::Clippy,
             "test" => Self::Test,
             "doctest" => Self::Doctest,
+            "xcodegen-generate" => Self::XcodegenGenerate,
+            "swift-build" => Self::SwiftBuild,
+            "swift-run" => Self::SwiftRun,
+            "swift-test" => Self::SwiftTest,
             "check" => Self::Check,
             _ => return None,
         })
@@ -787,6 +810,10 @@ impl ValidationPhase {
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doctest => "doctest",
+            Self::XcodegenGenerate => "xcodegen-generate",
+            Self::SwiftBuild => "swift-build",
+            Self::SwiftRun => "swift-run",
+            Self::SwiftTest => "swift-test",
             Self::Check => "check",
         }
     }
@@ -798,6 +825,10 @@ impl ValidationPhase {
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
             Self::Doctest => "Doctests",
+            Self::XcodegenGenerate => "XcodeGen project generation",
+            Self::SwiftBuild => "Swift build",
+            Self::SwiftRun => "Swift executable runs",
+            Self::SwiftTest => "Swift tests",
             Self::Check => "Prerequisite check",
         }
     }
@@ -809,6 +840,15 @@ impl ValidationPhase {
             .iter()
             .map(|phase| phase.as_str().to_owned())
             .collect()
+    }
+
+    /// Native Apple phases do not need a Rust-style prerequisite tier. Any
+    /// other phase set must carry an explicit check command.
+    pub(crate) fn allows_empty_prerequisites(self) -> bool {
+        matches!(
+            self,
+            Self::XcodegenGenerate | Self::SwiftBuild | Self::SwiftRun | Self::SwiftTest
+        )
     }
 }
 
@@ -3582,7 +3622,13 @@ pub(crate) fn validate_unit_phases(config: &ProjectConfig) -> Result<(), Generat
                 unit.id
             )));
         }
-        if unit.check_commands.is_empty() {
+        if unit.check_commands.is_empty()
+            && !(unit.kind == UnitKind::Swift
+                && unit
+                    .phases
+                    .iter()
+                    .all(|phase| phase.allows_empty_prerequisites()))
+        {
             return Err(GeneratorError::usage(format!(
                 "unit `{}` carries validation phases without prerequisite check commands",
                 unit.id
@@ -11555,6 +11601,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the scanner regression covers package and shared-scheme parity"
+    )]
     #[test]
     fn scanner_extracts_swiftpm_and_shared_xcode_scheme_units() {
         let root = temporary_repository("swift-analysis");
@@ -11570,7 +11620,10 @@ mod tests {
         );
         must(fs::create_dir_all(&schemes), "create shared schemes");
         must(
-            fs::write(root.join("Package.swift"), "// swift-tools-version: 5.9\n"),
+            fs::write(
+                root.join("Package.swift"),
+                "// swift-tools-version: 5.9\nlet package = Package(targets: [.testTarget(name: \"AppTests\")])\n",
+            ),
             "write Package.swift",
         );
         must(
@@ -11595,6 +11648,13 @@ mod tests {
             ),
             "write shared scheme",
         );
+        must(
+            fs::write(
+                schemes.join("BuildOnly.xcscheme"),
+                "<Scheme><BuildAction/></Scheme>\n",
+            ),
+            "write build-only shared scheme",
+        );
         let config = must(
             scan_repository(&root, RunnerMode::Github),
             "scan Swift repository",
@@ -11605,8 +11665,23 @@ mod tests {
                 .iter()
                 .filter(|unit| unit.kind == UnitKind::Swift)
                 .count(),
-            2
+            3
         );
+        let package = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift && unit.root == "."),
+            "Swift package unit",
+        );
+        assert_eq!(
+            package.phases,
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        );
+        assert!(package
+            .pr_commands
+            .iter()
+            .any(|command| command.ends_with("swift test --parallel")));
         let xcode = must_some(
             config
                 .units
@@ -11618,6 +11693,22 @@ mod tests {
             .pr_commands
             .iter()
             .any(|command| command.contains("platform=iOS Simulator")));
+        assert_eq!(
+            xcode.phases,
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
+        );
+        let build_only = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-xcodeproj-buildonly"),
+            "build-only Xcode scheme unit",
+        );
+        assert_eq!(build_only.phases, vec![ValidationPhase::SwiftBuild]);
+        assert!(build_only
+            .pr_commands
+            .iter()
+            .all(|command| !command.ends_with(" test")));
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
         assert!(workflow.contains("runs-on: macos-15"));
         assert!(workflow.contains("CI_UNIT_ID: swift-xcodeproj-app"));
@@ -13501,6 +13592,37 @@ channel = "stable"
                 .to_string()
                 .contains("without prerequisite check commands"),
             "phases without a stored check fail closed: {error}"
+        );
+        let mut swift = phased_unit();
+        swift.id = "swift-package-app".to_owned();
+        swift.kind = UnitKind::Swift;
+        swift.pr_commands = vec![
+            "swift build".to_owned(),
+            "swift run App".to_owned(),
+            "swift test".to_owned(),
+        ];
+        swift.full_commands = swift.pr_commands.clone();
+        swift.phases = vec![
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftRun,
+            ValidationPhase::SwiftTest,
+        ];
+        swift.check_commands.clear();
+        must(
+            validate(swift.clone()),
+            "typed Swift phases may omit the prerequisite check",
+        );
+        let mut invalid_swift = swift;
+        invalid_swift.phases[1] = ValidationPhase::Fmt;
+        let error = must_fail(
+            validate(invalid_swift),
+            "untyped Swift phases without a prerequisite",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without prerequisite check commands"),
+            "empty prerequisites are only valid for typed Swift phases: {error}"
         );
         let mut tagless = phased_unit();
         tagless.phases.clear();

@@ -212,6 +212,14 @@ impl CiUnit {
                 )));
             }
             if self.check_commands.is_empty() {
+                if self.kind == "swift"
+                    && self
+                        .phases
+                        .iter()
+                        .all(|phase| phase.allows_empty_prerequisites())
+                {
+                    return Ok(Vec::new());
+                }
                 return Err(GeneratorError::usage(format!(
                     "CI unit `{}` carries validation phases without prerequisite check commands",
                     self.id
@@ -556,7 +564,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"
                         ))
                     })
                 })
@@ -6430,6 +6438,161 @@ workspace_check = true
                 .contains("without prerequisite check commands"),
             "a phased unit without a check fails closed: {error}"
         );
+
+        let mut swift = unit;
+        swift.id = "swift-package-app".to_owned();
+        swift.kind = "swift".to_owned();
+        swift.github_pr_commands = vec![
+            "cd native && swift build".to_owned(),
+            "cd native && swift run --skip-build --product 'App'".to_owned(),
+            "cd native && swift test --parallel".to_owned(),
+        ];
+        swift.github_full_commands = swift.github_pr_commands.clone();
+        swift.velnor_pr_commands = swift.github_pr_commands.clone();
+        swift.velnor_full_commands = swift.github_pr_commands.clone();
+        swift.phases = vec![
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftRun,
+            ValidationPhase::SwiftTest,
+        ];
+        swift.check_commands.clear();
+        assert_eq!(
+            must(
+                swift.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftBuild,
+                ),
+                "Swift build selection",
+            ),
+            vec!["cd native && swift build".to_owned()]
+        );
+        assert_eq!(
+            must(
+                swift.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftRun,
+                ),
+                "Swift executable selection",
+            ),
+            vec!["cd native && swift run --skip-build --product 'App'".to_owned()]
+        );
+        assert_eq!(
+            must(
+                swift.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftTest,
+                ),
+                "Swift test selection",
+            ),
+            vec!["cd native && swift test --parallel".to_owned()]
+        );
+        assert!(
+            must(
+                prerequisite_commands(&swift, RunnerLane::Github, Scope::Affected, None),
+                "Swift prerequisite",
+            )
+            .is_empty(),
+            "SwiftPM phases have no Rust-style prerequisite"
+        );
+        assert!(
+            must(
+                swift.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::Check,
+                ),
+                "Swift typed check phase",
+            )
+            .is_empty(),
+            "typed Swift phases accept an explicit empty prerequisite tier"
+        );
+        let mut skewed_check = swift.clone();
+        skewed_check.github_pr_commands.pop();
+        assert_eq!(
+            must(
+                skewed_check.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::Check,
+                ),
+                "Swift check selection with skewed runnable commands",
+            ),
+            Vec::<String>::new(),
+            "--phase check does not require runnable command alignment"
+        );
+        let mut invalid_swift = swift.clone();
+        invalid_swift.phases = vec![
+            ValidationPhase::Fmt,
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftRun,
+            ValidationPhase::SwiftTest,
+        ];
+        let error = must_fail(
+            invalid_swift.commands_for_phase(
+                RunnerLane::Github,
+                Scope::Affected,
+                ValidationPhase::Check,
+            ),
+            "untyped Swift phases without a prerequisite",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without prerequisite check commands"),
+            "empty prerequisites are only valid for typed Swift phases: {error}"
+        );
+
+        let mut xcodegen = swift.clone();
+        xcodegen.id = "swift-xcodegen-app".to_owned();
+        xcodegen.github_pr_commands = vec![
+            "cd app && xcodegen generate --spec project.yml".to_owned(),
+            "cd app && xcodebuild -project App.xcodeproj -scheme App build".to_owned(),
+            "cd app && xcodebuild -project App.xcodeproj -scheme App test".to_owned(),
+        ];
+        xcodegen.github_full_commands = xcodegen.github_pr_commands.clone();
+        xcodegen.velnor_pr_commands = xcodegen.github_pr_commands.clone();
+        xcodegen.velnor_full_commands = xcodegen.github_pr_commands.clone();
+        xcodegen.phases = vec![
+            ValidationPhase::XcodegenGenerate,
+            ValidationPhase::SwiftBuild,
+            ValidationPhase::SwiftTest,
+        ];
+        assert_eq!(
+            must(
+                xcodegen.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::XcodegenGenerate,
+                ),
+                "XcodeGen generation selection",
+            ),
+            vec!["cd app && xcodegen generate --spec project.yml".to_owned()]
+        );
+        assert_eq!(
+            must(
+                xcodegen.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftBuild,
+                ),
+                "Xcode build selection",
+            ),
+            vec!["cd app && xcodebuild -project App.xcodeproj -scheme App build".to_owned()]
+        );
+        assert_eq!(
+            must(
+                xcodegen.commands_for_phase(
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    ValidationPhase::SwiftTest,
+                ),
+                "Xcode test selection",
+            ),
+            vec!["cd app && xcodebuild -project App.xcodeproj -scheme App test".to_owned()]
+        );
     }
 
     #[test]
@@ -6442,7 +6605,7 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, or check"),
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,

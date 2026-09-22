@@ -9,12 +9,60 @@ use super::file_walk::{
 use super::{unit, RepositoryShape, ScanContext};
 use crate::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
-    UnitKind,
+    UnitKind, ValidationPhase,
 };
 
-fn swift_package_unit(package_root: &str) -> Unit {
+fn call_present(contents: &str, call: &str) -> bool {
+    let mut rest = contents;
+    while let Some(found) = rest.find(call) {
+        rest = &rest[found + call.len()..];
+        if rest
+            .trim_start_matches([' ', '\t', '\n', '\r'])
+            .starts_with('(')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn xcode_scheme_has_test_action(contents: &str) -> bool {
+    const MARKER: &str = "<TestAction";
+    let mut index = 0;
+    while let Some(found) = contents[index..].find('<') {
+        let start = index + found;
+        if contents[start..].starts_with("<!--") {
+            let Some(end) = contents[start + 4..].find("-->") else {
+                return false;
+            };
+            index = start + 4 + end + 3;
+            continue;
+        }
+        if contents[start..].starts_with(MARKER) {
+            let after = start + MARKER.len();
+            if after == contents.len()
+                || matches!(
+                    contents.as_bytes().get(after),
+                    Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+                )
+            {
+                return true;
+            }
+        }
+        index = start + 1;
+    }
+    false
+}
+
+fn swift_package_unit(package_root: &str, has_tests: bool) -> Unit {
     let prefix = path_prefix(package_root);
     let command_prefix = shell_change_dir(package_root);
+    let mut commands = vec![format!("{command_prefix}swift build")];
+    let mut phases = vec![ValidationPhase::SwiftBuild];
+    if has_tests {
+        commands.push(format!("{command_prefix}swift test --parallel"));
+        phases.push(ValidationPhase::SwiftTest);
+    }
     let mut result = unit(
         UnitKind::Swift,
         package_root,
@@ -26,10 +74,7 @@ fn swift_package_unit(package_root: &str) -> Unit {
             format!("{prefix}Tests/**"),
             format!("{prefix}**/*.swift"),
         ],
-        vec![
-            format!("{command_prefix}swift build"),
-            format!("{command_prefix}swift test --parallel"),
-        ],
+        commands,
         Some(CacheSpec {
             key_files: vec![
                 join_repo_path(package_root, "Package.swift"),
@@ -52,6 +97,7 @@ fn swift_package_unit(package_root: &str) -> Unit {
     // provisions, on the lane's default executor. Only Xcode scheme work
     // below carries an Apple need.
     result.platform = crate::platform::PlatformRequirement::swift_package();
+    result.phases = phases;
     result
 }
 
@@ -110,18 +156,21 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
         } else {
             ""
         };
+        let has_test_action = xcode_scheme_has_test_action(&scheme_contents);
         let command_prefix = shell_change_dir(&container_root);
         let container_name = container.rsplit('/').next().unwrap_or(container);
         let container_quoted = shell_quote(container_name);
         let scheme_quoted = shell_quote(scheme_name);
-        let commands = vec![
-            format!(
-                "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
-            ),
-            format!(
+        let mut commands = vec![format!(
+            "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
+        )];
+        let mut phases = vec![ValidationPhase::SwiftBuild];
+        if has_test_action {
+            commands.push(format!(
                 "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{test_destination} CODE_SIGNING_ALLOWED=NO test"
-            ),
-        ];
+            ));
+            phases.push(ValidationPhase::SwiftTest);
+        }
         let mut cache_key_files = vec![scheme.to_owned()];
         if extension == "xcodeproj" {
             cache_key_files.push(format!("{container}/project.pbxproj"));
@@ -154,7 +203,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
-            phases: Vec::new(),
+            phases,
             check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: false,
@@ -200,7 +249,15 @@ fn package_manifest_needs_xcframework(root: &Path, package_root: &str) -> bool {
 pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
     for package_root in roots_for_manifests(&files_named(context.files, "Package.swift")) {
         shape.detected.push(format!("swift-package:{package_root}"));
-        let mut unit = swift_package_unit(&package_root);
+        let manifest = join_repo_path(&package_root, "Package.swift");
+        let has_tests = fs::read_to_string(context.root.join(&manifest))
+            .map_or(true, |contents| call_present(&contents, ".testTarget"));
+        if !has_tests {
+            shape.limitations.push(format!(
+                "Swift package {manifest} declares no test targets; emitting build-only commands."
+            ));
+        }
+        let mut unit = swift_package_unit(&package_root, has_tests);
         if package_manifest_needs_xcframework(context.root, &package_root) {
             unit.platform = crate::platform::PlatformRequirement::apple_xcframework();
         }
@@ -227,5 +284,31 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
         shape.limitations.push(
             "Apple test destinations use platform defaults; review the generated simulator destination when a project requires a named device or OS version.".to_owned(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{swift_package_unit, xcode_scheme_has_test_action};
+    use crate::ValidationPhase;
+
+    #[test]
+    fn testless_swift_package_has_only_a_build_phase() {
+        let unit = swift_package_unit("native", false);
+        assert_eq!(
+            unit.pr_commands,
+            vec!["cd -- 'native' && swift build".to_owned()]
+        );
+        assert_eq!(unit.phases, vec![ValidationPhase::SwiftBuild]);
+    }
+
+    #[test]
+    fn commented_xcode_test_action_does_not_enable_testing() {
+        assert!(!xcode_scheme_has_test_action(
+            "<Scheme><!-- <TestAction/> --><BuildAction/></Scheme>"
+        ));
+        assert!(xcode_scheme_has_test_action(
+            "<Scheme><BuildAction/><TestAction/></Scheme>"
+        ));
     }
 }
