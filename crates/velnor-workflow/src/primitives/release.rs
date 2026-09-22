@@ -1075,6 +1075,19 @@ fn deb_arch_matrix(config: &ProjectConfig, targets: &[String], guest: bool) -> O
     Some(matrix)
 }
 
+/// Give each cargo-deb invocation an empty output boundary. Mr. Boxington
+/// transports Cargo workspace state, including prior `.deb` files; those
+/// files are not inputs to the current package and must not enter collection.
+fn debian_output_reset_step() -> &'static str {
+    r"      - name: Reset cached Debian package outputs
+        run: |
+          set -euo pipefail
+          mkdir -p target dist
+          find target -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
+          find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
+"
+}
+
 /// Step-level env exporting the cross C toolchain to Cargo and the C build
 /// scripts (`cc` et al.) for matrix jobs that compile `AArch64` Linux on
 /// the x64 builder. The toolchain install alone leaves Cargo on the host
@@ -1405,6 +1418,7 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
             yaml_scalar(&config.github_runner),
         )
     };
+    steps.push_str(debian_output_reset_step());
     format!(
         "{header}{steps}      - name: Build Debian packages\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n{package_cmd}\n      - name: Attest Debian packages\n        uses: {attest}\n        with:\n          subject-path: dist/*.deb\n      - name: Upload Debian packages\n        uses: {upload}\n        with:\n          name: debian-packages\n          path: dist/*.deb\n          if-no-files-found: error\n          retention-days: 2\n"
     )
@@ -1718,6 +1732,7 @@ fn render_identity_debian_job(
     if guest {
         steps.push_str(&debian_guest_steps(config, release, cargo_cmd));
     }
+    steps.push_str(debian_output_reset_step());
     let versioned_stem = format!("{stem}-{version}");
     let asset_name = format!("{versioned_stem}-${{{{ matrix.arch }}}}.deb");
     let _ = writeln!(
@@ -6228,11 +6243,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5bb7a1a0357af6b295d2c1a571b8d9e0d915d7e20168c90afa93735db7f41df1",
+                "a57b14781da54ec1a75013a03c2d5c23335919d5b46716f49157438a3fdb5dae",
             ),
             (
                 "preview.yml",
-                "0c1ecdf5cf8708cee2f812509c6ef849c00e62a3d64aa181f69acd628f049655",
+                "675d1b5256554f80cea1823fb4c9c9a210c4947e7b21d616224b5104fe87701b",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -8292,6 +8307,30 @@ cp "$record" "$out"
         );
         assert!(
             debian.contains("--asset-name \"example-preview-${{ needs.identity.outputs.version }}-${{ matrix.arch }}.deb\""),
+            "{debian}"
+        );
+        let reset = debian.find("name: Reset cached Debian package outputs");
+        let package = debian.find("name: Build Debian packages");
+        assert!(
+            reset.is_some(),
+            "preview debian lane resets cached package outputs"
+        );
+        assert!(
+            package.is_some(),
+            "preview debian lane packages after reset"
+        );
+        assert!(
+            reset < package,
+            "cached output reset must precede packaging"
+        );
+        assert!(
+            debian.contains(
+                "find target -type f \\( -name '*.deb' -o -name '*.deb.sha256' \\) -delete"
+            ),
+            "{debian}"
+        );
+        assert!(
+            debian.contains("find dist -maxdepth 1 -type f \\( -name '*.deb' -o -name '*.deb.sha256' \\) -delete"),
             "{debian}"
         );
         // The rolling release is replaced under its Preview title, never

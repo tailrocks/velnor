@@ -3836,6 +3836,12 @@ jobs:
           esac
           [ "${#kernel}" -eq 64 ] || { echo "::error::kernel sha256 length ${#kernel}" >&2; exit 1; }
           [ "${#rootfs}" -eq 64 ] || { echo "::error::rootfs sha256 length ${#rootfs}" >&2; exit 1; }
+      - name: Reset cached Debian package outputs
+        run: |
+          set -euo pipefail
+          mkdir -p target dist
+          find target -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
+          find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
       - name: Build Debian packages
         run: |
           set -euo pipefail
