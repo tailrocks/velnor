@@ -1253,9 +1253,11 @@ fn post_provision(state: ScaleSetWorkerState) -> bool {
 /// (`velnor-<set>-<request>`). Returns `None` for foreign shapes — the
 /// caller then releases nothing instead of guessing.
 fn holder_for_key(scale_set_id: i32, key: &str) -> Option<String> {
-    let name = key.split('/').next_back()?;
-    let request = name.split('-').next_back()?.parse::<i64>().ok()?;
-    Some(permit_holder(scale_set_id, request))
+    let (key_set, name) = key.split_once('/')?;
+    let key_set = key_set.parse::<i32>().ok()?;
+    let (name_set, request) = crate::scaleset::intents::parse_runner_name(name)?;
+    (key_set == scale_set_id && name_set == scale_set_id)
+        .then_some(permit_holder(scale_set_id, request))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1511,6 +1513,14 @@ impl WorkerLane for DaemonWorkerLane {
         self.refresh_generation()?;
         self.opportunistic_sweep();
         let key = if !started.runner_name.is_empty() {
+            let Some((scale_set_id, _)) =
+                crate::scaleset::intents::parse_runner_name(&started.runner_name)
+            else {
+                return Ok(());
+            };
+            if scale_set_id != self.config.scale_set_id {
+                return Ok(());
+            }
             OwnershipId::bind(self.config.scale_set_id, &started.runner_name)
                 .as_str()
                 .to_string()
@@ -1574,6 +1584,14 @@ impl WorkerLane for DaemonWorkerLane {
         self.refresh_generation()?;
         self.opportunistic_sweep();
         let key = if !completed.runner_name.is_empty() {
+            let Some((scale_set_id, _)) =
+                crate::scaleset::intents::parse_runner_name(&completed.runner_name)
+            else {
+                return Ok(());
+            };
+            if scale_set_id != self.config.scale_set_id {
+                return Ok(());
+            }
             OwnershipId::bind(self.config.scale_set_id, &completed.runner_name)
                 .as_str()
                 .to_string()
@@ -1767,6 +1785,8 @@ mod tests {
             holder_for_key(7, "7/velnor-7-4244").as_deref(),
             Some("scaleset/7/4244")
         );
+        assert_eq!(holder_for_key(7, "7/velnor-8-4244"), None);
+        assert_eq!(holder_for_key(7, "8/velnor-8-4244"), None);
         assert_eq!(holder_for_key(7, "no-slash-here"), None);
         assert_eq!(holder_for_key(7, "7/velnor-7-notanumber"), None);
         assert_eq!(holder_for_key(7, ""), None);

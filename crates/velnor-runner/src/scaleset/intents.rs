@@ -71,17 +71,37 @@ pub fn runner_name(scale_set_id: i32, request_id: i64) -> String {
     format!("velnor-{scale_set_id}-{request_id}")
 }
 
-/// Parse `(scale_set_id, request_id)` from a runner name formatted like `velnor-{scale_set_id}-{request_id}`.
+/// Parse `(scale_set_id, request_id)` from a runner name formatted like
+/// `velnor-{scale_set_id}-{request_id}`. Non-positive identities are invalid:
+/// generated Velnor runner names always carry positive IDs.
 #[must_use]
 pub fn parse_runner_name(name: &str) -> Option<(i32, i64)> {
     let parts: Vec<&str> = name.split('-').collect();
     if parts.len() == 3 && parts[0] == "velnor" {
         let set_id = parts[1].parse::<i32>().ok()?;
         let req_id = parts[2].parse::<i64>().ok()?;
-        Some((set_id, req_id))
+        (set_id > 0 && req_id > 0).then_some((set_id, req_id))
     } else {
         None
     }
+}
+
+/// Resolve the request identity carried by an event's runner name.
+///
+/// A non-empty runner name is authoritative. Invalid or cross-scale names
+/// return `None` instead of falling back to the event's request field, which
+/// would let another scale set mutate this processor's demand or permit.
+#[must_use]
+pub fn request_id_for_runner(
+    scale_set_id: i32,
+    runner_name: &str,
+    fallback_request_id: i64,
+) -> Option<i64> {
+    if runner_name.is_empty() {
+        return Some(fallback_request_id);
+    }
+    let (event_scale_set_id, request_id) = parse_runner_name(runner_name)?;
+    (event_scale_set_id == scale_set_id).then_some(request_id)
 }
 
 /// Provision operation idempotency key: stable per attempt, distinct across
@@ -576,6 +596,13 @@ mod tests {
     #[test]
     fn provision_keys_are_stable_per_attempt() {
         assert_eq!(runner_name(7, 4242), "velnor-7-4242");
+        assert_eq!(parse_runner_name("velnor-7-4242"), Some((7, 4242)));
+        assert_eq!(request_id_for_runner(7, "velnor-7-4242", 99), Some(4242));
+        assert_eq!(request_id_for_runner(7, "", 99), Some(99));
+        assert_eq!(request_id_for_runner(7, "velnor-8-4242", 99), None);
+        assert_eq!(request_id_for_runner(7, "runner-7-4242", 99), None);
+        assert_eq!(parse_runner_name("velnor-0-4242"), None);
+        assert_eq!(parse_runner_name("velnor-7-0"), None);
         assert_eq!(provision_operation_id(7, 4242, 0), "prov-op-7-4242-0");
         assert_ne!(
             provision_operation_id(7, 4242, 0),
