@@ -2983,6 +2983,17 @@ mod tests {
                 "candidate guards {probe}: {candidate}"
             );
         }
+        for resolution in [
+            "HEAD=\"$(git rev-parse \"$HEAD^{commit}\")\"",
+            "HEAD=\"$(git rev-parse FETCH_HEAD)\"",
+            "BASE=\"$(git rev-parse \"$BASE^{commit}\")\"",
+            "BASE=\"$(git rev-parse FETCH_HEAD)\"",
+        ] {
+            assert!(
+                candidate.contains(resolution),
+                "candidate resolves refs to immutable commits: {resolution}: {candidate}"
+            );
+        }
         assert!(
             candidate.contains("velnor-workflow closure --rev=\"$HEAD\" --candidate")
                 && candidate.contains("velnor-workflow closure --rev=\"$base_pin\" --candidate"),
@@ -3131,6 +3142,17 @@ mod tests {
             assert!(
                 candidate.contains(binding),
                 "consumer binds {binding}: {candidate}"
+            );
+        }
+        for resolution in [
+            "HEAD=\"$(git rev-parse \"$HEAD^{commit}\")\"",
+            "HEAD=\"$(git rev-parse FETCH_HEAD)\"",
+            "BASE=\"$(git rev-parse \"$BASE^{commit}\")\"",
+            "BASE=\"$(git rev-parse FETCH_HEAD)\"",
+        ] {
+            assert!(
+                candidate.contains(resolution),
+                "consumer resolves refs to immutable commits: {resolution}: {candidate}"
             );
         }
         assert!(

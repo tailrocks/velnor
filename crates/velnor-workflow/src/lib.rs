@@ -5371,11 +5371,17 @@ pub(crate) fn candidate_bootstrap_steps(
           BASE="$CANDIDATE_BASE_SHA"
           test "$HEAD" != '' || {{ echo "::error::candidate head SHA is empty" >&2; exit 1; }}
           test "$BASE" != '' || {{ echo "::error::candidate base SHA is empty" >&2; exit 1; }}
-          if ! git cat-file -e "$HEAD^{{commit}}" 2>/dev/null; then
+          if git cat-file -e "$HEAD^{{commit}}" 2>/dev/null; then
+            HEAD="$(git rev-parse "$HEAD^{{commit}}")"
+          else
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$HEAD"
+            HEAD="$(git rev-parse FETCH_HEAD)"
           fi
-          if ! git cat-file -e "$BASE^{{commit}}" 2>/dev/null; then
+          if git cat-file -e "$BASE^{{commit}}" 2>/dev/null; then
+            BASE="$(git rev-parse "$BASE^{{commit}}")"
+          else
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+            BASE="$(git rev-parse FETCH_HEAD)"
           fi
           head_closure="$(velnor-workflow closure --rev="$HEAD" --candidate)"
           base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{{40}})".*/\1/p' | head -n 1)"
@@ -5440,11 +5446,17 @@ pub(crate) fn candidate_runtime_acquire_steps() -> &'static str {
           BASE="$CANDIDATE_BASE_SHA"
           test "$HEAD" != '' || { echo "::error::candidate head SHA is empty" >&2; exit 1; }
           test "$BASE" != '' || { echo "::error::candidate base SHA is empty" >&2; exit 1; }
-          if ! git cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+          if git cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+            HEAD="$(git rev-parse "$HEAD^{commit}")"
+          else
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$HEAD"
+            HEAD="$(git rev-parse FETCH_HEAD)"
           fi
-          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse "$BASE^{commit}")"
+          else
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+            BASE="$(git rev-parse FETCH_HEAD)"
           fi
           head_closure="$(velnor-workflow closure --rev="$HEAD" --candidate)"
           base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' | head -n 1)"
