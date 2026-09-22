@@ -1173,6 +1173,21 @@ impl DaemonWorkerLane {
                 continue;
             }
             if provision_pending(row.worker_state) {
+                if row.generation > self.generation {
+                    anyhow::bail!(
+                        "worker {key:?} belongs to newer generation {}, current lane is {}",
+                        row.generation,
+                        self.generation
+                    );
+                }
+                if row.generation < self.generation {
+                    // The processor will replay this intent after startup.
+                    // Claim the row first so its idempotent upsert lands in
+                    // this epoch instead of being rejected by the registry
+                    // generation fence. The CAS also prevents an older lane
+                    // from stealing a row already claimed by a newer lane.
+                    self.registry.claim_generation(&key, row.generation)?;
+                }
                 report.awaiting_provision += 1;
                 continue;
             }
@@ -2299,6 +2314,102 @@ mod tests {
         // Docker work after the durable release checkpoint.
         replay_lane.drive_terminal(&key).unwrap();
         assert_eq!(replay_seen.lock().unwrap().len(), calls_after_release);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adoption_claims_stale_provision_pending_row_before_replay() {
+        let dir = unique_test_dir("adopt-stale-provision");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4248");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let state_dir = state_root.join(ownership.slug());
+        let previous_generation;
+        let current_generation;
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            previous_generation = (0..4).fold(0, |_, _| global.begin_epoch().unwrap());
+            current_generation = global.begin_epoch().unwrap();
+        }
+
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry.set_generation(previous_generation);
+        registry
+            .upsert(
+                &key,
+                "op-stale",
+                4248,
+                "velnor-7-4248",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::ProvisionIntent)
+            .unwrap();
+        drop(registry);
+
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-stale",
+                &crate::scaleset::intents::provision_ownership_id(7, "velnor-7-4248"),
+                7,
+                4248,
+                "velnor-7-4248",
+                "sha256:runner",
+                "sha256:dind",
+                previous_generation,
+            )
+            .unwrap();
+        drop(intents);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut lane = test_lane(
+            &db,
+            &ledger,
+            &state_root,
+            Box::new(CleanupRunner::missing(
+                identity.runner_container(),
+                seen.clone(),
+            )),
+        );
+        assert_eq!(lane.generation, current_generation);
+
+        let report = lane.adopt_live_workers().unwrap();
+        assert_eq!(report.awaiting_provision, 1);
+        assert_eq!(report.adopted, 0);
+        assert_eq!(report.failed, 0);
+        assert_eq!(
+            lane.registry.get(&key).unwrap().unwrap().generation,
+            current_generation
+        );
+
+        // The processor's retry/upsert now lands in the claimed epoch instead
+        // of being rejected as an old-generation row.
+        let row = lane
+            .registry
+            .upsert(
+                &key,
+                "op-stale",
+                4248,
+                "velnor-7-4248",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        assert_eq!(row.generation, current_generation);
+        assert!(seen.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
