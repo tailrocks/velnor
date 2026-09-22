@@ -177,7 +177,9 @@ mod tests {
         UnitKind, WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
     };
     use crate::s2::config::MiseInstallDeps;
-    use crate::s2::platform::{NamedProduct, Prerequisite};
+    use crate::s2::platform::{
+        NamedProduct, Prerequisite, ProductIdentity, PRODUCT_IDENTITY_SCHEMA,
+    };
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
@@ -1497,6 +1499,65 @@ mod tests {
         assert!(
             !kind.contains("velnor-product-rust-ffi--sourceless"),
             "an output-less product rides no artifact"
+        );
+    }
+
+    #[test]
+    fn kind_reusable_wires_exact_native_cache_around_required_transport() {
+        let (mut producer, consumer) = transport_fixture();
+        let digest = "a".repeat(64);
+        producer.products[0].inputs_digest = Some(digest.clone());
+        producer.products[0].identity = Some(ProductIdentity {
+            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            producer: "rust-ffi".to_owned(),
+            product: "xcframework".to_owned(),
+            adapter: "native-adapter@1".to_owned(),
+            source: "native/recipe".to_owned(),
+            inputs_digest: Some(digest),
+            host_abi: "macos-arm64".to_owned(),
+            target: "apple-xcframework".to_owned(),
+            target_triple: "aarch64-apple-darwin".to_owned(),
+            architectures: vec!["macos-arm64".to_owned()],
+            sdk: "macos26.sdk-26.0".to_owned(),
+            deployment_target: "26.0".to_owned(),
+            toolchain: BTreeMap::from([("rust.channel".to_owned(), "stable".to_owned())]),
+            profile: "release".to_owned(),
+            features: Vec::new(),
+            flags: vec!["--locked".to_owned()],
+            generation: BTreeMap::from([("recipe".to_owned(), "release".to_owned())]),
+        });
+        let ir = owner_test_ir("example/native-cache", vec![producer, consumer]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        let restore = must_some(
+            kind.find("Restore exact native product cache"),
+            "exact native cache restore",
+        );
+        let transport = must_some(
+            kind.find("Download product velnor-product-rust-ffi--xcframework"),
+            "required product transport",
+        );
+        let save = must_some(
+            kind.find("Save exact native product cache"),
+            "exact native cache save",
+        );
+        assert!(restore < transport, "cache restore precedes transport");
+        assert!(transport < save, "transport remains before cache save");
+        assert!(
+            kind[restore..save].contains("continue-on-error: true"),
+            "optional cache failures cannot replace transport"
+        );
+        assert!(
+            kind.contains("key: velnor-native-product-cache/1-")
+                && kind.contains("steps.native-product-cache-"),
+            "exact cache key and stable step ids are rendered"
+        );
+        assert!(
+            kind.contains("outcome == 'success'"),
+            "save requires staging"
+        );
+        assert!(
+            kind.contains("github.ref == 'refs/heads/main'"),
+            "save keeps the existing trusted/main gate"
         );
     }
 
@@ -8622,6 +8683,71 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
+    /// The optional exact native-product cache restores for prerequisite
+    /// products this collapsed job consumes. Each block is gated to the unit
+    /// whose workspace owns the product; producer workspaces are never
+    /// pre-populated, and the cache never replaces required transport or
+    /// guarded local rebuild.
+    fn render_collapsed_native_product_cache_restore_steps(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+    ) {
+        let mut union: BTreeMap<
+            String,
+            (String, &crate::s2::platform::NamedProduct, BTreeSet<String>),
+        > = BTreeMap::new();
+        for member in members {
+            for prerequisite in &member.prerequisites {
+                let Some(producer) = self
+                    .units
+                    .iter()
+                    .find(|candidate| candidate.id == prerequisite.producer)
+                else {
+                    continue;
+                };
+                let Some(product) = producer
+                    .products
+                    .iter()
+                    .find(|product| product.name == prerequisite.product)
+                else {
+                    continue;
+                };
+                let record = super::product_transport::transport_record(
+                    &prerequisite.producer,
+                    &prerequisite.product,
+                );
+                let entry = union.entry(record).or_insert_with(|| {
+                    (
+                        producer.id.clone(),
+                        product,
+                        BTreeSet::from([member.id.clone()]),
+                    )
+                });
+                entry.2.insert(member.id.clone());
+            }
+        }
+        for (_, (producer, product, unit_ids)) in union {
+            let gate = (unit_ids.len() != members.len()).then(|| {
+                unit_ids
+                    .iter()
+                    .map(|unit_id| format!("inputs.unit == {}", crate::s2::shell_quote(unit_id)))
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            });
+            let marker = crate::s2::platform::transport_marker(&producer, &product.name);
+            let Some(block) = super::product_transport::render_native_product_cache_restore_block(
+                self.pins.cache_restore,
+                &producer,
+                product,
+                &marker,
+            ) else {
+                continue;
+            };
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+    }
+
     /// The union of product-producer steps across the collapsed provider's
     /// members: one stage+upload block per distinct eligible product, after
     /// the checks that build it. A failed check skips the upload, so no
@@ -8666,6 +8792,57 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 producer,
                 product,
             );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+    }
+
+    /// The optional trusted saves for products produced by this collapsed
+    /// job. Product transport is rendered separately and remains required.
+    fn render_collapsed_native_product_cache_save_steps(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+    ) {
+        let mut union: BTreeMap<
+            String,
+            (String, &crate::s2::platform::NamedProduct, BTreeSet<String>),
+        > = BTreeMap::new();
+        for member in members {
+            for product in &member.products {
+                let record = super::product_transport::transport_record(&member.id, &product.name);
+                let entry = union.entry(record).or_insert_with(|| {
+                    (
+                        member.id.clone(),
+                        product,
+                        BTreeSet::from([member.id.clone()]),
+                    )
+                });
+                entry.2.insert(member.id.clone());
+            }
+        }
+        if union.is_empty() {
+            return;
+        }
+        let trusted_gate = format!(
+            "always() && ({})",
+            trusted_cache_save_expression(&self.default_branch)
+        );
+        for (_, (producer, product, unit_ids)) in union {
+            let gate = (unit_ids.len() != members.len()).then(|| {
+                unit_ids
+                    .iter()
+                    .map(|unit_id| format!("inputs.unit == {}", crate::s2::shell_quote(unit_id)))
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            });
+            let Some(block) = super::product_transport::render_native_product_cache_save_block(
+                self.pins.cache_save,
+                &producer,
+                product,
+                &trusted_gate,
+            ) else {
+                continue;
+            };
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
     }
@@ -9043,6 +9220,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // artifact before the checks consume it. The verify step exports
         // the ready marker the guarded rebuild reads.
         if hosted {
+            self.render_collapsed_native_product_cache_restore_steps(output, members);
             self.render_collapsed_product_consumer_steps(output, members);
         }
 
@@ -9119,6 +9297,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // the checks that produced them.
         if hosted {
             self.render_collapsed_product_producer_steps(output, members);
+            if cache_save {
+                self.render_collapsed_native_product_cache_save_steps(output, members);
+            }
         }
 
         // Cache collection.

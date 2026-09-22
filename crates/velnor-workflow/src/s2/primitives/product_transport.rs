@@ -15,9 +15,9 @@
 //! installed path must sit under a declared output root. A mismatch fails
 //! the consumer — a corrupt or tampered artifact is never a hit.
 //! Provenance is the same run and commit on both ends, so an empty inputs
-//! digest (an incomplete closure) still transports safely within the run;
-//! cross-run reuse stays disabled until the exact-product cache can bind the
-//! stronger identity.
+//! digest (an incomplete closure) still transports safely within the run.
+//! Cross-run reuse is an optional exact-identity cache acceleration; it never
+//! replaces required same-run transport or the guarded local rebuild.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -57,7 +57,7 @@ pub(crate) fn transport_eligible(product: &NamedProduct) -> bool {
 
 /// Whether a product has enough identity for an exact cross-run cache hit.
 /// Same-run transport deliberately has the weaker [`transport_eligible`]
-/// contract; this predicate is the fail-closed boundary for a future native
+/// contract; this predicate is the fail-closed boundary for the native
 /// product cache and is kept separate so an optional cache is never the data
 /// bus for required consumers.
 #[must_use]
@@ -78,10 +78,6 @@ pub(crate) fn exact_product_reuse_eligible(product: &NamedProduct) -> bool {
 /// hint; transport readiness still comes only from verified same-run product
 /// transport.
 #[must_use]
-#[expect(
-    dead_code,
-    reason = "native exact-product cache renderer uses this boundary"
-)]
 pub(crate) fn exact_product_cache_key(product: &NamedProduct) -> Option<String> {
     if !exact_product_reuse_eligible(product) {
         return None;
@@ -946,6 +942,126 @@ pub(crate) fn render_consumer_block(
     )
 }
 
+fn native_product_cache_step_id(key: &str) -> String {
+    let suffix = key
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("native-product-cache-{suffix}")
+}
+
+/// Render an optional exact native-product cache restore and verification.
+///
+/// The cache is not a transport edge: restore failures and misses are
+/// reported and ignored, while corrupt or wrong-identity entries are removed
+/// without installation. A valid entry uses the same manifest verifier as
+/// same-run product transport. No restore prefix is emitted.
+#[must_use]
+pub(crate) fn render_native_product_cache_restore_block(
+    cache_restore_pin: &str,
+    producer: &str,
+    product: &NamedProduct,
+    marker: &str,
+) -> Option<String> {
+    let key = exact_product_cache_key(product)?;
+    let restore_id = native_product_cache_step_id(&key);
+    let verify_id = format!("{restore_id}-verify");
+    let artifact = artifact_name(producer, &product.name);
+    let action_path = format!("${{{{ runner.temp }}}}/velnor-native-product-cache/{artifact}");
+    let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
+    let digest = product.inputs_digest.as_deref().unwrap_or_default();
+    let identity = product.identity.as_ref()?;
+    let identity_json = identity_json(identity);
+    if identity_json.is_empty() {
+        return None;
+    }
+    let mut command = format!(
+        "velnor-workflow verify-product --producer {} --product {}",
+        shell_quote(producer),
+        shell_quote(&product.name),
+    );
+    if !digest.is_empty() {
+        let _ = write!(command, " --digest {}", shell_quote(digest));
+    }
+    let _ = write!(
+        command,
+        " --identity {} --stage \"{shell_path}\" --marker {}",
+        shell_quote(&identity_json),
+        shell_quote(marker)
+    );
+    let outputs_value = format!(
+        "          {OUTPUTS_ENV}: |\n{}\n",
+        indent_block(&product.outputs.join("\n"), "            ")
+    );
+    let files_value = if product.output_files.is_empty() {
+        format!("          {OUTPUT_FILES_ENV}: \"\"\n")
+    } else {
+        format!(
+            "          {OUTPUT_FILES_ENV}: |\n{}\n",
+            indent_block(&product.output_files.join("\n"), "            ")
+        )
+    };
+    Some(format!(
+        "      - name: Restore exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Verify exact native product cache {artifact}\n        id: {verify_id}\n        if: steps.{restore_id}.outputs.cache-hit == 'true'\n        continue-on-error: true\n        env:\n{outputs_value}{files_value}        run: |\n          set -o pipefail\n          stage=\"{shell_path}\"\n          log=\"$RUNNER_TEMP/{artifact}-cache-verify.log\"\n          if [[ ! -f \"$stage/{MANIFEST_FILE}\" ]]; then\n            outcome=corrupt\n          else\n            rc=0\n            {command} 2>&1 | tee \"$log\" || rc=$?\n            if (( rc == 0 )); then\n              outcome=hit\n            elif grep -Eiq 'identity|schema mismatch|producer/product|inputs_digest' \"$log\"; then\n              outcome=wrong-identity\n            else\n              outcome=corrupt\n            fi\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n          echo \"outcome=$outcome\" >> \"$GITHUB_OUTPUT\"\n          echo \"usable=$([[ $outcome == hit ]] && echo true || echo false)\" >> \"$GITHUB_OUTPUT\"\n          if [[ \"$outcome\" != hit ]]; then\n            rm -rf -- \"$stage\"\n          fi\n      - name: Report exact native product cache {artifact}\n        if: always()\n        env:\n          RESTORE_OUTCOME: ${{{{ steps.{restore_id}.outcome }}}}\n          CACHE_HIT: ${{{{ steps.{restore_id}.outputs.cache-hit }}}}\n          VERIFY_OUTCOME: ${{{{ steps.{verify_id}.outputs.outcome }}}}\n        run: |\n          if [[ \"$RESTORE_OUTCOME\" != success || \"$CACHE_HIT\" != true ]]; then\n            outcome=miss\n          else\n            outcome=$VERIFY_OUTCOME\n            [[ -n \"$outcome\" ]] || outcome=corrupt\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n"
+    ))
+}
+
+/// Render the trusted producer-side save for an exact native-product cache.
+///
+/// The staged manifest is built from the product transport contract. The
+/// caller supplies the existing trusted/main cache gate; this function adds
+/// exact-restore miss and successful-staging guards. Cache failures remain
+/// optional and cannot replace same-run product transport.
+#[must_use]
+pub(crate) fn render_native_product_cache_save_block(
+    cache_save_pin: &str,
+    producer: &str,
+    product: &NamedProduct,
+    trusted_save_gate: &str,
+) -> Option<String> {
+    let key = exact_product_cache_key(product)?;
+    let restore_id = native_product_cache_step_id(&key);
+    let stage_id = format!("{restore_id}-stage");
+    let artifact = artifact_name(producer, &product.name);
+    let action_path = format!("${{{{ runner.temp }}}}/velnor-native-product-cache/{artifact}");
+    let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
+    let digest = product.inputs_digest.as_deref().unwrap_or_default();
+    let identity = product.identity.as_ref()?;
+    let identity_json = identity_json(identity);
+    if identity_json.is_empty() {
+        return None;
+    }
+    let mut command = format!(
+        "velnor-workflow stage-product --producer {} --product {}",
+        shell_quote(producer),
+        shell_quote(&product.name),
+    );
+    if !digest.is_empty() {
+        let _ = write!(command, " --digest {}", shell_quote(digest));
+    }
+    let _ = write!(
+        command,
+        " --identity {} --stage \"{shell_path}\"",
+        shell_quote(&identity_json)
+    );
+    let save_gate = format!(
+        "({trusted_save_gate}) && steps.{restore_id}.outputs.cache-hit != 'true' && steps.{stage_id}.outcome == 'success'"
+    );
+    let outputs_value = format!(
+        "          {OUTPUTS_ENV}: |\n{}\n",
+        indent_block(&product.outputs.join("\n"), "            ")
+    );
+    Some(format!(
+        "      - name: Stage exact native product cache {artifact}\n        id: {stage_id}\n        continue-on-error: true\n        env:\n{outputs_value}        run: {command}\n      - name: Save exact native product cache {artifact}\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: {action_path}\n          key: {key}\n"
+    ))
+}
+
 fn indent_block(value: &str, indent: &str) -> String {
     value
         .lines()
@@ -959,6 +1075,7 @@ fn indent_block(value: &str, indent: &str) -> String {
 mod tests {
     use super::{
         artifact_name, exact_product_cache_key, exact_product_reuse_eligible, ready_records,
+        render_native_product_cache_restore_block, render_native_product_cache_save_block,
         stage_product, transport_eligible, verify_product, StageRequest, VerifyRequest,
     };
     use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
@@ -1045,6 +1162,84 @@ mod tests {
             key,
             exact_product_cache_key(&different_profile).expect("profile remains complete")
         );
+    }
+
+    #[test]
+    fn exact_native_cache_restore_is_identity_verified_and_prefix_free() {
+        let mut full = product(&["out/Foo.xcframework"]);
+        full.inputs_digest = Some("a".repeat(64));
+        full.identity = Some(identity());
+        let rendered = render_native_product_cache_restore_block(
+            "actions/cache/restore@v4",
+            "rust-ffi",
+            &full,
+            "VELNOR_PRODUCT_RUST_FFI__XCFRAMEWORK_READY",
+        )
+        .expect("complete native product renders an exact cache restore");
+        assert!(
+            rendered.contains("uses: actions/cache/restore@v4"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("key: velnor-native-product-cache/1-"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("restore-keys:"), "{rendered}");
+        assert!(rendered.contains("verify-product"), "{rendered}");
+        assert!(rendered.contains("--identity"), "{rendered}");
+        assert!(rendered.contains("outcome=wrong-identity"), "{rendered}");
+        assert!(rendered.contains("outcome=corrupt"), "{rendered}");
+        assert!(rendered.contains("outcome=miss"), "{rendered}");
+        assert!(rendered.contains("continue-on-error: true"), "{rendered}");
+    }
+
+    #[test]
+    fn exact_native_cache_save_reuses_exact_key_and_trusted_gate() {
+        let mut full = product(&["out/Foo.xcframework"]);
+        full.inputs_digest = Some("a".repeat(64));
+        full.identity = Some(identity());
+        let rendered = render_native_product_cache_save_block(
+            "actions/cache/save@v4",
+            "rust-ffi",
+            &full,
+            "always() && (github.event_name == 'push' && github.ref == 'refs/heads/main')",
+        )
+        .expect("complete native product renders an exact cache save");
+        assert!(
+            rendered.contains("uses: actions/cache/save@v4"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("stage-product"), "{rendered}");
+        assert!(
+            rendered.contains("github.ref == 'refs/heads/main'"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("cache-hit != 'true'"), "{rendered}");
+        assert!(rendered.contains("outcome == 'success'"), "{rendered}");
+        assert!(!rendered.contains("restore-keys:"), "{rendered}");
+    }
+
+    #[test]
+    fn incomplete_native_identity_renders_no_cache_steps() {
+        let mut incomplete = product(&["out/Foo.xcframework"]);
+        incomplete.inputs_digest = Some("a".repeat(64));
+        let mut identity = identity();
+        identity.sdk.clear();
+        incomplete.identity = Some(identity);
+        assert!(render_native_product_cache_restore_block(
+            "actions/cache/restore@v4",
+            "rust-ffi",
+            &incomplete,
+            "VELNOR_PRODUCT_RUST_FFI__XCFRAMEWORK_READY",
+        )
+        .is_none());
+        assert!(render_native_product_cache_save_block(
+            "actions/cache/save@v4",
+            "rust-ffi",
+            &incomplete,
+            "always()",
+        )
+        .is_none());
     }
 
     #[test]
