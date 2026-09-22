@@ -1295,6 +1295,7 @@ pub(crate) struct ReleaseJobSpec {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) tasks: Vec<String>,
+    pub(crate) tools: Vec<String>,
     pub(crate) needs: Vec<String>,
     pub(crate) runner: String,
     pub(crate) modes: Vec<String>,
@@ -1746,6 +1747,30 @@ fn scan_target(
         let blocks = package_update_owner_blocks(&config);
         let blocks = blocks.iter().map(String::as_str).collect::<Vec<_>>();
         generation.validate(&unit_ids, &blocks, &mise_lock_keys)?;
+    }
+    if let Some(release) = config.release.as_mut()
+        && !release.jobs.is_empty()
+    {
+        let lock_backends = crate::s2::config::mise_lock_backends_for_root(root)
+            .map_err(|error| GeneratorError::usage(error.to_string()))?;
+        let install_deps = crate::s2::config::mise_install_deps_for_root(root)
+            .map_err(|error| GeneratorError::usage(error.to_string()))?;
+        for job in &mut release.jobs {
+            crate::s2::primitives::validate_release_mise_tools_are_closed(
+                &job.id,
+                &job.tools,
+                &mise_lock_keys,
+                &lock_backends,
+                &install_deps,
+            )
+            .map_err(|error| GeneratorError::usage(error.to_string()))?;
+            crate::s2::primitives::close_mise_tool_subset(
+                &mut job.tools,
+                &mise_lock_keys,
+                &lock_backends,
+                &install_deps,
+            );
+        }
     }
     // A unit that needs nextest while the lock pins neither spelling would
     // render `install_args` the runner's own lock check rejects; refuse it at
@@ -2913,6 +2938,7 @@ fn apply_release(
                 id: id.to_owned(),
                 name: row.name().unwrap_or(id).to_owned(),
                 tasks: row.tasks().unwrap_or_default().to_vec(),
+                tools: row.tools().unwrap_or_default().to_vec(),
                 needs: row.needs().unwrap_or_default().to_vec(),
                 runner: row.runner().unwrap_or("github").to_owned(),
                 modes: row.modes().unwrap_or_default().to_vec(),

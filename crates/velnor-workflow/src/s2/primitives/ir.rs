@@ -676,6 +676,91 @@ mod tests {
     }
 
     #[test]
+    fn closure_accepts_qualified_cargo_keys_and_adds_cargo_backend_dependencies() {
+        let lock = BTreeSet::from([
+            "cargo:boltffi_cli".to_owned(),
+            "cargo:cargo-binstall".to_owned(),
+            "rust".to_owned(),
+        ]);
+        let backends = BTreeMap::from([
+            (
+                "cargo:boltffi_cli".to_owned(),
+                "cargo:boltffi_cli".to_owned(),
+            ),
+            (
+                "cargo:cargo-binstall".to_owned(),
+                "cargo:cargo-binstall".to_owned(),
+            ),
+        ]);
+        let mut tools = vec!["cargo:boltffi_cli".to_owned()];
+        super::close_mise_tool_subset(&mut tools, &lock, &backends, &MiseInstallDeps::default());
+        assert_eq!(
+            tools,
+            vec![
+                "cargo:boltffi_cli".to_owned(),
+                "rust".to_owned(),
+                "cargo:cargo-binstall".to_owned(),
+            ]
+        );
+        assert!(super::validate_release_mise_tools_are_closed(
+            "build",
+            &["cargo:boltffi_cli".to_owned()],
+            &lock,
+            &backends,
+            &MiseInstallDeps::default(),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn release_closure_rejects_unpinned_transitive_depends() {
+        let lock = BTreeSet::from([
+            "cargo:boltffi_cli".to_owned(),
+            "cargo:cargo-binstall".to_owned(),
+            "rust".to_owned(),
+        ]);
+        let backends = BTreeMap::from([(
+            "cargo:boltffi_cli".to_owned(),
+            "cargo:boltffi_cli".to_owned(),
+        )]);
+        let deps = MiseInstallDeps {
+            depends: BTreeMap::from([("rust".to_owned(), vec!["missing-tool".to_owned()])]),
+            ..MiseInstallDeps::default()
+        };
+        let error = must_err(
+            super::validate_release_mise_tools_are_closed(
+                "build",
+                &["cargo:boltffi_cli".to_owned()],
+                &lock,
+                &backends,
+                &deps,
+            ),
+            "a release tool's dangling transitive dependency must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("rust"), "{message}");
+        assert!(message.contains("missing-tool"), "{message}");
+    }
+
+    #[test]
+    fn release_closure_rejects_unknowable_backend() {
+        let lock = BTreeSet::from(["vfox:example/example-lint".to_owned()]);
+        let error = must_err(
+            super::validate_release_mise_tools_are_closed(
+                "build",
+                &["vfox:example/example-lint".to_owned()],
+                &lock,
+                &BTreeMap::new(),
+                &MiseInstallDeps::default(),
+            ),
+            "an unknowable release backend must fail generation",
+        );
+        let message = error.to_string();
+        assert!(message.contains("vfox:example/example-lint"), "{message}");
+        assert!(message.contains("plugin metadata"), "{message}");
+    }
+
+    #[test]
     fn depends_names_resolve_through_registry_spellings() {
         // A `depends` short resolves like a backend declaration: `sccache`
         // matches a locked `cargo:sccache` instead of dangling.
@@ -5526,6 +5611,61 @@ pub(crate) fn close_mise_tool_subset(
         }
         index += 1;
     }
+}
+
+/// Prove a declared release-job tool subset is installable with the exact
+/// locked ids that rendering will emit. The closure follows backend-implied
+/// and `mise.toml` `depends` edges to a fixpoint; an unknown backend or a
+/// dangling explicit dependency fails before either provider can render.
+pub(crate) fn validate_release_mise_tools_are_closed(
+    id: &str,
+    declared_tools: &[String],
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &BTreeMap<String, String>,
+    install_deps: &MiseInstallDeps,
+) -> Result<(), GeneratorError> {
+    if declared_tools.is_empty() {
+        return Ok(());
+    }
+    let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+    if lock_keys.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} declares tools but the repository has no pinned mise.lock tool keys; strict locked installation requires mise.lock"
+        )));
+    }
+    for tool in declared_tools {
+        if !lock_keys.contains(tool) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} declares tool {tool}, which mise.lock does not pin; install_args must equal the lock keys, known keys: {}",
+                known()
+            )));
+        }
+    }
+    let mut tools = declared_tools.to_vec();
+    close_mise_tool_subset(&mut tools, lock_keys, lock_backends, install_deps);
+    for tool in &tools {
+        if let Err(unknown) = member_backend_key(tool, lock_backends) {
+            let reason = unknown_backend_reason(&unknown, "tools");
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} installs {tool}, {reason} (planning models mise {MISE_INSTALL_DEPS_MODEL_VERSION} install dependencies), known keys: {}",
+                known()
+            )));
+        }
+    }
+    for tool in &tools {
+        let Some(names) = install_deps.depends.get(tool) else {
+            continue;
+        };
+        for name in names {
+            if resolve_install_dep_names(name, lock_keys).is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
+                    known()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether any of the unit's commands drive `XcodeGen` project generation.

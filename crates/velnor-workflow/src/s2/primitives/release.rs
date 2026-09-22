@@ -3489,9 +3489,17 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
             let _ = writeln!(output, "      {scope}: {level}");
         }
     }
-    if !job.env.is_empty() {
+    let mut env = job.env.clone();
+    // Named tasks must consume only the explicitly provisioned tools. These
+    // controls are forced after parsing so a job-level override cannot restore
+    // Mise's implicit whole-config installation.
+    env.insert("MISE_AUTO_INSTALL".to_owned(), "false".to_owned());
+    env.insert("MISE_EXEC_AUTO_INSTALL".to_owned(), "false".to_owned());
+    env.insert("MISE_NOT_FOUND_AUTO_INSTALL".to_owned(), "false".to_owned());
+    env.insert("MISE_TASK_RUN_AUTO_INSTALL".to_owned(), "false".to_owned());
+    if !env.is_empty() {
         output.push_str("    env:\n");
-        for (key, value) in &job.env {
+        for (key, value) in &env {
             let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
         }
     }
@@ -8064,6 +8072,17 @@ verification_providers = ["github-hosted"]
         let build = yaml_job(release, "build");
         assert!(build.contains("runs-on: ubuntu-24.04"), "{build}");
         assert!(build.contains("run: mise run desktop-build"), "{build}");
+        assert!(
+            [
+                "MISE_AUTO_INSTALL: \"false\"",
+                "MISE_EXEC_AUTO_INSTALL: \"false\"",
+                "MISE_NOT_FOUND_AUTO_INSTALL: \"false\"",
+                "MISE_TASK_RUN_AUTO_INSTALL: \"false\"",
+            ]
+            .into_iter()
+            .all(|env| build.contains(env)),
+            "every named task job disables Mise auto-install: {build}"
+        );
         assert!(build.contains("install: false"), "{build}");
         assert!(
             build.contains("install_args: \"rust cargo:boltffi_cli xcodegen cargo-binstall\""),

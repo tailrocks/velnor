@@ -392,6 +392,11 @@ pub(crate) struct ReleaseJobSection {
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tasks: Option<Vec<String>>,
+    /// Exact mise tool ids the job provisions before its named tasks. Each id
+    /// must be a root `mise.lock` key so hosted `install_args` cannot drift
+    /// from the repository's pinned tool identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     needs: Option<Vec<String>>,
     runner: Option<String>,
@@ -1027,6 +1032,10 @@ impl ReleaseJobSection {
 
     pub(crate) fn tasks(&self) -> Option<&[String]> {
         self.tasks.as_deref()
+    }
+
+    pub(crate) fn tools(&self) -> Option<&[String]> {
+        self.tools.as_deref()
     }
 
     pub(crate) fn needs(&self) -> Option<&[String]> {
@@ -1917,7 +1926,7 @@ impl RepoGenerationConfig {
         )?;
         validate_static_files(&self.static_files)?;
         validate_reviewers(&self.reviewers)?;
-        self.validate_release()?;
+        self.validate_release(mise_lock_keys)?;
         self.validate_renovate()?;
         self.validate_docs()?;
         self.validate_check_profiles(mise_lock_keys)?;
@@ -3229,10 +3238,10 @@ impl RepoGenerationConfig {
         Ok(())
     }
 
-    fn validate_release(&self) -> Result<(), GeneratorError> {
+    fn validate_release(&self, mise_lock_keys: &BTreeSet<String>) -> Result<(), GeneratorError> {
         let release = &self.release;
         validate_release_bindings(release)?;
-        validate_release_jobs(&self.workflow, release)?;
+        validate_release_jobs(&self.workflow, release, mise_lock_keys)?;
         if release.enabled != Some(true) {
             return Ok(());
         }
@@ -3563,27 +3572,39 @@ fn validate_check_profile_tools(
     tools: &[String],
     mise_lock_keys: &BTreeSet<String>,
 ) -> Result<(), GeneratorError> {
+    validate_mise_tools("[[check_profile]]", id, tools, mise_lock_keys)
+}
+
+/// Validate a typed mise tool subset against the root lock. The owner is kept
+/// as a parameter so check profiles and release jobs share the exact shape,
+/// duplicate, and lock-membership contract.
+fn validate_mise_tools(
+    owner: &str,
+    id: &str,
+    tools: &[String],
+    mise_lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
     if tools.is_empty() {
         return Err(GeneratorError::usage(format!(
-            "[[check_profile]] {id} declares an empty tools; omit it or name the tools the job installs"
+            "{owner} {id} declares an empty tools; omit it or name the tools the job installs"
         )));
     }
     let mut seen = BTreeSet::new();
     for tool in tools {
         if !valid_mise_tool_id(tool) {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} declares tool {tool}, which is not a plain tool id; use ids such as cargo-binstall without versions, flags, whitespace, traversal, or shell metacharacters"
+                "{owner} {id} declares tool {tool}, which is not a plain tool id; use ids such as cargo-binstall without versions, flags, whitespace, traversal, or shell metacharacters"
             )));
         }
         if !seen.insert(tool) {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} declares tool {tool} more than once"
+                "{owner} {id} declares tool {tool} more than once"
             )));
         }
     }
     if mise_lock_keys.is_empty() {
         return Err(GeneratorError::usage(format!(
-            "[[check_profile]] {id} declares tools but the repository has no pinned mise.lock tool keys; strict locked installation requires mise.lock"
+            "{owner} {id} declares tools but the repository has no pinned mise.lock tool keys; strict locked installation requires mise.lock"
         )));
     }
     for tool in tools {
@@ -3594,7 +3615,7 @@ fn validate_check_profile_tools(
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} declares tool {tool}, which mise.lock does not pin; install_args must equal the lock keys, known keys: {known}"
+                "{owner} {id} declares tool {tool}, which mise.lock does not pin; install_args must equal the lock keys, known keys: {known}"
             )));
         }
     }
@@ -3850,6 +3871,7 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
 fn validate_release_jobs(
     workflow: &WorkflowSection,
     release: &ReleaseSection,
+    mise_lock_keys: &BTreeSet<String>,
 ) -> Result<(), GeneratorError> {
     if release.job.is_empty() {
         return Ok(());
@@ -3881,7 +3903,7 @@ fn validate_release_jobs(
     }
     for row in &release.job {
         let id = row.id.as_deref().unwrap_or_default();
-        validate_release_job_row(workflow, row, id, &ids)?;
+        validate_release_job_row(workflow, row, id, &ids, mise_lock_keys)?;
     }
     Ok(())
 }
@@ -3893,6 +3915,7 @@ fn validate_release_job_row(
     row: &ReleaseJobSection,
     id: &str,
     ids: &BTreeSet<&str>,
+    mise_lock_keys: &BTreeSet<String>,
 ) -> Result<(), GeneratorError> {
     if let Some(name) = row.name.as_deref()
         && (name.is_empty() || name.contains(['\n', '\r']))
@@ -3921,6 +3944,9 @@ fn validate_release_job_row(
                 }
             }
         }
+    }
+    if let Some(tools) = row.tools.as_deref() {
+        validate_mise_tools("[[release.job]]", id, tools, mise_lock_keys)?;
     }
     if let Some(needs) = row.needs.as_deref() {
         for dependency in needs {
@@ -4464,6 +4490,41 @@ mod tests {
         assert_eq!(jobs[1].runner(), Some("macos"));
         assert_eq!(jobs[1].modes(), Some(&["publish".to_owned()][..]));
         assert_eq!(jobs[1].timeout_minutes(), Some(45));
+    }
+
+    #[test]
+    fn tasks_release_tools_parse_and_require_exact_lock_keys() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\"]\ntools = [\"cargo:boltffi_cli\", \"cargo:cargo-binstall\"]\n",
+        );
+        assert_eq!(
+            config.release().jobs()[0].tools(),
+            Some(
+                &[
+                    "cargo:boltffi_cli".to_owned(),
+                    "cargo:cargo-binstall".to_owned(),
+                ][..]
+            )
+        );
+        must(
+            config.validate(
+                &[],
+                &[],
+                &BTreeSet::from([
+                    "cargo:boltffi_cli".to_owned(),
+                    "cargo:cargo-binstall".to_owned(),
+                ]),
+            ),
+            "qualified release tools pinned by the lock validate",
+        );
+        let error = must_fail(
+            config.validate(&[], &[], &BTreeSet::from(["cargo:boltffi_cli".to_owned()])),
+            "an unpinned qualified release tool must fail",
+        );
+        assert!(
+            error.to_string().contains("cargo:cargo-binstall"),
+            "{error}"
+        );
     }
 
     #[test]

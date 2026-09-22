@@ -22,13 +22,13 @@ use serde_yaml::Value;
 
 mod capability_tests;
 mod closure;
-mod config;
+pub(crate) mod config;
 pub(crate) mod dispatch;
 mod estate;
 mod planner;
 pub(crate) mod platform;
 pub(crate) mod policy;
-mod primitives;
+pub(crate) mod primitives;
 pub(crate) mod provider;
 mod results;
 mod reuse;
@@ -1929,6 +1929,7 @@ fn scan_target(
         let blocks = blocks.iter().map(String::as_str).collect::<Vec<_>>();
         generation.validate(&unit_ids, &blocks, &mise_lock_keys)?;
     }
+    close_release_job_tools_for_target(&mut config, root, &mise_lock_keys)?;
     // A unit that needs nextest while the lock pins neither spelling would
     // render `install_args` the runner's own lock check rejects; refuse it at
     // generation time instead of shipping a failing job.
@@ -1970,6 +1971,48 @@ fn scan_target(
         generation,
         inputs,
     })
+}
+
+fn close_release_job_tools(
+    release: Option<&mut ReleaseSpec>,
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &BTreeMap<String, String>,
+    install_deps: &config::MiseInstallDeps,
+) -> Result<(), GeneratorError> {
+    let Some(release) = release else {
+        return Ok(());
+    };
+    for job in &mut release.jobs {
+        crate::s2::primitives::validate_release_mise_tools_are_closed(
+            &job.id,
+            &job.tools,
+            lock_keys,
+            lock_backends,
+            install_deps,
+        )?;
+        crate::s2::primitives::close_mise_tool_subset(
+            &mut job.tools,
+            lock_keys,
+            lock_backends,
+            install_deps,
+        );
+    }
+    Ok(())
+}
+
+fn close_release_job_tools_for_target(
+    config: &mut ProjectConfig,
+    root: &Path,
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    let lock_backends = config::mise_lock_backends_for_root(root)?;
+    let install_deps = config::mise_install_deps_for_root(root)?;
+    close_release_job_tools(
+        config.release.as_mut(),
+        lock_keys,
+        &lock_backends,
+        &install_deps,
+    )
 }
 
 pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {

@@ -47,8 +47,9 @@ pub(crate) use ir::{
     render_retained_output_cache_note, resolve_install_dep_names, trusted_cache_save_expression,
     unknown_backend_reason, validate_boltffi_tools_are_locked,
     validate_mise_install_deps_are_closed, validate_nextest_tools_are_locked,
-    validate_xcodegen_tools_are_locked, ProviderAdmission, WorkflowIr, WorkflowKind,
-    D19_PIN_FETCH_COMMANDS, GITHUB_WORKFLOW_BYTE_LIMIT, MISE_INSTALL_DEPS_MODEL_VERSION,
+    validate_release_mise_tools_are_closed, validate_xcodegen_tools_are_locked, ProviderAdmission,
+    WorkflowIr, WorkflowKind, D19_PIN_FETCH_COMMANDS, GITHUB_WORKFLOW_BYTE_LIMIT,
+    MISE_INSTALL_DEPS_MODEL_VERSION,
 };
 
 #[cfg(test)]

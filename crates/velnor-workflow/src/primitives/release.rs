@@ -3061,6 +3061,39 @@ fn render_versioned_tool_mise_setup(config: &ProjectConfig) -> String {
     )
 }
 
+/// Pinned Mise provisioning for one typed release job. Hosted runners use the
+/// setup action with the exact closed lock subset; Velnor uses its preinstalled
+/// binary with the same locked ids.
+fn render_mise_setup_for_runner(runner: &str, tools: &[String]) -> String {
+    match runner {
+        "velnor" => {
+            if tools.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "      - name: Install declared Mise tools\n        run: |\n          set -euo pipefail\n          mise --yes --locked install {}\n",
+                    tools.join(" ")
+                )
+            }
+        }
+        "github" | "macos" => {
+            let install_args = if tools.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "          install_args: {}\n",
+                    yaml_scalar(&tools.join(" "))
+                )
+            };
+            format!(
+                "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false\n{install_args}",
+                ActionPin::Mise.reference()
+            )
+        }
+        _ => String::new(),
+    }
+}
+
 /// One `mise run` step per named task, exactly the scheduled-check shape,
 /// with an optional job-expression gate on every step.
 fn render_versioned_tool_task_steps(tasks: &[String], gate: Option<&str>) -> String {
@@ -3277,9 +3310,17 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
             let _ = writeln!(output, "      {scope}: {level}");
         }
     }
-    if !job.env.is_empty() {
+    let mut env = job.env.clone();
+    // Named tasks must consume only the explicitly provisioned tools. These
+    // controls are forced after parsing so a job-level override cannot restore
+    // Mise's implicit whole-config installation.
+    env.insert("MISE_AUTO_INSTALL".to_owned(), "false".to_owned());
+    env.insert("MISE_EXEC_AUTO_INSTALL".to_owned(), "false".to_owned());
+    env.insert("MISE_NOT_FOUND_AUTO_INSTALL".to_owned(), "false".to_owned());
+    env.insert("MISE_TASK_RUN_AUTO_INSTALL".to_owned(), "false".to_owned());
+    if !env.is_empty() {
         output.push_str("    env:\n");
-        for (key, value) in &job.env {
+        for (key, value) in &env {
             let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
         }
     }
@@ -3287,7 +3328,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         output,
         "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
         ActionPin::Checkout.reference(),
-        render_versioned_tool_mise_setup(config),
+        render_mise_setup_for_runner(&job.runner, &job.tools),
     );
     output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
     if !job.attest_subjects.is_empty() {
@@ -5855,6 +5896,7 @@ cp "$record" "$out"
             id: id.to_owned(),
             name: id.to_owned(),
             tasks: tasks.iter().map(|task| (*task).to_owned()).collect(),
+            tools: Vec::new(),
             needs: Vec::new(),
             runner: "github".to_owned(),
             modes: Vec::new(),
@@ -7007,6 +7049,10 @@ cp "$record" "$out"
             "run: mise run build-release",
             "run: mise run verify-release",
             "run: mise run sign-release",
+            "MISE_AUTO_INSTALL: \"false\"",
+            "MISE_EXEC_AUTO_INSTALL: \"false\"",
+            "MISE_NOT_FOUND_AUTO_INSTALL: \"false\"",
+            "MISE_TASK_RUN_AUTO_INSTALL: \"false\"",
         ] {
             assert!(
                 workflow.contains(expected),
@@ -7033,6 +7079,45 @@ cp "$record" "$out"
             sign.contains("runs-on: macos-15"),
             "the sign job runs on the macos lane: {sign}"
         );
+    }
+
+    #[test]
+    fn tasks_release_provisions_declared_tools_for_each_runner() {
+        let config = config(&["release.yml"], None);
+        for (runner, expected) in [
+            (
+                "github",
+                "install_args: \"cargo:boltffi_cli cargo:cargo-binstall\"",
+            ),
+            (
+                "macos",
+                "install_args: \"cargo:boltffi_cli cargo:cargo-binstall\"",
+            ),
+            (
+                "velnor",
+                "mise --yes --locked install cargo:boltffi_cli cargo:cargo-binstall",
+            ),
+        ] {
+            let mut job = tasks_job("build", &["build-release"]);
+            job.runner = runner.to_owned();
+            job.tools = vec![
+                "cargo:boltffi_cli".to_owned(),
+                "cargo:cargo-binstall".to_owned(),
+            ];
+            let rendered = render_tasks_release_job(&config, &job);
+            assert!(rendered.contains(expected), "{runner}: {rendered}");
+            assert!(
+                [
+                    "MISE_AUTO_INSTALL: \"false\"",
+                    "MISE_EXEC_AUTO_INSTALL: \"false\"",
+                    "MISE_NOT_FOUND_AUTO_INSTALL: \"false\"",
+                    "MISE_TASK_RUN_AUTO_INSTALL: \"false\"",
+                ]
+                .into_iter()
+                .all(|env| rendered.contains(env)),
+                "{runner}: every named task job disables Mise auto-install: {rendered}"
+            );
+        }
     }
 
     #[test]
