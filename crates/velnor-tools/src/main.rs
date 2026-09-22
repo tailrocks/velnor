@@ -1928,10 +1928,11 @@ fn target_smoke_daemon_args(
 }
 
 fn target_smoke_scheduling_labels(target_mvp_arm_label: bool) -> Vec<&'static str> {
-    let mut labels = vec!["hetzner-sentry-ci", "ubuntu-latest", "ubuntu-24.04"];
+    let mut labels = vec!["hetzner-sentry-ci", "self-hosted"];
     if target_mvp_arm_label {
         labels.push("ubuntu-24.04-arm");
     }
+    labels.extend(["ubuntu-latest", "velnor-target-mvp"]);
     labels
 }
 
@@ -5178,15 +5179,21 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
     fn smoke_plan_target_labels_match_shell_contract() {
         assert_eq!(
             target_smoke_scheduling_labels(false),
-            vec!["hetzner-sentry-ci", "ubuntu-latest", "ubuntu-24.04"]
+            vec![
+                "hetzner-sentry-ci",
+                "self-hosted",
+                "ubuntu-latest",
+                "velnor-target-mvp"
+            ]
         );
         assert_eq!(
             target_smoke_scheduling_labels(true),
             vec![
                 "hetzner-sentry-ci",
+                "self-hosted",
+                "ubuntu-24.04-arm",
                 "ubuntu-latest",
-                "ubuntu-24.04",
-                "ubuntu-24.04-arm"
+                "velnor-target-mvp"
             ]
         );
     }

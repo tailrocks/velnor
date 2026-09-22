@@ -72,15 +72,18 @@ pub fn runner_name(scale_set_id: i32, request_id: i64) -> String {
 }
 
 /// Parse `(scale_set_id, request_id)` from a runner name formatted like
-/// `velnor-{scale_set_id}-{request_id}`. Non-positive identities are invalid:
-/// generated Velnor runner names always carry positive IDs.
+/// `velnor-{scale_set_id}-{request_id}`. Only canonical decimal spellings
+/// emitted by [`runner_name`] are accepted. Signed, zero-padded, and
+/// non-positive identities are invalid: generated Velnor runner names always
+/// carry positive IDs.
 #[must_use]
 pub fn parse_runner_name(name: &str) -> Option<(i32, i64)> {
     let parts: Vec<&str> = name.split('-').collect();
     if parts.len() == 3 && parts[0] == "velnor" {
         let set_id = parts[1].parse::<i32>().ok()?;
         let req_id = parts[2].parse::<i64>().ok()?;
-        (set_id > 0 && req_id > 0).then_some((set_id, req_id))
+        (set_id > 0 && req_id > 0 && runner_name(set_id, req_id) == name)
+            .then_some((set_id, req_id))
     } else {
         None
     }
@@ -603,6 +606,16 @@ mod tests {
         assert_eq!(request_id_for_runner(7, "runner-7-4242", 99), None);
         assert_eq!(parse_runner_name("velnor-0-4242"), None);
         assert_eq!(parse_runner_name("velnor-7-0"), None);
+        for alias in [
+            "velnor-07-4242",
+            "velnor-7-04242",
+            "velnor-+7-4242",
+            "velnor-7-+4242",
+            "velnor--7-4242",
+            "velnor-7--4242",
+        ] {
+            assert_eq!(parse_runner_name(alias), None, "noncanonical alias {alias}");
+        }
         assert_eq!(provision_operation_id(7, 4242, 0), "prov-op-7-4242-0");
         assert_ne!(
             provision_operation_id(7, 4242, 0),
