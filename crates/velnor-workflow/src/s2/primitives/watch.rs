@@ -93,7 +93,11 @@ impl Primitive for WatchGraph {
                         "mise.lock".to_owned(),
                     ]);
                 }
-                UnitKind::Gradle | UnitKind::Node | UnitKind::Swift | UnitKind::Homebrew => {}
+                UnitKind::Gradle
+                | UnitKind::Node
+                | UnitKind::Swift
+                | UnitKind::Homebrew
+                | UnitKind::GithubAction => {}
             }
             if let Some(paths) = additions.get(&unit.id) {
                 watch.extend(

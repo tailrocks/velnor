@@ -4103,6 +4103,7 @@ dependencies = [
  "termrock",
  "toml",
  "uuid",
+ "velnor-model",
  "velnor-runner",
 ]
 
