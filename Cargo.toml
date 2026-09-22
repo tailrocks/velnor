@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/velnor-model",
+  "crates/velnor-action-contract",
   "crates/velnor-control",
   "crates/velnor-client",
   "crates/velnor-render",
@@ -49,6 +50,7 @@ rsa = { version = "0.9.8", features = ["pem"] }
 # bundled: compile SQLite from source so cross/deb release legs stay hermetic.
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 serde = { version = "1.0.219", features = ["derive"] }
+noyalib = { version = "0.0.28", features = ["compat-serde-yaml"] }
 # float_roundtrip: serde_json's default float parser is correctly-rounded only
 # to 16 significant digits; the 17th digit can come back one ulp off, which
 # breaks bit-exact round trips of Summary mean/variance through NDJSON records

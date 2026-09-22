@@ -22,7 +22,8 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 10] = [
+const WORKSPACE_PACKAGES: [&str; 11] = [
+    "velnor-action-contract",
     "velnor-model",
     "velnor-control",
     "velnor-client",
