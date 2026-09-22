@@ -496,7 +496,7 @@ fn render_profile_job(
     if profile.runner.as_str() == "velnor" {
         let admission = WorkflowIr::from_config(config)
             .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
-        let _ = writeln!(output, "    if: ${{{{ ({}) }}}}", admission);
+        let _ = writeln!(output, "    if: ${{{{ ({admission}) }}}}");
     }
     let runs_on = profile_runs_on(config, profile)?;
     let _ = writeln!(output, "    runs-on: {runs_on}");
