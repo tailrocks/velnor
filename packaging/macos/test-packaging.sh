@@ -8,21 +8,24 @@ template="$root/Formula/velnorctl.rb.template"
 launcher="$root/packaging/macos/velnor-runner-launch"
 plist="$root/packaging/macos/com.tailrocks.velnor.runner.plist"
 mode_contract="$root/packaging/macos/test-mode-contract.sh"
+provider_fixtures="$root/packaging/macos/test-provider-discovery.sh"
 
 test -f "$formula"
 test -f "$template"
 test -x "$launcher"
 test -x "$mode_contract"
+test -x "$provider_fixtures"
 test -f "$plist"
 
 sh -n "$launcher"
 sh -n "$mode_contract"
+sh -n "$provider_fixtures"
 plutil -lint "$plist" >/dev/null
 ruby -c "$formula" >/dev/null
 ruby -c "$template" >/dev/null
 sh "$mode_contract"
 
-grep -F 'SOURCE_COMMIT = "c76d2b932dc1a4f12eee3650f690d50b13816d48"' "$formula" >/dev/null
+grep -F 'SOURCE_COMMIT = "24889535c25db9002e2903dda35cb2ee252c13bb"' "$formula" >/dev/null
 grep -F 'version "0.1.277"' "$formula" >/dev/null
 grep -F 'sha256 SOURCE_ARCHIVE_SHA256' "$formula" >/dev/null
 grep -F 'depends_on "gh"' "$formula" >/dev/null
@@ -62,6 +65,14 @@ grep -F 'admission_key in owner repository ref source workflow event' "$launcher
 grep -F 'requires exactly one [auth.app] or [auth.pat]' "$launcher" >/dev/null
 grep -F 'require_positive_integer VELNOR_MAX_JOBS' "$launcher" >/dev/null
 grep -F 'Docker is required' "$launcher" >/dev/null
+grep -F 'context inspect' "$launcher" >/dev/null
+grep -F -- '--host' "$launcher" >/dev/null
+grep -F 'OperatingSystem' "$launcher" >/dev/null
+grep -F 'cannot discover the selected Docker context' "$launcher" >/dev/null
+if grep -nF 'docker context use' "$launcher"; then
+  printf '%s\n' "launcher must never mutate Docker's selected context" >&2
+  exit 1
+fi
 grep -F 'brew services stop velnorctl; edit env; brew services start velnorctl' "$launcher" >/dev/null
 grep -F '<key>PATH</key>' "$plist" >/dev/null
 grep -F '<key>VELNOR_PATH</key>' "$plist" >/dev/null
@@ -70,6 +81,21 @@ grep -F '<key>VELNOR_WORKER_VERIFIER_CONTRACT</key>' "$plist" >/dev/null
 grep -F 'attestation verify --help' "$plist" >/dev/null
 grep -F '<key>VELNOR_MODE_STATE</key>' "$plist" >/dev/null
 grep -F '__VELNOR_MODE_STATE__' "$plist" >/dev/null
+
+provider_marker=$(printf 'orb%s' 'stack')
+provider_socket_marker=$(printf '.%s%s' 'orb' 'stack')
+for packaging_file in "$formula" "$template" "$launcher" "$plist"; do
+  if grep -niF "$provider_marker" "$packaging_file" || \
+    grep -niF "$provider_socket_marker" "$packaging_file"; then
+    printf '%s\n' "packaging must not hardcode a provider context or socket" >&2
+    exit 1
+  fi
+done
+if grep -nE 'VELNOR_DOCKER_CONTEXT[[:space:]]*:|VELNOR_DOCKER_HOST[[:space:]]*:|DOCKER_HOST[[:space:]]*:|__VELNOR_DOCKER_HOST__' \
+  "$formula" "$template" "$plist"; then
+  printf '%s\n' "packaging must not force Docker host/context" >&2
+  exit 1
+fi
 
 for binary in velnorctl velnor-runner velnor-workflow; do
   grep -E "\"$binary\"[[:space:]]+=>[[:space:]]+\"crates/$binary\"" "$formula" >/dev/null
@@ -90,5 +116,7 @@ if grep -nE '__VELNOR_[A-Z_]+__' "$launcher"; then
   printf '%s\n' "launcher contains unresolved plist placeholders" >&2
   exit 1
 fi
+
+sh "$provider_fixtures"
 
 printf '%s\n' "macOS packaging static gate: PASS"

@@ -119,10 +119,22 @@ pub fn startup<L: CapacityLedger>(
         if !batches.contains_request(scale_set_id, request_id)? {
             let holder = permit_holder(scale_set_id, request_id);
             if state == DemandState::CanceledPending {
-                demand.set_state(request_id, DemandState::CanceledDone, None, generation)?;
+                demand.set_state(
+                    scale_set_id,
+                    request_id,
+                    DemandState::CanceledDone,
+                    None,
+                    generation,
+                )?;
                 ledger.release_cancelled(&holder)?;
             } else {
-                demand.set_state(request_id, DemandState::Eligible, None, generation)?;
+                demand.set_state(
+                    scale_set_id,
+                    request_id,
+                    DemandState::Eligible,
+                    None,
+                    generation,
+                )?;
                 ledger.release_to_eligible(&holder)?;
             }
             unbatched_acquire_intents_recovered += 1;
@@ -138,10 +150,16 @@ pub fn startup<L: CapacityLedger>(
         if batch.state == crate::scaleset::intents::BatchState::Intended {
             batches.resolve(&batch.batch_id, true)?;
             for request_id in &batch.request_ids {
-                if let Some(row) = demand.get(*request_id)?
+                if let Some(row) = demand.get(batch.scale_set_id, *request_id)?
                     && matches!(row.state, DemandState::Granted | DemandState::AcquireIntent)
                 {
-                    demand.set_state(*request_id, DemandState::Uncertain, None, generation)?;
+                    demand.set_state(
+                        batch.scale_set_id,
+                        *request_id,
+                        DemandState::Uncertain,
+                        None,
+                        generation,
+                    )?;
                 }
             }
             batches_orphaned += 1;
@@ -279,7 +297,7 @@ async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
     require_generation(ledger, generation)?;
     let mut states = Vec::with_capacity(batch.request_ids.len());
     for request_id in &batch.request_ids {
-        states.push(demand.get(*request_id)?);
+        states.push(demand.get(batch.scale_set_id, *request_id)?);
     }
     if states.iter().any(|row| {
         row.as_ref().is_some_and(|row| {
@@ -407,7 +425,7 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
     let uncertain: Vec<i64> = {
         let mut members = Vec::new();
         for request_id in &batch.request_ids {
-            if let Some(row) = demand.get(*request_id)? {
+            if let Some(row) = demand.get(batch.scale_set_id, *request_id)? {
                 match row.state {
                     DemandState::Uncertain => members.push(*request_id),
                     DemandState::CanceledPending => {
@@ -444,7 +462,7 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
         } else {
             DemandState::Acquired
         };
-        demand.set_state(*request_id, state, None, generation)?;
+        demand.set_state(batch.scale_set_id, *request_id, state, None, generation)?;
         transition_or_adopt(
             ledger,
             &permit_holder(batch.scale_set_id, *request_id),
@@ -459,7 +477,13 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
             // The cancellation message was already ACKed. Once the batch
             // proves this request was not acquired, close this old attempt;
             // upstream sends a new JobAvailable for the requeued job.
-            demand.set_state(*request_id, DemandState::CanceledDone, None, generation)?;
+            demand.set_state(
+                batch.scale_set_id,
+                *request_id,
+                DemandState::CanceledDone,
+                None,
+                generation,
+            )?;
             ledger
                 .release_cancelled(&holder)
                 .map_err(|error| anyhow::anyhow!("release canceled holder: {error}"))?;
@@ -467,7 +491,13 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
             ledger
                 .release_to_eligible(&holder)
                 .map_err(|error| anyhow::anyhow!("release missing holder: {error}"))?;
-            demand.set_state(*request_id, DemandState::Eligible, None, generation)?;
+            demand.set_state(
+                batch.scale_set_id,
+                *request_id,
+                DemandState::Eligible,
+                None,
+                generation,
+            )?;
         }
     }
     metrics.add_acquired_ids(acquired.len() as u64);
@@ -624,7 +654,7 @@ mod tests {
 
         demand.submit_offer(7, &push_offer(11), 0).unwrap();
         demand
-            .set_state(11, DemandState::Acquired, None, 0)
+            .set_state(7, 11, DemandState::Acquired, None, 0)
             .unwrap();
         let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
         // No row existed for the attested holder: adopted as counted occupancy.
@@ -644,7 +674,7 @@ mod tests {
 
         demand.submit_offer(7, &push_offer(12), 0).unwrap();
         demand
-            .set_state(12, DemandState::AcquireIntent, None, 0)
+            .set_state(7, 12, DemandState::AcquireIntent, None, 0)
             .unwrap();
         let holder = permit_holder(7, 12);
         assert_eq!(
@@ -663,7 +693,7 @@ mod tests {
         assert_eq!(report.unbatched_acquire_intents_recovered, 1);
         assert_eq!(report.batches_orphaned, 0);
         assert_eq!(
-            demand.get(12).unwrap().unwrap().state,
+            demand.get(7, 12).unwrap().unwrap().state,
             DemandState::Eligible
         );
         assert_eq!(ledger.holder_state(&holder).unwrap(), None);
@@ -673,7 +703,7 @@ mod tests {
         let replay = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
         assert_eq!(replay.unbatched_acquire_intents_recovered, 0);
         assert_eq!(
-            demand.get(12).unwrap().unwrap().state,
+            demand.get(7, 12).unwrap().unwrap().state,
             DemandState::Eligible
         );
         assert_eq!(ledger.occupied().unwrap(), 0);
@@ -690,7 +720,7 @@ mod tests {
 
         demand.submit_offer(7, &push_offer(21), 0).unwrap();
         demand
-            .set_state(21, DemandState::AcquireIntent, None, 0)
+            .set_state(7, 21, DemandState::AcquireIntent, None, 0)
             .unwrap();
         let holders = vec![permit_holder(7, 21)];
         batches
@@ -716,7 +746,7 @@ mod tests {
             crate::scaleset::intents::BatchState::Uncertain
         );
         assert_eq!(
-            demand.get(21).unwrap().unwrap().state,
+            demand.get(7, 21).unwrap().unwrap().state,
             DemandState::Uncertain
         );
         // Still counted: occupancy survives the crash.
@@ -737,7 +767,7 @@ mod tests {
         for id in [31, 32] {
             demand.submit_offer(7, &push_offer(id), generation).unwrap();
             demand
-                .set_state(id, DemandState::Uncertain, None, generation)
+                .set_state(7, id, DemandState::Uncertain, None, generation)
                 .unwrap();
             let holder = permit_holder(7, id);
             ledger
@@ -784,12 +814,12 @@ mod tests {
         .unwrap();
         assert_eq!(report.reacquired_batches, 1);
         assert_eq!(
-            demand.get(31).unwrap().unwrap().state,
+            demand.get(7, 31).unwrap().unwrap().state,
             DemandState::Acquired
         );
         // Missing member releases its permit and re-queues with age kept.
         assert_eq!(
-            demand.get(32).unwrap().unwrap().state,
+            demand.get(7, 32).unwrap().unwrap().state,
             DemandState::Eligible
         );
         assert_eq!(ledger.holder_state(&holders[1]).unwrap(), None);
@@ -814,7 +844,7 @@ mod tests {
         for id in [41, 42] {
             demand.submit_offer(7, &push_offer(id), generation).unwrap();
             demand
-                .set_state(id, DemandState::Terminal, None, generation)
+                .set_state(7, id, DemandState::Terminal, None, generation)
                 .unwrap();
             ledger
                 .acquire(
@@ -868,7 +898,7 @@ mod tests {
 
         demand.submit_offer(7, &push_offer(43), generation).unwrap();
         demand
-            .set_state(43, DemandState::Terminal, None, generation)
+            .set_state(7, 43, DemandState::Terminal, None, generation)
             .unwrap();
         let holder = permit_holder(7, 43);
         ledger

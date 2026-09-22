@@ -14,12 +14,6 @@
     <string>strict</string>
     <key>VELNOR_CONFIG_DIR</key>
     <string>__VELNOR_CONFIG_DIR__</string>
-    <key>VELNOR_DOCKER_CONTEXT</key>
-    <string>orbstack</string>
-    <key>VELNOR_DOCKER_HOST</key>
-    <string>__VELNOR_DOCKER_HOST__</string>
-    <key>DOCKER_HOST</key>
-    <string>__VELNOR_DOCKER_HOST__</string>
     <key>PATH</key>
     <string>__VELNOR_PATH__</string>
     <key>VELNOR_ENV_FILE</key>

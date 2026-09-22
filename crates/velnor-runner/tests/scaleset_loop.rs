@@ -397,10 +397,10 @@ async fn deferred_offer_queues_durably_without_capacity_then_acks() {
 
     let demand = DemandStore::open(&db).unwrap();
     assert_eq!(
-        demand.get(4244).unwrap().unwrap().state,
+        demand.get(SCALE_SET_ID, 4244).unwrap().unwrap().state,
         DemandState::Granted
     );
-    let pr = demand.get(4245).unwrap().unwrap();
+    let pr = demand.get(SCALE_SET_ID, 4245).unwrap().unwrap();
     assert_eq!(pr.state, DemandState::Observed);
     assert_eq!(pr.decline_reason.as_deref(), Some("trust-inputs-missing"));
 
@@ -487,11 +487,19 @@ async fn redelivery_after_failed_ack_replays_idempotently() {
         cursors.get(SCALE_SET_ID).unwrap().unwrap().last_message_id,
         0
     );
-    let before = DemandStore::open(&db).unwrap().get(4244).unwrap().unwrap();
+    let before = DemandStore::open(&db)
+        .unwrap()
+        .get(SCALE_SET_ID, 4244)
+        .unwrap()
+        .unwrap();
 
     let replayed = listener.run_once().await.unwrap();
     assert_eq!(replayed.acquired, Vec::<i64>::new());
-    let after = DemandStore::open(&db).unwrap().get(4244).unwrap().unwrap();
+    let after = DemandStore::open(&db)
+        .unwrap()
+        .get(SCALE_SET_ID, 4244)
+        .unwrap()
+        .unwrap();
     assert_eq!(after.first_seen_at, before.first_seen_at);
     assert_eq!(after.sequence, before.sequence);
 
@@ -549,11 +557,11 @@ async fn partial_acquire_releases_missing_and_requeues_with_age() {
     assert_eq!(outcome.provisioned, vec![4244]);
 
     let demand = DemandStore::open(&db).unwrap();
-    let missing = demand.get(4246).unwrap().unwrap();
+    let missing = demand.get(SCALE_SET_ID, 4246).unwrap().unwrap();
     assert_eq!(missing.state, DemandState::Eligible);
     assert_eq!(missing.sequence, 1);
     assert_eq!(
-        demand.get(4244).unwrap().unwrap().state,
+        demand.get(SCALE_SET_ID, 4244).unwrap().unwrap().state,
         DemandState::ProvisionIntent
     );
     assert_eq!(listener.processor().ledger_ref().occupied().unwrap(), 1);
@@ -623,7 +631,7 @@ async fn uncertain_acquire_resolves_on_idle_reacquire() {
     assert_eq!(idle.provisioned, vec![4244]);
     let demand = DemandStore::open(&db).unwrap();
     assert_eq!(
-        demand.get(4244).unwrap().unwrap().state,
+        demand.get(SCALE_SET_ID, 4244).unwrap().unwrap().state,
         DemandState::ProvisionIntent
     );
     assert_eq!(lane.state.provisioned.lock().unwrap().len(), 1);
@@ -707,7 +715,7 @@ async fn stale_generation_seed_resets_and_regrants_with_age_kept() {
         .demand
         .iter()
         .map(|row| {
-            let stored = demand.get(row.request_id).unwrap().unwrap();
+            let stored = demand.get(SCALE_SET_ID, row.request_id).unwrap().unwrap();
             (stored.first_seen_at, stored.sequence)
         })
         .collect();
@@ -728,7 +736,7 @@ async fn stale_generation_seed_resets_and_regrants_with_age_kept() {
     let granted = grant_oldest(&mut demand, seed.scale_set_id, current, &metrics).unwrap();
     assert_eq!(granted.len(), 2);
     for (row, (first_seen_at, sequence)) in seed.demand.iter().zip(ages.iter()) {
-        let stored = demand.get(row.request_id).unwrap().unwrap();
+        let stored = demand.get(SCALE_SET_ID, row.request_id).unwrap().unwrap();
         assert_eq!(stored.state, DemandState::Granted);
         assert_eq!(stored.generation, current);
         assert_eq!(&stored.first_seen_at, first_seen_at);
@@ -749,7 +757,7 @@ async fn reordered_batch_folds_order_independently() {
         .submit_offer(SCALE_SET_ID, &push_offer(4250, "push"), 0)
         .unwrap();
     demand
-        .set_state(4250, DemandState::Acquired, None, 0)
+        .set_state(SCALE_SET_ID, 4250, DemandState::Acquired, None, 0)
         .unwrap();
 
     Mock::given(method("GET"))
@@ -770,7 +778,7 @@ async fn reordered_batch_folds_order_independently() {
 
     let demand = DemandStore::open(&db).unwrap();
     assert_eq!(
-        demand.get(4250).unwrap().unwrap().state,
+        demand.get(SCALE_SET_ID, 4250).unwrap().unwrap().state,
         DemandState::Terminal
     );
     // Startup reconcile adopted the attested holder; completion moved it to

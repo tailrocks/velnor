@@ -80,6 +80,11 @@ class Velnorctl < Formula
         VELNOR_SLOTS=2
         VELNOR_MAX_JOBS=
         VELNOR_DOCKER_IMAGE=velnor/job-ubuntu:26.04
+        # Optional Docker selection. The launcher resolves this context/host,
+        # verifies the exact local Unix socket, then exports it per-process.
+        # It never runs docker context use or mutates Docker configuration.
+        # VELNOR_DOCKER_CONTEXT=
+        # VELNOR_DOCKER_HOST=
         # Required explicit choice: native-only, scale-set-only, or both.
         VELNOR_HOST_MODE=
         # Required for scale-set-only/both. The TOML must contain:
@@ -128,7 +133,6 @@ class Velnorctl < Formula
       replacements = {
         "__VELNOR_PREFIX__"        => opt_prefix.to_s,
         "__VELNOR_CONFIG_DIR__"    => env_dir.to_s,
-        "__VELNOR_DOCKER_HOST__"   => "unix://#{Dir.home}/.orbstack/run/docker.sock",
         "__VELNOR_PATH__"          => "#{HOMEBREW_PREFIX}/bin:/usr/bin:/bin",
         "__VELNOR_ENV_FILE__"      => env_file.to_s,
         "__VELNOR_LOG_DIR__"       => log_dir.to_s,
@@ -231,9 +235,6 @@ class Velnorctl < Formula
     environment_variables(
       VELNOR_CAPABILITY_VALIDATION:    "strict",
       VELNOR_CONFIG_DIR:               (etc / "velnor").to_s,
-      VELNOR_DOCKER_CONTEXT:           "orbstack",
-      VELNOR_DOCKER_HOST:              "unix://#{Dir.home}/.orbstack/run/docker.sock",
-      DOCKER_HOST:                     "unix://#{Dir.home}/.orbstack/run/docker.sock",
       VELNOR_PATH:                     "#{HOMEBREW_PREFIX}/bin:/usr/bin:/bin",
       VELNOR_ENV_FILE:                 (etc / "velnor" / "velnor.env").to_s,
       VELNOR_LOG_DIR:                  (var / "log" / "velnor").to_s,

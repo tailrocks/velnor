@@ -347,8 +347,12 @@ mod tests {
         demand.submit_offer(7, &push(1), 1).unwrap();
         demand.submit_offer(7, &push(2), 1).unwrap();
         demand.submit_offer(7, &push(3), 1).unwrap();
-        demand.set_state(1, DemandState::Acquired, None, 1).unwrap();
-        demand.set_state(3, DemandState::Granted, None, 1).unwrap();
+        demand
+            .set_state(7, 1, DemandState::Acquired, None, 1)
+            .unwrap();
+        demand
+            .set_state(7, 3, DemandState::Granted, None, 1)
+            .unwrap();
         // eligible(2) is queued demand and granted(3) is acquire input:
         // neither is population.
         assert_eq!(local_population(&demand, 7).unwrap(), 1);

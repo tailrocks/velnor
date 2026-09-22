@@ -336,7 +336,11 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 SubmitOutcome::Inserted { .. } => outcome.offers_submitted += 1,
                 SubmitOutcome::Redelivered { .. } | SubmitOutcome::ReofferedTerminal => {}
             }
-            if let Some(row) = self.demand.get(*request_id).map_err(ScaleError::Store)? {
+            if let Some(row) = self
+                .demand
+                .get(self.config.scale_set_id, *request_id)
+                .map_err(ScaleError::Store)?
+            {
                 self.sync_global_demand(&row)?;
             }
         }
@@ -371,7 +375,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         for request_id in offer_request_ids {
             let present = self
                 .demand
-                .get(request_id)
+                .get(self.config.scale_set_id, request_id)
                 .map_err(ScaleError::Store)?
                 .is_some();
             if !present {
@@ -473,7 +477,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 .release_cancelled(&holder)
                 .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
             self.demand
-                .set_state(request_id, DemandState::Terminal, None, generation)
+                .set_state(
+                    self.config.scale_set_id,
+                    request_id,
+                    DemandState::Terminal,
+                    None,
+                    generation,
+                )
                 .map_err(ScaleError::Store)?;
             completed += 1;
         }
@@ -486,13 +496,25 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
     ) -> Result<(), ScaleError<Q::Error, W::Error>> {
         let generation = self.generation()?;
         self.demand
-            .set_state(request_id, DemandState::CanceledDone, None, generation)
+            .set_state(
+                self.config.scale_set_id,
+                request_id,
+                DemandState::CanceledDone,
+                None,
+                generation,
+            )
             .map_err(ScaleError::Store)?;
         self.ledger
             .release_cancelled(&permit_holder(self.config.scale_set_id, request_id))
             .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
         self.demand
-            .set_state(request_id, DemandState::Terminal, None, generation)
+            .set_state(
+                self.config.scale_set_id,
+                request_id,
+                DemandState::Terminal,
+                None,
+                generation,
+            )
             .map_err(ScaleError::Store)
     }
 
@@ -553,7 +575,11 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         ) else {
             return Ok(false);
         };
-        let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
+        let Some(row) = self
+            .demand
+            .get(self.config.scale_set_id, request_id)
+            .map_err(ScaleError::Store)?
+        else {
             return Ok(false);
         };
         if row.state == DemandState::Terminal || row.state == DemandState::Declined {
@@ -563,7 +589,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         if row.state == DemandState::CanceledPending {
             let generation = self.generation()?;
             self.demand
-                .set_state(request_id, DemandState::CanceledAcquired, None, generation)
+                .set_state(
+                    self.config.scale_set_id,
+                    request_id,
+                    DemandState::CanceledAcquired,
+                    None,
+                    generation,
+                )
                 .map_err(ScaleError::Store)?;
             transition_or_adopt(
                 &mut self.ledger,
@@ -588,7 +620,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             DemandState::Granted | DemandState::AcquireIntent | DemandState::Uncertain
         ) {
             self.demand
-                .set_state(request_id, DemandState::ProvisionIntent, None, generation)
+                .set_state(
+                    self.config.scale_set_id,
+                    request_id,
+                    DemandState::ProvisionIntent,
+                    None,
+                    generation,
+                )
                 .map_err(ScaleError::Store)?;
         }
         transition_or_adopt(
@@ -624,7 +662,11 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         ) else {
             return Ok(false);
         };
-        let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? else {
+        let Some(row) = self
+            .demand
+            .get(self.config.scale_set_id, request_id)
+            .map_err(ScaleError::Store)?
+        else {
             return Ok(false);
         };
         let holder = permit_holder(self.config.scale_set_id, request_id);
@@ -697,7 +739,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                         .map_err(ScaleError::Ledger)?;
                     }
                     self.demand
-                        .set_state(request_id, DemandState::CanceledPending, None, generation)
+                        .set_state(
+                            self.config.scale_set_id,
+                            request_id,
+                            DemandState::CanceledPending,
+                            None,
+                            generation,
+                        )
                         .map_err(ScaleError::Store)?;
                     return Ok(true);
                 }
@@ -718,7 +766,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         let generation = self.generation()?;
         if row.state != DemandState::Terminal {
             self.demand
-                .set_state(request_id, DemandState::Terminal, None, generation)
+                .set_state(
+                    self.config.scale_set_id,
+                    request_id,
+                    DemandState::Terminal,
+                    None,
+                    generation,
+                )
                 .map_err(ScaleError::Store)?;
         }
         if held {
@@ -831,6 +885,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             let changed = self
                 .demand
                 .compare_and_set_state(
+                    self.config.scale_set_id,
                     *request_id,
                     DemandState::Granted,
                     generation,
@@ -879,6 +934,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                     let changed = self
                         .demand
                         .compare_and_set_state(
+                            self.config.scale_set_id,
                             *request_id,
                             DemandState::AcquireIntent,
                             generation,
@@ -910,6 +966,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             let changed = self
                 .demand
                 .compare_and_set_state(
+                    self.config.scale_set_id,
                     *request_id,
                     DemandState::AcquireIntent,
                     generation,
@@ -935,6 +992,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             let changed = self
                 .demand
                 .compare_and_set_state(
+                    self.config.scale_set_id,
                     *request_id,
                     DemandState::AcquireIntent,
                     generation,
@@ -989,7 +1047,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             .await
             .map_err(ScaleError::Store)?;
             self.demand
-                .set_state(request_id, DemandState::ProvisionIntent, None, generation)
+                .set_state(
+                    self.config.scale_set_id,
+                    request_id,
+                    DemandState::ProvisionIntent,
+                    None,
+                    generation,
+                )
                 .map_err(ScaleError::Store)?;
             provisioned.push(request_id);
         }
@@ -1365,8 +1429,8 @@ mod tests {
             .unwrap();
         assert_eq!(first.acquired, vec![request_id]);
         assert_eq!(first.provisioned, vec![request_id]);
-        assert!(processor.demand_mut().get(request_id).unwrap().is_some());
-        assert!(processor.demand_mut().get(0).unwrap().is_none());
+        assert!(processor.demand_mut().get(7, request_id).unwrap().is_some());
+        assert!(processor.demand_mut().get(7, 0).unwrap().is_none());
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
 
         // The same wire event is a durable replay: it cannot reserve a
@@ -1393,7 +1457,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, ScaleError::OfferWithoutIdentity));
-        assert!(processor.demand_mut().get(0).unwrap().is_none());
+        assert!(processor.demand_mut().get(7, 0).unwrap().is_none());
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
     }
 
@@ -1423,7 +1487,7 @@ mod tests {
         completed.base.job_id.clear();
         assert!(!processor.observe_completed(&completed).unwrap());
 
-        assert!(processor.demand_mut().get(0).unwrap().is_none());
+        assert!(processor.demand_mut().get(7, 0).unwrap().is_none());
         assert!(processor.lane_mut().assigned.is_empty());
         assert!(processor.lane_mut().started.is_empty());
         assert!(processor.lane_mut().terminals.is_empty());
@@ -1443,7 +1507,7 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.acquired, vec![601]);
         assert_eq!(outcome.missing, vec![602]);
-        let before = processor.demand_mut().get(602).unwrap().unwrap();
+        let before = processor.demand_mut().get(7, 602).unwrap().unwrap();
         assert_eq!(before.state, DemandState::Eligible);
         // Redelivered offer keeps its age; the acquired one provisions.
         assert_eq!(outcome.provisioned, vec![601]);
@@ -1465,7 +1529,7 @@ mod tests {
         assert_eq!(outcome.uncertain, vec![701]);
         assert!(outcome.provisioned.is_empty());
         assert_eq!(
-            processor.demand_mut().get(701).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 701).unwrap().unwrap().state,
             DemandState::Uncertain
         );
         // Still counted: no double-spend on the next poll.
@@ -1516,10 +1580,10 @@ mod tests {
         let outcome = processor.scale(Some(&observed)).await.unwrap();
         assert_eq!(outcome.completed, 1);
         assert_eq!(
-            processor.demand_mut().get(801).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 801).unwrap().unwrap().state,
             DemandState::Terminal
         );
-        assert!(processor.demand_mut().get(999_999).unwrap().is_none());
+        assert!(processor.demand_mut().get(7, 999_999).unwrap().is_none());
         // Replay is a no-op once the lane released the permit.
         processor
             .ledger_mut()
@@ -1540,7 +1604,7 @@ mod tests {
             .unwrap();
         processor
             .demand_mut()
-            .set_state(901, DemandState::Granted, None, generation)
+            .set_state(7, 901, DemandState::Granted, None, generation)
             .unwrap();
 
         assert!(processor
@@ -1549,7 +1613,7 @@ mod tests {
             })
             .unwrap());
         assert_eq!(
-            processor.demand_mut().get(901).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 901).unwrap().unwrap().state,
             DemandState::Granted,
             "JobAssigned alone must not assert acquire success"
         );
@@ -1557,7 +1621,7 @@ mod tests {
             .observe_completed(&completed(901, "canceled"))
             .unwrap());
         assert_eq!(
-            processor.demand_mut().get(901).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 901).unwrap().unwrap().state,
             DemandState::Terminal
         );
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
@@ -1582,11 +1646,11 @@ mod tests {
                 .unwrap();
             processor
                 .demand_mut()
-                .set_state(id, DemandState::Granted, None, generation)
+                .set_state(7, id, DemandState::Granted, None, generation)
                 .unwrap();
             assert!(processor.observe_completed(&completed(id, result)).unwrap());
             assert_eq!(
-                processor.demand_mut().get(id).unwrap().unwrap().state,
+                processor.demand_mut().get(7, id).unwrap().unwrap().state,
                 DemandState::Terminal,
                 "result {result} must close the attempt"
             );
@@ -1618,7 +1682,7 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.completed, 1);
         assert_eq!(
-            processor.demand_mut().get(902).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 902).unwrap().unwrap().state,
             DemandState::Terminal
         );
         assert_eq!(processor.lane_mut().terminals, vec![902]);
@@ -1642,7 +1706,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            processor.demand_mut().get(903).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 903).unwrap().unwrap().state,
             DemandState::CanceledPending
         );
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
@@ -1676,7 +1740,7 @@ mod tests {
         };
         assert_eq!(report.reacquired_batches, 1);
         assert_eq!(
-            processor.demand_mut().get(903).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 903).unwrap().unwrap().state,
             DemandState::CanceledDone
         );
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
@@ -1684,7 +1748,7 @@ mod tests {
         let drained = processor.scale(None).await.unwrap();
         assert_eq!(drained.completed, 1);
         assert_eq!(
-            processor.demand_mut().get(903).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 903).unwrap().unwrap().state,
             DemandState::Terminal
         );
         assert!(processor.lane_mut().terminals.is_empty());
@@ -1707,7 +1771,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            processor.demand_mut().get(904).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 904).unwrap().unwrap().state,
             DemandState::CanceledPending
         );
 
@@ -1718,7 +1782,7 @@ mod tests {
         };
         assert!(processor.observe_started(&started).unwrap());
         assert_eq!(
-            processor.demand_mut().get(904).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 904).unwrap().unwrap().state,
             DemandState::CanceledAcquired
         );
         assert_eq!(processor.lane_mut().started, vec![904]);
@@ -1726,7 +1790,7 @@ mod tests {
 
         processor.scale(None).await.unwrap();
         assert_eq!(
-            processor.demand_mut().get(904).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 904).unwrap().unwrap().state,
             DemandState::Terminal
         );
         assert_eq!(processor.lane_mut().canceled, vec![904]);
@@ -1751,7 +1815,7 @@ mod tests {
             .unwrap();
         assert_eq!(queued.granted, 0);
         assert_eq!(
-            processor.demand_mut().get(802).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 802).unwrap().unwrap().state,
             DemandState::Observed
         );
 
@@ -1789,7 +1853,7 @@ mod tests {
         assert_eq!(outcome.started, 1);
         // Counted but never claimed: still observed, no permit, no lane.
         assert_eq!(
-            processor.demand_mut().get(802).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 802).unwrap().unwrap().state,
             DemandState::Observed
         );
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
@@ -1809,7 +1873,7 @@ mod tests {
         assert_eq!(outcome.completed, 1);
         // Foreign completion ends offering without touching the lane.
         assert_eq!(
-            processor.demand_mut().get(802).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 802).unwrap().unwrap().state,
             DemandState::Terminal
         );
         assert!(processor.lane_mut().terminals.is_empty());
@@ -1833,7 +1897,7 @@ mod tests {
         assert!(!processor.observe_started(&foreign_started).unwrap());
         assert!(processor.lane_mut().started.is_empty());
         assert_eq!(
-            processor.demand_mut().get(801).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 801).unwrap().unwrap().state,
             DemandState::ProvisionIntent
         );
 
@@ -1845,7 +1909,7 @@ mod tests {
         };
         assert!(!processor.observe_completed(&foreign_completed).unwrap());
         assert_eq!(
-            processor.demand_mut().get(801).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 801).unwrap().unwrap().state,
             DemandState::ProvisionIntent
         );
 
@@ -1868,10 +1932,10 @@ mod tests {
         assert!(processor.observe_completed(&routed_completed).unwrap());
         assert_eq!(processor.lane_mut().terminals, vec![999]);
         assert_eq!(
-            processor.demand_mut().get(801).unwrap().unwrap().state,
+            processor.demand_mut().get(7, 801).unwrap().unwrap().state,
             DemandState::Terminal
         );
-        assert!(processor.demand_mut().get(999).unwrap().is_none());
+        assert!(processor.demand_mut().get(7, 999).unwrap().is_none());
     }
 
     #[tokio::test]

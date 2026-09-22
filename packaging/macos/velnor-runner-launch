@@ -20,6 +20,162 @@ require_positive_integer() {
   esac
 }
 
+trim_value() {
+  printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+json_string() {
+  json=$1
+  shift
+  printf '%s' "$json" | "$json_parser" -rjson -e '
+    value = JSON.parse(STDIN.read)
+    ARGV.each { |key| value = value.is_a?(Hash) ? value[key] : nil }
+    puts value if value.is_a?(String)
+  ' "$@"
+}
+
+provider_key() {
+  printf '%s' "$1" | "$json_parser" -e '
+    puts STDIN.read.downcase.gsub(/[^a-z0-9]/, "")
+  '
+}
+
+normalize_docker_endpoint() {
+  raw_endpoint=$(trim_value "$1")
+  case "$raw_endpoint" in
+    unix:///*) socket_path=${raw_endpoint#unix://} ;;
+    /*) socket_path=$raw_endpoint ;;
+    *) fail "Docker endpoint must be an absolute local Unix socket: $raw_endpoint" ;;
+  esac
+  [ -n "$socket_path" ] || fail "Docker endpoint has an empty Unix socket path"
+  [ -S "$socket_path" ] || \
+    fail "Docker endpoint is missing or not a Unix socket: $socket_path"
+  printf 'unix://%s\n' "$socket_path"
+}
+
+validate_provider_evidence() {
+  context_description=$(json_string "$context_json" Metadata Description || true)
+  context_name=$(json_string "$context_json" Name || true)
+  server_os=$(json_string "$info_json" OperatingSystem || true)
+  server_ostype=$(json_string "$info_json" OSType || true)
+  server_name=$(json_string "$info_json" Name || true)
+  version_os=$(json_string "$version_json" Os || true)
+  client_os=$(json_string "$info_json" ClientInfo Os || true)
+
+  [ -n "$context_name" ] || fail "Docker context metadata has no name"
+  [ "$context_name" = "$selected_context" ] || \
+    fail "Docker context metadata name does not match selected context"
+  [ -n "$context_description" ] || \
+    fail "Docker provider evidence is missing context metadata description"
+  [ -n "$server_os" ] || \
+    fail "Docker provider evidence is missing daemon operating system"
+  [ -n "$server_name" ] || \
+    fail "Docker provider evidence is missing daemon name"
+  [ "$server_ostype" = linux ] || \
+    fail "Docker daemon is not a Linux job platform: ${server_ostype:-unknown}"
+  [ "$version_os" = linux ] || \
+    fail "Docker version endpoint is not a Linux daemon: ${version_os:-unknown}"
+  [ "$client_os" = darwin ] || \
+    fail "Docker client is not running on macOS: ${client_os:-unknown}"
+
+  context_provider_key=$(provider_key "$context_description") || \
+    fail "cannot normalize Docker context provider evidence"
+  server_provider_key=$(provider_key "$server_os") || \
+    fail "cannot normalize Docker daemon provider evidence"
+  daemon_name_key=$(provider_key "$server_name") || \
+    fail "cannot normalize Docker daemon name evidence"
+  case "$context_provider_key" in
+    ''|linux|unix|default|docker|dockerengine|dockerenginecommunity)
+      fail "Docker provider evidence is unknown or generic"
+      ;;
+  esac
+  provider_evidence=$(
+    printf '%s\n%s\n%s\n' \
+      "$context_provider_key" "$server_provider_key" "$daemon_name_key" |
+      "$json_parser" -e '
+        context_key, server_key, daemon_key = STDIN.read.lines.map(&:strip)
+        corroborated = !context_key.empty? && context_key == server_key &&
+          !daemon_key.empty? &&
+          (daemon_key == context_key || daemon_key.include?(context_key) ||
+           context_key.include?(daemon_key))
+        puts(corroborated ? "yes" : "no")
+      '
+  ) || fail "cannot evaluate Docker provider evidence"
+  [ "$provider_evidence" = yes ] || \
+    fail "Docker provider evidence is unknown or contradictory"
+}
+
+resolve_docker_endpoint() {
+  docker_bin=$(command -v docker 2>/dev/null || true)
+  [ -n "$docker_bin" ] || fail "Docker is required for Velnor container execution"
+  [ -x "$docker_bin" ] || fail "Docker is not executable: $docker_bin"
+  json_parser=$(command -v ruby 2>/dev/null || true)
+  [ -n "$json_parser" ] || fail "Ruby is required to parse Docker context metadata"
+  [ -x "$json_parser" ] || fail "Ruby is not executable: $json_parser"
+
+  configured_velnor_host=$(trim_value "${configured_velnor_docker_host:-}")
+  configured_docker_host=$(trim_value "${configured_docker_host:-}")
+  configured_velnor_context=$(trim_value "${configured_velnor_docker_context:-}")
+  configured_docker_context=$(trim_value "${configured_docker_context:-}")
+  if [ -n "$configured_velnor_host" ] && [ -n "$configured_docker_host" ] && \
+    [ "$configured_velnor_host" != "$configured_docker_host" ]; then
+    fail "VELNOR_DOCKER_HOST and DOCKER_HOST disagree"
+  fi
+  if [ -n "$configured_velnor_context" ] && [ -n "$configured_docker_context" ] && \
+    [ "$configured_velnor_context" != "$configured_docker_context" ]; then
+    fail "VELNOR_DOCKER_CONTEXT and DOCKER_CONTEXT disagree"
+  fi
+
+  explicit_host=$configured_velnor_host
+  [ -n "$explicit_host" ] || explicit_host=$configured_docker_host
+  selected_context=$configured_velnor_context
+  [ -n "$selected_context" ] || selected_context=$configured_docker_context
+  if [ -z "$selected_context" ]; then
+    selected_context=$(env -u VELNOR_DOCKER_HOST -u VELNOR_DOCKER_CONTEXT \
+      -u DOCKER_HOST -u DOCKER_CONTEXT "$docker_bin" context show 2>/dev/null) || \
+      fail "cannot discover the selected Docker context"
+    selected_context=$(trim_value "$selected_context")
+  fi
+  case "$selected_context" in
+    ''|*[!A-Za-z0-9_.-]*) fail "Docker context name is invalid or unresolved" ;;
+    -*) fail "Docker context name may not begin with '-'" ;;
+  esac
+
+  context_json=$(env -u VELNOR_DOCKER_HOST -u VELNOR_DOCKER_CONTEXT \
+    -u DOCKER_HOST -u DOCKER_CONTEXT "$docker_bin" --context "$selected_context" \
+    context inspect --format '{{json .}}' "$selected_context" 2>/dev/null) || \
+    fail "cannot inspect selected Docker context: $selected_context"
+  context_endpoint=$(json_string "$context_json" Endpoints docker Host || true)
+  [ -n "$context_endpoint" ] || \
+    fail "selected Docker context has no docker endpoint: $selected_context"
+  context_endpoint=$(normalize_docker_endpoint "$context_endpoint")
+
+  if [ -n "$explicit_host" ]; then
+    explicit_host=$(normalize_docker_endpoint "$explicit_host")
+    [ "$explicit_host" = "$context_endpoint" ] || \
+      fail "explicit Docker endpoint disagrees with selected context endpoint"
+    resolved_docker_host=$explicit_host
+  else
+    resolved_docker_host=$context_endpoint
+  fi
+
+  version_json=$(env -u VELNOR_DOCKER_HOST -u VELNOR_DOCKER_CONTEXT \
+    -u DOCKER_HOST -u DOCKER_CONTEXT "$docker_bin" --host "$resolved_docker_host" \
+    version --format '{{json .Server}}' 2>/dev/null) || \
+    fail "Docker version probe failed for resolved endpoint: $resolved_docker_host"
+  info_json=$(env -u VELNOR_DOCKER_HOST -u VELNOR_DOCKER_CONTEXT \
+    -u DOCKER_HOST -u DOCKER_CONTEXT "$docker_bin" --host "$resolved_docker_host" \
+    info --format '{{json .}}' 2>/dev/null) || \
+    fail "Docker info probe failed for resolved endpoint: $resolved_docker_host"
+  validate_provider_evidence
+
+  VELNOR_DOCKER_CONTEXT=$selected_context
+  VELNOR_DOCKER_HOST=$resolved_docker_host
+  DOCKER_HOST=$resolved_docker_host
+  unset DOCKER_CONTEXT
+  export VELNOR_DOCKER_CONTEXT VELNOR_DOCKER_HOST DOCKER_HOST
+}
+
 toml_field() {
   config=$1
   wanted_section=$2
@@ -218,11 +374,7 @@ validate_gh_for_scale() {
 }
 
 require_docker() {
-  docker_bin=$(command -v docker 2>/dev/null || true)
-  [ -n "$docker_bin" ] || fail "Docker is required for Velnor container execution"
-  [ -x "$docker_bin" ] || fail "Docker is not executable: $docker_bin"
-  "$docker_bin" version >/dev/null 2>&1 || \
-    fail "Docker engine is unavailable at the package-owned endpoint: $package_docker_host"
+  resolve_docker_endpoint
 }
 
 write_mode_state() {
@@ -260,7 +412,6 @@ package_log_dir=${VELNOR_LOG_DIR:?VELNOR_LOG_DIR is required}
 package_state_db=${VELNOR_STATE_DB:?VELNOR_STATE_DB is required}
 package_permit_ledger=${VELNOR_PERMIT_LEDGER:?VELNOR_PERMIT_LEDGER is required}
 package_mode_state=${VELNOR_MODE_STATE:?VELNOR_MODE_STATE is required}
-package_docker_host=${VELNOR_DOCKER_HOST:?VELNOR_DOCKER_HOST is required}
 package_path=${VELNOR_PATH:?VELNOR_PATH is required}
 package_worker_verifier=${VELNOR_WORKER_VERIFIER:?VELNOR_WORKER_VERIFIER is required}
 package_worker_verifier_contract=${VELNOR_WORKER_VERIFIER_CONTRACT:?VELNOR_WORKER_VERIFIER_CONTRACT is required}
@@ -276,6 +427,14 @@ set -a
 . "$package_env_file"
 set +a
 
+# Docker selection is operator input. Capture it before replacing package-owned
+# variables; the resolver validates it against Docker context metadata and the
+# exact daemon endpoint without changing Docker's global configuration.
+configured_velnor_docker_host=${VELNOR_DOCKER_HOST:-}
+configured_docker_host=${DOCKER_HOST:-}
+configured_velnor_docker_context=${VELNOR_DOCKER_CONTEXT:-}
+configured_docker_context=${DOCKER_CONTEXT:-}
+
 # Reassert package-owned invariants after loading mutable operator settings.
 VELNOR_ENV_FILE=$package_env_file
 VELNOR_CONFIG_DIR=$package_config_dir
@@ -285,9 +444,6 @@ VELNOR_LOG_DIR=$package_log_dir
 VELNOR_STATE_DB=$package_state_db
 VELNOR_PERMIT_LEDGER=$package_permit_ledger
 VELNOR_MODE_STATE=$package_mode_state
-VELNOR_DOCKER_CONTEXT=orbstack
-VELNOR_DOCKER_HOST=$package_docker_host
-DOCKER_HOST=$package_docker_host
 VELNOR_PATH=$package_path
 PATH=$package_path
 VELNOR_WORKER_VERIFIER=$package_worker_verifier
@@ -299,7 +455,6 @@ MISE_LOCKED=1
 MISE_LOCKED_VERIFY_PROVENANCE=1
 export VELNOR_ENV_FILE VELNOR_CONFIG_DIR VELNOR_STORAGE_ROOT VELNOR_WORK_DIR
 export VELNOR_LOG_DIR VELNOR_STATE_DB VELNOR_PERMIT_LEDGER VELNOR_MODE_STATE
-export VELNOR_DOCKER_CONTEXT VELNOR_DOCKER_HOST DOCKER_HOST
 export VELNOR_PATH PATH VELNOR_WORKER_VERIFIER VELNOR_WORKER_VERIFIER_CONTRACT
 export VELNOR_CAPABILITY_VALIDATION VELNOR_TRUST_SCOPE
 export MISE_LOCKFILE MISE_LOCKED MISE_LOCKED_VERIFY_PROVENANCE

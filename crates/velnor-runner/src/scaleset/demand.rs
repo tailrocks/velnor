@@ -1,7 +1,7 @@
 //! Global oldest-observed demand queue (§5.1 step 2) + trust-before-grant.
 //!
-//! Every `JobAvailable` lands in `scaleset_demand` keyed by GitHub
-//! `runnerRequestId`. `first_seen_at` + `sequence` are immutable:
+//! Every `JobAvailable` lands in `scaleset_demand` keyed by its scale set and
+//! GitHub `runnerRequestId`. `first_seen_at` + `sequence` are immutable:
 //! redelivery retains the original age, so a re-offered job never jumps the
 //! queue. Grants are generation-fenced: a `granted` row from a stale epoch
 //! is void and returns to `eligible` (age kept) before any new grant.
@@ -122,8 +122,8 @@ pub struct Demand {
     pub repo_name: String,
     /// Stable i64 projection of the wire `jobId` GUID: the v21 column is
     /// `INTEGER` but the wire value is a string, so the exact GUID is not
-    /// storable there. `request_id` stays the exact key; this hash is
-    /// correlation-only.
+    /// storable there. `(scale_set_id, request_id)` stays the exact key; this
+    /// hash is correlation-only.
     pub job_id_hash: i64,
     pub generation: u64,
     pub updated_at: String,
@@ -595,10 +595,8 @@ impl DemandStore {
     ) -> Result<SubmitOutcome> {
         let (request_id, request_identity) = resolve_job_request_identity(&offer.base)
             .context("scale-set offer has no canonical request identity")?;
-        if let Some(existing) = self.get(request_id)? {
-            if existing.scale_set_id != scale_set_id
-                || existing.request_identity.is_empty()
-                || existing.request_identity != request_identity
+        if let Some(existing) = self.get(scale_set_id, request_id)? {
+            if existing.request_identity.is_empty() || existing.request_identity != request_identity
             {
                 anyhow::bail!(
                     "request identity collision for scale-set request {request_id}; refusing to merge offers"
@@ -664,9 +662,9 @@ impl DemandStore {
         if inserted == 0 {
             // Lost a submit race; the winner's row (original age) stands.
             let row = self
-                .get(request_id)?
+                .get(scale_set_id, request_id)?
                 .context("demand row vanished after offer race")?;
-            if row.scale_set_id != scale_set_id || row.request_identity != request_identity {
+            if row.request_identity.is_empty() || row.request_identity != request_identity {
                 anyhow::bail!(
                     "request identity collision for scale-set request {request_id}; refusing to merge offers"
                 );
@@ -694,10 +692,8 @@ impl DemandStore {
     ) -> Result<(i64, DemandState)> {
         let (request_id, request_identity) = resolve_job_request_identity(&assigned.base)
             .context("scale-set assignment has no canonical request identity")?;
-        if let Some(existing) = self.get(request_id)? {
-            if existing.scale_set_id != scale_set_id
-                || existing.request_identity.is_empty()
-                || existing.request_identity != request_identity
+        if let Some(existing) = self.get(scale_set_id, request_id)? {
+            if existing.request_identity.is_empty() || existing.request_identity != request_identity
             {
                 anyhow::bail!(
                     "request identity collision for scale-set request {request_id}; refusing to merge assignment"
@@ -753,9 +749,9 @@ impl DemandStore {
         tx.commit().context("commit demand submit_assigned")?;
         if inserted == 0 {
             let row = self
-                .get(request_id)?
+                .get(scale_set_id, request_id)?
                 .context("demand row vanished after assignment race")?;
-            if row.scale_set_id != scale_set_id || row.request_identity != request_identity {
+            if row.request_identity.is_empty() || row.request_identity != request_identity {
                 anyhow::bail!(
                     "request identity collision for scale-set request {request_id}; refusing to merge assignment"
                 );
@@ -766,15 +762,16 @@ impl DemandStore {
         Ok((request_id, state))
     }
 
-    /// Fetch one demand row by request ID.
-    pub fn get(&self, request_id: i64) -> Result<Option<Demand>> {
+    /// Fetch one demand row by its scale-set-scoped request identity.
+    pub fn get(&self, scale_set_id: i32, request_id: i64) -> Result<Option<Demand>> {
         self.conn
             .query_row(
                 "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
                         repo_owner, repo_name, job_id, generation, updated_at, event_name,
                         job_workflow_ref, request_identity
-                 FROM scaleset_demand WHERE request_id = ?1",
-                params![request_id],
+                 FROM scaleset_demand
+                 WHERE scale_set_id = ?1 AND request_id = ?2",
+                params![scale_set_id, request_id],
                 Self::row_to_demand,
             )
             .optional()
@@ -835,13 +832,14 @@ impl DemandStore {
     /// precondition too.
     pub fn set_state(
         &mut self,
+        scale_set_id: i32,
         request_id: i64,
         state: DemandState,
         decline_reason: Option<&str>,
         generation: u64,
     ) -> Result<()> {
-        let Some(current) = self.get(request_id)? else {
-            anyhow::bail!("demand holds no row for request {request_id}");
+        let Some(current) = self.get(scale_set_id, request_id)? else {
+            anyhow::bail!("demand holds no row for scale set {scale_set_id}, request {request_id}");
         };
         if current.generation > generation
             || matches!(current.state, DemandState::Terminal | DemandState::Declined)
@@ -852,6 +850,7 @@ impl DemandStore {
             return Ok(());
         }
         let _ = self.compare_and_set_state(
+            scale_set_id,
             request_id,
             current.state,
             current.generation,
@@ -869,6 +868,7 @@ impl DemandStore {
     /// or terminal work.
     pub fn compare_and_set_state(
         &mut self,
+        scale_set_id: i32,
         request_id: i64,
         expected_state: DemandState,
         expected_generation: u64,
@@ -891,13 +891,14 @@ impl DemandStore {
             .execute(
                 "UPDATE scaleset_demand
                  SET state = ?1, decline_reason = ?2, generation = ?3, updated_at = ?4
-                 WHERE request_id = ?5 AND state = ?6 AND generation = ?7
-                   AND generation <= ?3",
+                 WHERE scale_set_id = ?5 AND request_id = ?6
+                   AND state = ?7 AND generation = ?8 AND generation <= ?3",
                 params![
                     state.as_str(),
                     decline_reason,
                     i64::try_from(generation).unwrap_or(i64::MAX),
                     Self::now_rfc3339(),
+                    scale_set_id,
                     request_id,
                     expected_state.as_str(),
                     i64::try_from(expected_generation).unwrap_or(i64::MAX),
@@ -1052,6 +1053,7 @@ pub fn grant_oldest(
         match store.classify_demand(&candidate) {
             OfferTrust::Trusted => {
                 if store.compare_and_set_state(
+                    candidate.scale_set_id,
                     candidate.request_id,
                     DemandState::Eligible,
                     candidate.generation,
@@ -1060,13 +1062,14 @@ pub fn grant_oldest(
                     generation,
                 )? {
                     metrics.add_offers_granted(1);
-                    if let Some(row) = store.get(candidate.request_id)? {
+                    if let Some(row) = store.get(candidate.scale_set_id, candidate.request_id)? {
                         granted.push(row);
                     }
                 }
             }
             OfferTrust::Unknown { reason } => {
                 let _ = store.compare_and_set_state(
+                    candidate.scale_set_id,
                     candidate.request_id,
                     DemandState::Eligible,
                     candidate.generation,
@@ -1159,7 +1162,7 @@ mod tests {
             SubmitOutcome::Inserted { sequence } => sequence,
             other => panic!("expected insert, got {other:?}"),
         };
-        let before = store.get(101).unwrap().unwrap();
+        let before = store.get(7, 101).unwrap().unwrap();
         let again = store.submit_offer(7, &offer(101, "push"), 3).unwrap();
         assert_eq!(
             again,
@@ -1167,7 +1170,7 @@ mod tests {
                 state: DemandState::Eligible,
             }
         );
-        let after = store.get(101).unwrap().unwrap();
+        let after = store.get(7, 101).unwrap().unwrap();
         assert_eq!(after.first_seen_at, before.first_seen_at);
         assert_eq!(after.sequence, sequence);
         assert_eq!(after.sequence, before.sequence);
@@ -1187,14 +1190,22 @@ mod tests {
         assert_eq!(granted.len(), 1);
         assert_eq!(granted[0].request_id, 202);
         assert_eq!(
-            store.get(201).unwrap().unwrap().state,
+            store.get(7, 201).unwrap().unwrap().state,
             DemandState::Observed
         );
         assert_eq!(
-            store.get(201).unwrap().unwrap().decline_reason.as_deref(),
+            store
+                .get(7, 201)
+                .unwrap()
+                .unwrap()
+                .decline_reason
+                .as_deref(),
             Some("trust-inputs-missing")
         );
-        assert_eq!(store.get(202).unwrap().unwrap().state, DemandState::Granted);
+        assert_eq!(
+            store.get(7, 202).unwrap().unwrap().state,
+            DemandState::Granted
+        );
         assert_eq!(metrics.snapshot().offers_granted, 1);
     }
 
@@ -1205,17 +1216,17 @@ mod tests {
         store.submit_offer(7, &offer(301, "push"), 5).unwrap();
         let metrics = crate::scaleset::metrics::Metrics::new();
         assert_eq!(grant_oldest(&mut store, 7, 5, &metrics).unwrap().len(), 1);
-        let before = store.get(301).unwrap().unwrap();
+        let before = store.get(7, 301).unwrap().unwrap();
         assert_eq!(before.state, DemandState::Granted);
         let reset = store.reset_stale_grants(7, 6).unwrap();
         assert_eq!(reset, 1);
-        let after = store.get(301).unwrap().unwrap();
+        let after = store.get(7, 301).unwrap().unwrap();
         assert_eq!(after.state, DemandState::Eligible);
         assert_eq!(after.first_seen_at, before.first_seen_at);
         assert_eq!(after.sequence, before.sequence);
         // Re-granted fresh in the new epoch.
         assert_eq!(grant_oldest(&mut store, 7, 6, &metrics).unwrap().len(), 1);
-        assert_eq!(store.get(301).unwrap().unwrap().generation, 6);
+        assert_eq!(store.get(7, 301).unwrap().unwrap().generation, 6);
     }
 
     #[test]
@@ -1224,14 +1235,14 @@ mod tests {
         let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
         store.submit_offer(7, &offer(401, "push"), 5).unwrap();
         store
-            .set_state(401, DemandState::Terminal, None, 5)
+            .set_state(7, 401, DemandState::Terminal, None, 5)
             .unwrap();
         assert_eq!(
             store.submit_offer(7, &offer(401, "push"), 5).unwrap(),
             SubmitOutcome::ReofferedTerminal
         );
         assert_eq!(
-            store.get(401).unwrap().unwrap().state,
+            store.get(7, 401).unwrap().unwrap().state,
             DemandState::Terminal
         );
     }
@@ -1242,18 +1253,42 @@ mod tests {
         let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
         store.submit_offer(7, &offer(450, "push"), 4).unwrap();
         assert!(store
-            .compare_and_set_state(450, DemandState::Eligible, 4, DemandState::Granted, None, 4,)
+            .compare_and_set_state(
+                7,
+                450,
+                DemandState::Eligible,
+                4,
+                DemandState::Granted,
+                None,
+                4,
+            )
             .unwrap());
         assert!(store
-            .compare_and_set_state(450, DemandState::Granted, 4, DemandState::Terminal, None, 5,)
+            .compare_and_set_state(
+                7,
+                450,
+                DemandState::Granted,
+                4,
+                DemandState::Terminal,
+                None,
+                5,
+            )
             .unwrap());
         assert!(!store
-            .compare_and_set_state(450, DemandState::Granted, 4, DemandState::Eligible, None, 4,)
+            .compare_and_set_state(
+                7,
+                450,
+                DemandState::Granted,
+                4,
+                DemandState::Eligible,
+                None,
+                4,
+            )
             .unwrap());
         store
-            .set_state(450, DemandState::Eligible, None, 4)
+            .set_state(7, 450, DemandState::Eligible, None, 4)
             .unwrap();
-        let row = store.get(450).unwrap().unwrap();
+        let row = store.get(7, 450).unwrap().unwrap();
         assert_eq!(row.state, DemandState::Terminal);
         assert_eq!(row.generation, 5);
     }
@@ -1266,7 +1301,8 @@ mod tests {
         store
             .conn
             .execute(
-                "UPDATE scaleset_demand SET request_identity = '' WHERE request_id = 451",
+                "UPDATE scaleset_demand SET request_identity = ''
+                 WHERE scale_set_id = 7 AND request_id = 451",
                 [],
             )
             .unwrap();
@@ -1340,7 +1376,7 @@ mod tests {
         let (request_id, state) = store.submit_assigned(7, &denied, 1).unwrap();
         assert_eq!(request_id, 501);
         assert_eq!(state, DemandState::Observed);
-        let row = store.get(request_id).unwrap().unwrap();
+        let row = store.get(7, request_id).unwrap().unwrap();
         assert_eq!(row.state, DemandState::Observed);
         assert_eq!(row.decline_reason.as_deref(), Some("admission-denied"));
         assert_eq!(
@@ -1352,6 +1388,47 @@ mod tests {
 
         let (_, state) = store.submit_assigned(7, &assigned(502, "push"), 1).unwrap();
         assert_eq!(state, DemandState::Acquired);
+    }
+
+    #[test]
+    fn same_request_id_is_independent_per_scale_set() {
+        let path = temp_path("composite-identity");
+        let mut store = DemandStore::open_with_admission(&path, admission()).unwrap();
+
+        assert!(matches!(
+            store.submit_offer(7, &offer(777, "push"), 1).unwrap(),
+            SubmitOutcome::Inserted { .. }
+        ));
+        assert!(matches!(
+            store.submit_offer(8, &offer(777, "push"), 1).unwrap(),
+            SubmitOutcome::Inserted { .. }
+        ));
+
+        let first = store.get(7, 777).unwrap().unwrap();
+        let second = store.get(8, 777).unwrap().unwrap();
+        assert_eq!(first.scale_set_id, 7);
+        assert_eq!(second.scale_set_id, 8);
+        assert_ne!(first.sequence, second.sequence);
+
+        assert!(store
+            .compare_and_set_state(
+                7,
+                777,
+                DemandState::Eligible,
+                1,
+                DemandState::Granted,
+                None,
+                1,
+            )
+            .unwrap());
+        assert_eq!(
+            store.get(7, 777).unwrap().unwrap().state,
+            DemandState::Granted
+        );
+        assert_eq!(
+            store.get(8, 777).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
     }
 
     #[test]

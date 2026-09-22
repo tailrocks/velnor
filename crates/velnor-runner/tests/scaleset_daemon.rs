@@ -1111,7 +1111,7 @@ async fn daemon_serves_one_job_end_to_end() {
     loop {
         let demand = DemandStore::open(&defaults.state_db).unwrap();
         let terminal = demand
-            .get(REQUEST_ID)
+            .get(SCALE_SET_ID, REQUEST_ID)
             .unwrap()
             .is_some_and(|row| row.state == DemandState::Terminal);
         let ledger = SharedLedger::open(&ledger_path).unwrap();
@@ -1277,7 +1277,7 @@ async fn restart_adopts_live_worker_without_reprovision() {
         "provision",
         |demand, _| {
             demand
-                .get(REQUEST_ID)
+                .get(SCALE_SET_ID, REQUEST_ID)
                 .unwrap()
                 .is_some_and(|row| row.state == DemandState::ProvisionIntent)
         },
@@ -1287,7 +1287,7 @@ async fn restart_adopts_live_worker_without_reprovision() {
     assert_eq!(creates_phase1, 2);
     let first_seen = DemandStore::open(&defaults.state_db)
         .unwrap()
-        .get(REQUEST_ID)
+        .get(SCALE_SET_ID, REQUEST_ID)
         .unwrap()
         .unwrap()
         .first_seen_at
@@ -1307,7 +1307,7 @@ async fn restart_adopts_live_worker_without_reprovision() {
     assert_eq!(
         DemandStore::open(&defaults.state_db)
             .unwrap()
-            .get(REQUEST_ID)
+            .get(SCALE_SET_ID, REQUEST_ID)
             .unwrap()
             .unwrap()
             .state,
@@ -1353,7 +1353,7 @@ async fn restart_adopts_live_worker_without_reprovision() {
         "completion",
         |demand, ledger| {
             demand
-                .get(REQUEST_ID)
+                .get(SCALE_SET_ID, REQUEST_ID)
                 .unwrap()
                 .is_some_and(|row| row.state == DemandState::Terminal)
                 && ledger.occupied().unwrap() == 0
@@ -1375,7 +1375,7 @@ async fn restart_adopts_live_worker_without_reprovision() {
     assert_eq!(
         DemandStore::open(&defaults.state_db)
             .unwrap()
-            .get(REQUEST_ID)
+            .get(SCALE_SET_ID, REQUEST_ID)
             .unwrap()
             .unwrap()
             .first_seen_at,
@@ -1569,7 +1569,7 @@ async fn crash_with_dead_workers_fails_explicitly() {
     let demand = DemandStore::open(&defaults.state_db).unwrap();
     for request in [REQUEST_ID, REQUEST_B] {
         assert_ne!(
-            demand.get(request).unwrap().unwrap().state,
+            demand.get(SCALE_SET_ID, request).unwrap().unwrap().state,
             DemandState::Terminal,
             "demand {request} must not complete without a GitHub observation"
         );
@@ -1607,7 +1607,7 @@ async fn crash_with_dead_workers_fails_explicitly() {
         "crash convergence",
         |demand, ledger| {
             demand
-                .get(REQUEST_B)
+                .get(SCALE_SET_ID, REQUEST_B)
                 .unwrap()
                 .is_some_and(|row| row.state == DemandState::Terminal)
                 && ledger.occupied().unwrap() == 1
@@ -1621,11 +1621,11 @@ async fn crash_with_dead_workers_fails_explicitly() {
     // B: terminal demand (GitHub said so) + UNCERTAIN permit + cleanup row.
     let demand = DemandStore::open(&defaults.state_db).unwrap();
     assert_eq!(
-        demand.get(REQUEST_ID).unwrap().unwrap().state,
+        demand.get(SCALE_SET_ID, REQUEST_ID).unwrap().unwrap().state,
         DemandState::Terminal
     );
     assert_eq!(
-        demand.get(REQUEST_B).unwrap().unwrap().state,
+        demand.get(SCALE_SET_ID, REQUEST_B).unwrap().unwrap().state,
         DemandState::Terminal
     );
     let ledger = SharedLedger::open(&ledger_path).unwrap();
@@ -1715,7 +1715,7 @@ async fn cleanup_failure_retains_permit_uncertain() {
         "failed cleanup",
         |demand, ledger| {
             demand
-                .get(REQUEST_ID)
+                .get(SCALE_SET_ID, REQUEST_ID)
                 .unwrap()
                 .is_some_and(|row| row.state == DemandState::Terminal)
                 && ledger
@@ -1894,7 +1894,7 @@ async fn capacity_shares_one_ledger_across_lanes() {
     assert_eq!(
         DemandStore::open(&db)
             .unwrap()
-            .get(REQUEST_ID)
+            .get(SCALE_SET_ID, REQUEST_ID)
             .unwrap()
             .unwrap()
             .state,

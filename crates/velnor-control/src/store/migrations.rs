@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 25;
+pub const LATEST_SCHEMA_VERSION: u32 = 26;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -664,6 +664,45 @@ CREATE INDEX IF NOT EXISTS idx_scaleset_acquire_claims_batch
     ON scaleset_acquire_claims (batch_id);
 ";
 
+/// Re-key scale-set demand by its owning set as well as the projected request
+/// ID. The old v21 table made `request_id` globally unique even though the
+/// acquire-claim table and every permit holder are scoped by set. Rebuild the
+/// table transactionally so rows, queue sequence, and named indexes survive;
+/// the migration framework rolls the whole rebuild back on any failure.
+const SCHEMA_V26: &str = "
+ALTER TABLE scaleset_demand RENAME TO scaleset_demand_v25;
+DROP INDEX IF EXISTS idx_scaleset_demand_order;
+CREATE TABLE scaleset_demand (
+    request_id INTEGER NOT NULL,
+    scale_set_id INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    sequence INTEGER NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    decline_reason TEXT,
+    repo_owner TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    job_id INTEGER NOT NULL,
+    labels_hash TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    event_name TEXT NOT NULL DEFAULT '',
+    job_workflow_ref TEXT NOT NULL DEFAULT '',
+    request_identity TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (scale_set_id, request_id)
+);
+INSERT INTO scaleset_demand
+    (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+     repo_owner, repo_name, job_id, labels_hash, generation, updated_at,
+     event_name, job_workflow_ref, request_identity)
+SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+       repo_owner, repo_name, job_id, labels_hash, generation, updated_at,
+       event_name, job_workflow_ref, request_identity
+FROM scaleset_demand_v25;
+DROP TABLE scaleset_demand_v25;
+CREATE INDEX idx_scaleset_demand_order
+    ON scaleset_demand (state, first_seen_at, sequence);
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -820,6 +859,11 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "scaleset-demand-and-acquire-claim-fencing",
         sql: SCHEMA_V25,
     },
+    Migration {
+        version: 26,
+        name: "scaleset-demand-composite-identity",
+        sql: SCHEMA_V26,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -870,13 +914,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
             "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
         )));
     }
-    if version >= LATEST_SCHEMA_VERSION && !v25_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v26_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 25 is recorded but its scale-set request identity or acquire-claim schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 26 is recorded but the composite scale-set demand identity schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -1118,6 +1162,8 @@ pub(crate) fn apply_pending(
                 "v25 request identity and acquire-claim schema is partial; both must converge transactionally before the schema version can advance",
             ));
         }
+        let demand_composite_schema_exists =
+            migration.version == 26 && v26_schema_complete(&transaction)?;
         if migration.version == 16
             && slot_lifecycle_columns.iter().any(|exists| *exists)
             && !slot_lifecycle_columns.iter().all(|exists| *exists)
@@ -1171,6 +1217,8 @@ pub(crate) fn apply_pending(
                 && acquire_claims_table_exists
             {
                 SCHEMA_V25_REPLAY
+            } else if migration.version == 26 && demand_composite_schema_exists {
+                ""
             } else {
                 migration.sql
             };
@@ -1300,6 +1348,15 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v25 scale-set request identity and acquire-claim tables did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 26 && !v26_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v26 scale-set demand composite identity table, ordering index, or copied data did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1670,6 +1727,43 @@ fn v25_schema_complete(conn: &Connection) -> StoreResult<bool> {
         )?)
 }
 
+fn v26_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v25_schema_complete(conn)? {
+        return Ok(false);
+    }
+    let legacy_table_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'scaleset_demand_v25'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if legacy_table_exists {
+        return Ok(false);
+    }
+    let primary_key_columns: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM pragma_table_info('scaleset_demand')
+             WHERE pk > 0 ORDER BY pk",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(primary_key_columns == vec!["scale_set_id", "request_id"]
+        && table_sql_contains(conn, "scaleset_demand", "sequence INTEGER NOT NULL UNIQUE")?
+        && table_sql_contains(
+            conn,
+            "scaleset_demand",
+            "PRIMARY KEY (scale_set_id, request_id)",
+        )?
+        && has_index_columns(
+            conn,
+            "idx_scaleset_demand_order",
+            "scaleset_demand",
+            &["state", "first_seen_at", "sequence"],
+        )?)
+}
+
 fn v22_schema_complete(conn: &Connection) -> StoreResult<bool> {
     if !v21_schema_complete(conn)? {
         return Ok(false);
@@ -1946,6 +2040,19 @@ mod tests {
         conn.busy_timeout(Duration::from_secs(5)).unwrap();
         ensure_meta_tables(conn).unwrap();
         for migration in MIGRATIONS.iter().take(23) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+    }
+
+    fn seed_v25_schema(conn: &Connection) {
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(conn).unwrap();
+        for migration in MIGRATIONS.iter().take(25) {
             conn.execute_batch(migration.sql).unwrap();
             conn.execute(
                 "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
@@ -2807,5 +2914,216 @@ mod tests {
         );
         assert!(v25_schema_complete(&conn).unwrap());
         release_lock(&conn, "v24-rollback").unwrap();
+    }
+
+    #[test]
+    fn v26_demand_rebuild_rolls_back_and_replays_without_data_loss() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct DemandSnapshot {
+            request_id: i64,
+            scale_set_id: i32,
+            first_seen_at: String,
+            sequence: i64,
+            state: String,
+            decline_reason: Option<String>,
+            repo_owner: String,
+            repo_name: String,
+            job_id: i64,
+            labels_hash: String,
+            generation: i64,
+            updated_at: String,
+            event_name: String,
+            job_workflow_ref: String,
+            request_identity: String,
+        }
+
+        let temp = TempDb::new("v25-v26-demand");
+        let mut conn = Connection::open(&temp.path).expect("open v25 database");
+        seed_v25_schema(&conn);
+        conn.execute(
+            "INSERT INTO scaleset_demand
+             (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+              repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name,
+              job_workflow_ref, request_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                41_i64,
+                7_i32,
+                "2026-01-01T00:00:00Z",
+                41_i64,
+                "eligible",
+                Option::<&str>::None,
+                "tailrocks",
+                "velnor",
+                1041_i64,
+                "labels-a",
+                3_i64,
+                "2026-01-01T00:00:01Z",
+                "push",
+                "tailrocks/velnor/.github/workflows/a.yml@main",
+                "runner-request:41",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scaleset_demand
+             (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+              repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name,
+              job_workflow_ref, request_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                42_i64,
+                8_i32,
+                "2026-01-02T00:00:00Z",
+                99_i64,
+                "observed",
+                Some("admission-unknown"),
+                "other-owner",
+                "other-repo",
+                1042_i64,
+                "labels-b",
+                4_i64,
+                "2026-01-02T00:00:01Z",
+                "pull_request",
+                "other/repo/.github/workflows/b.yml@main",
+                "runner-request:42",
+            ],
+        )
+        .unwrap();
+
+        let snapshot = |conn: &Connection| -> Vec<DemandSnapshot> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT request_id, scale_set_id, first_seen_at, sequence, state,
+                            decline_reason, repo_owner, repo_name, job_id, labels_hash,
+                            generation, updated_at, event_name, job_workflow_ref,
+                            request_identity
+                     FROM scaleset_demand ORDER BY sequence",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok(DemandSnapshot {
+                        request_id: row.get(0)?,
+                        scale_set_id: row.get(1)?,
+                        first_seen_at: row.get(2)?,
+                        sequence: row.get(3)?,
+                        state: row.get(4)?,
+                        decline_reason: row.get(5)?,
+                        repo_owner: row.get(6)?,
+                        repo_name: row.get(7)?,
+                        job_id: row.get(8)?,
+                        labels_hash: row.get(9)?,
+                        generation: row.get(10)?,
+                        updated_at: row.get(11)?,
+                        event_name: row.get(12)?,
+                        job_workflow_ref: row.get(13)?,
+                        request_identity: row.get(14)?,
+                    })
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let primary_key_columns = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT name FROM pragma_table_info('scaleset_demand')
+                 WHERE pk > 0 ORDER BY pk",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        let before = snapshot(&conn);
+        assert_eq!(primary_key_columns(&conn), vec!["request_id"]);
+        assert!(has_index_columns(
+            &conn,
+            "idx_scaleset_demand_order",
+            "scaleset_demand",
+            &["state", "first_seen_at", "sequence"],
+        )
+        .unwrap());
+
+        acquire_lock(&conn, "v25-v26-demand", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(
+            &mut conn,
+            "v25-v26-demand",
+            Some(&|version| {
+                if version == 26 {
+                    Err(StoreError::new(
+                        ExitClass::Operation,
+                        "store.test.v26-demand-rollback",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error.envelope.reason, "store.test.v26-demand-rollback");
+        assert_eq!(current_version(&conn).unwrap(), 25);
+        assert_eq!(snapshot(&conn), before);
+        assert_eq!(primary_key_columns(&conn), vec!["request_id"]);
+        assert!(!v26_schema_complete(&conn).unwrap());
+        release_lock(&conn, "v25-v26-demand").unwrap();
+
+        acquire_lock(&conn, "v25-v26-demand", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v25-v26-demand", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v25-v26-demand").unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(snapshot(&conn), before);
+        assert_eq!(
+            primary_key_columns(&conn),
+            vec!["scale_set_id", "request_id"]
+        );
+        assert!(v26_schema_complete(&conn).unwrap());
+        assert!(has_index_columns(
+            &conn,
+            "idx_scaleset_demand_order",
+            "scaleset_demand",
+            &["state", "first_seen_at", "sequence"],
+        )
+        .unwrap());
+        let legacy_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'scaleset_demand_v25'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_table_count, 0);
+
+        // Replaying from the prior version must recognize the completed v26
+        // schema and only advance the version marker.
+        conn.execute(
+            "UPDATE schema_version SET version = 25 WHERE singleton = 0",
+            [],
+        )
+        .unwrap();
+        acquire_lock(&conn, "v25-v26-demand", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v25-v26-demand", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v25-v26-demand").unwrap();
+        assert_eq!(snapshot(&conn), before);
+        assert_eq!(
+            primary_key_columns(&conn),
+            vec!["scale_set_id", "request_id"]
+        );
+        assert!(has_index_columns(
+            &conn,
+            "idx_scaleset_demand_order",
+            "scaleset_demand",
+            &["state", "first_seen_at", "sequence"],
+        )
+        .unwrap());
     }
 }
