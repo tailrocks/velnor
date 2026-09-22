@@ -1792,6 +1792,18 @@ fn close_unit_mise_tools_for_target(
             &install_deps,
         );
     }
+    for unit in &config.units {
+        let tools = crate::primitives::velnor_mise_install_tool_ids(unit, lock_keys);
+        if let Err(error) = crate::s2::validate_mise_tool_subset(
+            &unit.id,
+            &tools,
+            lock_keys,
+            &lock_backends,
+            &install_deps,
+        ) {
+            return Err(GeneratorError::usage(error));
+        }
+    }
     Ok(())
 }
 
@@ -13967,6 +13979,67 @@ lockfile = true
         let _ = fs::remove_dir_all(root);
     }
 
+    fn schema1_mise_validation_repository(
+        name: &str,
+        declared_tool: &str,
+        mise_toml: &str,
+    ) -> PathBuf {
+        let root = nextest_fixture_repository(name);
+        must(
+            fs::write(root.join("mise.toml"), mise_toml),
+            "write Mise configuration",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                format!(
+                    "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\nbackend = \"aqua:nextest-rs/nextest/cargo-nextest\"\n\n[[tools.\"{declared_tool}\"]]\nversion = \"1.0.0\"\n"
+                ),
+            ),
+            "write Mise lock",
+        );
+        let unit = scanned_rust_unit_id(&root);
+        write_generation_config(&root, &unit, &format!("\"{declared_tool}\""));
+        root
+    }
+
+    #[test]
+    fn schema1_mise_validation_rejects_unknown_backend() {
+        let root = schema1_mise_validation_repository(
+            "mise-schema1-unknown-backend",
+            "examplebackend:example-lint",
+            "[settings]\nlockfile = true\n",
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "schema-1 unknown mise backend must fail",
+        );
+        assert!(error.to_string().contains("examplebackend"), "{error}");
+        assert!(error.to_string().contains("planning models"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema1_mise_validation_rejects_missing_depends_lock_key() {
+        let root = schema1_mise_validation_repository(
+            "mise-schema1-missing-depends",
+            "cargo:example-tool",
+            r#"[settings]
+lockfile = true
+
+[tools]
+"cargo:example-tool" = { version = "1.0.0", depends = ["missing-tool"] }
+"#,
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "schema-1 missing mise dependency must fail",
+        );
+        assert!(error.to_string().contains("missing-tool"), "{error}");
+        assert!(error.to_string().contains("depends"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// The scanned Rust unit id a `[[units]]` override row must name. The scan
     /// derives the id from the package, so tests learn it from a first scan
     /// instead of hardcoding the derivation.
@@ -14006,7 +14079,7 @@ lockfile = true
         must(
             fs::write(
                 root.join("mise.lock"),
-                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\n",
+                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\nbackend = \"aqua:nextest-rs/nextest/cargo-nextest\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\nbackend = \"github:open-telemetry/weaver\"\n",
             ),
             "write mixed lock",
         );
@@ -14039,7 +14112,7 @@ lockfile = true
 
     #[test]
     fn emitted_install_args_pass_the_runner_lock_gate() {
-        const LOCK: &str = "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\n";
+        const LOCK: &str = "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\nbackend = \"aqua:cargo-bins/cargo-binstall\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\nbackend = \"aqua:nextest-rs/nextest/cargo-nextest\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\nbackend = \"github:open-telemetry/weaver\"\n";
         let root = nextest_fixture_repository("mise-runner-contract");
         must(fs::write(root.join("mise.lock"), LOCK), "write mixed lock");
         let id = scanned_rust_unit_id(&root);

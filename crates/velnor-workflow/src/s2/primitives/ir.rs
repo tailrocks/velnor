@@ -5805,34 +5805,46 @@ pub(crate) fn validate_mise_install_deps_are_closed(
         // subset installs plus the policy tool, so a provable union proves
         // every rendered subset of this unit installable.
         let tools = velnor_mise_install_tool_ids(unit, lock_keys, lock_backends, install_deps);
-        if tools.is_empty() {
+        validate_mise_tool_subset(&unit.id, &tools, lock_keys, lock_backends, install_deps)
+            .map_err(GeneratorError::usage)?;
+    }
+    Ok(())
+}
+
+/// Validate one derived mise install subset. Schema 1 and schema 2 use
+/// different unit/error types, so the shared proof returns a message and each
+/// scanner maps it to its own generator error.
+pub(crate) fn validate_mise_tool_subset(
+    unit_id: &str,
+    tools: &[String],
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &BTreeMap<String, String>,
+    install_deps: &MiseInstallDeps,
+) -> Result<(), String> {
+    if tools.is_empty() {
+        return Ok(());
+    }
+    let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+    for tool in tools {
+        let Err(unknown) = member_backend_key(tool, lock_backends) else {
             continue;
-        }
-        let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
-        for tool in &tools {
-            let Err(unknown) = member_backend_key(tool, lock_backends) else {
-                continue;
-            };
-            let reason = unknown_backend_reason(&unknown, "mise_tools");
-            return Err(GeneratorError::usage(format!(
-                "unit {} installs {tool}, {reason} (planning models mise {} install dependencies), known keys: {}",
-                unit.id,
-                MISE_INSTALL_DEPS_MODEL_VERSION,
-                known()
-            )));
-        }
-        for tool in &tools {
-            let Some(names) = install_deps.depends.get(tool) else {
-                continue;
-            };
-            for name in names {
-                if resolve_install_dep_names(name, lock_keys).is_empty() {
-                    return Err(GeneratorError::usage(format!(
-                        "unit {} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
-                        unit.id,
-                        known()
-                    )));
-                }
+        };
+        let reason = unknown_backend_reason(&unknown, "mise_tools");
+        return Err(format!(
+            "unit {unit_id} installs {tool}, {reason} (planning models mise {MISE_INSTALL_DEPS_MODEL_VERSION} install dependencies), known keys: {}",
+            known()
+        ));
+    }
+    for tool in tools {
+        let Some(names) = install_deps.depends.get(tool) else {
+            continue;
+        };
+        for name in names {
+            if resolve_install_dep_names(name, lock_keys).is_empty() {
+                return Err(format!(
+                    "unit {unit_id} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
+                    known()
+                ));
             }
         }
     }

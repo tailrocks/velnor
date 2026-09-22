@@ -42,7 +42,7 @@ mod tui;
 mod watchdog;
 
 pub(crate) use config::{mise_install_deps_for_root, mise_lock_backends_for_root};
-pub(crate) use primitives::close_mise_tool_subset;
+pub(crate) use primitives::{close_mise_tool_subset, validate_mise_tool_subset};
 
 use crate::s2::primitives::prepared_tools::PreparedToolNeed;
 use crate::s2::primitives::{WorkflowIr, WorkflowKind};
