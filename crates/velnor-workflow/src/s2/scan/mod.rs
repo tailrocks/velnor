@@ -233,7 +233,7 @@ fn wire_native_edge(
                 output_files: producer.output_files.clone(),
                 bindings_dir: producer.bindings_dir.clone(),
                 bindings_file: producer.bindings_file.clone(),
-                deployment_target: producer.deployment_target.clone(),
+                deployment_target: producer.effective_deployment_target().to_owned(),
                 inputs: producer.inputs.clone(),
                 inputs_unknown: producer.inputs_unknown.clone(),
                 inputs_digest: producer.inputs_digest.clone(),
@@ -625,11 +625,11 @@ mod tests {
             output: "native/out/BridgeCore.xcframework".to_owned(),
             bindings_dir: "native/Sources/BridgeCore".to_owned(),
             bindings_file: "FfiBoltFFI.swift".to_owned(),
-            deployment_target: "26.0".to_owned(),
+            manifest_deployment_target: "16.0".to_owned(),
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: Some(super::rust::CargoProfile("ci-release".to_owned())),
-                deployment: super::rust::DeploymentFloor("26.1".to_owned()),
+                deployment: super::rust::DeploymentFloor("26.0".to_owned()),
                 locked: true,
                 verbose: false,
             },
@@ -655,16 +655,22 @@ mod tests {
         assert_eq!(vec!["native/out/BridgeCore.xcframework"], product.outputs);
         assert_eq!(
             product.deployment_target, "26.0",
-            "the product keeps the manifest scan fact"
+            "transport validation uses the effective recipe floor"
         );
         assert_eq!(
             product
                 .env
                 .get(super::rust::MACOSX_DEPLOYMENT_TARGET)
                 .map(String::as_str),
-            Some("26.1"),
+            Some("26.0"),
             "the product exports the recipe's resolved floor: {:?}",
             product.env
+        );
+        let identity = crate::s2::platform::ProductIdentity::for_product(unit, product)
+            .expect("native product identity");
+        assert_eq!(
+            identity.deployment_target, "26.0",
+            "native product identity uses the effective recipe floor"
         );
         assert!(
             unit.env.is_empty(),
@@ -747,7 +753,7 @@ mod tests {
             output: "native/out/BridgeCore.xcframework".to_owned(),
             bindings_dir: "native/Sources/BridgeCore".to_owned(),
             bindings_file: "FfiBoltFFI.swift".to_owned(),
-            deployment_target: "26.0".to_owned(),
+            manifest_deployment_target: "16.0".to_owned(),
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: None,
