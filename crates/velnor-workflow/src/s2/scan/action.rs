@@ -1444,7 +1444,7 @@ fn local_references(
                     ));
                 }
                 if let Some(uses) = &step.uses {
-                    let uses = uses.trim();
+                    let uses = uses.as_str();
                     if is_runner_local_action_reference(uses) {
                         add_local_action_reference(&mut references, uses, root, files)?;
                     } else if is_unsafe_local_action_reference(uses) {
@@ -3033,6 +3033,23 @@ mod tests {
             "{error}"
         );
         let _ = fs::remove_dir_all(mutable);
+
+        let whitespace = fixture("whitespace-uses");
+        must(
+            fs::write(
+                whitespace.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ' actions/example@0123456789abcdef0123456789abcdef01234567 '\n",
+            ),
+            "write whitespace action metadata",
+        );
+        let error = super::super::scan_shape_for_tests(&whitespace, &providers, "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("surrounding whitespace must fail strict external uses"));
+        assert!(
+            error.to_string().contains("full 40-character SHA pin"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(whitespace);
     }
 
     #[test]
