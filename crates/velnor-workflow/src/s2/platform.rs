@@ -15,9 +15,298 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
+
+/// Versioned identity of a produced native artifact.
+///
+/// Static scanning can prove only the fields already present in the typed
+/// unit/product shape. Unknown adapter and SDK facts remain empty on purpose;
+/// they make exact cache admission fail closed while still allowing same-run
+/// transport to bind the facts both sides do know.
+pub(crate) const PRODUCT_IDENTITY_SCHEMA: &str = "velnor-native-product/1";
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ProductIdentity {
+    pub(crate) schema: String,
+    pub(crate) producer: String,
+    pub(crate) product: String,
+    pub(crate) adapter: String,
+    pub(crate) source: String,
+    pub(crate) inputs_digest: Option<String>,
+    pub(crate) host_abi: String,
+    pub(crate) target: String,
+    pub(crate) target_triple: String,
+    pub(crate) architectures: Vec<String>,
+    pub(crate) sdk: String,
+    pub(crate) deployment_target: String,
+    pub(crate) toolchain: BTreeMap<String, String>,
+    pub(crate) profile: String,
+    pub(crate) features: Vec<String>,
+    pub(crate) flags: Vec<String>,
+    pub(crate) generation: BTreeMap<String, String>,
+}
+
+impl ProductIdentity {
+    /// Derive the identity available without executing an Apple toolchain.
+    ///
+    /// The source intentionally does not invent an adapter version, SDK build,
+    /// or Cargo pack profile. Those dimensions stay empty and therefore keep
+    /// exact cross-run cache admission disabled.
+    pub(crate) fn for_product(producer: &Unit, product: &NamedProduct) -> Option<Self> {
+        if !is_native_product(product) {
+            return None;
+        }
+
+        let architectures = product_architectures(product);
+        let target_triple = if architectures.len() == 1 {
+            match architectures[0].as_str() {
+                "macos-arm64" => "aarch64-apple-darwin".to_owned(),
+                "macos-x86_64" => "x86_64-apple-darwin".to_owned(),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        let mut toolchain = BTreeMap::new();
+        if let Some(pin) = producer.toolchain.as_ref() {
+            toolchain.insert("rust.channel".to_owned(), pin.channel().to_owned());
+            if let Some(profile) = pin.profile() {
+                toolchain.insert("rust.profile".to_owned(), profile.to_owned());
+            }
+            if !pin.components().is_empty() {
+                toolchain.insert("rust.components".to_owned(), pin.components().join(","));
+            }
+            if !pin.targets().is_empty() {
+                toolchain.insert("rust.targets".to_owned(), pin.targets().join(","));
+            }
+        }
+        if let Some(pin) = producer.xcode.as_ref() {
+            toolchain.insert("xcode.version".to_owned(), pin.version().to_owned());
+        }
+
+        let mut generation = BTreeMap::new();
+        generation.insert("outputs".to_owned(), product.outputs.join("\0"));
+        generation.insert("output_files".to_owned(), product.output_files.join("\0"));
+        if !product.bindings_dir.is_empty() {
+            generation.insert("bindings_dir".to_owned(), product.bindings_dir.clone());
+        }
+        if !product.bindings_file.is_empty() {
+            generation.insert("bindings_file".to_owned(), product.bindings_file.clone());
+        }
+        if !product.rebuild.is_empty() {
+            generation.insert("rebuild".to_owned(), product.rebuild.join("\0"));
+        }
+
+        Some(Self {
+            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            producer: producer.id.clone(),
+            product: product.name.clone(),
+            adapter: String::new(),
+            source: product.bindings_dir.clone(),
+            inputs_digest: product.inputs_digest.clone(),
+            host_abi: producer.platform.as_str().to_owned(),
+            target: if product
+                .outputs
+                .iter()
+                .any(|output| output.ends_with(".xcframework"))
+            {
+                "apple-xcframework".to_owned()
+            } else {
+                String::new()
+            },
+            target_triple,
+            architectures,
+            sdk: String::new(),
+            deployment_target: product.deployment_target.clone(),
+            toolchain,
+            profile: String::new(),
+            features: Vec::new(),
+            flags: Vec::new(),
+            generation,
+        })
+    }
+
+    /// Validate syntax and canonical ordering without requiring every
+    /// identity dimension to be known.
+    pub(crate) fn validate(&self, context: &str) -> Result<(), GeneratorError> {
+        if self.schema != PRODUCT_IDENTITY_SCHEMA {
+            return Err(GeneratorError::usage(format!(
+                "{context} product identity schema `{}` is not `{PRODUCT_IDENTITY_SCHEMA}`",
+                self.schema
+            )));
+        }
+        for (field, value) in [
+            ("producer", self.producer.as_str()),
+            ("product", self.product.as_str()),
+            ("adapter", self.adapter.as_str()),
+            ("source", self.source.as_str()),
+            ("host_abi", self.host_abi.as_str()),
+            ("target", self.target.as_str()),
+            ("target_triple", self.target_triple.as_str()),
+            ("sdk", self.sdk.as_str()),
+            ("deployment_target", self.deployment_target.as_str()),
+            ("profile", self.profile.as_str()),
+        ] {
+            if value.chars().any(char::is_control) {
+                return Err(GeneratorError::usage(format!(
+                    "{context} product identity field `{field}` contains control characters"
+                )));
+            }
+        }
+        if let Some(digest) = self.inputs_digest.as_deref()
+            && !crate::s2::primitives::prepared_tools::is_digest(digest)
+        {
+            return Err(GeneratorError::usage(format!(
+                "{context} product identity inputs_digest `{digest}` is not a lowercase SHA-256"
+            )));
+        }
+        validate_identity_list(context, "architectures", &self.architectures)?;
+        validate_identity_list(context, "features", &self.features)?;
+        validate_identity_list(context, "flags", &self.flags)?;
+        validate_identity_map(context, "toolchain", &self.toolchain)?;
+        validate_identity_map(context, "generation", &self.generation)?;
+        Ok(())
+    }
+
+    /// Validate identity ownership and its relation to the product request.
+    pub(crate) fn validate_for(
+        &self,
+        context: &str,
+        producer: &str,
+        product: &str,
+    ) -> Result<(), GeneratorError> {
+        self.validate(context)?;
+        if self.producer != producer || self.product != product {
+            return Err(GeneratorError::usage(format!(
+                "{context} product identity owner mismatch: {}/{} != {producer}/{product}",
+                self.producer, self.product
+            )));
+        }
+        Ok(())
+    }
+
+    /// Return dimensions that make exact reuse unsafe when absent.
+    #[must_use]
+    pub(crate) fn missing_dimensions(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.schema != PRODUCT_IDENTITY_SCHEMA {
+            missing.push("schema");
+        }
+        if self.producer.is_empty() {
+            missing.push("producer");
+        }
+        if self.product.is_empty() {
+            missing.push("product");
+        }
+        if self.adapter.is_empty() {
+            missing.push("adapter");
+        }
+        if self.source.is_empty() {
+            missing.push("source");
+        }
+        if self.inputs_digest.is_none() {
+            missing.push("inputs_digest");
+        }
+        if self.host_abi.is_empty() {
+            missing.push("host_abi");
+        }
+        if self.target.is_empty() {
+            missing.push("target");
+        }
+        if self.target_triple.is_empty() {
+            missing.push("target_triple");
+        }
+        if self.architectures.is_empty() {
+            missing.push("architectures");
+        }
+        if self.sdk.is_empty() {
+            missing.push("sdk");
+        }
+        if self.deployment_target.is_empty() {
+            missing.push("deployment_target");
+        }
+        if self.toolchain.is_empty() {
+            missing.push("toolchain");
+        }
+        if self.profile.is_empty() {
+            missing.push("profile");
+        }
+        if self.generation.is_empty() {
+            missing.push("generation");
+        }
+        missing
+    }
+
+    /// Whether every exact-reuse dimension is known.
+    #[must_use]
+    pub(crate) fn exact_reuse_allowed(&self) -> bool {
+        self.missing_dimensions().is_empty()
+    }
+}
+
+fn validate_identity_list(
+    context: &str,
+    field: &str,
+    values: &[String],
+) -> Result<(), GeneratorError> {
+    if values
+        .iter()
+        .any(|value| value.is_empty() || value.chars().any(char::is_control))
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(GeneratorError::usage(format!(
+            "{context} product identity `{field}` must be non-empty, unique, and sorted"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_identity_map(
+    context: &str,
+    field: &str,
+    values: &BTreeMap<String, String>,
+) -> Result<(), GeneratorError> {
+    if values.iter().any(|(key, value)| {
+        key.is_empty() || key.chars().any(char::is_control) || value.chars().any(char::is_control)
+    }) {
+        return Err(GeneratorError::usage(format!(
+            "{context} product identity `{field}` contains an empty or non-printable entry"
+        )));
+    }
+    Ok(())
+}
+
+fn is_native_product(product: &NamedProduct) -> bool {
+    !product.bindings_dir.is_empty()
+        || !product.deployment_target.is_empty()
+        || product
+            .outputs
+            .iter()
+            .any(|output| output.ends_with(".xcframework"))
+}
+
+fn product_architectures(product: &NamedProduct) -> Vec<String> {
+    let Some(root) = product
+        .outputs
+        .iter()
+        .find(|output| output.ends_with(".xcframework"))
+    else {
+        return Vec::new();
+    };
+    let mut architectures = product
+        .output_files
+        .iter()
+        .filter_map(|file| file.strip_prefix(&format!("{root}/")))
+        .filter_map(|relative| relative.split('/').next())
+        .filter(|segment| *segment != "Info.plist")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    architectures.sort();
+    architectures.dedup();
+    architectures
+}
 
 /// A named build product one unit produces for others: an `XCFramework`
 /// bundle, a generated header set, a packed archive. `task` is the repository
@@ -749,11 +1038,12 @@ pub(crate) fn agreed_env(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{
         agreed_env, guarded_rebuild_command, is_ffi_crate_type, prepare_command, resolve,
         transport_marker, valid_env_name, valid_env_value, valid_product_input, valid_product_name,
-        valid_product_output, valid_task_name, NamedProduct, Prerequisite,
+        valid_product_output, valid_task_name, NamedProduct, Prerequisite, ProductIdentity,
     };
     use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
     use crate::s2::scan::default_selectors;
@@ -844,6 +1134,39 @@ mod tests {
         assert!(!valid_env_name("HAS-DASH"));
         assert!(valid_env_value("-C link-arg=-fuse-ld=mold"));
         assert!(!valid_env_value("line\nbreak"));
+    }
+
+    #[test]
+    fn derived_native_identity_stays_incomplete_without_runtime_facts() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.platform = Platform::MacosArm64;
+        producer.toolchain = Some(crate::s2::RustToolchain {
+            channel: "fixture-rust".to_owned(),
+            ..Default::default()
+        });
+        let mut native = product("xcframework", &["native/Foo.xcframework"]);
+        native.output_files = vec![
+            "native/Foo.xcframework/macos-arm64/libfoo.a".to_owned(),
+            "native/Foo.xcframework/Info.plist".to_owned(),
+        ];
+        native.bindings_dir = "native/Sources/Foo".to_owned();
+        native.deployment_target = "1.0".to_owned();
+        native.inputs_digest = Some("a".repeat(64));
+
+        let identity = ProductIdentity::for_product(&producer, &native).expect("native identity");
+        assert_eq!(identity.producer, "rust-ffi");
+        assert_eq!(identity.architectures, vec!["macos-arm64"]);
+        assert!(
+            identity.adapter.is_empty(),
+            "adapter is not statically proven"
+        );
+        assert!(
+            identity.sdk.is_empty(),
+            "SDK build is not statically proven"
+        );
+        assert!(!identity.exact_reuse_allowed());
+        assert!(identity.missing_dimensions().contains(&"adapter"));
+        assert!(identity.missing_dimensions().contains(&"sdk"));
     }
 
     #[test]

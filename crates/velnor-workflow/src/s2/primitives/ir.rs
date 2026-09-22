@@ -8612,13 +8612,88 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &format!("{record}:true"),
             );
             let marker = crate::s2::platform::transport_marker(producer, &product.name);
-            let block = super::product_transport::render_consumer_block(
+            let identity = self
+                .units
+                .iter()
+                .find(|unit| unit.id == *producer)
+                .and_then(|unit| crate::s2::platform::ProductIdentity::for_product(unit, product));
+            let block = super::product_transport::render_consumer_block_with_identity(
                 self.pins.download_artifact,
                 producer,
                 product,
                 &marker,
+                identity.as_ref(),
             );
             output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
+        }
+    }
+
+    /// The optional exact native-product cache restores for prerequisite
+    /// products this collapsed job consumes. Cache admission is stricter than
+    /// same-run transport; an incomplete static identity emits no cache step.
+    fn render_collapsed_native_product_cache_restore_steps(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+    ) {
+        let mut union: BTreeMap<
+            String,
+            (String, &crate::s2::platform::NamedProduct, BTreeSet<String>),
+        > = BTreeMap::new();
+        for member in members {
+            for prerequisite in &member.prerequisites {
+                let Some(producer) = self
+                    .units
+                    .iter()
+                    .find(|candidate| candidate.id == prerequisite.producer)
+                else {
+                    continue;
+                };
+                let Some(product) = producer
+                    .products
+                    .iter()
+                    .find(|product| product.name == prerequisite.product)
+                else {
+                    continue;
+                };
+                let record = super::product_transport::transport_record(
+                    &prerequisite.producer,
+                    &prerequisite.product,
+                );
+                let entry = union.entry(record).or_insert_with(|| {
+                    (
+                        producer.id.clone(),
+                        product,
+                        BTreeSet::from([member.id.clone()]),
+                    )
+                });
+                entry.2.insert(member.id.clone());
+            }
+        }
+        for (_, (producer, product, unit_ids)) in union {
+            let gate = (unit_ids.len() != members.len()).then(|| {
+                unit_ids
+                    .iter()
+                    .map(|unit_id| format!("inputs.unit == {}", crate::s2::shell_quote(unit_id)))
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            });
+            let Some(producer_unit) = self.units.iter().find(|unit| unit.id == producer) else {
+                continue;
+            };
+            let identity =
+                crate::s2::platform::ProductIdentity::for_product(producer_unit, product);
+            let marker = crate::s2::platform::transport_marker(&producer, &product.name);
+            let Some(block) = super::product_transport::render_native_product_cache_restore_block(
+                self.pins.cache_restore,
+                &producer,
+                product,
+                identity.as_ref(),
+                &marker,
+            ) else {
+                continue;
+            };
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
     }
 
@@ -8661,11 +8736,75 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 .all(|records| records.contains(record));
             let gate = (!shared)
                 .then(|| provider_input::contains_gate(provider_input::PRODUCT_PROVIDES, record));
-            let block = super::product_transport::render_producer_block(
+            let identity = self
+                .units
+                .iter()
+                .find(|unit| unit.id == *producer)
+                .and_then(|unit| crate::s2::platform::ProductIdentity::for_product(unit, product));
+            let block = super::product_transport::render_producer_block_with_identity(
                 self.pins.upload_artifact,
                 producer,
                 product,
+                identity.as_ref(),
             );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+    }
+
+    /// The optional trusted saves for products produced by this collapsed job.
+    /// Required same-run product transport is rendered independently.
+    fn render_collapsed_native_product_cache_save_steps(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+    ) {
+        let mut union: BTreeMap<
+            String,
+            (String, &crate::s2::platform::NamedProduct, BTreeSet<String>),
+        > = BTreeMap::new();
+        for member in members {
+            for product in &member.products {
+                let record = super::product_transport::transport_record(&member.id, &product.name);
+                let entry = union.entry(record).or_insert_with(|| {
+                    (
+                        member.id.clone(),
+                        product,
+                        BTreeSet::from([member.id.clone()]),
+                    )
+                });
+                entry.2.insert(member.id.clone());
+            }
+        }
+        if union.is_empty() {
+            return;
+        }
+        let trusted_gate = format!(
+            "always() && ({})",
+            trusted_cache_save_expression(&self.default_branch)
+        );
+        for (_, (producer, product, unit_ids)) in union {
+            let gate = (unit_ids.len() != members.len()).then(|| {
+                unit_ids
+                    .iter()
+                    .map(|unit_id| format!("inputs.unit == {}", crate::s2::shell_quote(unit_id)))
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            });
+            let Some(producer_unit) = self.units.iter().find(|unit| unit.id == producer) else {
+                continue;
+            };
+            let identity =
+                crate::s2::platform::ProductIdentity::for_product(producer_unit, product);
+            let Some(block) = super::product_transport::render_native_product_cache_save_block(
+                self.pins.cache_restore,
+                self.pins.cache_save,
+                &producer,
+                product,
+                identity.as_ref(),
+                &trusted_gate,
+            ) else {
+                continue;
+            };
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
     }
@@ -9043,6 +9182,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // artifact before the checks consume it. The verify step exports
         // the ready marker the guarded rebuild reads.
         if hosted {
+            self.render_collapsed_native_product_cache_restore_steps(output, members);
             self.render_collapsed_product_consumer_steps(output, members);
         }
 
@@ -9119,6 +9259,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // the checks that produced them.
         if hosted {
             self.render_collapsed_product_producer_steps(output, members);
+            if cache_save {
+                self.render_collapsed_native_product_cache_save_steps(output, members);
+            }
         }
 
         // Cache collection.
