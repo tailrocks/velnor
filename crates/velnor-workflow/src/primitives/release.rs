@@ -6286,11 +6286,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "7e47f6efeb6793578a1b32b2968dc6fb59078df5baa2298f691c9219773519c5",
+                "f05e0d5b8d4353400ef83a04fb3df9afa709e366fddb90b93f89f8e38361575e",
             ),
             (
                 "preview.yml",
-                "2e47365204b9124a5a2bd55ddfed741e5c978a45681491178553d673072d5f6c",
+                "508ba6286c0bf63f331a2348a4189cf4adfe494f0be7defb8f3f0afb668c2eee",
             ),
         ];
         let root = scanned_root("identity-pinned");

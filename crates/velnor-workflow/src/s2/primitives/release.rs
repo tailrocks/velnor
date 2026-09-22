@@ -6926,11 +6926,11 @@ cp "$record" "$out"
             // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "20723cb32c484b2bed46b97bfa35a54387dc0e018eb87bd5962d1c14f7bff471",
+                "89983e3e4ae19c0ff9a71cbd06b76125df6a966c9c164b4ba8457ef935ad7565",
             ),
             (
                 "preview.yml",
-                "c15885d80825ef39fcdf5879f51f4da931a7d0860ff20a5b06f04c89f5c91e37",
+                "6ab6b6fbcdc859b8456942846fbc430e588e2bad459b7a93917e17c7ff9fc8d3",
             ),
         ];
         let root = scanned_root("identity-pinned");
