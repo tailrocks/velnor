@@ -37,6 +37,7 @@ use super::{GeneratorError, UnitKind, ValidationPhase};
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+const REVISION_FALLBACK_REASON: &str = "identical or unresolvable revisions; fell back to full";
 
 #[expect(
     dead_code,
@@ -1245,27 +1246,28 @@ fn select_command(
             "no affected base; fell back to full",
         ));
     }
-    let Some(lines) = git_name_status(root, base, head)? else {
-        return print_selection(&crate::s2::reuse::fallback_selection(
-            &watched,
-            "git diff unavailable; fell back to full",
+    print_selection(&select_affected_for_revisions(root, &watched, base, head)?)
+}
+
+fn select_affected_for_revisions(
+    root: &Path,
+    watched: &[crate::s2::reuse::WatchedUnit],
+    base: &str,
+    head: &str,
+) -> Result<crate::s2::reuse::AffectedSelection, GeneratorError> {
+    if git_revisions_same(root, base, head)? {
+        return Ok(crate::s2::reuse::fallback_selection(
+            watched,
+            REVISION_FALLBACK_REASON,
+        ));
+    }
+    let Some(changes) = changed_paths_for_diff(root, base, head)? else {
+        return Ok(crate::s2::reuse::fallback_selection(
+            watched,
+            "git diff unavailable or unparseable; fell back to full",
         ));
     };
-    let mut changes = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let Some(change) = crate::s2::reuse::parse_name_status_line(line) else {
-            return print_selection(&crate::s2::reuse::fallback_selection(
-                &watched,
-                "unparseable change entry; fell back to full",
-            ));
-        };
-        changes.push(change);
-    }
-    print_selection(&crate::s2::reuse::select_affected(
-        &watched,
-        &changes,
-        crate::s2::reuse::FULL_SELECTION_PREFIXES,
-    )?)
+    crate::s2::reuse::select_affected(watched, &changes, crate::s2::reuse::FULL_SELECTION_PREFIXES)
 }
 
 fn print_selection(selection: &crate::s2::reuse::AffectedSelection) -> Result<(), GeneratorError> {
@@ -1276,28 +1278,15 @@ fn print_selection(selection: &crate::s2::reuse::AffectedSelection) -> Result<()
     Ok(())
 }
 
-fn git_name_status(
+fn changed_paths_for_diff(
     root: &Path,
     base: &str,
     head: &str,
-) -> Result<Option<Vec<String>>, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-status", "-M"])
-        .arg(format!("{base}...{head}"))
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
-    if !output.status.success() {
+) -> Result<Option<Vec<crate::s2::reuse::ChangedPath>>, GeneratorError> {
+    let Some(raw) = git_name_status_nul(root, base, head)? else {
         return Ok(None);
-    }
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-    ))
+    };
+    Ok(crate::s2::reuse::parse_name_status_nul(&raw))
 }
 
 /// One `fingerprint` report: the revision fingerprinted and the per-unit
@@ -2822,15 +2811,18 @@ fn selection_for_diff_with_closed_excluded<'a>(
         return full_selection(config, Some("no affected base; fell back to full"))
             .map(|selection| (selection, BTreeSet::new()));
     }
-    let Some(raw) = git_name_status_nul(root, base, head)? else {
-        return full_selection(config, Some("git diff unavailable; fell back to full"))
+    if git_revisions_same(root, base, head)? {
+        return full_selection(config, Some(REVISION_FALLBACK_REASON))
             .map(|selection| (selection, BTreeSet::new()));
+    }
+    let Some(changes) = changed_paths_for_diff(root, base, head)? else {
+        return full_selection(
+            config,
+            Some("git diff unavailable or unparseable; fell back to full"),
+        )
+        .map(|selection| (selection, BTreeSet::new()));
     };
-    let Some(changed) = parse_name_status_nul(&raw) else {
-        return full_selection(config, Some("unparseable change entry; fell back to full"))
-            .map(|selection| (selection, BTreeSet::new()));
-    };
-    if changed.is_empty() {
+    if changes.is_empty() {
         return Ok((
             UnitSelection {
                 units: Vec::new(),
@@ -2845,7 +2837,7 @@ fn selection_for_diff_with_closed_excluded<'a>(
         root,
         base,
         head,
-        &changed,
+        &crate::s2::reuse::effective_paths(&changes),
         &config.unit,
         &config.workflow.version_bump_units,
     )? {
@@ -2872,8 +2864,8 @@ fn selection_for_diff_with_closed_excluded<'a>(
     let mut selected = BTreeSet::new();
     let mut opaque_reasons: Vec<String> = Vec::new();
     let mut closed_excluded: BTreeSet<String> = BTreeSet::new();
-    for file in &changed {
-        if let Some(verdict) = crate::s2::reuse::github_verdict(file) {
+    for file in crate::s2::reuse::effective_paths(&changes) {
+        if let Some(verdict) = crate::s2::reuse::github_verdict(&file) {
             match verdict {
                 crate::s2::reuse::GithubVerdict::Global { reason }
                 | crate::s2::reuse::GithubVerdict::Unknown { reason } => {
@@ -2895,7 +2887,7 @@ fn selection_for_diff_with_closed_excluded<'a>(
         }
         if let Some(reason) = fold_affected_file(
             &compiled,
-            file,
+            &file,
             &mut selected,
             &mut opaque_reasons,
             &mut closed_excluded,
@@ -2917,6 +2909,35 @@ fn selection_for_diff_with_closed_excluded<'a>(
         },
         closed_excluded,
     ))
+}
+
+fn git_revisions_same(root: &Path, base: &str, head: &str) -> Result<bool, GeneratorError> {
+    let (Some(base), Some(head)) = (
+        resolve_git_revision(root, base)?,
+        resolve_git_revision(root, head)?,
+    ) else {
+        return Ok(true);
+    };
+    Ok(base == head)
+}
+
+fn resolve_git_revision(root: &Path, revision: &str) -> Result<Option<String>, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify"])
+        .arg(format!("{revision}^{{commit}}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("resolve git revision: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 /// Fold one non-contract changed file into the affected set: owned units join
@@ -3085,60 +3106,6 @@ fn git_name_status_nul(
         return Ok(None);
     }
     Ok(Some(output.stdout))
-}
-
-/// Parse `--name-status -z` bytes into the matchable path list, mirroring the
-/// select path's rename/delete semantics: a rename contributes its target
-/// then its source (both owners match), a copy contributes its target only,
-/// and a delete keeps its path (its owner still matches). `None` means the
-/// input is truncated, malformed, or non-UTF-8: the caller falls back to
-/// full instead of matching a mangled name.
-fn parse_name_status_nul(output: &[u8]) -> Option<Vec<String>> {
-    if output.is_empty() {
-        return Some(Vec::new());
-    }
-    let text = std::str::from_utf8(output).ok()?;
-    let mut records = text.split('\0');
-    let mut changed = Vec::new();
-    loop {
-        let status = records.next()?;
-        if status.is_empty() {
-            // The trailing NUL terminates the stream: anything after it is a
-            // malformed record, not an empty diff.
-            return records.next().is_none().then_some(changed);
-        }
-        if let Some(score) = status.strip_prefix('R') {
-            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            let from = records.next()?;
-            let to = records.next()?;
-            if from.is_empty() || to.is_empty() {
-                return None;
-            }
-            changed.push(to.to_owned());
-            changed.push(from.to_owned());
-        } else if let Some(score) = status.strip_prefix('C') {
-            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            let from = records.next()?;
-            let to = records.next()?;
-            if from.is_empty() || to.is_empty() {
-                return None;
-            }
-            changed.push(to.to_owned());
-        } else {
-            if !matches!(status, "A" | "M" | "T" | "D") {
-                return None;
-            }
-            let path = records.next()?;
-            if path.is_empty() {
-                return None;
-            }
-            changed.push(path.to_owned());
-        }
-    }
 }
 
 fn ordered_units<'a>(
@@ -7023,16 +6990,8 @@ workspace_check = true
             let (root, base, head) = selection_git_fixture("slice-c", changed)?;
             let runtime_selection =
                 selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-            let raw = git_name_status_nul(&root, &base, &head)?.ok_or("the diff must resolve")?;
-            let changed_files = parse_name_status_nul(&raw).ok_or("the diff must parse")?;
-            let changes: Vec<crate::s2::reuse::ChangedPath> = changed_files
-                .into_iter()
-                .map(|path| crate::s2::reuse::ChangedPath {
-                    path,
-                    previous: None,
-                    status: crate::s2::reuse::ChangeKind::Modified,
-                })
-                .collect();
+            let changes =
+                changed_paths_for_diff(&root, &base, &head)?.ok_or("the diff must parse")?;
             let model = crate::s2::reuse::select_affected(
                 &watched,
                 &changes,
@@ -7049,8 +7008,15 @@ workspace_check = true
             );
             std::fs::remove_dir_all(root)?;
         }
-        let (root, base, _) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
-        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let (root, _, head) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let runtime_selection =
+            selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         let model = crate::s2::reuse::select_affected(
             &watched,
             &[],
@@ -7290,9 +7256,15 @@ workspace_check = true
 
     #[test]
     fn affected_selection_is_empty_for_an_empty_diff() -> Result<(), Box<dyn Error>> {
-        let (root, base, _) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+        let (root, _, head) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
         let config = selection_config();
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         assert!(selection.units.is_empty());
         assert!(selection.full_units.is_empty());
         std::fs::remove_dir_all(root)?;
@@ -7576,91 +7548,6 @@ workspace_check = true
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
-    }
-
-    #[test]
-    fn name_status_nul_parses_exact_paths() {
-        // Status entries arrive verbatim: spaces, quotes, unicode, newlines,
-        // and glob metacharacters survive because NUL delimits records.
-        // Renames contribute target then source; copies contribute the target
-        // only; deletes keep their path.
-        for (input, expected) in [
-            ("".as_bytes(), Vec::new()),
-            ("M\0src/lib.rs\0".as_bytes(), vec!["src/lib.rs".to_owned()]),
-            (
-                "A\0dir with space/f ile.txt\0".as_bytes(),
-                vec!["dir with space/f ile.txt".to_owned()],
-            ),
-            (
-                "M\0we\"ird?.rs\0".as_bytes(),
-                vec!["we\"ird?.rs".to_owned()],
-            ),
-            (
-                "M\0ünïcode/[bracket]*.rs\0".as_bytes(),
-                vec!["ünïcode/[bracket]*.rs".to_owned()],
-            ),
-            (
-                "M\0with\nnewline.txt\0".as_bytes(),
-                vec!["with\nnewline.txt".to_owned()],
-            ),
-            ("D\0gone.rs\0".as_bytes(), vec!["gone.rs".to_owned()]),
-            ("T\0link.rs\0".as_bytes(), vec!["link.rs".to_owned()]),
-            (
-                "R100\0old.rs\0new.rs\0".as_bytes(),
-                vec!["new.rs".to_owned(), "old.rs".to_owned()],
-            ),
-            (
-                "R050\0a.rs\0b.rs\0".as_bytes(),
-                vec!["b.rs".to_owned(), "a.rs".to_owned()],
-            ),
-            ("C75\0a.rs\0b.rs\0".as_bytes(), vec!["b.rs".to_owned()]),
-            (
-                "M\0a.rs\0D\0b.rs\0R100\0c.rs\0d.rs\0".as_bytes(),
-                vec![
-                    "a.rs".to_owned(),
-                    "b.rs".to_owned(),
-                    "d.rs".to_owned(),
-                    "c.rs".to_owned(),
-                ],
-            ),
-        ] {
-            assert_eq!(
-                parse_name_status_nul(input),
-                Some(expected),
-                "input {input:?} must parse exactly"
-            );
-        }
-    }
-
-    #[test]
-    fn name_status_nul_fails_closed_on_malformed_input() {
-        // Unknown statuses, truncated records, empty paths, trailing
-        // garbage, and non-UTF-8 bytes never parse: the caller falls back to
-        // full instead of matching a mangled name.
-        for input in [
-            "X\0a.rs\0".as_bytes(),
-            "U\0a.rs\0".as_bytes(),
-            "m\0a.rs\0".as_bytes(),
-            "R\0a.rs\0b.rs\0".as_bytes(),
-            "Rx\0a.rs\0b.rs\0".as_bytes(),
-            "C\0a.rs\0b.rs\0".as_bytes(),
-            "M\0".as_bytes(),
-            "M\0a.rs".as_bytes(),
-            "R100\0a.rs\0".as_bytes(),
-            "R100\0a.rs".as_bytes(),
-            "M\0\0".as_bytes(),
-            "R100\0\0b.rs\0".as_bytes(),
-            "M\0a.rs\0junk".as_bytes(),
-            "A\0a.rs\0\0".as_bytes(),
-            "\0".as_bytes(),
-            b"M\0\xff.rs\0".as_slice(),
-        ] {
-            assert_eq!(
-                parse_name_status_nul(input),
-                None,
-                "input {input:?} must fail closed"
-            );
-        }
     }
 
     #[test]
@@ -9850,9 +9737,15 @@ trust = "untrusted-ok"
 
     #[test]
     fn empty_diff_carries_a_reason_while_unproven_empty_errors() -> Result<(), Box<dyn Error>> {
-        let (root, base, _) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
+        let (root, _, head) = selection_git_fixture("s4-empty", "crates/base/src/lib.rs")?;
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
         let config = selection_config();
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         assert!(selection.units.is_empty());
         assert_eq!(
             must(
@@ -9896,6 +9789,60 @@ trust = "untrusted-ok"
             "real work carries no no-work reason"
         )
         .is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn revision_fallback_reason_is_shared_by_plan_and_select() -> Result<(), Box<dyn Error>> {
+        // `select` is the why-run oracle, while `plan` adds provider and
+        // workspace policy. Both must treat identical or unresolved
+        // revisions as a full fallback with the same auditable reason.
+        let (root, _, head) = selection_git_fixture("revision-fallback", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let watched = watched_units(&config.unit);
+        for (label, base, candidate_head) in [
+            ("identical", head.as_str(), head.as_str()),
+            ("unresolved base", "missing-base", head.as_str()),
+            ("unresolved head", head.as_str(), "missing-head"),
+        ] {
+            let planned =
+                selection_for_diff(&root, &config, Scope::Affected, base, candidate_head)?;
+            assert_eq!(planned.units.len(), config.unit.len(), "{label} plan units");
+            assert_eq!(
+                planned.fallback_reason.as_deref(),
+                Some(REVISION_FALLBACK_REASON),
+                "{label} plan reason"
+            );
+
+            let selected = select_affected_for_revisions(&root, &watched, base, candidate_head)?;
+            assert!(selected.fallback_full, "{label} select fallback");
+            assert_eq!(
+                selected.required.len(),
+                config.unit.len(),
+                "{label} select units"
+            );
+            assert_eq!(
+                selected.fallback_reason.as_deref(),
+                Some(REVISION_FALLBACK_REASON),
+                "{label} select reason"
+            );
+        }
+
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = git_fixture_head(&root)?;
+        let planned = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
+        assert!(planned.units.is_empty());
+        assert!(planned.fallback_reason.is_none());
+        let selected = select_affected_for_revisions(&root, &watched, &head, &no_op_head)?;
+        assert!(selected.required.is_empty());
+        assert!(!selected.fallback_full);
+        assert!(selected.fallback_reason.is_none());
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -11,7 +11,7 @@
 //!
 //! # Contract
 //!
-//! * [`select_affected`] maps a `git diff --name-status` change list onto the
+//! * [`select_affected`] maps a `git diff --name-status -M -z` change list onto the
 //!   watched units. Renames match both sides, deletes still select their
 //!   owner, and dependency edges are followed across unit kinds. A path no
 //!   watch matches is classified: owned paths (watch, declared reads, or a
@@ -92,7 +92,7 @@ pub(crate) fn check_names_for_unit(unit_id: &str, unit: &ExpectedUnit) -> BTreeS
     names
 }
 
-/// One changed path from `git diff --name-status -M`: `path` is the current
+/// One changed path from `git diff --name-status -M -z`: `path` is the current
 /// path (the rename target), `previous` is the rename source, and `status`
 /// is the entry kind. Renames carry both sides so selection matches the old
 /// owner's globs (the file left) and the new owner's globs (the file arrived);
@@ -155,59 +155,83 @@ fn effective_matches(changes: &[ChangedPath]) -> Vec<EffectiveMatch<'_>> {
     matches
 }
 
-/// Parse one `git diff --name-status` line (without `-z`). Copies report
-/// their new path as added; type changes report as modified. Anything else —
-/// unmerged entries, unknown statuses, malformed lines — parses to [`None`]
-/// so the caller falls back to the full set instead of guessing.
+/// Parse `git diff --name-status -M -z` bytes into the one changed-path
+/// representation consumed by both the selection command and planning.
+/// NUL-delimiting is mandatory: Git's non-`-z` output quotes unusual names,
+/// so line/tab parsing cannot preserve the path identity used by globs.
+/// Copies contribute only their target; renames retain both sides through one
+/// [`ChangedPath`], and malformed or non-UTF-8 input fails closed.
 #[must_use]
-pub(crate) fn parse_name_status_line(line: &str) -> Option<ChangedPath> {
-    let mut fields = line.split('\t');
-    let status = fields.next()?;
-    if let Some(target) = status.strip_prefix('R') {
-        if target.is_empty() || !target.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        let from = fields.next()?;
-        let to = fields.next()?;
-        if fields.next().is_some() || from.is_empty() || to.is_empty() {
-            return None;
-        }
-        return Some(ChangedPath {
-            path: to.to_owned(),
-            previous: Some(from.to_owned()),
-            status: ChangeKind::Renamed,
-        });
+pub(crate) fn parse_name_status_nul(output: &[u8]) -> Option<Vec<ChangedPath>> {
+    if output.is_empty() {
+        return Some(Vec::new());
     }
-    if let Some(target) = status.strip_prefix('C') {
-        if target.is_empty() || !target.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
+    let text = std::str::from_utf8(output).ok()?;
+    let mut records = text.split('\0');
+    let mut changed = Vec::new();
+    loop {
+        let status = records.next()?;
+        if status.is_empty() {
+            // A single trailing NUL terminates the stream. Anything after it
+            // is an extra malformed record, never an empty path.
+            return records.next().is_none().then_some(changed);
         }
-        let _from = fields.next()?;
-        let to = fields.next()?;
-        if fields.next().is_some() || to.is_empty() {
-            return None;
+        if let Some(score) = status.strip_prefix('R') {
+            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let from = records.next()?;
+            let to = records.next()?;
+            if from.is_empty() || to.is_empty() {
+                return None;
+            }
+            changed.push(ChangedPath {
+                path: to.to_owned(),
+                previous: Some(from.to_owned()),
+                status: ChangeKind::Renamed,
+            });
+        } else if let Some(score) = status.strip_prefix('C') {
+            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let from = records.next()?;
+            let to = records.next()?;
+            if from.is_empty() || to.is_empty() {
+                return None;
+            }
+            changed.push(ChangedPath {
+                path: to.to_owned(),
+                previous: None,
+                status: ChangeKind::Added,
+            });
+        } else {
+            let status = match status {
+                "A" => ChangeKind::Added,
+                "M" | "T" => ChangeKind::Modified,
+                "D" => ChangeKind::Deleted,
+                _ => return None,
+            };
+            let path = records.next()?;
+            if path.is_empty() {
+                return None;
+            }
+            changed.push(ChangedPath {
+                path: path.to_owned(),
+                previous: None,
+                status,
+            });
         }
-        return Some(ChangedPath {
-            path: to.to_owned(),
-            previous: None,
-            status: ChangeKind::Added,
-        });
     }
-    let path = fields.next()?;
-    if fields.next().is_some() || path.is_empty() {
-        return None;
-    }
-    let status = match status {
-        "A" => ChangeKind::Added,
-        "M" | "T" => ChangeKind::Modified,
-        "D" => ChangeKind::Deleted,
-        _ => return None,
-    };
-    Some(ChangedPath {
-        path: path.to_owned(),
-        previous: None,
-        status,
-    })
+}
+
+/// Expand the parsed changes to the paths the ownership classifier must see.
+/// A rename invalidates both its target and source owner; all other statuses
+/// contribute their one path.
+pub(crate) fn effective_paths(changes: &[ChangedPath]) -> Vec<String> {
+    effective_matches(changes)
+        .into_iter()
+        .map(|candidate| candidate.path.to_owned())
+        .collect()
 }
 
 /// The `(id, watch, depends_on)` view selection needs, plus the ownership
@@ -2671,35 +2695,79 @@ mod tests {
     }
 
     #[test]
-    fn name_status_parsing_covers_rename_copy_and_rejects_unknown(
+    fn name_status_nul_parsing_preserves_quoted_paths_and_statuses(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let renamed = parse_name_status_line("R100\tcrates/old.rs\tcrates/new.rs")
-            .ok_or("rename must parse")?;
-        assert_eq!(renamed.path, "crates/new.rs");
-        assert_eq!(renamed.previous.as_deref(), Some("crates/old.rs"));
-        assert_eq!(renamed.status, ChangeKind::Renamed);
-        let copied = parse_name_status_line("C75\tsrc/a.rs\tsrc/b.rs").ok_or("copy must parse")?;
-        assert_eq!(copied.path, "src/b.rs");
-        assert_eq!(copied.previous, None);
-        assert_eq!(copied.status, ChangeKind::Added);
-        let typed = parse_name_status_line("T\tlink.rs").ok_or("type change must parse")?;
-        assert_eq!(typed.status, ChangeKind::Modified);
-        for line in [
-            "U\tconflicted.rs",
-            "X\tunknown.rs",
-            "R\tonly-two.rs",
-            "R100\t",
-            "M\t",
-            "bogus",
-            "",
-            "M\ta.rs\textra.rs",
+        let changes = parse_name_status_nul(
+            "M\0dir with\ttab/with \"quote\" and\nnewline?.rs\0R100\0old.rs\0new.rs\0C75\0src/a.rs\0src/b.rs\0T\0link.rs\0D\0gone.rs\0"
+                .as_bytes(),
+        )
+        .ok_or("valid NUL status stream")?;
+        assert_eq!(
+            changes,
+            vec![
+                ChangedPath {
+                    path: "dir with\ttab/with \"quote\" and\nnewline?.rs".to_owned(),
+                    previous: None,
+                    status: ChangeKind::Modified,
+                },
+                ChangedPath {
+                    path: "new.rs".to_owned(),
+                    previous: Some("old.rs".to_owned()),
+                    status: ChangeKind::Renamed,
+                },
+                ChangedPath {
+                    path: "src/b.rs".to_owned(),
+                    previous: None,
+                    status: ChangeKind::Added,
+                },
+                ChangedPath {
+                    path: "link.rs".to_owned(),
+                    previous: None,
+                    status: ChangeKind::Modified,
+                },
+                ChangedPath {
+                    path: "gone.rs".to_owned(),
+                    previous: None,
+                    status: ChangeKind::Deleted,
+                },
+            ]
+        );
+        assert_eq!(
+            effective_paths(&changes),
+            vec![
+                "dir with\ttab/with \"quote\" and\nnewline?.rs",
+                "new.rs",
+                "old.rs",
+                "src/b.rs",
+                "link.rs",
+                "gone.rs",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn name_status_nul_parsing_fails_closed_on_malformed_input() {
+        for input in [
+            "X\0a.rs\0".as_bytes(),
+            "U\0a.rs\0".as_bytes(),
+            "R\0a.rs\0b.rs\0".as_bytes(),
+            "C\0a.rs\0b.rs\0".as_bytes(),
+            "M\0".as_bytes(),
+            "M\0a.rs".as_bytes(),
+            "R100\0a.rs\0".as_bytes(),
+            "M\0\0".as_bytes(),
+            "M\0a.rs\0junk".as_bytes(),
+            "A\0a.rs\0\0".as_bytes(),
+            "\0".as_bytes(),
+            b"M\0\xff.rs\0".as_slice(),
         ] {
-            assert!(
-                parse_name_status_line(line).is_none(),
-                "unusable status must fail closed: {line:?}"
+            assert_eq!(
+                parse_name_status_nul(input),
+                None,
+                "unusable status must fail closed: {input:?}"
             );
         }
-        Ok(())
     }
 
     #[test]

@@ -174,8 +174,9 @@ permit headroom, while GitHub assigned-demand statistics drive its worker
 target. Either lane's capacity may be lower than the host-wide `N` ceiling.
 Labels for native runners are sorted and deduplicated. Empty native labels
 become `self-hosted,velnor`.
-Native target-MVP labels add `hetzner-sentry-ci`, `ubuntu-24.04`,
-`ubuntu-latest`, and `velnor-target-mvp`; the ARM option adds
+Native target-MVP labels add `hetzner-sentry-ci`, `ubuntu-latest`, and
+`velnor-target-mvp`; `ubuntu-24.04` is reserved for GitHub-hosted workflow
+selection and is rejected on Velnor self-hosted runners. The ARM option adds
 `ubuntu-24.04-arm`. macOS labels are rejected; local execution is Linux-only.
 
 ## Native scope and registration
