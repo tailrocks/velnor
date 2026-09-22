@@ -3115,7 +3115,7 @@ mod tests {
             "candidate acquire renders",
         );
         let run = must_some(
-            hosted.find("velnor-workflow run --config"),
+            hosted.find("\"${VELNOR_WORKFLOW_CANDIDATE_BINARY:-velnor-workflow}\" run --config"),
             "config run renders",
         );
         assert!(acquire < run, "{hosted}");
@@ -3162,6 +3162,9 @@ mod tests {
                 && candidate.contains("::error::candidate digest mismatch")
                 && candidate.contains("\"$stage/velnor-workflow\" --closure")
                 && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]")
+                && candidate.contains(
+                    "echo \"VELNOR_WORKFLOW_CANDIDATE_BINARY=$stage/velnor-workflow\" >> \"$GITHUB_ENV\"",
+                )
                 && candidate.contains("echo \"PATH=$stage:$PATH\" >> \"$GITHUB_ENV\""),
             "consumer downloads, validates, and exports the candidate: {candidate}"
         );
@@ -3281,12 +3284,25 @@ mod tests {
             "the plan owns publication once, independent of unit count: {plan}"
         );
         let content = must_render_kind(&ir);
+        let docs = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Docs, None),
+                "docs kind reusable renders",
+            ),
+            "docs kind has members",
+        )
+        .1;
         assert_eq!(
             content
                 .matches("Acquire candidate generator runtime")
                 .count(),
             1,
             "one collapsed hosted Rust consumer owns acquisition: {content}"
+        );
+        assert_eq!(
+            docs.matches("Acquire candidate generator runtime").count(),
+            1,
+            "one collapsed hosted Docs consumer owns acquisition: {docs}"
         );
         assert!(
             !content.contains("candidate_publish") && !content.contains("Publish candidate"),
@@ -8966,7 +8982,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
         if hosted
             && self.repository == crate::s2::workflow_setup_action_repository()
-            && kind == UnitKind::Rust
             && members
                 .iter()
                 .any(|unit| unit.platform != crate::s2::provider::Platform::MacosArm64)
@@ -9012,7 +9027,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let mut block = String::new();
             let _ = writeln!(
                 block,
-                "      - name: {}\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{started}          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --phase {} 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{ended}          exit $rc",
+                "      - name: {}\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{started}          rc=0\n          \"${{VELNOR_WORKFLOW_CANDIDATE_BINARY:-velnor-workflow}}\" run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --phase {} 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{ended}          exit $rc",
                 phase.step_name(),
                 phase.as_str(),
             );
@@ -9025,7 +9040,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let mut block = String::new();
             let _ = writeln!(
                 block,
-                "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+                "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          \"${{VELNOR_WORKFLOW_CANDIDATE_BINARY:-velnor-workflow}}\" run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
             );
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }

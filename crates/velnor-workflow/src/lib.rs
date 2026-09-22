@@ -5429,10 +5429,10 @@ pub(crate) fn candidate_bootstrap_steps(
     )
 }
 
-/// Acquire the control-plane candidate in a hosted non-Apple Rust unit before
-/// its first `run --config`. The step uses the same closure/name/manifest
-/// contract as [`candidate_bootstrap_steps`], then places the verified binary
-/// first in `PATH`; no unit needs to know whether the plan used the candidate.
+/// Acquire the control-plane candidate in a hosted non-Apple unit before its
+/// first `run --config`. The step uses the same closure/name/manifest contract
+/// as [`candidate_bootstrap_steps`], then exports the verified binary's absolute
+/// path; no unit needs to know whether the plan used the candidate.
 pub(crate) fn candidate_runtime_acquire_steps() -> &'static str {
     r#"      - name: Acquire candidate generator runtime
         if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && inputs.apple_executor != true
@@ -5487,6 +5487,7 @@ pub(crate) fn candidate_runtime_acquire_steps() -> &'static str {
           chmod 0755 "$stage/velnor-workflow"
           reported="$(GH_TOKEN='' GITHUB_TOKEN='' "$stage/velnor-workflow" --closure)"
           [[ "$reported" == "$head_closure" ]] || { echo "::error::candidate reports closure $reported, expected $head_closure" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_CANDIDATE_BINARY=$stage/velnor-workflow" >> "$GITHUB_ENV"
           echo "PATH=$stage:$PATH" >> "$GITHUB_ENV"
 "#
 }
@@ -16824,7 +16825,7 @@ channel = "stable"
         assert!(!workflow.contains("uses: tailrocks/velnor/.github/workflows/"));
         assert!(!workflow.contains("path: .github-policy"));
         assert!(!workflow.contains("velnor-workflow policy --workflow-root .github-policy"));
-        assert!(workflow.contains("velnor-workflow run --config .github/ci/project.toml"));
+        assert!(workflow.contains("run --config .github/ci/project.toml"));
         for action in [
             ActionPin::Checkout.reference(),
             ActionPin::CacheRestore.reference(),
@@ -17067,7 +17068,7 @@ channel = "stable"
         assert!(files.values().any(|content| content.contains(&policy_pin)));
         assert!(files
             .values()
-            .any(|content| content.contains("velnor-workflow run")));
+            .any(|content| content.contains("run --config .github/ci/project.toml")));
     }
 
     #[test]

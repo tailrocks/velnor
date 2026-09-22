@@ -294,6 +294,61 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
+      - name: Acquire candidate generator runtime
+        if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && inputs.apple_executor != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_HEAD_SHA: ${{ inputs.head_sha }}
+          CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          HEAD="$CANDIDATE_HEAD_SHA"
+          BASE="$CANDIDATE_BASE_SHA"
+          test "$HEAD" != '' || { echo "::error::candidate head SHA is empty" >&2; exit 1; }
+          test "$BASE" != '' || { echo "::error::candidate base SHA is empty" >&2; exit 1; }
+          if git cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+            HEAD="$(git rev-parse "$HEAD^{commit}")"
+          else
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$HEAD"
+            HEAD="$(git rev-parse FETCH_HEAD)"
+          fi
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse "$BASE^{commit}")"
+          else
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+            BASE="$(git rev-parse FETCH_HEAD)"
+          fi
+          head_closure="$(velnor-workflow closure --rev="$HEAD" --candidate)"
+          base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || { echo "::error::base $BASE declares no generator pin" >&2; exit 1; }
+          if ! git cat-file -e "$base_pin^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
+          fi
+          base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
+          if [[ "$head_closure" == "$base_closure" ]]; then
+            echo "head $HEAD shares the base generator closure; no candidate artifact is required"
+            exit 0
+          fi
+          name="velnor-workflow-candidate-${head_closure:0:16}-$RUNNER_OS-$RUNNER_ARCH"
+          test -n "${RUNNER_TEMP:-}" || { echo "::error::RUNNER_TEMP is empty" >&2; exit 1; }
+          stage="$RUNNER_TEMP/velnor-workflow-candidate"
+          test ! -e "$stage" || { echo "::error::candidate staging path already exists: $stage" >&2; exit 1; }
+          mkdir "$stage"
+          gh run download "$GITHUB_RUN_ID" --name "$name" --dir "$stage" --repo "$GITHUB_REPOSITORY"
+          jq -e --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg repo "$GITHUB_REPOSITORY" --arg run "$GITHUB_RUN_ID" --arg revision "$HEAD" --arg closure "$head_closure" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and .revision == $revision and .closure == $closure and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$stage/candidate-manifest.json" >/dev/null
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+          else
+            actual="$(shasum -a 256 "$stage/velnor-workflow" | awk '{print $1}')"
+          fi
+          expected="$(jq -er .binary_sha256 "$stage/candidate-manifest.json")"
+          [[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }
+          chmod 0755 "$stage/velnor-workflow"
+          reported="$(GH_TOKEN='' GITHUB_TOKEN='' "$stage/velnor-workflow" --closure)"
+          [[ "$reported" == "$head_closure" ]] || { echo "::error::candidate reports closure $reported, expected $head_closure" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_CANDIDATE_BINARY=$stage/velnor-workflow" >> "$GITHUB_ENV"
+          echo "PATH=$stage:$PATH" >> "$GITHUB_ENV"
       - name: Run unit checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -317,7 +372,7 @@ jobs:
             fi
           fi
           rc=0
-          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          "${VELNOR_WORKFLOW_CANDIDATE_BINARY:-velnor-workflow}" run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
           mkdir -p "$timing_dir"

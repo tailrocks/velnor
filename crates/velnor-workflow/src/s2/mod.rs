@@ -14452,7 +14452,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
     fn assert_checks_steps_disable_mise_auto_install(workflow: &str) {
         let auto_install_off = workflow.matches("MISE_AUTO_INSTALL: \"false\"").count();
         let checks_steps = workflow
-            .matches("velnor-workflow run --config .github/ci/project.toml --scope")
+            .matches("run --config .github/ci/project.toml --scope")
             .count();
         assert!(
             checks_steps >= 3,
@@ -18002,7 +18002,7 @@ lockfile = true
         assert!(!workflow.contains("uses: tailrocks/velnor/.github/workflows/"));
         assert!(!workflow.contains("path: .github-policy"));
         assert!(!workflow.contains("velnor-workflow policy --workflow-root .github-policy"));
-        assert!(rust.contains("velnor-workflow run --config .github/ci/project.toml"));
+        assert!(rust.contains("run --config .github/ci/project.toml"));
         for action in [
             ActionPin::Checkout.reference(),
             ActionPin::CacheRestore.reference(),
@@ -18257,7 +18257,7 @@ lockfile = true
         assert!(files.values().any(|content| content.contains(&policy_pin)));
         assert!(files
             .values()
-            .any(|content| content.contains("velnor-workflow run")));
+            .any(|content| content.contains("run --config .github/ci/project.toml")));
     }
 
     #[test]
