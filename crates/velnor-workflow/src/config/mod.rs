@@ -4238,7 +4238,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn schema_one_product_inputs_are_typed_and_validated() {
         let config = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-ffi\"\nkind = \"rust\"\n\n[[units.products]]\nname = \"xcframework\"\ntask = \"build-xcframework\"\ninputs = [\"libs/bridge-ffi/boltffi.toml\", \"libs/sibling/**/*.rs\"]\n",
