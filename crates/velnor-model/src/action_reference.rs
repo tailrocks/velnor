@@ -6,6 +6,7 @@
 //! action can reach a different runtime arm.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// A validated OCI image reference without the `docker://` action scheme.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -25,6 +26,204 @@ impl fmt::Display for InvalidImageReference {
 }
 
 impl std::error::Error for InvalidImageReference {}
+
+/// A repository action reference pinned to an immutable commit.
+///
+/// This is the one strict parser for downloaded action metadata references:
+/// `owner/repository[/path]@<40-hex-SHA>`. Workflow fields that carry the
+/// repository, path, and ref separately use [`Self::from_parts`] so admission
+/// and planning share exactly the same validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryActionReference {
+    pub repository: String,
+    pub source_path: Option<String>,
+    pub git_ref: String,
+}
+
+/// Why a repository action reference was rejected. The received value is not
+/// retained because it is repository-controlled input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidRepositoryActionReference {
+    pub reason: &'static str,
+}
+
+impl fmt::Display for InvalidRepositoryActionReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid repository action reference: {}",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for InvalidRepositoryActionReference {}
+
+impl RepositoryActionReference {
+    /// Parse `owner/repository[/path]@<40-hex-SHA>` without normalization.
+    pub fn parse(raw: &str) -> Result<Self, InvalidRepositoryActionReference> {
+        let (path, git_ref) = raw
+            .rsplit_once('@')
+            .ok_or(invalid_repository_action("reference is missing @SHA"))?;
+        if !is_full_sha(git_ref) {
+            return Err(invalid_repository_action(
+                "reference must end in a 40-hex commit SHA",
+            ));
+        }
+        let parts = path.split('/').collect::<Vec<_>>();
+        if parts.len() < 2 || parts.iter().any(|part| !valid_repository_path_part(part)) {
+            return Err(invalid_repository_action(
+                "reference must be owner/repository with an optional safe path",
+            ));
+        }
+        Ok(Self {
+            repository: format!("{}/{}", parts[0], parts[1]),
+            source_path: (parts.len() > 2).then(|| parts[2..].join("/")),
+            git_ref: git_ref.to_owned(),
+        })
+    }
+
+    /// Validate separate workflow fields through the same strict parser.
+    pub fn from_parts(
+        repository: &str,
+        source_path: Option<&str>,
+        git_ref: &str,
+    ) -> Result<Self, InvalidRepositoryActionReference> {
+        let path = source_path.map_or_else(
+            || repository.to_owned(),
+            |source_path| format!("{repository}/{source_path}"),
+        );
+        Self::parse(&format!("{path}@{git_ref}"))
+    }
+}
+
+fn invalid_repository_action(reason: &'static str) -> InvalidRepositoryActionReference {
+    InvalidRepositoryActionReference { reason }
+}
+
+fn is_full_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_repository_path_part(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && !part.contains('\\')
+        && !part.contains('@')
+        && !part
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+}
+
+/// A normalized, repository-relative action metadata path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeActionPath(PathBuf);
+
+/// Why a metadata path could not be safely resolved below an action root.
+#[derive(Debug)]
+pub enum InvalidActionPath {
+    Invalid(&'static str),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for InvalidActionPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(reason) => write!(formatter, "invalid action path: {reason}"),
+            Self::Io(error) => write!(formatter, "inspect action path: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for InvalidActionPath {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Invalid(_) => None,
+            Self::Io(error) => Some(error),
+        }
+    }
+}
+
+impl SafeActionPath {
+    /// Parse a metadata path without accepting platform-specific escapes.
+    pub fn parse(raw: &str) -> Result<Self, InvalidActionPath> {
+        if raw.is_empty() {
+            return Err(invalid_action_path("path is empty"));
+        }
+        if raw.contains('\\') {
+            return Err(invalid_action_path("backslash is not allowed"));
+        }
+        if raw.starts_with('/') || has_windows_drive_prefix(raw) {
+            return Err(invalid_action_path(
+                "path must be relative to the action root",
+            ));
+        }
+        let mut components = Vec::new();
+        for component in raw.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => return Err(invalid_action_path("path traversal is not allowed")),
+                component if has_windows_drive_prefix(component) => {
+                    return Err(invalid_action_path(
+                        "Windows drive prefixes are not allowed",
+                    ));
+                }
+                component if component.chars().any(char::is_control) => {
+                    return Err(invalid_action_path("control characters are not allowed"));
+                }
+                component => components.push(component),
+            }
+        }
+        if components.is_empty() {
+            return Err(invalid_action_path("path is empty"));
+        }
+        Ok(Self(PathBuf::from(components.join("/"))))
+    }
+
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Resolve a metadata path below `action_root` and reject symlink traversal.
+/// Missing final files are allowed so callers can report their own metadata
+/// missing-file diagnostic; every existing component is checked without
+/// following links.
+pub fn resolve_action_path(action_root: &Path, raw: &str) -> Result<PathBuf, InvalidActionPath> {
+    let relative = SafeActionPath::parse(raw)?;
+    let resolved = action_root.join(relative.as_path());
+    let mut existing = action_root.to_path_buf();
+    for component in relative.as_path().components() {
+        existing.push(component.as_os_str());
+        match std::fs::symlink_metadata(&existing) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(invalid_action_path("path traverses a symlink"));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break
+            }
+            Err(error) => return Err(InvalidActionPath::Io(error)),
+        }
+    }
+    Ok(resolved)
+}
+
+fn invalid_action_path(reason: &'static str) -> InvalidActionPath {
+    InvalidActionPath::Invalid(reason)
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
 
 /// The runner's two supported `runs.image` classes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +261,6 @@ impl ActionImageReference {
 impl ImageReference {
     /// Parse `[domain[:port]/]path[:tag][@digest]`.
     pub fn parse(raw: &str) -> Result<Self, InvalidImageReference> {
-        let raw = raw.trim();
         if raw.is_empty() {
             return Err(invalid("empty reference"));
         }
@@ -272,10 +470,13 @@ fn validate_digest(digest: &str) -> Result<(), InvalidImageReference> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionImageReference, ImageReference};
+    use super::{
+        resolve_action_path, ActionImageReference, ImageReference, RepositoryActionReference,
+        SafeActionPath,
+    };
 
     #[test]
-    fn action_scheme_is_case_insensitive_but_image_is_normalized() {
+    fn action_scheme_is_case_insensitive_without_image_normalization() {
         let parsed = ActionImageReference::parse("DOCKER://ubuntu:24.04");
         assert_eq!(
             parsed.as_ref().ok().and_then(|value| match value {
@@ -291,6 +492,8 @@ mod tests {
         for value in [
             "docker://--privileged",
             "docker://",
+            "docker://ubuntu ",
+            "docker:// ubuntu",
             " docker://ubuntu",
             "ubuntu",
             "éééééé",
@@ -307,5 +510,74 @@ mod tests {
         ));
         assert!(ActionImageReference::parse("./nested/Dockerfile ").is_err());
         assert!(ImageReference::parse("ubuntu:24.04").is_ok());
+    }
+
+    #[test]
+    fn strict_repository_action_reference_has_one_owner() {
+        let parsed = RepositoryActionReference::parse(
+            "octo/example/.github/actions/tool@0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("valid pinned action reference");
+        assert_eq!(parsed.repository, "octo/example");
+        assert_eq!(parsed.source_path.as_deref(), Some(".github/actions/tool"));
+        assert_eq!(
+            RepositoryActionReference::from_parts(
+                "octo/example",
+                Some(".github/actions/tool"),
+                "0123456789abcdef0123456789abcdef01234567",
+            ),
+            Ok(parsed)
+        );
+        for value in [
+            "octo/example@main",
+            "octo/example@0123456789abcdef0123456789abcdef0123456",
+            "octo/example@0123456789abcdef0123456789abcdef012345678",
+            "octo/example/../tool@0123456789abcdef0123456789abcdef01234567",
+            "octo/example\\tool@0123456789abcdef0123456789abcdef01234567",
+            " octo/example@0123456789abcdef0123456789abcdef01234567",
+        ] {
+            assert!(RepositoryActionReference::parse(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn safe_action_path_rejects_cross_platform_escapes() {
+        for value in [
+            "",
+            ".",
+            "/etc/passwd",
+            "../outside.js",
+            "nested/../../outside.js",
+            "nested\\outside.js",
+            "C:/outside.js",
+            "C:outside.js",
+            "nested/C:outside.js",
+        ] {
+            assert!(SafeActionPath::parse(value).is_err(), "{value:?}");
+        }
+        assert_eq!(
+            SafeActionPath::parse("./dist/./index.js")
+                .expect("safe relative path")
+                .as_path(),
+            std::path::Path::new("dist/index.js")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_action_path_rejects_symlink_components() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("velnor-safe-action-path-{}", std::process::id()));
+        let outside = root.join("outside");
+        let action = root.join("action");
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(&outside).is_ok());
+        assert!(fs::create_dir_all(&action).is_ok());
+        assert!(symlink(&outside, action.join("link")).is_ok());
+        assert!(resolve_action_path(&action, "link/entry.js").is_err());
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -31,6 +31,9 @@ use crate::action::{native_action_adapter, ActionAdapter, ActionMetadata, NATIVE
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
+use velnor_model::action_reference::{
+    ActionImageReference, RepositoryActionReference, SafeActionPath,
+};
 
 /// Maximum composite nesting depth. Matches the removed local preflight bound.
 const MAX_COMPOSITE_DEPTH: usize = 10;
@@ -900,7 +903,7 @@ fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), Admis
     let ancestry = root.child(format!("reusable workflow {repository}/{path}@{ref_part}"));
     // N2: the caller must pin the reusable workflow by immutable full SHA. A
     // branch/tag ref (refs/heads/*, refs/tags/*, or a bare tag) is mutable.
-    if !is_full_sha(&ref_part) {
+    if RepositoryActionReference::from_parts(&repository, Some(&path), &ref_part).is_err() {
         return Err(AdmissionError::new(
             &ancestry,
             "ref",
@@ -1279,24 +1282,16 @@ fn recurse_composite(
             continue;
         }
 
-        let Some((target, target_ref)) = uses.rsplit_once('@') else {
-            return Err(AdmissionError::malformed_manifest(
+        let reference = RepositoryActionReference::parse(uses).map_err(|error| {
+            AdmissionError::malformed_manifest(
                 &ancestry.child(format!("nested '{label}' ({uses})")),
                 "uses",
-                "nested action reference is missing an @ref",
-            ));
-        };
-        let mut segments = target.split('/');
-        let (Some(owner), Some(repo)) = (segments.next(), segments.next()) else {
-            return Err(AdmissionError::malformed_manifest(
-                &ancestry.child(format!("nested '{label}' ({uses})")),
-                "uses",
-                "nested action reference is malformed",
-            ));
-        };
-        let target_repository = format!("{owner}/{repo}");
-        let target_path = segments.collect::<Vec<_>>().join("/");
-        let target_subpath = (!target_path.is_empty()).then_some(target_path.as_str());
+                error.to_string(),
+            )
+        })?;
+        let target_repository = reference.repository;
+        let target_ref = reference.git_ref;
+        let target_subpath = reference.source_path.as_deref();
         let ancestry = ancestry.child(format!(
             "nested '{label}' ({target_repository}@{target_ref})"
         ));
@@ -1305,7 +1300,7 @@ fn recurse_composite(
             &ancestry,
             Some(parent),
             &target_repository,
-            target_ref,
+            &target_ref,
             target_subpath,
             &child_inputs,
             &label,
@@ -1631,6 +1626,7 @@ fn validate_metadata_bounds(
     ] {
         validate_metadata_text(value, field, &mut total_string_bytes)?;
     }
+    validate_action_metadata_paths(metadata)?;
     if metadata.runs.args.len() > MAX_METADATA_MAP_ENTRIES {
         return Err(MetadataValidationFailure::policy(format!(
             "metadata argument count exceeds {MAX_METADATA_MAP_ENTRIES}"
@@ -1659,6 +1655,43 @@ fn validate_metadata_bounds(
         }
         validate_metadata_string_map(&step.with, "steps.with", &mut total_string_bytes)?;
         validate_metadata_string_map(&step.env, "steps.env", &mut total_string_bytes)?;
+    }
+    Ok(())
+}
+
+fn validate_action_metadata_paths(
+    metadata: &ActionMetadata,
+) -> std::result::Result<(), MetadataValidationFailure> {
+    let using = metadata.runs.using.to_ascii_lowercase();
+    if matches!(using.as_str(), "node12" | "node16" | "node20" | "node24") {
+        for (field, value) in [
+            ("runs.main", metadata.runs.main.as_deref()),
+            ("runs.pre", metadata.runs.pre.as_deref()),
+            ("runs.post", metadata.runs.post.as_deref()),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            SafeActionPath::parse(value).map_err(|error| {
+                MetadataValidationFailure::malformed(format!("{field} is unsafe: {error}"))
+            })?;
+        }
+    }
+    if using == "docker"
+        && let Some(image) = metadata.runs.image.as_deref()
+    {
+        match ActionImageReference::parse(image).map_err(|error| {
+            MetadataValidationFailure::malformed(format!("runs.image is invalid: {error}"))
+        })? {
+            ActionImageReference::DockerImage(_) => {}
+            ActionImageReference::Dockerfile(path) => {
+                SafeActionPath::parse(&path).map_err(|error| {
+                    MetadataValidationFailure::malformed(format!(
+                        "runs.image Dockerfile path is unsafe: {error}"
+                    ))
+                })?;
+            }
+        }
     }
     Ok(())
 }
