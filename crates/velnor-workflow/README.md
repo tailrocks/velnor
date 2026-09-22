@@ -53,6 +53,10 @@ config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
 
+The schema-1 Swift scanner fails closed for executable Swift products and
+recognized XcodeGen specs because it cannot emit their complete phase and
+selection contracts; use schema 2 for those Apple surfaces.
+
 ## Typed package-release verification hooks
 
 Schema-2 `package-release` declarations may name repository-owned mise tasks in

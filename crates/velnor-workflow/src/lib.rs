@@ -11723,6 +11723,51 @@ mod tests {
     }
 
     #[test]
+    fn schema1_refuses_swift_surfaces_without_phase_parity() {
+        let executable_root = temporary_repository("swift-executable-product");
+        must(
+            fs::write(
+                executable_root.join("Package.swift"),
+                r#"let package = Package(
+    products: [.executable(name: "App", targets: ["App"])],
+    targets: [.executableTarget(name: "App")]
+)
+"#,
+            ),
+            "write executable Package.swift",
+        );
+        let executable_error = must_fail(
+            scan_repository(&executable_root, RunnerMode::Github),
+            "schema 1 must reject executable Swift products",
+        );
+        assert!(executable_error
+            .to_string()
+            .contains("schema-1 Swift limitation"));
+        assert!(executable_error.to_string().contains("swift-run"));
+        assert!(executable_error.to_string().contains("phase selection"));
+        let _ = fs::remove_dir_all(executable_root);
+
+        let xcodegen_root = temporary_repository("swift-xcodegen");
+        must(
+            fs::write(
+                xcodegen_root.join("project.yml"),
+                "name: App\ntargets:\n  App:\n    type: application\n    platform: macOS\n",
+            ),
+            "write XcodeGen project spec",
+        );
+        let xcodegen_error = must_fail(
+            scan_repository(&xcodegen_root, RunnerMode::Github),
+            "schema 1 must reject XcodeGen specs",
+        );
+        assert!(xcodegen_error
+            .to_string()
+            .contains("schema-1 Swift limitation"));
+        assert!(xcodegen_error.to_string().contains("XcodeGen"));
+        assert!(xcodegen_error.to_string().contains("phase and selection"));
+        let _ = fs::remove_dir_all(xcodegen_root);
+    }
+
+    #[test]
     fn scanner_marks_xcframework_binary_target_packages_apple_bound() {
         let root = temporary_repository("swift-xcframework");
         must(

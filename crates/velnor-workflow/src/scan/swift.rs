@@ -3,13 +3,15 @@
 use std::fs;
 use std::path::Path;
 
+use serde_yaml::Value;
+
 use super::file_walk::{
     files_named, join_repo_path, path_prefix, resolve_repo_path, roots_for_manifests,
 };
 use super::{unit, RepositoryShape, ScanContext};
 use crate::{
-    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
-    UnitKind, ValidationPhase,
+    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
+    GeneratorError, Unit, UnitKind, ValidationPhase,
 };
 
 fn call_present(contents: &str, call: &str) -> bool {
@@ -24,6 +26,117 @@ fn call_present(contents: &str, call: &str) -> bool {
         }
     }
     false
+}
+
+fn swift_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
+        let mut index = start + 3;
+        while index + 3 <= bytes.len() {
+            if bytes[index..index + 3] == *b"\"\"\"" {
+                return Some(index + 3);
+            }
+            index += 1;
+        }
+        return None;
+    }
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn swift_block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 2;
+    let mut depth = 1;
+    while index + 2 <= bytes.len() {
+        if bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            depth += 1;
+            index += 2;
+        } else if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+            depth -= 1;
+            index += 2;
+            if depth == 0 {
+                return Some(index);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn swift_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Detect a Swift call without treating comments or string contents as
+/// package declarations. The scan only needs the call marker: it intentionally
+/// refuses the whole schema-1 surface when a product might require a `swift
+/// run` phase that this pipeline cannot model.
+fn has_swift_call(contents: &str, call: &str) -> bool {
+    let bytes = contents.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let Some(next) = swift_string_end(bytes, index) else {
+                    return false;
+                };
+                index = next;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let Some(next) = swift_block_comment_end(bytes, index) else {
+                    return false;
+                };
+                index = next;
+            }
+            _ => {
+                let matches_call = contents[index..].starts_with(call)
+                    && (index == 0 || !swift_identifier_byte(bytes[index - 1]))
+                    && (index + call.len() == bytes.len()
+                        || !swift_identifier_byte(bytes[index + call.len()]));
+                if matches_call
+                    && contents[index + call.len()..]
+                        .trim_start_matches([' ', '\t', '\n', '\r'])
+                        .starts_with('(')
+                {
+                    return true;
+                }
+                let width = contents[index..].chars().next().map_or(1, char::len_utf8);
+                index += width;
+            }
+        }
+    }
+    false
+}
+
+fn is_xcodegen_spec(contents: &str) -> bool {
+    let Ok(value) = serde_yaml::from_str::<Value>(contents) else {
+        return false;
+    };
+    let Some(mapping) = value.as_mapping() else {
+        return false;
+    };
+    let has_name = mapping.iter().any(|(key, value)| {
+        key.as_str() == "name" && value.as_str().is_some_and(|name| !name.is_empty())
+    });
+    let has_targets = mapping.iter().any(|(key, value)| {
+        key.as_str() == "targets"
+            && value
+                .as_mapping()
+                .is_some_and(|targets| !targets.is_empty())
+    });
+    has_name && has_targets
 }
 
 fn xcode_scheme_has_test_action(contents: &str) -> bool {
@@ -246,12 +359,25 @@ fn package_manifest_needs_xcframework(root: &Path, package_root: &str) -> bool {
     contents.contains(".binaryTarget") && contents.contains(".xcframework")
 }
 
-pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
+pub(crate) fn detect(
+    context: &ScanContext<'_>,
+    shape: &mut RepositoryShape,
+) -> Result<(), GeneratorError> {
     for package_root in roots_for_manifests(&files_named(context.files, "Package.swift")) {
         shape.detected.push(format!("swift-package:{package_root}"));
         let manifest = join_repo_path(&package_root, "Package.swift");
-        let has_tests = fs::read_to_string(context.root.join(&manifest))
-            .map_or(true, |contents| call_present(&contents, ".testTarget"));
+        let contents = fs::read_to_string(context.root.join(&manifest)).ok();
+        if contents.as_deref().is_some_and(|contents| {
+            has_swift_call(contents, ".executable")
+                || has_swift_call(contents, "Product.executable")
+        }) {
+            return Err(GeneratorError::usage(format!(
+                "schema-1 Swift limitation: package {manifest} declares an executable product; refusing generation because the root scanner cannot emit the required `swift-run` phase without misleading phase selection. Use schema = 2 for executable-product support."
+            )));
+        }
+        let has_tests = contents
+            .as_deref()
+            .is_none_or(|contents| call_present(contents, ".testTarget"));
         if !has_tests {
             shape.limitations.push(format!(
                 "Swift package {manifest} declares no test targets; emitting build-only commands."
@@ -285,12 +411,59 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             "Apple test destinations use platform defaults; review the generated simulator destination when a project requires a named device or OS version.".to_owned(),
         );
     }
+    for spec in context.files.iter().filter(|file| {
+        file.ends_with("/project.yml")
+            || file.ends_with("/project.yaml")
+            || file.as_str() == "project.yml"
+            || file.as_str() == "project.yaml"
+    }) {
+        let contents = fs::read_to_string(context.root.join(spec)).unwrap_or_default();
+        if is_xcodegen_spec(&contents) {
+            return Err(GeneratorError::usage(format!(
+                "schema-1 Swift limitation: XcodeGen spec `{spec}` is not modeled; refusing generation because emitting no XcodeGen unit would make phase and selection behavior misleading. Use schema = 2 for XcodeGen support."
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{swift_package_unit, xcode_scheme_has_test_action};
+    use super::{
+        has_swift_call, is_xcodegen_spec, swift_package_unit, xcode_scheme_has_test_action,
+    };
     use crate::ValidationPhase;
+
+    #[test]
+    fn executable_product_detection_skips_comments_and_strings() {
+        assert!(has_swift_call(
+            "products: [.executable(name: \"App\", targets: [\"App\"])]",
+            ".executable"
+        ));
+        assert!(has_swift_call(
+            "products: [Product.executable(name: \"App\", targets: [\"App\"])]",
+            "Product.executable"
+        ));
+        assert!(!has_swift_call(
+            "// .executable(name: \"App\")\nlet note = \".executable(name: \\\"App\\\")\"",
+            ".executable"
+        ));
+        assert!(!has_swift_call(
+            "/* .executable(name: \"App\") */",
+            ".executable"
+        ));
+    }
+
+    #[test]
+    fn xcodegen_detection_is_structural() {
+        assert!(is_xcodegen_spec(
+            "name: App\ntargets:\n  App:\n    type: application\n"
+        ));
+        assert!(!is_xcodegen_spec(
+            "name: App\noptions:\n  bundleIdPrefix: org.example\n"
+        ));
+        assert!(!is_xcodegen_spec("targets: []\n"));
+    }
 
     #[test]
     fn testless_swift_package_has_only_a_build_phase() {

@@ -23,6 +23,14 @@ use crate::s2::{
 /// is a minimum-version floor, not a toolchain identity.
 const APPLE_TOOLCHAIN_PIN_KEY_FILES: [&str; 3] = ["mise.lock", ".swift-version", ".xcode-version"];
 
+fn append_apple_toolchain_pin_watches(watch: &mut Vec<String>) {
+    watch.extend(
+        APPLE_TOOLCHAIN_PIN_KEY_FILES
+            .iter()
+            .map(std::string::ToString::to_string),
+    );
+}
+
 /// The single mise spelling the `XcodeGen` CLI pins under: the registry id
 /// whose lock entry carries the backend and version, so `install_args`
 /// names the id and `mise --locked` resolves everything else from the
@@ -1137,6 +1145,7 @@ fn xcodegen_generate_unit(
     };
     let mut watch = vec![root_watch, "*.xcconfig".to_owned()];
     watch.extend(spec.files.iter().cloned());
+    append_apple_toolchain_pin_watches(&mut watch);
     watch.sort();
     watch.dedup();
     Unit {
@@ -1211,17 +1220,21 @@ fn swift_package_unit(package_root: &str, facts: &PackageFacts) -> Unit {
     );
     cache_key_files.sort();
     cache_key_files.dedup();
+    let mut watch = vec![
+        join_repo_path(package_root, "Package.swift"),
+        join_repo_path(package_root, "Package.resolved"),
+        join_repo_path(package_root, ".swiftpm/Package.resolved"),
+        format!("{prefix}Sources/**"),
+        format!("{prefix}Tests/**"),
+        format!("{prefix}**/*.swift"),
+    ];
+    append_apple_toolchain_pin_watches(&mut watch);
+    watch.sort();
+    watch.dedup();
     let mut result = unit(
         UnitKind::Swift,
         package_root,
-        vec![
-            join_repo_path(package_root, "Package.swift"),
-            join_repo_path(package_root, "Package.resolved"),
-            join_repo_path(package_root, ".swiftpm/Package.resolved"),
-            format!("{prefix}Sources/**"),
-            format!("{prefix}Tests/**"),
-            format!("{prefix}**/*.swift"),
-        ],
+        watch,
         commands,
         Some(CacheSpec {
             key_files: cache_key_files,
@@ -1429,16 +1442,20 @@ fn xcode_scheme_unit(
             format!("Apple scheme ({scheme_name})"),
         )
     };
+    let mut watch = vec![
+        format!("{container}/**"),
+        root_watch,
+        "*.xcconfig".to_owned(),
+    ];
+    append_apple_toolchain_pin_watches(&mut watch);
+    watch.sort();
+    watch.dedup();
     let mut unit = Unit {
         id,
         label,
         kind: UnitKind::Swift,
         root: container_root.clone(),
-        watch: vec![
-            format!("{container}/**"),
-            root_watch,
-            "*.xcconfig".to_owned(),
-        ],
+        watch,
         pr_commands: commands.clone(),
         full_commands: commands,
         phases: if has_test_action {
@@ -1639,7 +1656,7 @@ mod tests {
     use super::{
         is_xcodegen_spec, load_spec_closure, merge_spec, parse_package_facts,
         parse_xcode_toolchain, parse_yaml_mapping, validate_xcode_version, xcodegen_unit,
-        PackageFacts, ValidationPhase, XcodeGenSpec, XCODEGEN_TOOL,
+        PackageFacts, ValidationPhase, XcodeGenSpec, APPLE_TOOLCHAIN_PIN_KEY_FILES, XCODEGEN_TOOL,
     };
     use std::collections::BTreeMap;
 
@@ -1673,6 +1690,15 @@ mod tests {
         match result {
             Ok(value) => panic!("{context}: unexpectedly succeeded with {value:?}"),
             Err(error) => error,
+        }
+    }
+
+    fn assert_apple_toolchain_pin_watches(watch: &[String]) {
+        for pin in APPLE_TOOLCHAIN_PIN_KEY_FILES {
+            assert!(
+                watch.iter().any(|path| path == pin),
+                "watch set must include {pin}: {watch:?}"
+            );
         }
     }
 
@@ -2801,6 +2827,7 @@ mod tests {
                 "mise.lock".to_owned(),
             ]
         );
+        assert_apple_toolchain_pin_watches(&unit.watch);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2837,6 +2864,7 @@ mod tests {
                 cache.key_files
             );
         }
+        assert_apple_toolchain_pin_watches(&unit.watch);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3159,6 +3187,7 @@ mod tests {
                 cache.key_files
             );
         }
+        assert_apple_toolchain_pin_watches(&unit.watch);
         let _ = std::fs::remove_dir_all(root);
     }
 
