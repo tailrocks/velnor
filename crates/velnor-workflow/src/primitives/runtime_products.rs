@@ -9,8 +9,10 @@
 //! renders the workflow that publishes those releases. The consumer contract
 //! is the specification: the tag scheme, the manifest shape, the attestation
 //! subject, and the acceptance filter below mirror the setup action byte for
-//! byte, and the conformance tests pin that agreement against the action
-//! source itself.
+//! byte. During a staged local-dependency rollout, the producer's closure may
+//! be expanded before the published consumer action is promoted; the action
+//! remains on its known published bootstrap closure until the new product
+//! exists. The conformance tests pin both sides and make that split explicit.
 //!
 //! The workflow is owner-only infrastructure. It renders only for the
 //! repository that ships the setup action (derived from the action's own
@@ -985,12 +987,12 @@ mod tests {
     }
 
     #[test]
-    fn closure_shell_matches_the_setup_action() {
+    fn closure_shell_records_staged_consumer_activation() {
         let content = owner_content(&[]);
         let action = setup_action_source();
-        // The commands differ (the action resolves any rev portably, the
-        // producer resolves HEAD on Linux), but the hashed byte stream — the
-        // pathspec, the byte sort, and the footer — must agree exactly.
+        // The producer resolves the expanded HEAD closure. The consumer is
+        // deliberately held at the published bootstrap closure until a
+        // post-merge product publication and D19 pin promotion complete.
         let action_ls_tree = must_some(
             action
                 .lines()
@@ -1008,14 +1010,24 @@ mod tests {
             action_pathspec.strip_suffix(")\""),
             "the setup action pathspec end",
         );
+        let bootstrap_pathspec =
+            "crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo";
         assert_eq!(
+            action_pathspec, bootstrap_pathspec,
+            "the consumer remains on the published bootstrap pathspec"
+        );
+        assert_ne!(
             action_pathspec,
             CLOSURE_PATHS.join(" "),
-            "the setup action pathspec is the closure paths"
+            "expanded producer closure must not activate an unpublished consumer product"
         );
         assert!(
-            content.contains(action_pathspec),
-            "producer and setup action hash the same pathspec: {content}"
+            action.contains("staged local-dependency rollout"),
+            "the staged activation contract must be documented in the consumer"
+        );
+        assert!(
+            content.contains(&CLOSURE_PATHS.join(" ")),
+            "producer hashes the expanded closure: {content}"
         );
         let footer = format!(
             "closure-version:{CLOSURE_VERSION}\\nfeatures:{CI_FEATURES}\\nprofile:{PROFILE_RELEASE}\\n"
