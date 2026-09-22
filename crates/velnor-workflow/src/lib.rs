@@ -1792,7 +1792,136 @@ fn close_unit_mise_tools_for_target(
             &install_deps,
         );
     }
+    let declared_install_deps = install_deps.depends.clone();
+    validate_mise_install_deps_are_closed(
+        &config.units,
+        lock_keys,
+        &lock_backends,
+        &declared_install_deps,
+    )?;
     Ok(())
+}
+
+/// Refuse an S1 unit whose post-closure `mise_tools` subset is not provably
+/// installable. S1 and S2 keep separate `Unit` types, so this adapter checks
+/// the same parsed dependency graph at the S1 scan boundary instead of
+/// weakening the contract or converting a whole S1 project into an S2 model.
+fn validate_mise_install_deps_are_closed(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &BTreeMap<String, String>,
+    install_deps: &BTreeMap<String, Vec<String>>,
+) -> Result<(), GeneratorError> {
+    for unit in units {
+        if unit.mise_tools.is_empty() {
+            continue;
+        }
+        let known = || lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+        for tool in &unit.mise_tools {
+            if let Some(reason) = schema_one_unknown_mise_backend(tool, lock_backends) {
+                return Err(GeneratorError::usage(format!(
+                    "unit {} installs {tool}, {reason} (planning models mise install dependencies), known keys: {}",
+                    unit.id,
+                    known()
+                )));
+            }
+        }
+        for tool in &unit.mise_tools {
+            let Some(names) = install_deps.get(tool) else {
+                continue;
+            };
+            for name in names {
+                if !unit
+                    .mise_tools
+                    .iter()
+                    .any(|member| schema_one_mise_dependency_matches(name, member))
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "unit {} installs {tool}, whose mise.toml `depends` names `{name}`, but mise.lock pins no such key; pin it and re-lock so every install_args subset is installable, known keys: {}",
+                        unit.id,
+                        known()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The backends mise defines for locked tool ids. Unknown plugin backends are
+/// not statically safe: their dependency metadata lives outside the scanned
+/// repository and the closure cannot prove their install subsets complete.
+fn schema_one_unknown_mise_backend(
+    tool: &str,
+    lock_backends: &BTreeMap<String, String>,
+) -> Option<String> {
+    const KNOWN_BARE: &[&str] = &[
+        "aube",
+        "cargo-binstall",
+        "dotnet",
+        "elixir",
+        "erlang",
+        "go",
+        "node",
+        "npm",
+        "pipx",
+        "pnpm",
+        "python",
+        "ruby",
+        "rust",
+        "sccache",
+        "swift",
+        "uv",
+        "xcodegen",
+    ];
+    const KNOWN_PREFIXES: &[&str] = &[
+        "asdf", "aqua", "cargo", "conda", "core", "dotnet", "forgejo", "gem", "github", "gitlab",
+        "go", "http", "npm", "packslip", "pipx", "pkgx", "pypi", "s3", "spm", "ubi",
+    ];
+    let backend = if let Some((prefix, _)) = tool.split_once(':') {
+        Some(prefix)
+    } else if let Some(recorded) = lock_backends.get(tool) {
+        recorded.split_once(':').map(|(prefix, _)| prefix)
+    } else {
+        None
+    };
+    match backend {
+        Some("vfox") => Some(
+            "whose `vfox` backend declares install dependencies in plugin metadata that planning cannot read, so the derived subset may omit an edge mise enforces; remove the tool from `mise_tools` and provision it outside the locked install".to_owned(),
+        ),
+        Some(prefix) if !KNOWN_PREFIXES.contains(&prefix) => Some(format!(
+            "whose `{prefix}` backend mise does not define, so its install dependencies come from plugin metadata that planning cannot read and the derived subset may omit an edge mise enforces; remove the tool from `mise_tools` and provision it outside the locked install"
+        )),
+        None if !KNOWN_BARE.contains(&tool) => Some(
+            "which names no backend and whose lock entry records none, so planning cannot tell which backend's install dependencies apply; re-lock so `mise.lock` records a `backend` for it".to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// Match the same short and qualified mise dependency spellings used by the
+/// closure: a dependency may resolve to a backend-qualified lock key, while
+/// `core:` aliases compare by their registry short name.
+fn schema_one_mise_dependency_matches(name: &str, member: &str) -> bool {
+    fn normalize(value: &str) -> &str {
+        match value {
+            "dotnet-core" => "dotnet",
+            "nodejs" => "node",
+            "golang" => "go",
+            value => value.strip_prefix("core:").unwrap_or(value),
+        }
+    }
+    if normalize(name) == normalize(member) {
+        return true;
+    }
+    let name = normalize(name);
+    let member = normalize(member);
+    member
+        .rsplit_once(':')
+        .is_some_and(|(_, short)| short == name)
+        || name
+            .rsplit_once(':')
+            .is_some_and(|(_, short)| short == member)
 }
 
 pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
@@ -14137,6 +14266,70 @@ lockfile = true
         assert!(
             error.to_string().contains("cargo-binstall"),
             "error lists the known keys: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_rejects_a_dangling_mise_dependency_after_closure() {
+        let root = configured_repository("mise-schema-one-dangling-dependency", None);
+        let unit = scanned_rust_unit_id(&root);
+        write_generation_config(&root, &unit, "\"cargo:boltffi_cli\"");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[tools]\n\"cargo:boltffi_cli\" = { version = \"0.30.1\", depends = [\"example-ghost\"] }\n",
+            ),
+            "write schema-1 dependency fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"cargo:boltffi_cli\"]]\nversion = \"0.30.1\"\nbackend = \"cargo:boltffi_cli\"\n",
+            ),
+            "write schema-1 dependency lock",
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "schema-1 must reject a dangling install dependency",
+        );
+        let message = error.to_string();
+        assert!(message.contains(&unit), "error names the unit: {message}");
+        assert!(
+            message.contains("cargo:boltffi_cli") && message.contains("example-ghost"),
+            "error names the missing dependency edge: {message}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_rejects_an_unknown_mise_backend_after_closure() {
+        let root = configured_repository("mise-schema-one-unknown-backend", None);
+        let unit = scanned_rust_unit_id(&root);
+        write_generation_config(&root, &unit, "\"examplebackend:example-lint\"");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[tools]\n\"examplebackend:example-lint\" = \"1.0.0\"\n",
+            ),
+            "write schema-1 backend fixture",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"examplebackend:example-lint\"]]\nversion = \"1.0.0\"\nbackend = \"examplebackend:example-lint\"\n",
+            ),
+            "write schema-1 backend lock",
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "schema-1 must reject an unknown install backend",
+        );
+        let message = error.to_string();
+        assert!(message.contains(&unit), "error names the unit: {message}");
+        assert!(
+            message.contains("examplebackend") && message.contains("backend"),
+            "error names the unknown backend: {message}"
         );
         let _ = fs::remove_dir_all(root);
     }
