@@ -19,6 +19,7 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
+pub(crate) mod apple_test_results;
 mod apt;
 mod closure;
 mod config;
