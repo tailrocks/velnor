@@ -9845,7 +9845,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     tools.insert(ToolRequirement::Mise);
                 }
             }
-            UnitKind::Docs => {}
+            UnitKind::Docs | UnitKind::GithubAction => {}
         }
         // Declared tools and mise-run commands provision through mise whatever
         // the kind: the scan cannot see tools a test invokes at runtime, so
