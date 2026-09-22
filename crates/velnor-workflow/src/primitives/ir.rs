@@ -201,8 +201,9 @@ mod tests {
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
-        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
-        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, ValidationPhase, VelnorPullRequest,
+        lane_input, snapshot_compatibility, unit_owns_workflow_crate, AutomaticEvent,
+        CacheReportFacts, DispatchChoice::*, GraphNode, LaneAdmission, Pins, ReportedCacheLayer,
+        RunnerMode, ToolRequirement, Unit, UnitKind, ValidationPhase, VelnorPullRequest,
         VelnorRustNeeds, WorkflowIr, WorkflowKind,
     };
     use crate::{
@@ -1018,6 +1019,39 @@ mod tests {
             !rust_workflow.contains("runs-on: macos-15"),
             "{rust_workflow}"
         );
+    }
+
+    #[test]
+    fn rust_mold_setup_linker_and_cache_are_linux_only() {
+        let mut apple = rust_unit("rust-apple", "crates/apple");
+        apple.platform = crate::platform::PlatformRequirement::apple_xcframework();
+        let mut apple_ir = owner_test_ir("example/apple", vec![apple.clone()]);
+        apple_ir.mise_present = true;
+        let apple_tools = WorkflowIr::tools_for_unit(&apple, true, false);
+        let apple_facts = snapshot_compatibility(&apple_ir, &apple, &[]);
+        let apple_cache = CacheReportFacts::for_unit(RunnerMode::Github, &apple, &apple_ir);
+        assert!(!apple_tools.contains(&ToolRequirement::Mold));
+        assert_eq!(apple_facts.linker, "");
+        assert_eq!(apple_facts.rustflags, "");
+        assert!(!apple_cache.layers.contains(&ReportedCacheLayer::Mold));
+
+        let apple_workflow = must_render_kind(&apple_ir);
+        assert!(!apple_workflow.contains("Set up mold"), "{apple_workflow}");
+        assert!(!apple_workflow.contains("fuse-ld=mold"), "{apple_workflow}");
+
+        let linux = rust_unit("rust-linux", "crates/linux");
+        let mut linux_ir = owner_test_ir("example/linux", vec![linux.clone()]);
+        linux_ir.mise_present = true;
+        let linux_tools = WorkflowIr::tools_for_unit(&linux, true, false);
+        let linux_facts = snapshot_compatibility(&linux_ir, &linux, &[]);
+        let linux_cache = CacheReportFacts::for_unit(RunnerMode::Github, &linux, &linux_ir);
+        assert!(linux_tools.contains(&ToolRequirement::Mold));
+        assert_eq!(linux_facts.linker, "mold");
+        assert_eq!(linux_facts.rustflags, "-C link-arg=-fuse-ld=mold");
+        assert!(linux_cache.layers.contains(&ReportedCacheLayer::Mold));
+
+        let linux_workflow = must_render_kind(&linux_ir);
+        assert!(linux_workflow.contains("Set up mold"), "{linux_workflow}");
     }
 
     #[test]
@@ -2232,6 +2266,7 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         .iter()
         .filter(|unit| unit.kind == UnitKind::Rust)
         .collect();
+    let has_linux_rust = rust_units.iter().any(|unit| uses_mold(unit));
     let mise_present = config
         .analysis
         .detected
@@ -2244,8 +2279,12 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: config_rust_toolchain(config),
         host_image: config.github_runner.clone(),
-        linker: "mold".to_owned(),
-        rustflags: if mise_present {
+        linker: if has_linux_rust {
+            "mold".to_owned()
+        } else {
+            String::new()
+        },
+        rustflags: if mise_present && has_linux_rust {
             "-C link-arg=-fuse-ld=mold".to_owned()
         } else {
             String::new()
@@ -2274,6 +2313,7 @@ fn snapshot_compatibility(
     unit: &Unit,
     dependency_inputs: &[String],
 ) -> CompatibilityFacts {
+    let mold = uses_mold(unit);
     CompatibilityFacts {
         schema: SNAPSHOT_SCHEMA,
         payload: if unit.kind == UnitKind::Docker {
@@ -2284,12 +2324,12 @@ fn snapshot_compatibility(
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: unit.toolchain.clone(),
         host_image: ir.github_runner.clone(),
-        linker: if ir.tools.contains(&ToolRequirement::Mold) {
+        linker: if mold {
             "mold".to_owned()
         } else {
             String::new()
         },
-        rustflags: if ir.mise_present {
+        rustflags: if ir.mise_present && mold {
             "-C link-arg=-fuse-ld=mold".to_owned()
         } else {
             String::new()
@@ -2297,6 +2337,10 @@ fn snapshot_compatibility(
         cargo_inputs: dependency_inputs.to_vec(),
         recipe: unit_commands(unit).cloned().collect(),
     }
+}
+
+fn uses_mold(unit: &Unit) -> bool {
+    unit.kind == UnitKind::Rust && !unit.platform.requires_apple()
 }
 
 /// A rendered snapshot key and its restore prefixes for one unit on one
@@ -4532,6 +4576,8 @@ impl WorkflowIr {
             } else {
                 tools.insert(ToolRequirement::Sccache);
             }
+        }
+        if config.units.iter().any(uses_mold) {
             tools.insert(ToolRequirement::Mold);
         }
         // The detection fact only says mise is configured; the renderer needs
@@ -4600,6 +4646,7 @@ impl WorkflowIr {
     fn render_aggregate_env(&self, output: &mut String) {
         if self.tools.contains(&ToolRequirement::Sccache)
             || self.tools.contains(&ToolRequirement::OpenTofu)
+            || self.tools.contains(&ToolRequirement::Mold)
             || self.mise_present
         {
             output.push_str("env:\n");
@@ -4608,7 +4655,7 @@ impl WorkflowIr {
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_present {
+            if self.tools.contains(&ToolRequirement::Mold) {
                 output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if self.tools.contains(&ToolRequirement::OpenTofu) {
@@ -6447,7 +6494,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
     pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mold = self.mise_present && unit.kind != UnitKind::Swift;
+        let mold = self.mise_present && tools.contains(&ToolRequirement::Mold);
         let mut entries: Vec<String> = Vec::new();
         // Declared env shadows the generator defaults key by key, so a
         // repository-owned build flag always wins and no key renders twice.
@@ -6689,7 +6736,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
     fn render_job_env(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mold = self.mise_present && unit.kind != UnitKind::Swift;
+        let mold = self.mise_present && tools.contains(&ToolRequirement::Mold);
         let postgres = (unit.kind == UnitKind::Gradle)
             .then(|| {
                 unit.services
@@ -7449,7 +7496,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 } else {
                     tools.insert(ToolRequirement::Sccache);
                 }
-                tools.insert(ToolRequirement::Mold);
+                if uses_mold(unit) {
+                    tools.insert(ToolRequirement::Mold);
+                }
                 if needs_nextest(unit) {
                     tools.insert(ToolRequirement::Nextest);
                 }
