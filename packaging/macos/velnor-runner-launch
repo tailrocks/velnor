@@ -105,6 +105,8 @@ validate_provider_evidence() {
     fail "Docker provider evidence is unknown or contradictory"
 }
 
+provider_tool_dir=
+
 resolve_docker_endpoint() {
   docker_bin=$(command -v docker 2>/dev/null || true)
   [ -n "$docker_bin" ] || fail "Docker is required for Velnor container execution"
@@ -149,6 +151,24 @@ resolve_docker_endpoint() {
   [ -n "$context_endpoint" ] || \
     fail "selected Docker context has no docker endpoint: $selected_context"
   context_endpoint=$(normalize_docker_endpoint "$context_endpoint")
+  context_socket_path=${context_endpoint#unix://}
+
+  # Docker resolves credential helpers by executable name from PATH. Some
+  # macOS providers install the helper beside the context socket rather than
+  # in the package PATH. Add only that exact,
+  # context-derived provider directory after the package path; never append
+  # the caller's arbitrary PATH to a launchd service.
+  provider_socket_dir=$(CDPATH="" cd -- "$(dirname -- "$context_socket_path")" && pwd -P) || \
+    fail "cannot resolve Docker provider socket directory"
+  provider_root_dir=$(CDPATH="" cd -- "$provider_socket_dir/.." && pwd -P) || \
+    fail "cannot resolve Docker provider root directory"
+  provider_candidate_dir="$provider_root_dir/bin"
+  for provider_helper in "$provider_candidate_dir"/docker-credential-*; do
+    if [ -x "$provider_helper" ]; then
+      provider_tool_dir=$provider_candidate_dir
+      break
+    fi
+  done
 
   if [ -n "$explicit_host" ]; then
     explicit_host=$(normalize_docker_endpoint "$explicit_host")
@@ -513,6 +533,14 @@ esac
 # Docker engine. The native branch is explicit so native mode cannot start
 # without Docker even when no job has arrived yet.
 require_docker
+
+runtime_path=$package_path
+if [ -n "$provider_tool_dir" ]; then
+  runtime_path="$runtime_path:$provider_tool_dir"
+fi
+VELNOR_PATH=$runtime_path
+PATH=$runtime_path
+export VELNOR_PATH PATH
 
 case "$mode" in
   scale-set-only|both) validate_gh_for_scale ;;

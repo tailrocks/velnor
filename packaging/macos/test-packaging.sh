@@ -72,6 +72,7 @@ grep -F 'Docker is required' "$launcher" >/dev/null
 grep -F 'context inspect' "$launcher" >/dev/null
 grep -F -- '--host' "$launcher" >/dev/null
 grep -F 'OperatingSystem' "$launcher" >/dev/null
+grep -F 'docker-credential-' "$launcher" >/dev/null
 grep -F 'cannot discover the selected Docker context' "$launcher" >/dev/null
 if grep -nF 'docker context use' "$launcher"; then
   printf '%s\n' "launcher must never mutate Docker's selected context" >&2

@@ -6,7 +6,9 @@ set -eu
 root=$(CDPATH="" cd -- "$(dirname -- "$0")/../.." && pwd -P)
 launcher="$root/packaging/macos/velnor-runner-launch"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/velnor-provider.XXXXXX")
-socket_path="$tmp/docker.sock"
+tmp=$(CDPATH="" cd -- "$tmp" && pwd -P)
+provider_root="$tmp/provider"
+socket_path="$provider_root/run/docker.sock"
 config_path="$tmp/docker-config.json"
 
 cleanup() {
@@ -16,10 +18,16 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$tmp/bin" "$tmp/libexec" "$tmp/state"
+mkdir -p "$tmp/bin" "$tmp/libexec" "$tmp/state" "$provider_root/bin" "$provider_root/run"
 cp "$launcher" "$tmp/libexec/velnor-runner-launch"
 chmod 755 "$tmp/libexec/velnor-runner-launch"
 printf '%s\n' '{"currentContext":"desktop-linux"}' > "$config_path"
+
+cat > "$provider_root/bin/docker-credential-fixture" <<'FAKE_HELPER'
+#!/bin/sh
+exit 0
+FAKE_HELPER
+chmod 755 "$provider_root/bin/docker-credential-fixture"
 
 # Leave a real socket inode for the launcher's -S check. The listener is not
 # needed: the fake Docker CLI supplies the version/info responses.
@@ -93,7 +101,7 @@ cat > "$tmp/bin/velnor-runner" <<'FAKE_RUNNER'
 set -eu
 {
   printf 'args=%s\n' "$*"
-  env | sort | grep -E '^(DOCKER_CONTEXT|DOCKER_HOST|VELNOR_DOCKER_CONTEXT|VELNOR_DOCKER_HOST)=' || true
+  env | sort | grep -E '^(DOCKER_CONTEXT|DOCKER_HOST|VELNOR_DOCKER_CONTEXT|VELNOR_DOCKER_HOST|PATH)=' || true
 } > "$FAKE_RUNNER_ENV"
 FAKE_RUNNER
 chmod 755 "$tmp/bin/velnor-runner"
@@ -177,6 +185,7 @@ grep -F 'info --format' "$tmp/success.docker-log" >/dev/null
 grep -F "DOCKER_HOST=unix://$socket_path" "$tmp/success.runner-env" >/dev/null
 grep -F "VELNOR_DOCKER_HOST=unix://$socket_path" "$tmp/success.runner-env" >/dev/null
 grep -F 'VELNOR_DOCKER_CONTEXT=desktop-linux' "$tmp/success.runner-env" >/dev/null
+grep -F "PATH=$tmp/bin:/usr/bin:/bin:$provider_root/bin" "$tmp/success.runner-env" >/dev/null
 ! grep -F 'DOCKER_CONTEXT=' "$tmp/success.runner-env"
 ! test -e "$tmp/success.context-use"
 
