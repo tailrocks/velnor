@@ -216,15 +216,6 @@ impl CiUnit {
                     self.id
                 )));
             }
-            let commands = self.commands(scope);
-            if commands.len() != self.phases.len() {
-                return Err(GeneratorError::usage(format!(
-                    "CI unit `{}` carries {} validation phases for {} commands; refusing a misaligned --phase selection",
-                    self.id,
-                    self.phases.len(),
-                    commands.len()
-                )));
-            }
             if self.check_commands.is_empty() {
                 if self.kind == "swift"
                     && self.phases.iter().all(|phase| {
