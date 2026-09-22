@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 const RUNTIME_COMMANDS: &[&str] = &[
     "plan",
     "run",
+    "verify-action",
     "test-crates",
     "policy",
     "release",

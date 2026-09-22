@@ -7,9 +7,9 @@
 //!
 //! # Closure inputs
 //!
-//! * the `crates/velnor-workflow` subtree (all sources, `build.rs`, the
-//!   crate manifest, and embedded templates — captured as a file set, so a
-//!   newly added file can never escape the digest);
+//! * the `crates/velnor-workflow` and `crates/velnor-model` subtrees (all
+//!   sources, manifests, and embedded templates — captured as a file set, so
+//!   a newly added file can never escape the digest);
 //! * the workspace root `Cargo.toml` (profiles, lints, workspace settings);
 //! * `Cargo.lock` (every dependency version, including git revisions);
 //! * the toolchain pins (`rust-toolchain.toml`, `rust-toolchain`);
@@ -83,6 +83,7 @@ pub(crate) const PRODUCT_TAG_PREFIX: &str = "velnor-workflow-runtime-v1-";
 /// files inside these directories are covered without updating this list.
 pub(crate) const CLOSURE_PATHS: &[&str] = &[
     "crates/velnor-workflow",
+    "crates/velnor-model",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",

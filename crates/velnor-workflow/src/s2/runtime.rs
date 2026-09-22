@@ -482,6 +482,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             )?;
             Ok(true)
         }
+        "verify-action" => verify_action_command(&arguments[1..]),
         "test-crates" => {
             let options = parse_options(&arguments[1..], &["config"])?;
             let root = env::current_dir()
@@ -545,6 +546,17 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         _ => try_run_reuse(command, arguments),
     }
+}
+
+fn verify_action_command(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["path"])?;
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let metadata = options
+        .get("path")
+        .ok_or_else(|| GeneratorError::usage("verify-action needs --path PATH".to_owned()))?;
+    super::scan::action::verify_action(&root, metadata)?;
+    Ok(true)
 }
 
 /// Dispatch the slice-C subcommands (`aggregate`, `select`, `fingerprint`,
