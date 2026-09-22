@@ -329,7 +329,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       cache_paths: ".velnor-docker-cache"
-      seed_compat: "7e67216c9e23"
+      seed_compat: "3dc120657580"
       seed_dependency_files: |
         Cargo.lock
         Dockerfile
