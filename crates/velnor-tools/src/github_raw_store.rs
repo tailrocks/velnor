@@ -1268,6 +1268,122 @@ fn reconcile_temporary(directory: &File, name: &CStr) -> Result<(), RawStorageEr
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+struct TestPublishReplacement {
+    directory: FileIdentity,
+    bytes: Vec<u8>,
+}
+
+#[cfg(all(test, unix))]
+static TEST_PUBLISH_REPLACEMENT: OnceLock<Mutex<Option<TestPublishReplacement>>> = OnceLock::new();
+
+#[cfg(all(test, unix))]
+static NEXT_TEST_REPLACEMENT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(test, unix))]
+pub struct TestPublishReplacementGuard {
+    directory: FileIdentity,
+}
+
+#[cfg(all(test, unix))]
+pub fn arm_test_publish_replacement(
+    directory: &File,
+    bytes: Vec<u8>,
+) -> io::Result<TestPublishReplacementGuard> {
+    let identity = stat_fd(directory)?;
+    let slot = TEST_PUBLISH_REPLACEMENT.get_or_init(|| Mutex::new(None));
+    let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "test publication replacement already armed",
+        ));
+    }
+    *slot = Some(TestPublishReplacement {
+        directory: identity,
+        bytes,
+    });
+    Ok(TestPublishReplacementGuard {
+        directory: identity,
+    })
+}
+
+#[cfg(all(test, unix))]
+impl Drop for TestPublishReplacementGuard {
+    fn drop(&mut self) {
+        let Some(slot) = TEST_PUBLISH_REPLACEMENT.get() else {
+            return;
+        };
+        let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|replacement| replacement.directory.same_directory(self.directory))
+        {
+            *slot = None;
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+fn replace_test_temporary_if_armed(
+    directory: &File,
+    temporary: &CStr,
+) -> Result<(), RawStorageError> {
+    let directory_identity = stat_fd(directory).map_err(storage_io)?;
+    let bytes = {
+        let Some(slot) = TEST_PUBLISH_REPLACEMENT.get() else {
+            return Ok(());
+        };
+        let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|replacement| replacement.directory.same_directory(directory_identity))
+        {
+            slot.take().map(|replacement| replacement.bytes)
+        } else {
+            None
+        }
+    };
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
+
+    let sequence = NEXT_TEST_REPLACEMENT.fetch_add(1, Ordering::Relaxed);
+    let replacement_name = CString::new(format!(
+        ".velnor-raw-test-replacement-{}-{sequence}.tmp",
+        std::process::id()
+    ))
+    .map_err(|_| RawStorageError::Refused)?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            replacement_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(storage_io(io::Error::last_os_error()));
+    }
+    let mut replacement = unsafe { File::from_raw_fd(fd) };
+    replacement.write_all(&bytes).map_err(storage_io)?;
+    replacement.sync_all().map_err(storage_io)?;
+    drop(replacement);
+
+    let result = unsafe {
+        libc::renameat(
+            directory.as_raw_fd(),
+            replacement_name.as_ptr(),
+            directory.as_raw_fd(),
+            temporary.as_ptr(),
+        )
+    };
+    if result < 0 {
+        return Err(storage_io(io::Error::last_os_error()));
+    }
+    sync_directory(directory)
+}
+
 #[cfg(unix)]
 fn publish_if_absent(
     directory: &File,
@@ -1284,6 +1400,8 @@ fn publish_if_absent(
         None => {}
     }
     let mut temporary = TemporaryFile::create(directory)?;
+    #[cfg(all(test, unix))]
+    replace_test_temporary_if_armed(directory, &temporary.name)?;
     (|| {
         temporary
             .file
@@ -1609,46 +1727,4 @@ fn raw_storage_io_error(error: RawStorageError) -> io::Error {
         RawStorageError::Unbound => io::ErrorKind::InvalidData,
     };
     io::Error::new(kind, "raw store namespace reconciliation failed")
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::os::unix::ffi::OsStrExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-
-    #[test]
-    fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() -> io::Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "velnor-github-raw-store-unit-{}-{}",
-            std::process::id(),
-            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&root)?;
-
-        let result = (|| {
-            let directory = File::open(&root)?;
-            let mut temporary = TemporaryFile::create(&directory)
-                .map_err(|error| io::Error::other(format!("create temporary file: {error:?}")))?;
-            temporary.file.write_all(b"creator-temporary-file")?;
-            temporary.file.sync_all()?;
-            let temporary_path = root.join(OsStr::from_bytes(temporary.name.to_bytes()));
-            let replacement = root.join("replacement");
-            fs::write(&replacement, b"attacker-temporary-file")?;
-            fs::rename(&replacement, &temporary_path)?;
-
-            drop(temporary);
-
-            assert!(fs::metadata(&temporary_path)?.file_type().is_file());
-            assert_eq!(fs::read(&temporary_path)?, b"attacker-temporary-file");
-            Ok::<(), io::Error>(())
-        })();
-        let cleanup = fs::remove_dir_all(&root);
-        result?;
-        cleanup?;
-        Ok(())
-    }
 }

@@ -976,6 +976,54 @@ fn verification_survives_symlink_and_hardlink_replacement_race() {
 
 #[cfg(unix)]
 #[test]
+fn store_leaves_replaced_temporary_name_instead_of_unlinking_it() {
+    let root = fixture("cleanup-race");
+    let mut store = must(RawObjectFileStore::new(&root), "open cleanup store");
+    let object_directory = root.join("sha256");
+    let directory = must(
+        fs::File::open(&object_directory),
+        "open object directory for cleanup hook",
+    );
+    let _replacement = must(
+        github_raw_store::arm_test_publish_replacement(
+            &directory,
+            b"attacker-temporary-file".to_vec(),
+        ),
+        "arm deterministic cleanup replacement",
+    );
+
+    // The hook runs immediately after TemporaryFile::create inside store's
+    // publish_if_absent caller. It deterministically replaces that pathname,
+    // so the identity guard must leave the replacement behind. The final
+    // identity check and unlinkat remain separate syscalls on the supported
+    // Unix targets; this proves fail-closed pre-check behavior, not that a
+    // concurrent replacement after the check is impossible.
+    assert!(store
+        .store(capture("cleanup-race", b"source", &[b'z'; 1024]))
+        .is_err());
+
+    let replaced = must(
+        fs::read_dir(&object_directory),
+        "read object directory after cleanup rejection",
+    )
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| {
+        path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with(".velnor-raw-") && name.ends_with(".tmp")
+        })
+    })
+    .unwrap_or_else(|| panic!("replaced temporary name missing"));
+    assert_eq!(
+        must(fs::read(&replaced), "read replaced temporary"),
+        b"attacker-temporary-file"
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn rejects_fifo_sidecar_without_blocking() {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
