@@ -2942,6 +2942,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "scanner classification regression cases stay together"
+    )]
     #[test]
     fn docker_images_and_action_path_are_classified_like_runner() {
         let root = fixture("docker-and-action-path");
