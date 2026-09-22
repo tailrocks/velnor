@@ -410,9 +410,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
         let mut object = serde_json::Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if object.contains_key(&key) {
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate JSON object key {key:?}"
-                )));
+                return Err(serde::de::Error::custom("duplicate JSON object key"));
             }
             object.insert(key, map.next_value_seed(StrictJsonValue)?);
         }
@@ -420,22 +418,22 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
     }
 }
 
-fn parse_estate_manifest(text: &str, context: impl fmt::Display) -> Result<EstateManifest> {
+fn parse_estate_manifest(text: &str) -> Result<EstateManifest> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     let value = StrictJsonValue
         .deserialize(&mut deserializer)
-        .with_context(|| format!("parse estate manifest {context}"))?;
+        .map_err(|_| anyhow::anyhow!("invalid estate manifest JSON"))?;
     deserializer
         .end()
-        .with_context(|| format!("parse estate manifest {context}"))?;
-    serde_json::from_value(value).with_context(|| format!("decode estate manifest {context}"))
+        .map_err(|_| anyhow::anyhow!("invalid estate manifest JSON"))?;
+    serde_json::from_value(value).map_err(|_| anyhow::anyhow!("invalid estate manifest schema"))
 }
 
 fn canonical_estate_manifest(root: &Path) -> Result<EstateManifest> {
     let path = root.join(ESTATE_MANIFEST_FILE);
     let text = fs::read_to_string(&path)
         .with_context(|| format!("read estate manifest {}", path.display()))?;
-    parse_estate_manifest(&text, path.display())
+    parse_estate_manifest(&text)
 }
 
 fn canonical_fleet_map(
@@ -540,6 +538,13 @@ fn generated_class_equality_findings(
 }
 
 pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
+    audit_ci_with_identity_resolver(args, remote_default_identity)
+}
+
+fn audit_ci_with_identity_resolver<F>(args: AuditCiArgs, resolve_remote: F) -> Result<()>
+where
+    F: Fn(&str) -> Result<(String, String)>,
+{
     let canonical_manifest = if args.estate.is_some() || args.repository_name.is_some() {
         Some(canonical_estate_manifest(&args.repo_path)?)
     } else {
@@ -553,7 +558,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     let estate = if let Some(estate) = &args.estate {
         let text = fs::read_to_string(estate)
             .with_context(|| format!("read estate file {}", estate.display()))?;
-        Some(parse_estate_manifest(&text, estate.display())?)
+        Some(parse_estate_manifest(&text)?)
     } else {
         None
     };
@@ -587,7 +592,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                 .get(&repo.name)
                 .copied()
                 .with_context(|| format!("canonical fleet map has no class for {}", repo.name))?;
-            let (default_branch, head_sha) = remote_default_identity(&repo.name)?;
+            let (default_branch, head_sha) = resolve_remote(&repo.name)?;
             let remote_checkout = if args.remote_defaults {
                 Some(checkout_remote_default(
                     &repo.name,
@@ -4923,7 +4928,6 @@ jobs:
     fn estate_manifest_parses_classified_repository() {
         let manifest = parse_estate_manifest(
             r#"{"version":2,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
-            "unit test",
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
@@ -4951,41 +4955,63 @@ jobs:
             ),
         ];
         for (label, text) in cases {
-            let error = format!("{:#}", parse_estate_manifest(text, label).unwrap_err());
-            assert!(error.contains("unknown field"), "{label}: {error}");
+            let error = format!("{label}: {:#}", parse_estate_manifest(text).unwrap_err());
+            assert!(
+                error.contains("invalid estate manifest schema"),
+                "{label}: {error}"
+            );
         }
     }
 
     #[test]
     fn estate_manifest_parser_rejects_recursive_duplicates_and_trailing_tokens() {
         let valid = r#"{"version":2,"defaults":{},"repositories":[]}"#;
-        assert!(parse_estate_manifest(valid, "valid").is_ok());
+        assert!(parse_estate_manifest(valid).is_ok());
 
         let top_level_duplicate = r#"{"version":2,"version":2,"defaults":{},"repositories":[]}"#;
         let error = format!(
             "{:#}",
-            parse_estate_manifest(top_level_duplicate, "top-level duplicate").unwrap_err()
+            parse_estate_manifest(top_level_duplicate).unwrap_err()
         );
-        assert!(
-            error.contains("duplicate JSON object key \"version\""),
-            "{error}"
-        );
+        assert!(error.contains("invalid estate manifest JSON"), "{error}");
+        assert!(!error.contains("version"), "{error}");
 
         let nested_duplicate = r#"{"version":2,"defaults":{"checkout":{"classification":"required","evidence":"first","evidence":"second"}},"repositories":[]}"#;
-        let error = format!(
-            "{:#}",
-            parse_estate_manifest(nested_duplicate, "nested duplicate").unwrap_err()
-        );
-        assert!(
-            error.contains("duplicate JSON object key \"evidence\""),
-            "{error}"
-        );
+        let error = format!("{:#}", parse_estate_manifest(nested_duplicate).unwrap_err());
+        assert!(error.contains("invalid estate manifest JSON"), "{error}");
+        assert!(!error.contains("evidence"), "{error}");
 
         let error = format!(
             "{:#}",
-            parse_estate_manifest(&format!("{valid} {{}}"), "trailing tokens").unwrap_err()
+            parse_estate_manifest(&format!("{valid} {{}}"),).unwrap_err()
         );
-        assert!(error.contains("trailing"), "{error}");
+        assert!(error.contains("invalid estate manifest JSON"), "{error}");
+    }
+
+    #[test]
+    fn estate_manifest_parser_does_not_echo_untrusted_keys_or_values() {
+        let cases = [
+            (
+                r#"{"version":2,"defaults":{},"repositories":[],"hostile-unknown-key":true}"#,
+                "hostile-unknown-key",
+            ),
+            (
+                r#"{"version":2,"hostile-duplicate-key":1,"hostile-duplicate-key":2,"defaults":{},"repositories":[]}"#,
+                "hostile-duplicate-key",
+            ),
+            (
+                r#"{"version":2,"defaults":{"checkout":{"classification":"hostile-enum-value","evidence":"evidence"}},"repositories":[]}"#,
+                "hostile-enum-value",
+            ),
+            (
+                r#"{"version":2,"defaults":{},"repositories":[hostile-syntax-value]}"#,
+                "hostile-syntax-value",
+            ),
+        ];
+        for (text, secret) in cases {
+            let error = format!("{:#}", parse_estate_manifest(text).unwrap_err());
+            assert!(!error.contains(secret), "parser echoed {secret:?}: {error}");
+        }
     }
 
     #[test]
@@ -5015,10 +5041,8 @@ jobs:
             })
             .unwrap_err()
         );
-        assert!(
-            error.contains("duplicate JSON object key \"version\""),
-            "{error}"
-        );
+        assert!(error.contains("invalid estate manifest JSON"), "{error}");
+        assert!(!error.contains("version"), "{error}");
         assert!(!error.contains("freshness"), "{error}");
     }
 
@@ -5069,6 +5093,101 @@ jobs:
         assert!(error.contains("caller-plan-not-authority"), "{error}");
         assert!(error.contains("classification downgrade"), "{error}");
         assert!(!error.contains("freshness"), "{error}");
+    }
+
+    #[test]
+    fn audit_ci_executes_canonical_plan_for_local_estate() {
+        let canonical_root = TestRepo::new();
+        let fixture = TestRepo::new();
+        initialize_git_repository(&fixture.path, "estate fixture\n");
+        fs::write(
+            fixture.path.join(".github/workflows/ci.yml"),
+            GENERATED_CALLER,
+        )
+        .unwrap();
+        let support = BASE.replace(
+            "  workflow_dispatch:\n    inputs:\n      lanes: {type: choice, default: velnor, options: [velnor, github, both]}\n",
+            "  workflow_dispatch:\n",
+        );
+        fs::write(fixture.path.join(".github/workflows/support.yml"), support).unwrap();
+        let added = run_git(&fixture.path, &["add", ".github/workflows"]);
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        let committed = run_git(&fixture.path, &["commit", "--quiet", "-m", "workflows"]);
+        assert!(
+            committed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&committed.stderr)
+        );
+        let head = String::from_utf8(run_git(&fixture.path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let defaults = REQUIRED_CONCERNS_FOR_TESTS
+            .into_iter()
+            .filter(|name| *name != "lane-selection")
+            .map(|name| {
+                (
+                    name.to_string(),
+                    serde_json::json!({
+                        "classification": "non-applicable",
+                        "evidence": "test fixture",
+                        "implementations": [],
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let canonical = serde_json::json!({
+            "version": 2,
+            "defaults": defaults,
+            "repositories": [{
+                "name": "fixture/repo",
+                "concerns": {
+                    "lane-selection": {
+                        "classification": "required",
+                        "evidence": "canonical lane workload",
+                        "implementations": [{"workflow": "support.yml"}],
+                    },
+                },
+            }],
+        });
+        fs::create_dir_all(canonical_root.path.join("config")).unwrap();
+        fs::write(
+            canonical_root.path.join(ESTATE_MANIFEST_FILE),
+            serde_json::to_vec(&canonical).unwrap(),
+        )
+        .unwrap();
+        let mut caller = canonical;
+        caller["repositories"][0]["path"] =
+            serde_json::json!(fixture.path.to_string_lossy().to_string());
+        let caller_path = canonical_root.path.join("caller-estate.json");
+        fs::write(&caller_path, serde_json::to_vec(&caller).unwrap()).unwrap();
+
+        let error = audit_ci_with_identity_resolver(
+            AuditCiArgs {
+                repo_path: canonical_root.path.clone(),
+                repository_name: None,
+                json: false,
+                perf_log: None,
+                repo: None,
+                first_party: Vec::new(),
+                estate: Some(caller_path),
+                remote_defaults: false,
+                estate_root: None,
+                offline: false,
+            },
+            |repository| {
+                assert_eq!(repository, "fixture/repo");
+                Ok(("main".to_string(), head.clone()))
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "audit-ci found 1 error(s)");
     }
 
     fn current_canonical_manifest() -> EstateManifest {
