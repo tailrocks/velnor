@@ -423,16 +423,12 @@ fn literal_string_arg(group: &str, key: &str) -> Option<String> {
                     index += width;
                     continue;
                 }
-                let Some(colon) = skip_trivia(bytes, index + key.len()) else {
-                    return None;
-                };
+                let colon = skip_trivia(bytes, index + key.len())?;
                 if bytes.get(colon) != Some(&b':') {
                     index += key.len();
                     continue;
                 }
-                let Some(value) = skip_trivia(bytes, colon + 1) else {
-                    return None;
-                };
+                let value = skip_trivia(bytes, colon + 1)?;
                 if bytes.get(value) != Some(&b'"')
                     || bytes.get(value + 1) == Some(&b'"')
                     || bytes.get(value + 2) == Some(&b'"')
@@ -440,9 +436,7 @@ fn literal_string_arg(group: &str, key: &str) -> Option<String> {
                     return None;
                 }
                 let end = skip_string(bytes, value)?;
-                let Some(after) = skip_trivia(bytes, end) else {
-                    return None;
-                };
+                let after = skip_trivia(bytes, end)?;
                 if after < bytes.len() && bytes[after] != b',' {
                     return None;
                 }

@@ -747,7 +747,7 @@ impl UnitKind {
 }
 
 /// One typed validation phase of a unit's commands. The scan tags each
-/// command it structures (Rust fmt/clippy/test/doctest, XcodeGen generation,
+/// command it structures (Rust fmt/clippy/test/doctest, `XcodeGen` generation,
 /// and Swift build/run/test); generated jobs run
 /// one step per runnable phase behind `--phase`, and the prerequisite tier
 /// selects the check phase. Phase membership is positional data, never
@@ -772,7 +772,7 @@ pub enum ValidationPhase {
 
 impl ValidationPhase {
     /// The runnable phases in step order: formatting first, then lints, then
-    /// tests, then doctests, then XcodeGen generation, then Swift builds and
+    /// tests, then doctests, then `XcodeGen` generation, then Swift builds and
     /// executable runs, then tests. `Check` is prerequisite-only and never
     /// renders a validation step.
     pub(crate) const RUNNABLE: [Self; 8] = [
