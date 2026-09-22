@@ -2935,7 +2935,7 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
             )));
         }
-        if Path::new(source).starts_with(".github/") {
+        if path_starts_with_github(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must stay outside `.github/`, found `{source}`"
             )));
@@ -3010,6 +3010,16 @@ fn validate_reviewers(rows: &[ReviewerSection]) -> Result<(), GeneratorError> {
 
 fn is_contained_github_path(path: &str) -> bool {
     is_contained_repository_path(path) && Path::new(path).starts_with(".github/")
+}
+
+/// Ignore lexical `.` components only while checking the generated-tree
+/// boundary. Keep the original path for the existing traversal and symlink
+/// handling.
+fn path_starts_with_github(path: &str) -> bool {
+    let first = Path::new(path)
+        .components()
+        .find(|component| !matches!(component, Component::CurDir));
+    matches!(first, Some(Component::Normal(name)) if name.to_str() == Some(".github"))
 }
 
 fn is_contained_repository_path(path: &str) -> bool {
@@ -6075,6 +6085,29 @@ mod tests {
                 .contains("source must stay outside `.github/`"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn static_file_sources_cannot_reach_generated_github_tree_through_dot_components() {
+        for source in [
+            "./.github/workflows/input.yml",
+            "././.github/workflows/input.yml",
+            ".//.github/workflows/input.yml",
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/custom.yml\"\nsource = \"{source}\"\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "dot-component static source under .github must fail",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("source must stay outside `.github/`"),
+                "unexpected error for `{source}`: {error}"
+            );
+        }
     }
 
     #[test]
