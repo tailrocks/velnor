@@ -1052,6 +1052,39 @@ mod tests {
 
         let linux_workflow = must_render_kind(&linux_ir);
         assert!(linux_workflow.contains("Set up mold"), "{linux_workflow}");
+
+        let mut mixed_ir = owner_test_ir(
+            "example/mixed-platforms",
+            vec![linux.clone(), apple.clone()],
+        );
+        mixed_ir.mise_present = true;
+        mixed_ir.tools.insert(ToolRequirement::Mold);
+        let mixed_linux = &mixed_ir.units[0];
+        assert!(
+            WorkflowIr::tools_for_unit(mixed_linux, true, false).contains(&ToolRequirement::Mold)
+        );
+        let mixed_linux_facts = snapshot_compatibility(&mixed_ir, mixed_linux, &[]);
+        assert_eq!(mixed_linux_facts.linker, "mold");
+        assert_eq!(mixed_linux_facts.rustflags, "-C link-arg=-fuse-ld=mold");
+        let aggregate = mixed_ir.render(WorkflowKind::Main);
+        let aggregate_header = must_some(
+            aggregate.split_once("jobs:").map(|(header, _)| header),
+            "aggregate render has jobs",
+        );
+        assert!(
+            !aggregate_header.contains("RUSTFLAGS"),
+            "aggregate workflow leaks Linux flags: {aggregate_header}"
+        );
+
+        let linux_workflow = mixed_ir.render_nested_unit(mixed_linux, WorkflowKind::Main);
+        assert!(linux_workflow.contains("Set up mold"), "{linux_workflow}");
+        assert!(
+            linux_workflow.contains("RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\""),
+            "{linux_workflow}"
+        );
+        let apple_workflow = mixed_ir.render_nested_unit(&mixed_ir.units[1], WorkflowKind::Main);
+        assert!(!apple_workflow.contains("Set up mold"), "{apple_workflow}");
+        assert!(!apple_workflow.contains("fuse-ld=mold"), "{apple_workflow}");
     }
 
     #[test]
@@ -4646,7 +4679,6 @@ impl WorkflowIr {
     fn render_aggregate_env(&self, output: &mut String) {
         if self.tools.contains(&ToolRequirement::Sccache)
             || self.tools.contains(&ToolRequirement::OpenTofu)
-            || self.tools.contains(&ToolRequirement::Mold)
             || self.mise_present
         {
             output.push_str("env:\n");
@@ -4654,9 +4686,6 @@ impl WorkflowIr {
                 output.push_str(
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
-            }
-            if self.tools.contains(&ToolRequirement::Mold) {
-                output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if self.tools.contains(&ToolRequirement::OpenTofu) {
                 output.push_str("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
