@@ -25,6 +25,7 @@ const RUNTIME_COMMANDS: &[&str] = &[
     "release",
     "version",
     "closure",
+    "record-result",
     "prepared-tool-install",
     "stage-product",
     "verify-product",
@@ -278,5 +279,26 @@ mod tests {
                 "{command} routes as a binary-only runtime command"
             );
         }
+    }
+
+    #[test]
+    fn record_result_routes_to_the_strict_schema2_runtime() {
+        let arguments = args(&["record-result"]);
+        assert!(
+            RUNTIME_COMMANDS.contains(&"record-result"),
+            "record-result must enter the schema-2 runtime branch"
+        );
+
+        // The strict handler rejects a missing output before reading result
+        // identity. Seeing this error proves the bridge target, rather than
+        // the schema-1 generator fallback, owns the command.
+        let error = match crate::s2::runtime::try_run(&arguments) {
+            Err(error) => error.to_string(),
+            Ok(handled) => format!("expected strict handler error, got Ok({handled})"),
+        };
+        assert!(
+            error.contains("`record-result` requires --output PATH"),
+            "record-result must reach the strict schema-2 handler: {error}"
+        );
     }
 }

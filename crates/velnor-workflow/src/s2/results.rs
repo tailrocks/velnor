@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use crate::s2::planner::{Exclusion, Execution};
 use crate::s2::provider::{
-    evaluate_verdict, ObservedResult, ProviderId, RunIdentity, VerdictFailure,
+    evaluate_verdict, ObservedOutcome, ObservedResult, ProviderId, RunIdentity, VerdictFailure,
 };
 use crate::s2::GeneratorError;
 
@@ -97,6 +97,35 @@ impl ExpectedSet {
     pub(crate) fn passes(&self, observed: &[ObservedResult], run: &RunIdentity) -> bool {
         self.verdict(observed, run).is_empty()
     }
+}
+
+/// Validate only the identity carried by live result records.
+///
+/// Live aggregation owns outcome policy: a planner-declared skip may pass,
+/// while every other non-success outcome fails there. Reusing the strict
+/// evaluator with every observed outcome projected to `Success` preserves
+/// that policy boundary while still rejecting stale, foreign, wrong-attempt,
+/// wrong-provider, and command-mismatched records. Missing records remain the
+/// aggregate's responsibility because it also knows matrix and planned-skip
+/// semantics.
+#[must_use]
+pub(crate) fn identity_failures(
+    expected: &BTreeSet<(String, ProviderId)>,
+    observed: &[ObservedResult],
+    run: &RunIdentity,
+) -> Vec<VerdictFailure> {
+    let identity_only = observed
+        .iter()
+        .cloned()
+        .map(|mut result| {
+            result.outcome = ObservedOutcome::Success;
+            result
+        })
+        .collect::<Vec<_>>();
+    evaluate_verdict(expected, &identity_only, run)
+        .into_iter()
+        .filter(|failure| !matches!(failure, VerdictFailure::Missing { .. }))
+        .collect()
 }
 
 /// Matrix policy for qualification: fail-fast is always disabled so every
@@ -206,6 +235,11 @@ mod tests {
         let plan = fanout(&[planned("rust-a")], None, &universe(), &selectors(), true).unwrap();
         let plan_digest = plan.digest.clone();
         let digests = plan.command_digests();
+        let platforms = plan
+            .executions
+            .iter()
+            .map(|execution| (execution.unit_id.clone(), execution.platform))
+            .collect();
         let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
         let run = RunIdentity {
             repository_id: "123".to_owned(),
@@ -214,6 +248,7 @@ mod tests {
             run_attempt: "1".to_owned(),
             plan_digest,
             command_digests: digests,
+            platforms,
         };
         (frozen, run)
     }
@@ -227,7 +262,11 @@ mod tests {
             plan_digest: run.plan_digest.clone(),
             unit_id: unit.to_owned(),
             provider,
-            platform: Platform::LinuxX64,
+            platform: run
+                .platforms
+                .get(unit)
+                .copied()
+                .unwrap_or(Platform::LinuxX64),
             command_digest: run.command_digests.get(unit).cloned().unwrap_or_default(),
         }
     }
@@ -261,6 +300,23 @@ mod tests {
     fn all_green_passes() {
         let (frozen, run) = frozen_single();
         assert!(frozen.passes(&all_green(&run), &run));
+    }
+
+    #[test]
+    fn identity_failures_ignore_outcome_but_reject_command_mismatch() {
+        let (frozen, run) = frozen_single();
+        let mut observed = all_green(&run);
+        observed[2].outcome = ObservedOutcome::Skipped;
+        assert!(identity_failures(frozen.members(), &observed, &run).is_empty());
+
+        observed[2].identity.command_digest = "forged".to_owned();
+        let failures = identity_failures(frozen.members(), &observed, &run);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.class() == "identity-mismatch"),
+            "failures: {failures:?}"
+        );
     }
 
     #[test]
@@ -349,6 +405,16 @@ mod tests {
     }
 
     #[test]
+    fn wrong_platform_report_fails() {
+        let (frozen, run) = frozen_single();
+        let mut observed = all_green(&run);
+        observed[2].identity.platform = Platform::MacosArm64;
+        let classes = failure_classes(&frozen.verdict(&observed, &run));
+        assert!(classes.contains(&"identity-mismatch"), "{classes:?}");
+        assert!(classes.contains(&"missing"), "{classes:?}");
+    }
+
+    #[test]
     fn stale_attempt_fails() {
         let (frozen, run) = frozen_single();
         let mut observed = all_green(&run);
@@ -370,6 +436,11 @@ mod tests {
         .unwrap();
         let plan_digest = plan.digest.clone();
         let digests = plan.command_digests();
+        let platforms = plan
+            .executions
+            .iter()
+            .map(|execution| (execution.unit_id.clone(), execution.platform))
+            .collect();
         let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
         let run = RunIdentity {
             repository_id: "123".to_owned(),
@@ -378,6 +449,7 @@ mod tests {
             run_attempt: "1".to_owned(),
             plan_digest,
             command_digests: digests,
+            platforms,
         };
         // A local lane claims the hosted-only unit: wrong provider, and the
         // expected hosted record is missing.

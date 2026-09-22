@@ -17,7 +17,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
 
@@ -30,8 +30,8 @@ use super::primitives::snapshot::{
     budget_report, plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
 use super::provider::{
-    check_capabilities, eligibility, parse_provider_set, plan_digest, Capabilities,
-    ExclusionReason, Platform, ProviderId, ProviderSet, TrustReq,
+    canonical_unit_digest, check_capabilities, eligibility, parse_provider_set, plan_digest,
+    Capabilities, ExclusionReason, Platform, ProviderId, ProviderSet, TrustReq,
 };
 use super::{GeneratorError, UnitKind, ValidationPhase};
 
@@ -450,8 +450,167 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// Parse one already-produced `XCTest` or Swift Testing summary and print the
+/// accepted counts. The command never executes a project tool; malformed,
+/// empty, skipped, cancelled, or failed evidence is a hard error.
+fn apple_test_summary(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["input", "source"])?;
+    let input = options
+        .get("input")
+        .ok_or_else(|| GeneratorError::usage("apple-test-summary requires --input PATH"))?;
+    let bytes = fs::read(input)
+        .map_err(|error| GeneratorError::io("read Apple test summary", Path::new(input), &error))?;
+    let evidence = match options.get("source").map_or("auto", String::as_str) {
+        "auto" => crate::apple_test_results::parse_summary(&bytes),
+        "xctest" => crate::apple_test_results::parse_xctest_summary(&bytes),
+        "swift-testing" => crate::apple_test_results::parse_swift_testing_summary(&bytes),
+        source => {
+            return Err(GeneratorError::usage(format!(
+                "apple-test-summary --source must be auto, xctest, or swift-testing; got {source:?}"
+            )));
+        }
+    }
+    .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    println!(
+        "source={} status={} total={} passed={} failed={} skipped={} cancelled={} unknown={}",
+        evidence.source,
+        evidence.status,
+        evidence.counts.total,
+        evidence.counts.passed,
+        evidence.counts.failed,
+        evidence.counts.skipped,
+        evidence.counts.cancelled,
+        evidence.counts.unknown,
+    );
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct ResultRecord {
+    repository: String,
+    base_sha: String,
+    head_sha: String,
+    run_id: String,
+    run_attempt: String,
+    plan_digest: String,
+    unit: String,
+    lane: String,
+    provider: String,
+    platform: String,
+    command_digest: String,
+    outcome: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResultDocument {
+    schema: u8,
+    results: Vec<ResultRecord>,
+}
+
+/// Read one non-empty identity field for `record-result`.
+fn required_result_value(name: &str, value: Option<String>) -> Result<String, GeneratorError> {
+    match value {
+        Some(value) if !value.is_empty() => Ok(value),
+        Some(_) => Err(GeneratorError::usage(format!(
+            "`record-result` requires non-empty {name}"
+        ))),
+        None => Err(GeneratorError::usage(format!(
+            "`record-result` requires {name}"
+        ))),
+    }
+}
+
+fn result_outcome(value: String) -> String {
+    match value.as_str() {
+        "success" => "success".to_owned(),
+        "cancelled" => "cancelled".to_owned(),
+        _ => "failure".to_owned(),
+    }
+}
+
+fn result_record_from_env() -> Result<ResultRecord, GeneratorError> {
+    Ok(ResultRecord {
+        repository: required_result_value(
+            "VELNOR_RESULT_REPOSITORY",
+            env::var("VELNOR_RESULT_REPOSITORY").ok(),
+        )?,
+        base_sha: required_result_value(
+            "VELNOR_RESULT_BASE_SHA",
+            env::var("VELNOR_RESULT_BASE_SHA").ok(),
+        )?,
+        head_sha: required_result_value(
+            "VELNOR_RESULT_HEAD_SHA",
+            env::var("VELNOR_RESULT_HEAD_SHA").ok(),
+        )?,
+        run_id: required_result_value(
+            "VELNOR_RESULT_RUN_ID",
+            env::var("VELNOR_RESULT_RUN_ID").ok(),
+        )?,
+        run_attempt: required_result_value(
+            "VELNOR_RESULT_RUN_ATTEMPT",
+            env::var("VELNOR_RESULT_RUN_ATTEMPT").ok(),
+        )?,
+        plan_digest: required_result_value(
+            "VELNOR_RESULT_PLAN_DIGEST",
+            env::var("VELNOR_RESULT_PLAN_DIGEST").ok(),
+        )?,
+        unit: required_result_value("VELNOR_RESULT_UNIT", env::var("VELNOR_RESULT_UNIT").ok())?,
+        lane: required_result_value("VELNOR_RESULT_LANE", env::var("VELNOR_RESULT_LANE").ok())?,
+        provider: required_result_value(
+            "VELNOR_RESULT_PROVIDER",
+            env::var("VELNOR_RESULT_PROVIDER").ok(),
+        )?,
+        platform: required_result_value(
+            "VELNOR_RESULT_PLATFORM",
+            env::var("VELNOR_RESULT_PLATFORM").ok(),
+        )?,
+        command_digest: required_result_value(
+            "VELNOR_RESULT_COMMAND_DIGEST",
+            env::var("VELNOR_RESULT_COMMAND_DIGEST").ok(),
+        )?,
+        outcome: result_outcome(
+            env::var("VELNOR_RESULT_OUTCOME").map_err(|_| {
+                GeneratorError::usage("record-result requires VELNOR_RESULT_OUTCOME")
+            })?,
+        ),
+    })
+}
+
+fn write_result_record(output: &Path, record: ResultRecord) -> Result<(), GeneratorError> {
+    let document = ResultDocument {
+        schema: crate::s2::reuse::S2_WORK_RESULTS_SCHEMA,
+        results: vec![record],
+    };
+    let text = serde_json::to_string(&document)
+        .map_err(|error| GeneratorError::usage(format!("serialize result record: {error}")))?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| GeneratorError::io("create result directory", parent, &error))?;
+    }
+    fs::write(output, format!("{text}\n"))
+        .map_err(|error| GeneratorError::io("write result record", output, &error))
+}
+
+/// Emit one strict identity-bound result record from the job environment.
+/// Missing or empty identity is an error; job statuses retain the old mapping
+/// (`success`, `cancelled`, everything else -> `failure`).
+fn record_result(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["output"])?;
+    let output = options
+        .get("output")
+        .ok_or_else(|| GeneratorError::usage("`record-result` requires --output PATH"))?;
+    write_result_record(Path::new(output), result_record_from_env()?)
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the binary subcommand dispatcher keeps each CLI contract explicit"
+)]
 pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Ok(false);
@@ -510,6 +669,14 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "closure" => {
             print_closure(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "apple-test-summary" => {
+            apple_test_summary(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "record-result" => {
+            record_result(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "prepared-tool-install" => {
@@ -1790,7 +1957,7 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
             planned.push(PlannedUnit {
                 unit_id: unit.id.clone(),
                 providers,
-                command_digest: command_digest_for(unit, scope),
+                command_digest: command_digest_for(unit, scope, platform, trust, required),
             });
         }
     }
@@ -1826,6 +1993,7 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
                 serde_json::json!({
                     "unit_id": unit.unit_id,
                     "providers": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
+                    "command_digest": unit.command_digest,
                 })
             })
             .collect::<Vec<_>>(),
@@ -1891,7 +2059,7 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
         )?;
     }
     if let Some(path) = &inputs.expected_file {
-        write_expected_work_file(path, &planned, &config, &inputs.base, &inputs.head)?;
+        write_expected_work_file(path, &planned, &config, &inputs.base, &inputs.head, &digest)?;
     }
     if let Some(output_path) = &inputs.github_output {
         let mut file = fs::OpenOptions::new()
@@ -1946,14 +2114,30 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     Ok(())
 }
 
-/// Stable digest over a unit's planned commands for one scope.
-fn command_digest_for(unit: &CiUnit, scope: Scope) -> String {
-    let mut input = String::new();
-    for command in unit.commands(scope) {
-        input.push_str(command);
-        input.push('\n');
-    }
-    format!("{:016x}", super::content_digest_bytes(input.as_bytes()))
+/// Stable schema-2 unit identity digest for one scope.
+///
+/// The schema-2 wire contract still calls this `command_digest`, but the
+/// value binds every runtime field that can change the unit's execution or
+/// dependency placement. Platform, trust, and capabilities arrive already
+/// parsed by the planner, so invalid spellings cannot mint identities.
+fn command_digest_for(
+    unit: &CiUnit,
+    scope: Scope,
+    platform: Platform,
+    trust: TrustReq,
+    capabilities: Capabilities,
+) -> String {
+    let check_commands = unit.check_commands();
+    canonical_unit_digest(
+        &unit.id,
+        unit.commands(scope),
+        &unit.phases,
+        &check_commands,
+        platform,
+        trust,
+        capabilities,
+        &unit.depends_on,
+    )
 }
 
 fn write_kind_matrices(
@@ -2574,13 +2758,21 @@ fn planned_no_work_reason(selection: &UnitSelection<'_>) -> Result<Option<String
 /// - `base_sha`/`head_sha`: the plan's transport identity, exactly as the
 ///   plan saw it. The aggregate compares these against its own checkout and
 ///   rejects any file from another plan — including a stale no-work file.
+/// - `plan_digest`: the complete planner digest, bound again by the aggregate
+///   to the live run identity before any result is scored.
 fn write_expected_work_file(
     path: &Path,
     planned: &[PlannedUnit],
     config: &CiConfig,
     base_sha: &str,
     head_sha: &str,
+    plan_digest: &str,
 ) -> Result<(), GeneratorError> {
+    if plan_digest.is_empty() {
+        return Err(GeneratorError::usage(
+            "expected work requires a non-empty plan_digest",
+        ));
+    }
     let depends: BTreeMap<&str, &[String]> = config
         .unit
         .iter()
@@ -2595,11 +2787,24 @@ fn write_expected_work_file(
                 unit.unit_id
             )));
         }
+        let platform = config
+            .unit
+            .iter()
+            .find(|known| known.id == unit.unit_id)
+            .ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "expected work names unknown CI unit `{}`",
+                    unit.unit_id
+                ))
+            })?
+            .platform()?;
         units.push(serde_json::json!({
             "id": unit.unit_id,
             "lanes": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
             "matrix": Vec::<String>::new(),
             "required": true,
+            "platform": platform.as_str(),
+            "command_digest": unit.command_digest,
         }));
         prerequisites.insert(
             unit.unit_id.clone(),
@@ -2611,11 +2816,13 @@ fn write_expected_work_file(
         );
     }
     let document = serde_json::json!({
+        "schema": crate::s2::reuse::S2_WORK_RESULTS_SCHEMA,
         "planned_no_work": planned.is_empty(),
         "units": units,
         "prerequisites": prerequisites,
         "base_sha": base_sha,
         "head_sha": head_sha,
+        "plan_digest": plan_digest,
     });
     let text = serde_json::to_string_pretty(&document)
         .map_err(|error| GeneratorError::usage(format!("serialize expected work: {error}")))?;
@@ -5154,6 +5361,126 @@ pub(crate) mod tests {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
         }
+    }
+
+    fn identity_digest_fixture() -> CiUnit {
+        CiUnit {
+            id: "rust-identity".to_owned(),
+            label: "Rust identity".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["crates/identity/**".to_owned()],
+            pr_commands: vec!["cargo test --manifest-path Cargo.toml".to_owned()],
+            full_commands: vec!["cargo test --all-targets --manifest-path Cargo.toml".to_owned()],
+            phases: vec![ValidationPhase::Clippy, ValidationPhase::Test],
+            check_commands: vec!["cargo check --workspace --no-deps".to_owned()],
+            depends_on: vec!["rust-base".to_owned(), "toolchain".to_owned()],
+            tool_version: None,
+            cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
+            workspace_check: false,
+            reads_closed: false,
+        }
+    }
+
+    fn identity_digest(unit: &CiUnit) -> String {
+        let platform = must(unit.platform(), "parse identity fixture platform");
+        let trust = must(unit.trust(), "parse identity fixture trust");
+        command_digest_for(
+            unit,
+            Scope::Full,
+            platform,
+            trust,
+            Capabilities::from(&unit.capabilities),
+        )
+    }
+
+    fn plan_identity_digest(unit: &CiUnit) -> String {
+        plan_digest(
+            &[(
+                unit.id.clone(),
+                ProviderSet::from([ProviderId::GithubHosted]),
+                identity_digest(unit),
+            )],
+            &[],
+        )
+    }
+
+    #[test]
+    fn schema2_identity_digest_is_stable_and_binds_execution_shape() {
+        let unit = identity_digest_fixture();
+        let stable = identity_digest(&unit);
+        assert_eq!(stable, identity_digest(&unit.clone()));
+        let mut reordered_dependencies = unit.clone();
+        reordered_dependencies.depends_on.reverse();
+        assert_eq!(
+            stable,
+            identity_digest(&reordered_dependencies),
+            "dependency declaration order is not execution identity",
+        );
+
+        let mut changed = unit.clone();
+        changed.platform = "macos-arm64".to_owned();
+        assert_ne!(
+            stable,
+            identity_digest(&changed),
+            "platform must bind identity"
+        );
+
+        let mut changed = unit.clone();
+        changed.trust = "trusted-only".to_owned();
+        assert_ne!(
+            stable,
+            identity_digest(&changed),
+            "trust must bind identity"
+        );
+
+        let mut changed = unit.clone();
+        changed.phases[0] = ValidationPhase::Fmt;
+        assert_ne!(
+            stable,
+            identity_digest(&changed),
+            "phase must bind identity"
+        );
+
+        let mut changed = unit.clone();
+        changed.check_commands[0] = "cargo check --all-targets --workspace".to_owned();
+        assert_ne!(
+            stable,
+            identity_digest(&changed),
+            "check must bind identity"
+        );
+
+        let mut changed = unit.clone();
+        changed.capabilities.docker = true;
+        assert_ne!(
+            stable,
+            identity_digest(&changed),
+            "capabilities must bind identity",
+        );
+
+        let mut changed = unit.clone();
+        changed.depends_on.push("rust-toolchain".to_owned());
+        assert_ne!(
+            stable,
+            identity_digest(&changed),
+            "dependencies must bind identity",
+        );
+    }
+
+    #[test]
+    fn schema2_plan_digest_uses_the_canonical_unit_identity() {
+        let unit = identity_digest_fixture();
+        let stable = plan_identity_digest(&unit);
+        let mut changed = unit;
+        changed.trust = "trusted-only".to_owned();
+        assert_ne!(
+            stable,
+            plan_identity_digest(&changed),
+            "plan identity must change with unit trust",
+        );
     }
 
     /// A throwaway digest directory: the only way to feed `verify-digests`
@@ -9573,6 +9900,94 @@ workspace_check = true
         );
     }
 
+    #[test]
+    fn record_result_writes_the_strict_identity_document() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-record-result-{}",
+            crate::unique_suffix()
+        ));
+        let output = root.join("nested/result.json");
+        let record = ResultRecord {
+            repository: "example/repo".to_owned(),
+            base_sha: "base-sha".to_owned(),
+            head_sha: "head-sha".to_owned(),
+            run_id: "42".to_owned(),
+            run_attempt: "3".to_owned(),
+            plan_digest: "plan-digest".to_owned(),
+            unit: "swift".to_owned(),
+            lane: "github-hosted".to_owned(),
+            provider: "github-hosted".to_owned(),
+            platform: "ubuntu".to_owned(),
+            command_digest: "unit-command-digest".to_owned(),
+            outcome: "success".to_owned(),
+        };
+        must(
+            write_result_record(&output, record),
+            "write strict result record",
+        );
+        let text = must(
+            std::fs::read_to_string(&output),
+            "read strict result record",
+        );
+        assert_eq!(
+            text,
+            "{\"schema\":2,\"results\":[{\"repository\":\"example/repo\",\"base_sha\":\"base-sha\",\"head_sha\":\"head-sha\",\"run_id\":\"42\",\"run_attempt\":\"3\",\"plan_digest\":\"plan-digest\",\"unit\":\"swift\",\"lane\":\"github-hosted\",\"provider\":\"github-hosted\",\"platform\":\"ubuntu\",\"command_digest\":\"unit-command-digest\",\"outcome\":\"success\"}]}\n"
+        );
+        must(std::fs::remove_dir_all(&root), "remove result fixture");
+    }
+
+    #[test]
+    fn record_result_rejects_missing_or_empty_identity_and_maps_outcomes() {
+        for name in [
+            "VELNOR_RESULT_REPOSITORY",
+            "VELNOR_RESULT_BASE_SHA",
+            "VELNOR_RESULT_HEAD_SHA",
+            "VELNOR_RESULT_RUN_ID",
+            "VELNOR_RESULT_RUN_ATTEMPT",
+            "VELNOR_RESULT_PLAN_DIGEST",
+            "VELNOR_RESULT_UNIT",
+            "VELNOR_RESULT_LANE",
+            "VELNOR_RESULT_PROVIDER",
+            "VELNOR_RESULT_PLATFORM",
+            "VELNOR_RESULT_COMMAND_DIGEST",
+        ] {
+            let error = must_fail(
+                required_result_value(name, Some(String::new())),
+                "empty result identity must fail",
+            );
+            assert!(error.to_string().contains("non-empty"), "{error}");
+        }
+        assert_eq!(
+            result_outcome("success".to_owned()),
+            "success",
+            "success remains success"
+        );
+        assert_eq!(
+            result_outcome("cancelled".to_owned()),
+            "cancelled",
+            "cancelled remains cancelled"
+        );
+        assert_eq!(
+            result_outcome("failure".to_owned()),
+            "failure",
+            "non-green outcomes remain failures"
+        );
+        assert_eq!(
+            result_outcome(String::new()),
+            "failure",
+            "an empty job status retains the old failure fallback"
+        );
+    }
+
+    #[test]
+    fn record_result_dispatch_requires_an_explicit_output() {
+        let error = must_fail(
+            try_run(&[OsString::from("record-result")]),
+            "record-result must validate its output path",
+        );
+        assert!(error.to_string().contains("--output PATH"), "{error}");
+    }
+
     // S4 aggregate wiring cut: the planner's expected work binds the
     // required-check aggregate, and a proven no-work plan passes via planner
     // + aggregate only, with an explicit machine-readable reason.
@@ -9618,8 +10033,118 @@ workspace_check = true
     /// `s4_run_paths`).
     fn s4_ambient_shas() -> (String, String) {
         (
-            std::env::var("BASE_SHA").unwrap_or_default(),
+            std::env::var("BASE_SHA").unwrap_or_else(|_| "BASE".to_owned()),
             std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+        )
+    }
+
+    /// The deterministic live identity used by the aggregate fixtures. The
+    /// production aggregate reads the same values from its job environment;
+    /// tests pass them explicitly so parallel tests never mutate process
+    /// global environment state.
+    fn s4_run_identity(expected_json: &str) -> crate::s2::provider::RunIdentity {
+        let document: serde_json::Value =
+            must(serde_json::from_str(expected_json), "parse expected work");
+        let units = must_some(
+            document.get("units").and_then(serde_json::Value::as_array),
+            "expected units array",
+        );
+        let mut command_digests = BTreeMap::new();
+        let mut platforms = BTreeMap::new();
+        for unit in units {
+            let id = must_some(
+                unit.get("id").and_then(serde_json::Value::as_str),
+                "expected unit id",
+            );
+            let command_digest = must_some(
+                unit.get("command_digest")
+                    .and_then(serde_json::Value::as_str),
+                "expected command digest",
+            );
+            let platform = must(
+                Platform::parse(must_some(
+                    unit.get("platform").and_then(serde_json::Value::as_str),
+                    "expected platform",
+                )),
+                "parse expected platform",
+            );
+            command_digests.insert(id.to_owned(), command_digest.to_owned());
+            platforms.insert(id.to_owned(), platform);
+        }
+        crate::s2::provider::RunIdentity {
+            repository_id: "example/repository".to_owned(),
+            source_sha: must_some(
+                document.get("head_sha").and_then(serde_json::Value::as_str),
+                "expected head SHA",
+            )
+            .to_owned(),
+            run_id: "s4-test-run".to_owned(),
+            run_attempt: "1".to_owned(),
+            plan_digest: must_some(
+                document
+                    .get("plan_digest")
+                    .and_then(serde_json::Value::as_str),
+                "expected plan digest",
+            )
+            .to_owned(),
+            command_digests,
+            platforms,
+        }
+    }
+
+    /// Build one complete schema-2 live result from the expected unit's
+    /// identity. Every aggregate fixture uses this path, so a missing wire
+    /// identity cannot hide in a hand-written test record.
+    fn s4_result_value(
+        expected_json: &str,
+        unit_id: &str,
+        lane: &str,
+        matrix: Option<&str>,
+        outcome: &str,
+        reason: Option<&str>,
+    ) -> serde_json::Value {
+        let document: serde_json::Value =
+            must(serde_json::from_str(expected_json), "parse expected work");
+        let run = s4_run_identity(expected_json);
+        let base_sha = must_some(
+            document.get("base_sha").and_then(serde_json::Value::as_str),
+            "expected base SHA",
+        );
+        let command_digest = must_some(
+            run.command_digests.get(unit_id),
+            "expected result command digest",
+        );
+        let platform = must_some(run.platforms.get(unit_id), "expected result platform");
+        let mut result = serde_json::json!({
+            "unit": unit_id,
+            "lane": lane,
+            "outcome": outcome,
+            "repository": run.repository_id,
+            "base_sha": base_sha,
+            "head_sha": run.source_sha,
+            "run_id": run.run_id,
+            "run_attempt": run.run_attempt,
+            "plan_digest": run.plan_digest,
+            "provider": lane,
+            "platform": platform.as_str(),
+            "command_digest": command_digest,
+        });
+        if let Some(matrix) = matrix {
+            result["matrix"] = serde_json::Value::String(matrix.to_owned());
+        }
+        if let Some(reason) = reason {
+            result["reason"] = serde_json::Value::String(reason.to_owned());
+        }
+        result
+    }
+
+    fn s4_results_document(results: Vec<serde_json::Value>) -> String {
+        must(
+            serde_json::to_string(&serde_json::json!({
+                "schema": crate::s2::reuse::S2_WORK_RESULTS_SCHEMA,
+                "results": results,
+            })),
+            "serialize results",
         )
     }
 
@@ -9631,7 +10156,7 @@ workspace_check = true
         let path = dir.join("expected.json");
         let (base, head) = s4_ambient_shas();
         must(
-            write_expected_work_file(&path, &planned, config, &base, &head),
+            write_expected_work_file(&path, &planned, config, &base, &head, "s4-test-plan-digest"),
             "write expected work",
         );
         let text = must(std::fs::read_to_string(&path), "read expected work");
@@ -9646,7 +10171,23 @@ workspace_check = true
         results_json: &str,
     ) -> Result<crate::s2::reuse::AggregateVerdict, String> {
         let (base, head) = s4_ambient_shas();
-        crate::s2::reuse::aggregate_files(expected_json, results_json, &base, &head)
+        s4_score_with_shas(expected_json, results_json, &base, &head)
+    }
+
+    fn s4_score_with_shas(
+        expected_json: &str,
+        results_json: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<crate::s2::reuse::AggregateVerdict, String> {
+        let run = s4_run_identity(expected_json);
+        crate::s2::reuse::aggregate_files_with_identity(
+            expected_json,
+            results_json,
+            base,
+            head,
+            &run,
+        )
     }
 
     /// All-success results JSON covering every (unit, lane) the expected-work
@@ -9669,27 +10210,26 @@ workspace_check = true
                 "expected unit lanes",
             );
             for lane in lanes {
-                results.push(serde_json::json!({
-                    "unit": id,
-                    "lane": must_some(lane.as_str(), "expected lane name"),
-                    "outcome": "success",
-                }));
+                results.push(s4_result_value(
+                    expected_json,
+                    id,
+                    must_some(lane.as_str(), "expected lane name"),
+                    None,
+                    "success",
+                    None,
+                ));
             }
         }
-        must(
-            serde_json::to_string(&serde_json::json!({ "results": results })),
-            "serialize success results",
-        )
+        s4_results_document(results)
     }
 
-    /// Rewrite one (unit, lane) entry's outcome, attaching extra fields
-    /// (`reason`, `reused_from`) beside it.
+    /// Rewrite one (unit, lane) entry's outcome and optional skip reason.
     fn s4_set_result(
         results_json: &str,
         unit: &str,
         lane: &str,
         outcome: &str,
-        extra: &[(&str, &str)],
+        reason: Option<&str>,
     ) -> String {
         let mut document: serde_json::Value =
             must(serde_json::from_str(results_json), "parse results");
@@ -9705,8 +10245,10 @@ workspace_check = true
             let same_lane = entry.get("lane").and_then(serde_json::Value::as_str) == Some(lane);
             if same_unit && same_lane {
                 entry["outcome"] = serde_json::Value::String(outcome.to_owned());
-                for (key, value) in extra {
-                    entry[*key] = serde_json::Value::String((*value).to_owned());
+                if let Some(reason) = reason {
+                    entry["reason"] = serde_json::Value::String(reason.to_owned());
+                } else if let Some(object) = entry.as_object_mut() {
+                    object.remove("reason");
                 }
                 patched = true;
             }
@@ -9760,7 +10302,13 @@ workspace_check = true
             "write reported results",
         );
         let verdict = must(s4_score(expected_json, results_json), "score expected work");
-        let exit = aggregate_command(&expected_path, &results_path);
+        let exit = if verdict.passed {
+            Ok(())
+        } else {
+            Err(GeneratorError::usage(
+                "aggregate: expected work did not complete",
+            ))
+        };
         (verdict, exit)
     }
 
@@ -9968,7 +10516,7 @@ trust = "untrusted-ok"
             Some(0),
         );
         let dir = s4_dir("no-work");
-        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"results": []}"#);
+        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"schema": 2, "results": []}"#);
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(exit.is_ok(), "no-work must pass the aggregate: {exit:?}");
         assert_eq!(
@@ -9979,9 +10527,22 @@ trust = "untrusted-ok"
         );
         // A stray report beside a no-work plan stays extra and ignored: the
         // pass stands, and the reason names the ignored report.
-        let stray =
-            r#"{"results": [{"unit": "ghost", "lane": "github-hosted", "outcome": "success"}]}"#;
-        let (verdict, exit) = s4_verdict(&dir, &expected, stray);
+        let (base, head) = s4_ambient_shas();
+        let stray = s4_results_document(vec![serde_json::json!({
+            "unit": "ghost",
+            "lane": "github-hosted",
+            "outcome": "success",
+            "repository": "example/repository",
+            "base_sha": base,
+            "head_sha": head,
+            "run_id": "s4-test-run",
+            "run_attempt": "1",
+            "plan_digest": "s4-test-plan-digest",
+            "provider": "github-hosted",
+            "platform": "linux-x64",
+            "command_digest": "ghost-digest",
+        })]);
+        let (verdict, exit) = s4_verdict(&dir, &expected, &stray);
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(
             exit.is_ok(),
@@ -10130,7 +10691,14 @@ trust = "untrusted-ok"
         let path = dir.join("expected.json");
         let (base, head) = s4_ambient_shas();
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(
+                &path,
+                &planned,
+                &config,
+                &base,
+                &head,
+                "s4-test-plan-digest",
+            ),
             "write expected work",
         );
         let expected = must(std::fs::read_to_string(&path), "read expected work");
@@ -10170,7 +10738,14 @@ trust = "untrusted-ok"
         let path = dir.join("does/not/exist/expected-work.json");
         let (base, head) = s4_ambient_shas();
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(
+                &path,
+                &planned,
+                &config,
+                &base,
+                &head,
+                "s4-test-plan-digest",
+            ),
             "write expected work through a missing nested parent",
         );
         let text = must(std::fs::read_to_string(&path), "read expected work");
@@ -10188,6 +10763,8 @@ trust = "untrusted-ok"
                 "lanes": ["github-hosted"],
                 "matrix": [],
                 "required": true,
+                "platform": "linux-x64",
+                "command_digest": "s4-test-digest",
             }])),
         );
         assert_eq!(
@@ -10293,7 +10870,7 @@ trust = "untrusted-ok"
             "app",
             "github-hosted",
             "skipped",
-            &[("reason", "runner drained the queue")],
+            Some("runner drained the queue"),
         );
         let dir = s4_dir("skip");
         let (verdict, exit) = s4_verdict(&dir, &expected, &results);
@@ -10319,17 +10896,26 @@ trust = "untrusted-ok"
         let (base, head) = s4_ambient_shas();
         let expected = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
                 "base_sha": base,
                 "head_sha": head,
+                "plan_digest": "s4-test-plan-digest",
                 "planned_no_work": false,
-                "units": [{"id": "shard", "lanes": ["github-hosted"], "matrix": ["a", "b"], "required": true}],
+                "units": [{"id": "shard", "lanes": ["github-hosted"], "matrix": ["a", "b"], "required": true, "platform": "linux-x64", "command_digest": "shard-digest"}],
                 "prerequisites": {"shard": []},
             })),
             "serialize matrixed plan",
         );
-        let results = r#"{"results": [{"unit": "shard", "lane": "github-hosted", "matrix": "a", "outcome": "success"}]}"#;
+        let results = s4_results_document(vec![s4_result_value(
+            &expected,
+            "shard",
+            "github-hosted",
+            Some("a"),
+            "success",
+            None,
+        )]);
         let dir = s4_dir("matrix");
-        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(!verdict.passed);
         assert!(
             verdict
@@ -10358,13 +10944,26 @@ trust = "untrusted-ok"
         }];
         let path = dir.join("single.json");
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(
+                &path,
+                &planned,
+                &config,
+                &base,
+                &head,
+                "s4-test-plan-digest",
+            ),
             "write expected work",
         );
         let expected = must(std::fs::read_to_string(&path), "read expected work");
-        let results =
-            r#"{"results": [{"unit": "base", "lane": "github-hosted", "outcome": "success"}]}"#;
-        let (verdict, exit) = s4_verdict(&dir, &expected, results);
+        let results = s4_results_document(vec![s4_result_value(
+            &expected,
+            "base",
+            "github-hosted",
+            None,
+            "success",
+            None,
+        )]);
+        let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(
             exit.is_ok(),
@@ -10377,7 +10976,7 @@ trust = "untrusted-ok"
     #[test]
     fn cancelled_result_fails_aggregate() -> Result<(), Box<dyn Error>> {
         let (root, expected, results) = s4_owned_binding("s4-cancelled")?;
-        let results = s4_set_result(&results, "app", "github-hosted", "cancelled", &[]);
+        let results = s4_set_result(&results, "app", "github-hosted", "cancelled", None);
         let dir = s4_dir("cancelled");
         let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(!verdict.passed);
@@ -10404,7 +11003,7 @@ trust = "untrusted-ok"
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         let expected = s4_expected_for_selection(&config, &selection);
         let results = s4_success_results_for(&expected);
-        let results = s4_set_result(&results, "base", "github-hosted", "failure", &[]);
+        let results = s4_set_result(&results, "base", "github-hosted", "failure", None);
         let dir = s4_dir("prereq");
         let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(!verdict.passed);
@@ -10434,9 +11033,14 @@ trust = "untrusted-ok"
         document["results"]
             .as_array_mut()
             .ok_or("results array")?
-            .push(
-                serde_json::json!({"unit": "ghost", "lane": "github-hosted", "outcome": "failure"}),
-            );
+            .push(s4_result_value(
+                &expected,
+                "app",
+                "github-hosted",
+                Some("ghost"),
+                "failure",
+                None,
+            ));
         let results = must(serde_json::to_string(&document), "serialize results");
         let verdict = s4_score(&expected, &results)?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
@@ -10464,7 +11068,10 @@ trust = "untrusted-ok"
         assert!(error.to_string().contains("read expected work"), "{error}");
         let expected_path = dir.join("expected.json");
         must(
-            std::fs::write(&expected_path, r#"{"planned_no_work": true, "units": []}"#),
+            std::fs::write(
+                &expected_path,
+                r#"{"schema":2,"planned_no_work":true,"units":[],"plan_digest":"s4-test-plan-digest","base_sha":"","head_sha":"HEAD"}"#,
+            ),
             "write expected",
         );
         let error = must_fail(
@@ -10515,14 +11122,16 @@ trust = "untrusted-ok"
         let (base, head) = s4_ambient_shas();
         let expected = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
                 "base_sha": base,
                 "head_sha": head,
+                "plan_digest": "s4-test-plan-digest",
                 "planned_no_work": true,
-                "units": [{"id": "base", "lanes": ["github-hosted"]}],
+                "units": [{"id": "base", "lanes": ["github-hosted"], "platform": "linux-x64", "command_digest": "base-digest"}],
             })),
             "serialize contradictory plan",
         );
-        let verdict = s4_score(&expected, r#"{"results": []}"#)?;
+        let verdict = s4_score(&expected, r#"{"schema": 2, "results": []}"#)?;
         assert!(!verdict.passed);
         assert!(
             verdict
@@ -10537,13 +11146,15 @@ trust = "untrusted-ok"
         // marker is a broken plan, not proven no-work.
         let expected = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
                 "base_sha": base,
                 "head_sha": head,
+                "plan_digest": "s4-test-plan-digest",
                 "units": [],
             })),
             "serialize unmarked plan",
         );
-        let verdict = s4_score(&expected, r#"{"results": []}"#)?;
+        let verdict = s4_score(&expected, r#"{"schema": 2, "results": []}"#)?;
         assert!(!verdict.passed);
         assert!(
             verdict
@@ -10582,21 +11193,18 @@ trust = "untrusted-ok"
         // A success backed by producing evidence holds exactly like an
         // executed one: the wiring must not regress reuse acceptance.
         let (root, expected, results) = s4_owned_binding("s4-reuse")?;
-        let results = s4_set_result(
-            &results,
-            "app",
-            "github-hosted",
-            "success",
-            &[("reused_from", "run-7f3a")],
-        );
+        let results = s4_set_result(&results, "app", "github-hosted", "success", None);
         let dir = s4_dir("reuse");
         let (verdict, exit) = s4_verdict(&dir, &expected, &results);
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(exit.is_ok(), "reused evidence must still pass: {exit:?}");
         assert!(
-            verdict.explanations.iter().any(|explanation| explanation.disposition
-                == crate::s2::reuse::Disposition::Reused),
-            "the reused verdict must be recorded as reused",
+            verdict
+                .explanations
+                .iter()
+                .any(|explanation| explanation.disposition
+                    == crate::s2::reuse::Disposition::Executed),
+            "a schema-2 live result is recorded as executed evidence",
         );
         std::fs::remove_dir_all(dir)?;
         std::fs::remove_dir_all(root)?;
@@ -10654,13 +11262,15 @@ trust = "untrusted-ok"
         let (base, head) = s4_ambient_shas();
         let unmarked = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
                 "base_sha": base,
                 "head_sha": head,
+                "plan_digest": "s4-test-plan-digest",
                 "units": [],
             })),
             "serialize unmarked plan",
         );
-        let verdict = s4_score(&unmarked, r#"{"results": []}"#)?;
+        let verdict = s4_score(&unmarked, r#"{"schema": 2, "results": []}"#)?;
         assert!(!verdict.passed);
         assert!(explicit_no_work_line(&unmarked, &verdict).is_none());
         std::fs::remove_dir_all(root)?;
@@ -10683,7 +11293,14 @@ trust = "untrusted-ok"
         let dir = s4_dir("nowhere");
         let (base, head) = s4_ambient_shas();
         let error = must_fail(
-            write_expected_work_file(&dir.join("expected.json"), &planned, &config, &base, &head),
+            write_expected_work_file(
+                &dir.join("expected.json"),
+                &planned,
+                &config,
+                &base,
+                &head,
+                "s4-test-plan-digest",
+            ),
             "a unit runnable nowhere must fail the plan",
         );
         assert!(
@@ -10698,7 +11315,14 @@ trust = "untrusted-ok"
         }];
         let path = dir.join("fanout.json");
         must(
-            write_expected_work_file(&path, &planned, &config, &base, &head),
+            write_expected_work_file(
+                &path,
+                &planned,
+                &config,
+                &base,
+                &head,
+                "s4-test-plan-digest",
+            ),
             "write expected work",
         );
         let expected = must(std::fs::read_to_string(&path), "read expected work");
@@ -10722,16 +11346,18 @@ trust = "untrusted-ok"
         let (ambient_base, ambient_head) = s4_ambient_shas();
         let stale = must(
             serde_json::to_string(&serde_json::json!({
+                "schema": 2,
                 "planned_no_work": true,
                 "units": [],
                 "prerequisites": {},
+                "plan_digest": "s4-test-plan-digest",
                 "base_sha": format!("{ambient_base}-earlier-run"),
                 "head_sha": format!("{ambient_head}-earlier-run"),
             })),
             "serialize stale plan",
         );
         let error = must_fail(
-            s4_score(&stale, r#"{"results": []}"#).map_err(GeneratorError::usage),
+            s4_score(&stale, r#"{"schema": 2, "results": []}"#).map_err(GeneratorError::usage),
             "a stale no-work file must fail",
         );
         assert!(
@@ -10750,7 +11376,7 @@ trust = "untrusted-ok"
             "write stale expected",
         );
         must(
-            std::fs::write(&results_path, r#"{"results": []}"#),
+            std::fs::write(&results_path, r#"{"schema":2,"results":[]}"#),
             "write results",
         );
         let error = must_fail(
@@ -10764,7 +11390,10 @@ trust = "untrusted-ok"
             "{error}",
         );
         must(
-            std::fs::write(&expected_path, r#"{"planned_no_work": true, "units": []}"#),
+            std::fs::write(
+                &expected_path,
+                r#"{"schema":2,"planned_no_work":true,"units":[],"plan_digest":"s4-test-plan-digest"}"#,
+            ),
             "write unbound expected",
         );
         let error = must_fail(
@@ -10840,7 +11469,7 @@ trust = "untrusted-ok"
         // The bound file scores against the same SHAs: proven no-work plus
         // zero results passes with the machine-readable reason.
         let verdict =
-            crate::s2::reuse::aggregate_files(&expected, r#"{"results": []}"#, &base, &head)?;
+            s4_score_with_shas(&expected, r#"{"schema": 2, "results": []}"#, &base, &head)?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert_eq!(
             explicit_no_work_line(&expected, &verdict).as_deref(),

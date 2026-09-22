@@ -19,7 +19,7 @@
 //! Cross-run reuse is an optional exact-identity cache acceleration; it never
 //! replaces required same-run transport or the guarded local rebuild.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -151,7 +151,7 @@ struct ProductManifest {
     schema: String,
     producer: String,
     product: String,
-    inputs_digest: String,
+    inputs_digest: Option<String>,
     identity: Option<ProductIdentity>,
     identity_digest: Option<String>,
     files: BTreeMap<String, String>,
@@ -163,7 +163,7 @@ struct ProductManifest {
 pub(crate) struct StageRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
-    pub(crate) inputs_digest: String,
+    pub(crate) inputs_digest: Option<String>,
     pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) stage: PathBuf,
@@ -183,7 +183,7 @@ pub(crate) enum VerifyMode {
 pub(crate) struct VerifyRequest {
     pub(crate) producer: String,
     pub(crate) product: String,
-    pub(crate) inputs_digest: String,
+    pub(crate) inputs_digest: Option<String>,
     pub(crate) identity: Option<ProductIdentity>,
     pub(crate) outputs: Vec<String>,
     pub(crate) output_files: Vec<String>,
@@ -418,8 +418,14 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             "stage-product needs at least one output; refusing to stage an empty product",
         ));
     }
+    let mut declared_outputs = BTreeSet::new();
     for output in &request.outputs {
         manifest_rel(output)?;
+        if !declared_outputs.insert(output) {
+            return Err(GeneratorError::usage(format!(
+                "stage-product declares duplicate output root: {output}"
+            )));
+        }
     }
     if request.producer.is_empty() || request.product.is_empty() {
         return Err(GeneratorError::usage(
@@ -433,9 +439,9 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
                 "stage-product product identity does not match producer/product",
             ));
         }
-        if identity.inputs_digest.as_deref() != Some(request.inputs_digest.as_str()) {
+        if identity.inputs_digest != request.inputs_digest {
             return Err(GeneratorError::usage(
-                "stage-product product identity inputs_digest does not match --digest",
+                "stage-product product identity inputs_digest does not match optional --digest",
             ));
         }
     }
@@ -537,6 +543,7 @@ pub(crate) fn verify_product(
     root: &Path,
     request: &VerifyRequest,
 ) -> Result<usize, GeneratorError> {
+    let mut declared_outputs = BTreeSet::new();
     if let VerifyMode::Install { marker, .. } = &request.mode
         && !valid_env_name(marker)
     {
@@ -546,15 +553,20 @@ pub(crate) fn verify_product(
     }
     for output in &request.outputs {
         manifest_rel(output)?;
+        if !declared_outputs.insert(output) {
+            return Err(GeneratorError::usage(format!(
+                "verify-product declares duplicate output root: {output}"
+            )));
+        }
     }
     let stage = root.join(&request.stage);
     let manifest = load_manifest(&stage)?;
     check_manifest_identity(&manifest, request)?;
-    check_manifest_paths(&manifest, request)?;
+    let manifest_paths = check_manifest_paths(&manifest, request)?;
     let dest = stage.join(STAGED_OUTPUTS_DIR);
-    verify_staged_contents(&manifest, &dest, request)?;
+    verify_staged_contents(&manifest, &dest, request, &manifest_paths)?;
     if let VerifyMode::Install { marker, env_file } = &request.mode {
-        install_verified_product(&manifest, root, &dest)?;
+        install_verified_product(&manifest, &request.outputs, root, &dest)?;
         export_marker(marker, env_file)?;
     }
     Ok(manifest.files.len())
@@ -591,17 +603,18 @@ fn check_manifest_identity(
             manifest.product.as_str(),
             request.product.as_str(),
         ),
-        (
-            "inputs_digest",
-            manifest.inputs_digest.as_str(),
-            request.inputs_digest.as_str(),
-        ),
     ] {
         if got != want {
             return Err(GeneratorError::usage(format!(
                 "product manifest {field} mismatch: {got:?} != {want:?}"
             )));
         }
+    }
+    if manifest.inputs_digest != request.inputs_digest {
+        return Err(GeneratorError::usage(format!(
+            "product manifest inputs_digest mismatch: {:?} != {:?}",
+            manifest.inputs_digest, request.inputs_digest
+        )));
     }
     match (&manifest.identity, &request.identity) {
         (None, None) => {
@@ -638,7 +651,7 @@ fn check_manifest_identity(
                     "product manifest typed identity digest mismatch".to_owned(),
                 ));
             }
-            if got.inputs_digest.as_deref() != Some(request.inputs_digest.as_str()) {
+            if got.inputs_digest != request.inputs_digest {
                 return Err(GeneratorError::usage(
                     "product manifest typed identity inputs_digest mismatch".to_owned(),
                 ));
@@ -663,12 +676,31 @@ fn check_manifest_identity(
 fn check_manifest_paths(
     manifest: &ProductManifest,
     request: &VerifyRequest,
-) -> Result<(), GeneratorError> {
-    for rel in manifest.files.keys().chain(manifest.links.keys()) {
+) -> Result<BTreeMap<String, ManifestEntryKind>, GeneratorError> {
+    let mut paths = BTreeMap::new();
+    for rel in manifest.files.keys() {
         manifest_rel(rel)?;
         if !under_outputs(rel, &request.outputs) {
             return Err(GeneratorError::usage(format!(
                 "product manifest path `{rel}` escapes the declared output roots"
+            )));
+        }
+        if paths.insert(rel.clone(), ManifestEntryKind::File).is_some() {
+            return Err(GeneratorError::usage(format!(
+                "product manifest contains duplicate path: {rel}"
+            )));
+        }
+    }
+    for rel in manifest.links.keys() {
+        manifest_rel(rel)?;
+        if !under_outputs(rel, &request.outputs) {
+            return Err(GeneratorError::usage(format!(
+                "product manifest path `{rel}` escapes the declared output roots"
+            )));
+        }
+        if paths.insert(rel.clone(), ManifestEntryKind::Link).is_some() {
+            return Err(GeneratorError::usage(format!(
+                "product manifest contains duplicate path: {rel}"
             )));
         }
     }
@@ -679,46 +711,207 @@ fn check_manifest_paths(
                 "product manifest path `{dir}` escapes the declared output roots"
             )));
         }
+        if paths
+            .insert(dir.clone(), ManifestEntryKind::Directory)
+            .is_some()
+        {
+            return Err(GeneratorError::usage(format!(
+                "product manifest contains duplicate path: {dir}"
+            )));
+        }
+    }
+    Ok(paths)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ManifestEntryKind {
+    File,
+    Link,
+    Directory,
+}
+
+fn staged_entry_kind(metadata: &fs::Metadata) -> Result<ManifestEntryKind, GeneratorError> {
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        Ok(ManifestEntryKind::Link)
+    } else if metadata.is_dir() {
+        Ok(ManifestEntryKind::Directory)
+    } else if metadata.is_file() {
+        Ok(ManifestEntryKind::File)
+    } else {
+        Err(GeneratorError::usage(
+            "product artifact contains an unsupported entry type".to_owned(),
+        ))
+    }
+}
+
+fn manifest_entry_kind_name(kind: ManifestEntryKind) -> &'static str {
+    match kind {
+        ManifestEntryKind::File => "file",
+        ManifestEntryKind::Link => "link",
+        ManifestEntryKind::Directory => "directory",
+    }
+}
+
+/// Whether a path is an implicit directory needed to reach a declared root.
+fn output_parent(rel: &str, outputs: &[String]) -> bool {
+    outputs.iter().any(|output| {
+        output.len() > rel.len()
+            && output.starts_with(rel)
+            && output.as_bytes().get(rel.len()) == Some(&b'/')
+    })
+}
+
+/// Walk one staged directory without following symlinks. Paths above declared
+/// roots are allowed only when they are implicit directories needed to reach
+/// one of those roots.
+fn walk_staged_directory(
+    manifest: &ProductManifest,
+    dir: &Path,
+    rel_dir: &str,
+    outputs: &[String],
+    manifest_paths: &BTreeMap<String, ManifestEntryKind>,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
+        .map_err(|error| GeneratorError::io("walk staged product", dir, &error))?
+        .collect::<Result<_, _>>()
+        .map_err(|error| GeneratorError::io("walk staged product", dir, &error))?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "product artifact path is not UTF-8: {}",
+                path.display()
+            ))
+        })?;
+        let rel = if rel_dir.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{rel_dir}/{name}")
+        };
+        manifest_rel(&rel)?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("inspect staged product", &path, &error))?;
+        let actual = staged_entry_kind(&metadata)?;
+        let expected = manifest_paths.get(&rel).copied();
+        if expected.is_none() && !output_parent(&rel, outputs) {
+            return Err(GeneratorError::usage(format!(
+                "product artifact contains unmanifested extra entry: {rel}"
+            )));
+        }
+        if let Some(expected) = expected {
+            if output_parent(&rel, outputs) && expected != ManifestEntryKind::Directory {
+                return Err(GeneratorError::usage(format!(
+                    "product entry type conflict at {rel}: output parent is not a directory"
+                )));
+            }
+            if actual != expected {
+                return Err(GeneratorError::usage(format!(
+                    "product entry type conflict at {rel}: manifest expects {}, artifact has {}",
+                    manifest_entry_kind_name(expected),
+                    manifest_entry_kind_name(actual),
+                )));
+            }
+            if !seen.insert(rel.clone()) {
+                return Err(GeneratorError::usage(format!(
+                    "product artifact contains duplicate path: {rel}"
+                )));
+            }
+            match actual {
+                ManifestEntryKind::File => {
+                    let Some(digest) = manifest.files.get(&rel) else {
+                        return Err(GeneratorError::usage(format!(
+                            "product manifest has no file digest for: {rel}"
+                        )));
+                    };
+                    if sha256_file(&path)? != *digest {
+                        return Err(GeneratorError::usage(format!(
+                            "product file digest mismatch: {rel}"
+                        )));
+                    }
+                }
+                ManifestEntryKind::Link => {
+                    let Some(link) = manifest.links.get(&rel) else {
+                        return Err(GeneratorError::usage(format!(
+                            "product manifest has no link entry for: {rel}"
+                        )));
+                    };
+                    let target = fs::read_link(&path).map_err(|_| {
+                        GeneratorError::usage(format!("product link missing from artifact: {rel}"))
+                    })?;
+                    if target.to_str() != Some(link.target.as_str()) {
+                        return Err(GeneratorError::usage(format!(
+                            "product link mismatch in artifact: {rel}"
+                        )));
+                    }
+                    if !link_target_safe(&link.target) {
+                        return Err(GeneratorError::usage(format!(
+                            "product link target escapes the product tree: {rel}"
+                        )));
+                    }
+                }
+                ManifestEntryKind::Directory => {
+                    walk_staged_directory(manifest, &path, &rel, outputs, manifest_paths, seen)?;
+                }
+            }
+        } else {
+            if actual != ManifestEntryKind::Directory {
+                return Err(GeneratorError::usage(format!(
+                    "product entry type conflict at {rel}: implicit output parent is not a directory"
+                )));
+            }
+            walk_staged_directory(manifest, &path, &rel, outputs, manifest_paths, seen)?;
+        }
     }
     Ok(())
 }
 
-/// Digest every staged file against the manifest, confirm every staged
-/// link, and require every declared structural file.
+/// Digest every staged file against the manifest, confirm every staged link,
+/// exact-walk every declared output root, and require every declared file.
 fn verify_staged_contents(
     manifest: &ProductManifest,
     dest: &Path,
     request: &VerifyRequest,
+    manifest_paths: &BTreeMap<String, ManifestEntryKind>,
 ) -> Result<(), GeneratorError> {
-    for (rel, digest) in &manifest.files {
-        let path = dest.join(rel);
-        let metadata = fs::symlink_metadata(&path).map_err(|_| {
-            GeneratorError::usage(format!("product file missing from artifact: {rel}"))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+    for output in &request.outputs {
+        if !manifest_paths.contains_key(output) {
             return Err(GeneratorError::usage(format!(
-                "product file missing from artifact: {rel}"
-            )));
-        }
-        if sha256_file(&path)? != *digest {
-            return Err(GeneratorError::usage(format!(
-                "product file digest mismatch: {rel}"
+                "product manifest omits declared output root: {output}"
             )));
         }
     }
-    for (rel, link) in &manifest.links {
-        let path = dest.join(rel);
-        let target = fs::read_link(&path).map_err(|_| {
-            GeneratorError::usage(format!("product link missing from artifact: {rel}"))
-        })?;
-        if target.to_str() != Some(link.target.as_str()) {
+    let metadata = fs::symlink_metadata(dest).map_err(|_| {
+        GeneratorError::usage("product outputs directory missing from artifact".to_owned())
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(GeneratorError::usage(
+            "product outputs artifact entry is not a directory".to_owned(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    walk_staged_directory(
+        manifest,
+        dest,
+        "",
+        &request.outputs,
+        manifest_paths,
+        &mut seen,
+    )?;
+    for output in &request.outputs {
+        if !seen.contains(output) {
             return Err(GeneratorError::usage(format!(
-                "product link mismatch in artifact: {rel}"
+                "declared output root missing from artifact: {output}"
             )));
         }
-        if !link_target_safe(&link.target) {
+    }
+    for rel in manifest_paths.keys() {
+        if !seen.contains(rel) {
             return Err(GeneratorError::usage(format!(
-                "product link target escapes the product tree: {rel}"
+                "product manifest entry missing from artifact: {rel}"
             )));
         }
     }
@@ -737,9 +930,13 @@ fn verify_staged_contents(
 /// then regular files. Every target was containment-checked already.
 fn install_verified_product(
     manifest: &ProductManifest,
+    outputs: &[String],
     root: &Path,
     dest: &Path,
 ) -> Result<(), GeneratorError> {
+    for output in outputs {
+        clear_target(&root.join(output))?;
+    }
     let mut dirs = manifest.dirs.clone();
     dirs.sort();
     for rel in &dirs {
@@ -782,6 +979,188 @@ fn export_marker(marker: &str, env_file: &Path) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// Render the generic macOS semantic validator for a typed `XCFramework`.
+/// Callers pass the staged or source output root to the returned function.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "XCFramework output paths are an exact, case-sensitive contract"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fail-closed generated shell validator is intentionally kept together"
+)]
+fn render_apple_xcframework_validation(
+    product: &NamedProduct,
+    identity: &ProductIdentity,
+) -> Option<String> {
+    if identity.target != "apple-xcframework" {
+        return None;
+    }
+    let mut script = String::from(
+        "validate_apple_xcframework() {\n\
+          local root=\"$1\"\n\
+          local framework info plist_dump slice modulemap library lipo_info\n\
+          local framework_count=0 library_count\n\
+          if [[ -z \"$root\" ]]; then\n\
+            echo \"Apple XCFramework validation root is empty\" >&2\n\
+            return 1\n\
+          fi\n",
+    );
+    for file in &product.output_files {
+        let path = shell_quote(file);
+        let _ = writeln!(
+            script,
+            "          if [[ ! -e \"$root\"/{path} ]]; then\n\
+                        echo \"declared Apple product file missing:\" {path} >&2\n\
+                        return 1\n\
+                      fi"
+        );
+    }
+    let module_pattern = r"(^|[[:space:]])(framework[[:space:]]+)?module[[:space:]]+[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*\{";
+    let mut framework_count = 0usize;
+    for output in &product.outputs {
+        if !output.ends_with(".xcframework") {
+            continue;
+        }
+        framework_count += 1;
+        let output_path = output;
+        let output = shell_quote(output_path);
+        let _ = writeln!(
+            script,
+            "          framework=\"$root\"/{output}\n\
+                      framework_count=$((framework_count + 1))\n\
+                      if [[ ! -d \"$framework\" ]]; then\n\
+                        echo \"Apple XCFramework root missing:\" {output} >&2\n\
+                        return 1\n\
+                      fi\n\
+                      info=\"$framework/Info.plist\"\n\
+                      if ! plutil -lint \"$info\" >/dev/null 2>&1; then\n\
+                        echo \"Apple XCFramework Info.plist is invalid: $info\" >&2\n\
+                        return 1\n\
+                      fi\n\
+                      if ! plist_dump=\"$(plutil -p \"$info\" 2>/dev/null)\"; then\n\
+                        echo \"Apple XCFramework Info.plist cannot be inspected: $info\" >&2\n\
+                        return 1\n\
+                      fi\n\
+                      if ! grep -Fq '\"AvailableLibraries\" =>' <<<\"$plist_dump\"; then\n\
+                        echo \"Apple XCFramework Info.plist has no AvailableLibraries: $info\" >&2\n\
+                        return 1\n\
+                      fi"
+        );
+        for slice in &identity.architectures {
+            let Some((platform, suffix)) = slice.split_once('-') else {
+                let slice = shell_quote(slice);
+                let _ = writeln!(
+                    script,
+                    "          echo \"unsupported Apple XCFramework slice:\" {} >&2\n\
+                                return 1",
+                    slice
+                );
+                continue;
+            };
+            let suffix = suffix.strip_suffix("-simulator").unwrap_or(suffix);
+            let platform = match platform {
+                "macos" => "macos",
+                "ios" => "ios",
+                _ => "",
+            };
+            if platform.is_empty() || suffix.is_empty() {
+                let slice = shell_quote(slice);
+                let _ = writeln!(
+                    script,
+                    "          echo \"unsupported Apple XCFramework slice:\" {} >&2\n\
+                                return 1",
+                    slice
+                );
+                continue;
+            }
+            let prefix = format!("{output_path}/{slice}/");
+            let libraries = product
+                .output_files
+                .iter()
+                .filter(|file| file.starts_with(&prefix) && file.ends_with(".a"))
+                .map(|file| shell_quote(file))
+                .collect::<Vec<_>>();
+            let libraries = if libraries.is_empty() {
+                "''".to_owned()
+            } else {
+                libraries.join(" ")
+            };
+            let slice_needle = shell_quote(&format!("\"LibraryIdentifier\" => \"{slice}\""));
+            let platform_needle = shell_quote(&format!("\"SupportedPlatform\" => \"{platform}\""));
+            let deployment_needle = shell_quote(&format!(
+                "\"MinimumOSVersion\" => \"{}\"",
+                identity.deployment_target
+            ));
+            let slice = shell_quote(slice);
+            let _ = writeln!(
+                script,
+                "          slice=\"$framework\"/{}\n\
+                          if [[ ! -d \"$slice\" ]]; then\n\
+                            echo \"Apple XCFramework slice missing:\" {} >&2\n\
+                            return 1\n\
+                          fi\n\
+                          if ! grep -Fq {slice_needle} <<<\"$plist_dump\"; then\n\
+                            echo \"Apple XCFramework plist is missing slice metadata: {}\" >&2\n\
+                            return 1\n\
+                          fi\n\
+                          if ! grep -Fq {platform_needle} <<<\"$plist_dump\"; then\n\
+                            echo \"Apple XCFramework plist has wrong platform metadata for: {}\" >&2\n\
+                            return 1\n\
+                          fi\n\
+                          if ! grep -Fq {deployment_needle} <<<\"$plist_dump\"; then\n\
+                            echo \"Apple XCFramework plist has wrong deployment metadata for: {}\" >&2\n\
+                            return 1\n\
+                          fi\n\
+                          modulemap=\"$slice/Headers/module.modulemap\"\n\
+                          if [[ ! -s \"$modulemap\" ]] || ! grep -Eq {} \"$modulemap\"; then\n\
+                            echo \"Apple XCFramework modulemap is missing or malformed: $modulemap\" >&2\n\
+                            return 1\n\
+                          fi\n\
+                          library_count=0\n\
+                          for library in {libraries}; do\n\
+                            library_count=$((library_count + 1))\n\
+                            if ! lipo_info=\"$(lipo -info \"$library\" 2>/dev/null)\"; then\n\
+                              echo \"Apple XCFramework static library is not inspectable: $library\" >&2\n\
+                              return 1\n\
+                            fi",
+                slice,
+                slice,
+                slice,
+                slice,
+                slice,
+                shell_quote(module_pattern)
+            );
+            for architecture in suffix.split('_') {
+                let needle = shell_quote(&format!("(^|[[:space:]]){architecture}([[:space:]]|$)"));
+                let _ = writeln!(
+                    script,
+                    "            if ! grep -Eq {needle} <<<\"$lipo_info\"; then\n\
+                              echo \"Apple XCFramework static library lacks architecture {}: $library\" >&2\n\
+                              return 1\n\
+                            fi",
+                    shell_quote(architecture)
+                );
+            }
+            script.push_str(
+                "          done\n\
+                          if (( library_count == 0 )); then\n\
+                            echo \"Apple XCFramework slice declares no static library\" >&2\n\
+                            return 1\n\
+                          fi\n",
+            );
+        }
+    }
+    if framework_count == 0 {
+        script.push_str(
+            "          echo \"typed apple-xcframework product declares no .xcframework output\" >&2\n\
+                      return 1\n",
+        );
+    }
+    script.push_str("        }\n");
+    Some(script)
+}
+
 /// Split a newline-separated step env list, dropping blank lines.
 fn env_list(name: &str) -> Vec<String> {
     std::env::var(name)
@@ -811,7 +1190,7 @@ pub(crate) fn stage_product_cli(root: &Path, arguments: &[OsString]) -> Result<(
     let request = StageRequest {
         producer: options["producer"].clone(),
         product: options["product"].clone(),
-        inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        inputs_digest: options.get("digest").cloned(),
         identity: parse_identity(&options, "stage-product")?,
         outputs: env_list(OUTPUTS_ENV),
         stage: PathBuf::from(&options["stage"]),
@@ -887,7 +1266,7 @@ pub(crate) fn verify_product_cli(
     let request = VerifyRequest {
         producer: options["producer"].clone(),
         product: options["product"].clone(),
-        inputs_digest: options.get("digest").cloned().unwrap_or_default(),
+        inputs_digest: options.get("digest").cloned(),
         identity: parse_identity(&options, "verify-product")?,
         outputs: env_list(OUTPUTS_ENV),
         output_files: env_list(OUTPUT_FILES_ENV),
@@ -920,14 +1299,13 @@ pub(crate) fn render_producer_block(
     product: &NamedProduct,
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
-    let digest = product.inputs_digest.clone().unwrap_or_default();
     let mut command = format!(
         "velnor-workflow stage-product --producer {} --product {}",
         shell_quote(producer),
         shell_quote(&product.name),
     );
-    if !digest.is_empty() {
-        let _ = write!(command, " --digest {}", shell_quote(&digest));
+    if let Some(digest) = product.inputs_digest.as_deref() {
+        let _ = write!(command, " --digest {}", shell_quote(digest));
     }
     if let Some(identity) = &product.identity {
         let json = identity_json(identity);
@@ -939,8 +1317,21 @@ pub(crate) fn render_producer_block(
         command,
         " --stage \"$RUNNER_TEMP/velnor-products/{artifact}\""
     );
+    let run = product
+        .identity
+        .as_ref()
+        .and_then(|identity| render_apple_xcframework_validation(product, identity))
+        .map_or_else(
+            || format!("run: {command}"),
+            |validation| {
+                format!(
+                    "run: |\n          set -euo pipefail\n          {command}\n{}\n          validate_apple_xcframework \"$RUNNER_TEMP/velnor-products/{artifact}/outputs\"",
+                    indent_block(&validation, "          ")
+                )
+            },
+        );
     format!(
-        "      - name: Stage product {artifact}\n        env:\n          {OUTPUTS_ENV}: |\n{}\n        run: {command}\n      - name: Upload product {artifact}\n        uses: {upload_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n          if-no-files-found: error\n          retention-days: {ARTIFACT_RETENTION_DAYS}\n",
+        "      - name: Stage product {artifact}\n        env:\n          {OUTPUTS_ENV}: |\n{}\n        {run}\n      - name: Upload product {artifact}\n        uses: {upload_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n          if-no-files-found: error\n          retention-days: {ARTIFACT_RETENTION_DAYS}\n",
         indent_block(&product.outputs.join("\n"), "            "),
     )
 }
@@ -956,14 +1347,13 @@ pub(crate) fn render_consumer_block(
     marker: &str,
 ) -> String {
     let artifact = artifact_name(producer, &product.name);
-    let digest = product.inputs_digest.clone().unwrap_or_default();
     let mut command = format!(
         "velnor-workflow verify-product --producer {} --product {}",
         shell_quote(producer),
         shell_quote(&product.name),
     );
-    if !digest.is_empty() {
-        let _ = write!(command, " --digest {}", shell_quote(&digest));
+    if let Some(digest) = product.inputs_digest.as_deref() {
+        let _ = write!(command, " --digest {}", shell_quote(digest));
     }
     if let Some(identity) = &product.identity {
         let json = identity_json(identity);
@@ -971,10 +1361,22 @@ pub(crate) fn render_consumer_block(
             let _ = write!(command, " --identity {}", shell_quote(&json));
         }
     }
-    let _ = write!(
-        command,
-        " --stage \"$RUNNER_TEMP/velnor-products/{artifact}\" --marker {marker}"
-    );
+    let stage_path = format!("\"$RUNNER_TEMP/velnor-products/{artifact}\"");
+    let check_command = format!("{command} --stage {stage_path} --check-only true");
+    let install_command = format!("{command} --stage {stage_path} --marker {marker}");
+    let run = product
+        .identity
+        .as_ref()
+        .and_then(|identity| render_apple_xcframework_validation(product, identity))
+        .map_or_else(
+            || format!("run: {install_command}"),
+            |validation| {
+                format!(
+                    "run: |\n          set -euo pipefail\n          {check_command}\n{}\n          validate_apple_xcframework \"$RUNNER_TEMP/velnor-products/{artifact}/outputs\"\n          {install_command}",
+                    indent_block(&validation, "          ")
+                )
+            },
+        );
     let outputs_value = format!(
         "          {OUTPUTS_ENV}: |\n{}\n",
         indent_block(&product.outputs.join("\n"), "            ")
@@ -988,7 +1390,7 @@ pub(crate) fn render_consumer_block(
         )
     };
     format!(
-        "      - name: Download product {artifact}\n        uses: {download_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n      - name: Verify product {artifact}\n        env:\n{outputs_value}{files_value}        run: {command}\n",
+        "      - name: Download product {artifact}\n        uses: {download_artifact_pin}\n        with:\n          name: {artifact}\n          path: ${{{{ runner.temp }}}}/velnor-products/{artifact}\n      - name: Verify product {artifact}\n        env:\n{outputs_value}{files_value}        {run}\n",
     )
 }
 
@@ -1025,7 +1427,6 @@ pub(crate) fn render_native_product_cache_restore_block(
     let artifact = artifact_name(producer, &product.name);
     let action_path = format!("${{{{ runner.temp }}}}/velnor-native-product-cache/{artifact}");
     let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
-    let digest = product.inputs_digest.as_deref().unwrap_or_default();
     let identity = product.identity.as_ref()?;
     let identity_json = identity_json(identity);
     if identity_json.is_empty() {
@@ -1036,7 +1437,7 @@ pub(crate) fn render_native_product_cache_restore_block(
         shell_quote(producer),
         shell_quote(&product.name),
     );
-    if !digest.is_empty() {
+    if let Some(digest) = product.inputs_digest.as_deref() {
         let _ = write!(command, " --digest {}", shell_quote(digest));
     }
     let _ = write!(
@@ -1056,6 +1457,33 @@ pub(crate) fn render_native_product_cache_restore_block(
             indent_block(&product.output_files.join("\n"), "            ")
         )
     };
+    let command = render_apple_xcframework_validation(product, identity)
+        .map_or_else(|| command.clone(), |validation| {
+        format!(
+            "{{\n\
+              status=0\n\
+              {command} || status=$?\n\
+              if (( status == 0 )); then\n\
+{}\n\
+                validate_apple_xcframework \"$RUNNER_TEMP/velnor-native-product-cache/{artifact}/outputs\" || status=$?\n\
+              fi\n\
+              (( status == 0 ))\n\
+            }}",
+            indent_block(&validation, "          ")
+        )
+        });
+    let command = command
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                line.to_owned()
+            } else {
+                format!("            {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(format!(
         "      - name: Restore exact native product cache {artifact}\n        id: {restore_id}\n        continue-on-error: true\n        uses: {cache_restore_pin}\n        with:\n          path: {action_path}\n          key: {key}\n      - name: Validate exact native product cache {artifact}\n        id: {verify_id}\n        if: steps.{restore_id}.outputs.cache-hit == 'true'\n        continue-on-error: true\n        env:\n{outputs_value}{files_value}        run: |\n          set -o pipefail\n          stage=\"{shell_path}\"\n          log=\"$RUNNER_TEMP/{artifact}-cache-verify.log\"\n          if [[ ! -f \"$stage/{MANIFEST_FILE}\" ]]; then\n            outcome=corrupt\n          else\n            rc=0\n            {command} 2>&1 | tee \"$log\" || rc=$?\n            if (( rc == 0 )); then\n              outcome=hit\n            elif grep -Eiq 'identity|schema mismatch|producer/product|inputs_digest' \"$log\"; then\n              outcome=wrong-identity\n            else\n              outcome=corrupt\n            fi\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n          echo \"outcome=$outcome\" >> \"$GITHUB_OUTPUT\"\n          echo \"usable=$([[ $outcome == hit ]] && echo true || echo false)\" >> \"$GITHUB_OUTPUT\"\n          if [[ \"$outcome\" != hit ]]; then\n            rm -rf -- \"$stage\"\n          fi\n      - name: Report exact native product cache {artifact}\n        if: always()\n        env:\n          RESTORE_OUTCOME: ${{{{ steps.{restore_id}.outcome }}}}\n          CACHE_HIT: ${{{{ steps.{restore_id}.outputs.cache-hit }}}}\n          VERIFY_OUTCOME: ${{{{ steps.{verify_id}.outputs.outcome }}}}\n        run: |\n          if [[ \"$RESTORE_OUTCOME\" != success || \"$CACHE_HIT\" != true ]]; then\n            outcome=miss\n          else\n            outcome=$VERIFY_OUTCOME\n            [[ -n \"$outcome\" ]] || outcome=corrupt\n          fi\n          echo \"::notice::exact native product cache: $outcome ({artifact})\"\n"
     ))
@@ -1080,7 +1508,6 @@ pub(crate) fn render_native_product_cache_save_block(
     let artifact = artifact_name(producer, &product.name);
     let action_path = format!("${{{{ runner.temp }}}}/velnor-native-product-cache/{artifact}");
     let shell_path = format!("$RUNNER_TEMP/velnor-native-product-cache/{artifact}");
-    let digest = product.inputs_digest.as_deref().unwrap_or_default();
     let identity = product.identity.as_ref()?;
     let identity_json = identity_json(identity);
     if identity_json.is_empty() {
@@ -1091,7 +1518,7 @@ pub(crate) fn render_native_product_cache_save_block(
         shell_quote(producer),
         shell_quote(&product.name),
     );
-    if !digest.is_empty() {
+    if let Some(digest) = product.inputs_digest.as_deref() {
         let _ = write!(command, " --digest {}", shell_quote(digest));
     }
     let _ = write!(
@@ -1106,8 +1533,21 @@ pub(crate) fn render_native_product_cache_save_block(
         "          {OUTPUTS_ENV}: |\n{}\n",
         indent_block(&product.outputs.join("\n"), "            ")
     );
+    let run = product
+        .identity
+        .as_ref()
+        .and_then(|identity| render_apple_xcframework_validation(product, identity))
+        .map_or_else(
+            || format!("run: {command}"),
+            |validation| {
+                format!(
+                    "run: |\n          set -euo pipefail\n          {command}\n{}\n          validate_apple_xcframework \"$RUNNER_TEMP/velnor-native-product-cache/{artifact}/outputs\"",
+                    indent_block(&validation, "          ")
+                )
+            },
+        );
     Some(format!(
-        "      - name: Stage exact native product cache {artifact}\n        id: {stage_id}\n        continue-on-error: true\n        env:\n{outputs_value}        run: {command}\n      - name: Save exact native product cache {artifact}\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: {action_path}\n          key: {key}\n"
+        "      - name: Stage exact native product cache {artifact}\n        id: {stage_id}\n        continue-on-error: true\n        env:\n{outputs_value}        {run}\n      - name: Save exact native product cache {artifact}\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: {action_path}\n          key: {key}\n"
     ))
 }
 
@@ -1124,8 +1564,9 @@ fn indent_block(value: &str, indent: &str) -> String {
 mod tests {
     use super::{
         artifact_name, exact_product_cache_key, exact_product_reuse_eligible, ready_records,
-        render_native_product_cache_restore_block, render_native_product_cache_save_block,
-        stage_product, transport_eligible, verify_product, StageRequest, VerifyMode, VerifyRequest,
+        render_apple_xcframework_validation, render_native_product_cache_restore_block,
+        render_native_product_cache_save_block, stage_product, transport_eligible, verify_product,
+        StageRequest, VerifyMode, VerifyRequest,
     };
     use crate::s2::platform::{NamedProduct, ProductIdentity, PRODUCT_IDENTITY_SCHEMA};
 
@@ -1381,6 +1822,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apple_validator_keeps_quoted_paths_outside_root_variables_and_maps_macos() {
+        let framework = "out/Foo Framework.xcframework";
+        let slice = "macos-arm64";
+        let mut product = product(&[framework]);
+        product.output_files = vec![
+            format!("{framework}/Info.plist"),
+            format!("{framework}/{slice}/Headers/module.modulemap"),
+            format!("{framework}/{slice}/libfoo.a"),
+        ];
+        let rendered = render_apple_xcframework_validation(&product, &identity())
+            .expect("Apple identity renders a validator");
+
+        assert!(
+            rendered.contains("if [[ ! -e \"$root\"/'out/Foo Framework.xcframework/Info.plist' ]]"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("framework=\"$root\"/'out/Foo Framework.xcframework'"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("slice=\"$framework\"/'macos-arm64'"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("\"$root/'"), "{rendered}");
+        assert!(!rendered.contains("\"$framework/'"), "{rendered}");
+        assert!(
+            rendered
+                .contains("for library in 'out/Foo Framework.xcframework/macos-arm64/libfoo.a';"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("'\"SupportedPlatform\" => \"macos\"'"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("SupportedPlatform\" => \"macosx"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn apple_validator_blocks_are_valid_yaml() {
+        let mut product = product(&["out/Foo.xcframework"]);
+        product.output_files = vec!["out/Foo.xcframework/Info.plist".to_owned()];
+        product.inputs_digest = Some("a".repeat(64));
+        product.identity = Some(identity());
+        let blocks = vec![
+            (
+                "producer",
+                super::render_producer_block("upload@pinned", "rust-ffi", &product),
+            ),
+            (
+                "consumer",
+                super::render_consumer_block("download@pinned", "rust-ffi", &product, "READY"),
+            ),
+            (
+                "cache restore",
+                render_native_product_cache_restore_block(
+                    "actions/cache/restore@v4",
+                    "rust-ffi",
+                    &product,
+                )
+                .expect("complete native product renders a cache restore"),
+            ),
+            (
+                "cache save",
+                render_native_product_cache_save_block(
+                    "actions/cache/save@v4",
+                    "rust-ffi",
+                    &product,
+                    "always()",
+                )
+                .expect("complete native product renders a cache save"),
+            ),
+        ];
+
+        for (kind, rendered) in blocks {
+            let workflow = format!("jobs:\n  verify:\n    steps:\n{rendered}");
+            let parsed = serde_yaml::from_str::<serde_yaml::Value>(&workflow);
+            assert!(parsed.is_ok(), "{kind} block is invalid YAML:\n{workflow}");
+        }
+    }
+
     fn scratch(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-transport-{name}-{}-{}",
@@ -1408,7 +1934,7 @@ mod tests {
         StageRequest {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
-            inputs_digest: "digest-1".to_owned(),
+            inputs_digest: Some("digest-1".to_owned()),
             identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             stage: stage.to_path_buf(),
@@ -1419,7 +1945,7 @@ mod tests {
         VerifyRequest {
             producer: "rust-ffi".to_owned(),
             product: "xcframework-foo".to_owned(),
-            inputs_digest: "digest-1".to_owned(),
+            inputs_digest: Some("digest-1".to_owned()),
             identity: None,
             outputs: vec!["out/Foo.xcframework".to_owned()],
             output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
@@ -1488,6 +2014,37 @@ mod tests {
         let env = std::fs::read_to_string(&env_file).expect("marker file");
         assert!(env.contains("EXISTING=1\n"), "markers append: {env}");
         assert!(env.contains("VELNOR_PRODUCT_MARKER=1\n"), "{env}");
+    }
+
+    #[test]
+    fn same_run_transport_accepts_unknown_input_digest_but_exact_cache_does_not() {
+        let producer_root = scratch("unknown-input-producer");
+        let consumer_root = scratch("unknown-input-consumer");
+        stage_fixture(&producer_root);
+        let mut typed_identity = identity();
+        typed_identity.product = "xcframework-foo".to_owned();
+        typed_identity.inputs_digest = None;
+        let stage = producer_root.join("stage");
+        let mut stage_request = stage_request(&stage);
+        stage_request.inputs_digest = None;
+        stage_request.identity = Some(typed_identity.clone());
+        stage_product(&producer_root, &stage_request).expect("stage without closed digest");
+
+        let shipped = consumer_root.join("stage");
+        copy_dir(&stage, &shipped);
+        let env_file = consumer_root.join("github-env");
+        let mut verify_request = verify_request(&shipped, &env_file);
+        verify_request.inputs_digest = None;
+        verify_request.identity = Some(typed_identity);
+        verify_product(&consumer_root, &verify_request).expect("verify without closed digest");
+
+        let mut product = product(&["out/Foo.xcframework"]);
+        product.inputs_digest = None;
+        let mut cache_identity = identity();
+        cache_identity.inputs_digest = None;
+        product.identity = Some(cache_identity);
+        assert!(!exact_product_reuse_eligible(&product));
+        assert!(exact_product_cache_key(&product).is_none());
     }
 
     #[test]
@@ -1582,6 +2139,28 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_unmanifested_extra_file() {
+        let stage = staged(&scratch("extra-file-producer"));
+        std::fs::write(
+            stage.join("outputs/out/Foo.xcframework/macos-arm64/extra.txt"),
+            "unmanifested",
+        )
+        .expect("extra file");
+        let consumer = scratch("extra-file-consumer");
+        let env_file = consumer.join("github-env");
+        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
+        let message = format!(
+            "{}",
+            result.expect_err("unmanifested staged files must fail")
+        );
+        assert!(message.contains("unmanifested extra entry"), "{message}");
+        assert!(
+            !consumer.join("out/Foo.xcframework").exists(),
+            "extra file failure installs nothing"
+        );
+    }
+
+    #[test]
     fn verify_rejects_identity_and_structural_mismatch() {
         let stage = staged(&scratch("identity-producer"));
         let consumer = scratch("identity-consumer");
@@ -1589,7 +2168,7 @@ mod tests {
         let wrong_digest = verify_product(
             &consumer,
             &VerifyRequest {
-                inputs_digest: "digest-2".to_owned(),
+                inputs_digest: Some("digest-2".to_owned()),
                 ..verify_request(&stage, &env_file)
             },
         );
@@ -1627,7 +2206,7 @@ mod tests {
         let mut expected = identity();
         expected.product = "xcframework-foo".to_owned();
         expected.inputs_digest = Some("d".repeat(64));
-        staged_request.inputs_digest = "d".repeat(64);
+        staged_request.inputs_digest = Some("d".repeat(64));
         staged_request.identity = Some(expected.clone());
         stage_product(&producer, &staged_request).expect("stage typed identity");
 
@@ -1639,7 +2218,7 @@ mod tests {
             &consumer,
             &VerifyRequest {
                 identity: Some(wrong_architecture),
-                inputs_digest: "d".repeat(64),
+                inputs_digest: Some("d".repeat(64)),
                 stage: producer.join("stage"),
                 ..verify_request(&producer.join("stage"), &env_file)
             },
@@ -1657,7 +2236,7 @@ mod tests {
             &consumer,
             &VerifyRequest {
                 identity: Some(wrong_profile),
-                inputs_digest: "d".repeat(64),
+                inputs_digest: Some("d".repeat(64)),
                 stage: producer.join("stage"),
                 ..verify_request(&producer.join("stage"), &env_file)
             },
@@ -1683,7 +2262,7 @@ mod tests {
             &StageRequest {
                 producer: "rust-ffi".to_owned(),
                 product: "xcframework-foo".to_owned(),
-                inputs_digest: "e".repeat(64),
+                inputs_digest: Some("e".repeat(64)),
                 identity: Some(expected.clone()),
                 outputs: vec!["out/Foo.xcframework".to_owned()],
                 stage: stage.clone(),
@@ -1709,7 +2288,7 @@ mod tests {
             &VerifyRequest {
                 producer: "rust-ffi".to_owned(),
                 product: "xcframework-foo".to_owned(),
-                inputs_digest: "e".repeat(64),
+                inputs_digest: Some("e".repeat(64)),
                 identity: Some(expected),
                 outputs: vec!["out/Foo.xcframework".to_owned()],
                 output_files: vec!["out/Foo.xcframework/macos-arm64/libfoo.a".to_owned()],
@@ -1809,5 +2388,92 @@ mod tests {
         );
         let message = format!("{}", unknown.expect_err("unknown flag"));
         assert!(message.contains("--bogus"), "{message}");
+    }
+
+    #[test]
+    fn install_removes_stale_entries_under_declared_output_root() {
+        let producer = scratch("stale-producer");
+        stage_fixture(&producer);
+        let stage = producer.join("stage");
+        stage_product(&producer, &stage_request(&stage)).expect("stage");
+
+        let consumer = scratch("stale-consumer");
+        let output = consumer.join("out/Foo.xcframework");
+        let stale_directory = output.join("stale-directory/nested");
+        std::fs::create_dir_all(&stale_directory).expect("stale directory");
+        std::fs::write(output.join("stale-file"), "stale").expect("stale file");
+        std::fs::write(stale_directory.join("old-file"), "stale").expect("nested stale file");
+        let stale_link = output.join("stale-link");
+        std::os::unix::fs::symlink("missing-target", &stale_link).expect("stale link");
+
+        let env_file = consumer.join("github-env");
+        verify_product(&consumer, &verify_request(&stage, &env_file)).expect("install");
+
+        assert!(!output.join("stale-file").exists());
+        assert!(!output.join("stale-directory").exists());
+        assert!(std::fs::symlink_metadata(stale_link).is_err());
+        assert!(output.join("macos-arm64/libfoo.a").is_file());
+    }
+
+    #[test]
+    fn verify_rejects_unmanifested_directory_and_symlink() {
+        let stage = staged(&scratch("extra-directory-producer"));
+        let extra_directory = stage.join("outputs/out/Foo.xcframework/extra-directory");
+        std::fs::create_dir_all(extra_directory.join("nested")).expect("extra directory");
+        std::fs::write(extra_directory.join("nested/file"), "extra").expect("extra file");
+        let consumer = scratch("extra-directory-consumer");
+        let env_file = consumer.join("github-env");
+        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
+        let message = format!("{}", result.expect_err("unmanifested directory must fail"));
+        assert!(message.contains("unmanifested extra entry"), "{message}");
+        assert!(!consumer.join("out").exists());
+
+        let stage = staged(&scratch("extra-link-producer"));
+        std::os::unix::fs::symlink(
+            "missing-target",
+            stage.join("outputs/out/Foo.xcframework/extra-link"),
+        )
+        .expect("extra link");
+        let consumer = scratch("extra-link-consumer");
+        let env_file = consumer.join("github-env");
+        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
+        let message = format!("{}", result.expect_err("unmanifested link must fail"));
+        assert!(message.contains("unmanifested extra entry"), "{message}");
+        assert!(!consumer.join("out").exists());
+    }
+
+    #[test]
+    fn verify_rejects_missing_and_mismatched_manifest_entries() {
+        let stage = staged(&scratch("missing-entry-producer"));
+        std::fs::remove_file(stage.join("outputs/out/Foo.xcframework/macos-arm64/libfoo.a"))
+            .expect("remove staged file");
+        let consumer = scratch("missing-entry-consumer");
+        let env_file = consumer.join("github-env");
+        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
+        let message = format!("{}", result.expect_err("missing manifest entry must fail"));
+        assert!(
+            message.contains("manifest entry missing from artifact"),
+            "{message}"
+        );
+
+        let stage = staged(&scratch("file-directory-conflict-producer"));
+        let file = stage.join("outputs/out/Foo.xcframework/macos-arm64/libfoo.a");
+        std::fs::remove_file(&file).expect("remove staged file");
+        std::fs::create_dir(&file).expect("replace file with directory");
+        let consumer = scratch("file-directory-conflict-consumer");
+        let env_file = consumer.join("github-env");
+        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
+        let message = format!("{}", result.expect_err("file-directory conflict must fail"));
+        assert!(message.contains("entry type conflict"), "{message}");
+
+        let stage = staged(&scratch("link-file-conflict-producer"));
+        let link = stage.join("outputs/out/Foo.xcframework/Current");
+        std::fs::remove_file(&link).expect("remove staged link");
+        std::fs::write(&link, "not-a-link").expect("replace link with file");
+        let consumer = scratch("link-file-conflict-consumer");
+        let env_file = consumer.join("github-env");
+        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
+        let message = format!("{}", result.expect_err("link-file conflict must fail"));
+        assert!(message.contains("entry type conflict"), "{message}");
     }
 }

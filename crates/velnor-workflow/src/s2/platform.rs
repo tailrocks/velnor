@@ -455,6 +455,87 @@ fn validate_output_files(unit: &Unit, product: &NamedProduct) -> Result<(), Gene
     Ok(())
 }
 
+/// Validate the typed plan facts required by the generic Apple
+/// `XCFramework` semantic verifier. Runtime plist and lipo facts remain in the
+/// rendered macOS command; generation must declare enough paths to make that
+/// check deterministic and fail closed.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "XCFramework output paths are an exact, case-sensitive contract"
+)]
+fn validate_apple_xcframework_contract(
+    unit: &Unit,
+    product: &NamedProduct,
+) -> Result<(), GeneratorError> {
+    let Some(identity) = product.identity.as_ref() else {
+        return Ok(());
+    };
+    if identity.target != "apple-xcframework" {
+        return Ok(());
+    }
+    let frameworks = product
+        .outputs
+        .iter()
+        .filter(|output| output.ends_with(".xcframework"))
+        .collect::<Vec<_>>();
+    if frameworks.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} has apple-xcframework identity but no .xcframework output root",
+            unit.id, product.name
+        )));
+    }
+    if identity.architectures.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} has apple-xcframework identity but no declared slice architectures",
+            unit.id, product.name
+        )));
+    }
+    if !super::scan::rust::valid_deployment_floor(&identity.deployment_target) {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} declares apple-xcframework deployment target {} that is not a valid Apple deployment version",
+            unit.id, product.name, identity.deployment_target
+        )));
+    }
+    if !product.deployment_target.is_empty()
+        && product.deployment_target != identity.deployment_target
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} deployment target {} disagrees with typed identity {}",
+            unit.id, product.name, product.deployment_target, identity.deployment_target
+        )));
+    }
+    for framework in frameworks {
+        let info = format!("{framework}/Info.plist");
+        if !product.output_files.iter().any(|file| file == &info) {
+            return Err(GeneratorError::usage(format!(
+                "unit {} product {} XCFramework output {} must declare {}",
+                unit.id, product.name, framework, info
+            )));
+        }
+        for slice in &identity.architectures {
+            let prefix = format!("{framework}/{slice}/");
+            if !product
+                .output_files
+                .iter()
+                .any(|file| file.starts_with(&prefix) && file.ends_with(".a"))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "unit {} product {} XCFramework slice {} declares no static library under {}",
+                    unit.id, product.name, slice, prefix
+                )));
+            }
+            let modulemap = format!("{prefix}Headers/module.modulemap");
+            if !product.output_files.iter().any(|file| file == &modulemap) {
+                return Err(GeneratorError::usage(format!(
+                    "unit {} product {} XCFramework slice {} must declare {}",
+                    unit.id, product.name, slice, modulemap
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate one product's binding contract: the directory and file are
 /// normal-form repo-relative paths, the file sits strictly under the
 /// directory, and the deployment target is an Apple deployment version.
@@ -611,6 +692,7 @@ fn validate_product<'a>(
             )));
         }
     }
+    validate_apple_xcframework_contract(unit, product)?;
     validate_rebuild(unit, product)
 }
 

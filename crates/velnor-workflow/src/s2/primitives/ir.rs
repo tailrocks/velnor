@@ -20,12 +20,12 @@ use super::{
 };
 use crate::s2::config::{MiseInstallDeps, NpmPackageManager};
 use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap};
-use crate::s2::reuse::REQUIRED_CHECK;
+use crate::s2::reuse::{REQUIRED_CHECK, S2_WORK_RESULTS_SCHEMA};
 use crate::s2::scan::swift::XCODEGEN_TOOL;
 use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
-    kind_unit_workflow_file, nested_unit_workflow_file, prepare_cargo_caller_job_id,
+    kind_unit_workflow_file, kind_unit_workflow_file_for_provider, prepare_cargo_caller_job_id,
     product_dependency_needs, provider_supports_unit, render_mr_boxington_store_budget_step,
     rendered_cache_values, rust_dependency_needs, stack_group_job_id, unit_group,
     unit_group_job_id, unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
@@ -98,8 +98,24 @@ fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
 /// no-work plan runs no unit jobs — because the aggregate fails a real-work
 /// plan with zero records anyway; every other step fails the check.
 fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
-    format!(
-        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+    let steps = format!(
+        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n          VELNOR_RESULT_IDENTITY_REQUIRED: \"true\"\n          VELNOR_RESULT_REPOSITORY: ${{{{ github.repository }}}}\n          VELNOR_RESULT_SOURCE_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n          VELNOR_RESULT_RUN_ID: ${{{{ github.run_id }}}}\n          VELNOR_RESULT_RUN_ATTEMPT: ${{{{ github.run_attempt }}}}\n          VELNOR_RESULT_PLAN_DIGEST: ${{{{ needs.plan.outputs.plan_digest }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+    );
+    let schema_step = format!(
+        "          jq '. + {{schema: {S2_WORK_RESULTS_SCHEMA}}}' {COLLECTED_RESULTS_FILE} > {COLLECTED_RESULTS_FILE}.schema2\n          mv {COLLECTED_RESULTS_FILE}.schema2 {COLLECTED_RESULTS_FILE}\n"
+    );
+    let schema_guard = format!(
+        "            if ! jq -e '(.schema == {S2_WORK_RESULTS_SCHEMA}) and (.results | type == \"array\")' \"$file\" >/dev/null; then\n              echo \"::error::$file is not a schema-{S2_WORK_RESULTS_SCHEMA} result document\" >&2\n              exit 1\n            fi\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n"
+    );
+    let steps = steps
+        .replace(
+            "            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n",
+            &schema_guard,
+        )
+        .replace("          VELNOR_RESULT_IDENTITY_REQUIRED: \"true\"\n", "");
+    steps.replace(
+        "          echo \"collected",
+        &format!("{schema_step}          echo \"collected"),
     )
 }
 
@@ -129,7 +145,7 @@ fn render_unit_result_steps(
     record_gate: &str,
 ) -> String {
     format!(
-        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          mkdir -p {RESULT_DIR}\n          jq -n --arg unit \"$VELNOR_RESULT_UNIT\" --arg lane \"$VELNOR_RESULT_LANE\" --arg outcome \"$outcome\" '{{results: [{{unit: $unit, lane: $lane, outcome: $outcome}}]}}' > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
+        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n          VELNOR_RESULT_REPOSITORY: ${{{{ github.repository }}}}\n          VELNOR_RESULT_BASE_SHA: ${{{{ inputs.base_sha }}}}\n          VELNOR_RESULT_HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_RESULT_RUN_ID: ${{{{ github.run_id }}}}\n          VELNOR_RESULT_RUN_ATTEMPT: ${{{{ github.run_attempt }}}}\n          VELNOR_RESULT_PLAN_DIGEST: ${{{{ inputs.plan_digest }}}}\n          VELNOR_RESULT_PROVIDER: {provider}\n          VELNOR_RESULT_PLATFORM: ${{{{ inputs.unit_platform }}}}\n          VELNOR_RESULT_SELECTED_UNITS: ${{{{ inputs.selected_units }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          mkdir -p {RESULT_DIR}\n          VELNOR_RESULT_COMMAND_DIGEST=\"$(jq -er --arg unit \"$VELNOR_RESULT_UNIT\" 'map(select(.unit_id == $unit)) as $matches | if ($matches | length) != 1 then error(\"expected exactly one selected unit\") elif ($matches[0].command_digest | type) != \"string\" or $matches[0].command_digest == \"\" then error(\"selected unit has no command digest\") else $matches[0].command_digest end' <<< \"$VELNOR_RESULT_SELECTED_UNITS\")\"\n          export VELNOR_RESULT_COMMAND_DIGEST\n          velnor-workflow record-result --output \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
     )
 }
 
@@ -1330,7 +1346,7 @@ mod tests {
             assert!(!callers.is_empty(), "unit {} renders call jobs", unit.id);
             for caller in &callers {
                 let mut output = String::new();
-                ir.render_unit_provider_caller(&mut output, unit, caller, false, &[], false);
+                ir.render_unit_provider_caller(&mut output, unit, caller, None, false, &[], false);
                 if expect {
                     assert!(
                         output
@@ -1977,7 +1993,6 @@ mod tests {
                 .env("PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED", "true")
                 .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED", "true")
                 .env("PROVIDER_ADMITTED_VELNOR_TRUSTED", "true")
-                .env("PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED", "true")
                 .output(),
             "bash and jq execute the rendered gate",
         );
@@ -3577,8 +3592,8 @@ mod tests {
             "result dir creation",
         );
         let write = must_some(
-            steps.find("> \".velnor-ci-results/result-"),
-            "first result write",
+            steps.find("velnor-workflow record-result --output \".velnor-ci-results/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\""),
+            "record result command",
         );
         assert!(
             mkdir < write,
@@ -3587,6 +3602,45 @@ mod tests {
         assert!(
             steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github-hosted.json"),
             "the upload publishes exactly what the record step wrote: {steps}"
+        );
+    }
+
+    #[test]
+    fn record_step_extracts_one_unit_digest_and_uses_runtime_writer() {
+        let steps = super::render_unit_result_steps(
+            "actions/upload-artifact@pinned",
+            "github-hosted",
+            "always()",
+        );
+        assert!(
+            steps.contains("VELNOR_RESULT_SELECTED_UNITS: ${{ inputs.selected_units }}"),
+            "the record step receives the planned unit records: {steps}"
+        );
+        assert!(
+            steps.contains("jq -er --arg unit \"$VELNOR_RESULT_UNIT\""),
+            "digest extraction is fail-closed jq selection: {steps}"
+        );
+        assert!(
+            steps.contains(".unit_id == $unit")
+                && steps.contains("expected exactly one selected unit")
+                && steps.contains("selected unit has no command digest"),
+            "digest extraction requires exactly one nonempty selected-unit digest: {steps}"
+        );
+        assert!(
+            steps.contains("export VELNOR_RESULT_COMMAND_DIGEST"),
+            "the selected per-unit digest is passed to the runtime through its env contract: {steps}"
+        );
+        assert!(
+            steps.contains("velnor-workflow record-result --output"),
+            "serialization belongs to the verified runtime subcommand: {steps}"
+        );
+        assert!(
+            !steps.contains("jq -n --arg"),
+            "the reusable no longer embeds the giant result serializer: {steps}"
+        );
+        assert!(
+            !steps.contains("VELNOR_RESULT_COMMAND_DIGEST: ${{ inputs.plan_digest }}"),
+            "command identity is never plan-wide: {steps}"
         );
     }
 
@@ -3600,10 +3654,6 @@ mod tests {
         assert!(
             steps.contains("VELNOR_RESULT_OUTCOME: ${{ job.status }}"),
             "the receipt binds to the enclosing job status: {steps}"
-        );
-        assert!(
-            steps.contains("*) outcome=failure ;;"),
-            "setup, execution, and any other non-green job state records failure: {steps}"
         );
         assert!(
             steps.contains("if: ${{ always() }}"),
@@ -6359,11 +6409,6 @@ pub(crate) enum ProviderAdmission {
     /// The provider gated to trusted events (local providers, trusted-only
     /// units).
     ProviderTrusted(ProviderId),
-    /// Any local provider in the universe, gated to trusted events. The
-    /// `control` prerequisite caller warms every local provider's stores, so
-    /// it is admitted when any of them is — keying it to one local provider
-    /// would skip warming on dispatches that select only the other.
-    AnyLocalTrusted,
 }
 
 impl Default for ProviderAdmission {
@@ -6384,18 +6429,16 @@ impl ProviderAdmission {
         }
     }
 
-    /// The single provider whose event predicate this class evaluates, if it
-    /// has one. The union class matches no single provider.
+    /// The single provider whose event predicate this class evaluates.
     pub(crate) fn provider(self) -> Option<ProviderId> {
         match self {
             Self::Provider(provider) | Self::ProviderTrusted(provider) => Some(provider),
-            Self::AnyLocalTrusted => None,
         }
     }
 
     /// Whether this class requires a trusted event.
     pub(crate) fn trusted_only(self) -> bool {
-        matches!(self, Self::ProviderTrusted(_) | Self::AnyLocalTrusted)
+        matches!(self, Self::ProviderTrusted(_))
     }
 
     /// The required check's environment variable carrying the evaluated
@@ -6412,7 +6455,6 @@ impl ProviderAdmission {
                 ProviderId::GithubSelfHosted => "PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED",
                 ProviderId::Velnor => "PROVIDER_ADMITTED_VELNOR_TRUSTED",
             },
-            Self::AnyLocalTrusted => "PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED",
         }
     }
 
@@ -6420,7 +6462,6 @@ impl ProviderAdmission {
     /// records beside the unit's dependency closure.
     pub(crate) fn info_id(self) -> &'static str {
         match self {
-            Self::AnyLocalTrusted => "any-local-trusted",
             Self::Provider(ProviderId::GithubHosted) => "github-hosted",
             Self::Provider(ProviderId::GithubSelfHosted) => "github-self-hosted",
             Self::Provider(ProviderId::Velnor) => "velnor",
@@ -6609,6 +6650,11 @@ fn kind_from_unit_workflow_file(file: &str) -> Option<UnitKind> {
     let stem = file
         .strip_prefix("ci-unit-")
         .and_then(|value| value.strip_suffix(".yml"))?;
+    let stem = stem
+        .strip_suffix("-github-hosted")
+        .or_else(|| stem.strip_suffix("-github-self-hosted"))
+        .or_else(|| stem.strip_suffix("-velnor"))
+        .unwrap_or(stem);
     match stem {
         "rust" => Some(UnitKind::Rust),
         "gradle" => Some(UnitKind::Gradle),
@@ -7482,7 +7528,7 @@ impl WorkflowIr {
     fn unit_provider_callers(
         &self,
         unit: &Unit,
-        file: &str,
+        _file: &str,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> Vec<UnitProviderCaller> {
         let contract = self.contract_for(unit, contracts);
@@ -7495,7 +7541,11 @@ impl WorkflowIr {
                 unit_id: unit.id.clone(),
                 name: unit_job_display_name(unit, job.provider),
                 provider: job.provider,
-                file: file.to_owned(),
+                file: kind_unit_workflow_file_for_provider(
+                    unit.kind,
+                    job.provider,
+                    &self.providers,
+                ),
                 inputs: self
                     .unit_provider_facts(unit, &contract, job.provider)
                     .input_values(),
@@ -7503,14 +7553,17 @@ impl WorkflowIr {
             .collect()
     }
 
-    fn kind_file_needs_prepare_cargo(&self, file: &str) -> bool {
-        self.providers.iter().any(|provider| provider.is_local())
+    fn kind_file_needs_prepare_cargo(
+        &self,
+        file: &str,
+        provider: ProviderId,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> bool {
+        provider.is_local()
             && kind_from_unit_workflow_file(file) == Some(UnitKind::Rust)
-            && self.units.iter().any(|unit| {
-                unit.kind == UnitKind::Rust
-                    && nested_unit_workflow_file(unit) == file
-                    && cargo_network_is_restricted(unit)
-            })
+            && !self
+                .prepare_cargo_selected_by(file, provider, contracts)
+                .is_empty()
     }
 
     /// The unit ids whose selection runs the `prepare-cargo` caller of one
@@ -7518,36 +7571,55 @@ impl WorkflowIr {
     /// callee's `velnor-prepare-cargo-sources` job selects on the same set
     /// (`restricted_unit_selection_if`), so the caller, the callee, and the
     /// required check agree on when the prerequisite runs.
-    fn prepare_cargo_selected_by(&self, file: &str) -> Vec<String> {
+    fn prepare_cargo_selected_by(
+        &self,
+        file: &str,
+        provider: ProviderId,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> Vec<String> {
+        let Some(kind) = kind_from_unit_workflow_file(file) else {
+            return Vec::new();
+        };
         self.units
             .iter()
             .filter(|unit| {
-                unit.kind == UnitKind::Rust
-                    && nested_unit_workflow_file(unit) == file
+                unit.kind == kind
                     && cargo_network_is_restricted(unit)
+                    && provider_supports_unit(provider, unit)
+                    && self
+                        .contract_for(unit, contracts)
+                        .providers
+                        .iter()
+                        .any(|job| job.provider == provider)
             })
             .map(|unit| unit.id.clone())
             .collect()
     }
 
-    /// The `prepare-cargo` caller as the required check validates it: a
-    /// prerequisite selected by any restricted unit of the file and admitted
-    /// with any local provider, whose stores it warms — every local
-    /// provider's, through its own callee job.
-    fn prepare_cargo_required_caller(&self, file: &str) -> RequiredCaller {
-        let provider = self
-            .providers
-            .iter()
-            .copied()
-            .find(|provider| provider.is_local())
-            .unwrap_or_else(|| self.control_plane_provider());
-        let selected_by = self.prepare_cargo_selected_by(file);
+    /// The provider-sharded Cargo prerequisite caller as the required check
+    /// validates it: a prerequisite selected by every restricted unit and
+    /// admitted on the one local provider whose store it warms.
+    fn prepare_cargo_job_id(&self, provider: ProviderId) -> String {
+        if self.providers.len() <= 1 {
+            prepare_cargo_caller_job_id().to_owned()
+        } else {
+            format!("{}-{}", prepare_cargo_caller_job_id(), provider.as_str())
+        }
+    }
+
+    fn prepare_cargo_required_caller(
+        &self,
+        file: &str,
+        provider: ProviderId,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> RequiredCaller {
+        let selected_by = self.prepare_cargo_selected_by(file, provider, contracts);
         RequiredCaller {
-            job_id: prepare_cargo_caller_job_id().to_owned(),
+            job_id: self.prepare_cargo_job_id(provider),
             unit_id: selected_by.first().cloned().unwrap_or_default(),
             provider,
             selected_by,
-            admission: ProviderAdmission::AnyLocalTrusted,
+            admission: ProviderAdmission::ProviderTrusted(provider),
             prerequisite: true,
         }
     }
@@ -7557,10 +7629,12 @@ impl WorkflowIr {
         output: &mut String,
         file: &str,
         sample_unit: &str,
+        provider: ProviderId,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
         include_policy: bool,
         cancel_in_progress: bool,
     ) {
-        let caller = self.prepare_cargo_required_caller(file);
+        let caller = self.prepare_cargo_required_caller(file, provider, contracts);
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
@@ -7587,12 +7661,13 @@ impl WorkflowIr {
         ));
         let _ = writeln!(
             output,
-            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      provider: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      selected_unit_ids: ${{{{ needs.plan.outputs.unit_ids }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
+            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      provider: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      selected_unit_ids: ${{{{ needs.plan.outputs.unit_ids }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
             caller.job_id,
             crate::s2::control_job_name("Prepare Cargo"),
             conditions.join(" && "),
             needs.join(", "),
             yaml_scalar(sample_unit),
+            provider.as_str(),
         );
     }
 
@@ -7601,6 +7676,7 @@ impl WorkflowIr {
         output: &mut String,
         unit: &Unit,
         caller: &UnitProviderCaller,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
         include_policy: bool,
         extra_needs: &[String],
         cancel_in_progress: bool,
@@ -7611,8 +7687,9 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         append_unique_needs(&mut needs, extra_needs.iter().cloned());
-        if provider.is_local() && self.kind_file_needs_prepare_cargo(&caller.file) {
-            append_unique_needs(&mut needs, [prepare_cargo_caller_job_id().to_owned()]);
+        let prepare_cargo_job = self.prepare_cargo_job_id(provider);
+        if self.kind_file_needs_prepare_cargo(&caller.file, provider, contracts) {
+            append_unique_needs(&mut needs, [prepare_cargo_job.clone()]);
         }
         append_unique_needs(
             &mut needs,
@@ -7629,11 +7706,10 @@ impl WorkflowIr {
         if include_policy {
             conditions.push("needs.policy.result == 'success'".to_owned());
         }
-        if provider.is_local() && self.kind_file_needs_prepare_cargo(&caller.file) {
-            conditions.push(
-                "(needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped')"
-                    .to_owned(),
-            );
+        if self.kind_file_needs_prepare_cargo(&caller.file, provider, contracts) {
+            conditions.push(format!(
+                "(needs.{prepare_cargo_job}.result == 'success' || needs.{prepare_cargo_job}.result == 'skipped')"
+            ));
         }
         for dependency in rust_dependency_needs(provider, unit, self.rust_needs, &self.units) {
             conditions.push(format!(
@@ -7724,16 +7800,27 @@ impl WorkflowIr {
             let Some(unit) = self.units.iter().find(|unit| unit.id == *unit_id) else {
                 continue;
             };
-            if self.kind_file_needs_prepare_cargo(file)
-                && prepare_cargo_files.insert(file.to_owned())
+            for provider in self
+                .providers
+                .iter()
+                .copied()
+                .filter(|provider| provider.is_local())
             {
-                self.render_prepare_cargo_caller(
-                    output,
-                    file,
-                    unit_id,
-                    include_policy,
-                    cancel_in_progress,
-                );
+                let provider_file =
+                    kind_unit_workflow_file_for_provider(unit.kind, provider, &self.providers);
+                if self.kind_file_needs_prepare_cargo(&provider_file, provider, contracts)
+                    && prepare_cargo_files.insert((provider_file.clone(), provider))
+                {
+                    self.render_prepare_cargo_caller(
+                        output,
+                        &provider_file,
+                        unit_id,
+                        provider,
+                        contracts,
+                        include_policy,
+                        cancel_in_progress,
+                    );
+                }
             }
             for caller in self.unit_provider_callers(unit, file, contracts) {
                 let extra_needs = if self.serial_stack_groups && caller.provider.is_local() {
@@ -7745,6 +7832,7 @@ impl WorkflowIr {
                     output,
                     unit,
                     &caller,
+                    contracts,
                     include_policy,
                     &extra_needs,
                     cancel_in_progress,
@@ -7777,10 +7865,23 @@ impl WorkflowIr {
             let Some(unit) = self.units.iter().find(|unit| unit.id == *unit_id) else {
                 continue;
             };
-            if self.kind_file_needs_prepare_cargo(file)
-                && prepare_cargo_files.insert(file.to_owned())
+            for provider in self
+                .providers
+                .iter()
+                .copied()
+                .filter(|provider| provider.is_local())
             {
-                callers.push(self.prepare_cargo_required_caller(file));
+                let provider_file =
+                    kind_unit_workflow_file_for_provider(unit.kind, provider, &self.providers);
+                if self.kind_file_needs_prepare_cargo(&provider_file, provider, contracts)
+                    && prepare_cargo_files.insert((provider_file.clone(), provider))
+                {
+                    callers.push(self.prepare_cargo_required_caller(
+                        &provider_file,
+                        provider,
+                        contracts,
+                    ));
+                }
             }
             for caller in self.unit_provider_callers(unit, file, contracts) {
                 callers.push(RequiredCaller {
@@ -8077,6 +8178,40 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         Ok(Some((kind_unit_workflow_file(kind), output)))
     }
 
+    /// Render one provider-sharded kind reusable. The public all-provider
+    /// renderer above remains useful for focused contract tests; generated
+    /// multi-provider surfaces use this bounded body so inactive provider
+    /// jobs are not loaded into every caller's template budget.
+    pub(crate) fn render_kind_unit_workflow_for_provider(
+        &self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        provider: ProviderId,
+    ) -> Result<Option<(String, String)>, GeneratorError> {
+        let members = self.provider_kind_members(kind, contracts, provider);
+        if members.is_empty() || !self.providers.contains(&provider) {
+            return Ok(None);
+        }
+        let env = crate::s2::platform::agreed_env(&members, kind)?;
+        let mut output = Self::render_kind_units_header(kind, &members, &env);
+        self.append_provider_cargo_prep_jobs_for_providers(
+            &mut output,
+            &members,
+            contracts,
+            &ProviderSet::from([provider]),
+        );
+        self.render_collapsed_kind_verify_job_for_providers(
+            &mut output,
+            &members,
+            contracts,
+            &ProviderSet::from([provider]),
+        )?;
+        Ok(Some((
+            kind_unit_workflow_file_for_provider(kind, provider, &self.providers),
+            output,
+        )))
+    }
+
     fn contract_for(
         &self,
         unit: &Unit,
@@ -8086,6 +8221,30 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .and_then(|contracts| contracts.get(&unit.id))
             .cloned()
             .unwrap_or_else(|| self.default_unit_contract(unit, true))
+    }
+
+    /// Members rendered into one provider shard. Static capability and the
+    /// resolved unit contract both must agree before a unit enters the shard;
+    /// this prevents empty reusable files and keeps prep/product edges on the
+    /// same provider surface as the unit caller.
+    fn provider_kind_members<'a>(
+        &'a self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        provider: ProviderId,
+    ) -> Vec<&'a Unit> {
+        self.units
+            .iter()
+            .filter(|unit| {
+                unit.kind == kind
+                    && provider_supports_unit(provider, unit)
+                    && self
+                        .contract_for(unit, contracts)
+                        .providers
+                        .iter()
+                        .any(|job| job.provider == provider)
+            })
+            .collect()
     }
 
     /// The job gate of a collapsed provider job: the provider the caller selected, the
@@ -8164,13 +8323,28 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         members: &[&Unit],
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> Result<(), GeneratorError> {
+        self.render_collapsed_kind_verify_job_for_providers(
+            output,
+            members,
+            contracts,
+            &self.providers,
+        )
+    }
+
+    fn render_collapsed_kind_verify_job_for_providers(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        providers: &ProviderSet,
+    ) -> Result<(), GeneratorError> {
         if members.is_empty() {
             return Ok(());
         }
         // Collect the jobs first so the owned strings outlive each render
         // call.
         let mut jobs: Vec<CollapsedProviderJob<'_>> = Vec::new();
-        for provider in &self.providers {
+        for provider in providers {
             let provider = *provider;
             if provider == ProviderId::GithubHosted {
                 let hosted = self.collapsed_provider_members(members, contracts, provider, None);
@@ -9366,6 +9540,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         members: &[&Unit],
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
+        self.append_provider_cargo_prep_jobs_for_providers(
+            output,
+            members,
+            contracts,
+            &self.providers,
+        );
+    }
+
+    fn append_provider_cargo_prep_jobs_for_providers(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        providers: &ProviderSet,
+    ) {
         let roots = cargo_fetch_roots(members);
         if roots.is_empty() {
             return;
@@ -9383,8 +9572,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let fetch_script = render_cargo_fetch_roots_script(&roots, skip_when_offline_ready);
         // Only local providers share persistent Cargo stores between jobs.
         // GitHub-hosted jobs fetch into their own ephemeral workspace.
-        for provider in self
-            .providers
+        for provider in providers
             .iter()
             .copied()
             .filter(|provider| provider.is_local())
@@ -9402,15 +9590,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 continue;
             }
             let prep_id = format!("{}-prepare-cargo-sources", provider.as_str());
-            // The control caller invokes the reusable once per file; the prep
-            // job's unit-membership gate selects the restricted units.
-            let intended_provider = "control";
-            // The prep job warms the provider's stores, so it is admitted
-            // exactly when the provider's jobs are. Local providers gate all
-            // jobs on trusted events, so the prep gate carries the trusted
-            // class — the base class is never evaluated for a local
-            // provider, and a gate the check never evaluates cannot be
-            // single-sourced.
+            // The provider-specific caller invokes the reusable once per
+            // shard; the prep job's unit-membership gate selects the
+            // restricted units and its provider input selects this shard.
+            let intended_provider = provider.as_str();
+            // The prep job warms this provider's stores, so it is admitted
+            // exactly when this provider's jobs are. Local providers gate all
+            // jobs on trusted events, so the prep gate carries that same
+            // provider-specific trusted class.
             let prep_gate = format!(
                 "inputs.provider == '{intended_provider}' && ({if_gate}) && ({})",
                 self.provider_admission_expression(ProviderAdmission::ProviderTrusted(provider))
@@ -9732,28 +9919,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// therefore expects `skipped` for it like any other unadmitted provider.
     pub(crate) fn provider_admission_expression(&self, admission: ProviderAdmission) -> String {
         match admission {
-            ProviderAdmission::AnyLocalTrusted => {
-                let mut locals = self
-                    .providers
-                    .iter()
-                    .copied()
-                    .filter(|provider| provider.is_local())
-                    .map(|provider| {
-                        self.provider_admission_expression(ProviderAdmission::ProviderTrusted(
-                            provider,
-                        ))
-                    })
-                    .collect::<Vec<_>>();
-                if locals.is_empty() {
-                    return "false".to_owned();
-                }
-                locals.sort();
-                locals.dedup();
-                if locals.len() == 1 {
-                    return locals.swap_remove(0);
-                }
-                format!("({})", locals.join(") || ("))
-            }
             ProviderAdmission::Provider(provider)
             | ProviderAdmission::ProviderTrusted(provider) => {
                 // Dispatches select the static universe, so the event side is

@@ -9,11 +9,10 @@
 //! `github-self-hosted`, and `velnor` (bastion spec §2).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::s2::GeneratorError;
+use crate::s2::{GeneratorError, ValidationPhase};
 
 /// The only provider vocabulary. Canonical order (sort/digest/display) is
 /// declaration order: hosted, self-hosted, native.
@@ -497,29 +496,131 @@ pub(crate) fn is_github_owned_label(label: &str) -> bool {
     label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
 }
 
+/// Stable schema-2 unit identity digest.
+///
+/// The fields are encoded as length-delimited records instead of a delimiter-
+/// joined string. Commands and phases retain execution order; dependencies are
+/// a set for identity purposes and therefore sort canonically. The version
+/// marker intentionally invalidates identities minted by the command-only
+/// implementation while keeping the schema-2 wire field name stable.
+pub(crate) fn canonical_unit_digest(
+    unit_id: &str,
+    commands: &[String],
+    phases: &[ValidationPhase],
+    check_commands: &[String],
+    platform: Platform,
+    trust: TrustReq,
+    capabilities: Capabilities,
+    depends_on: &[String],
+) -> String {
+    let mut input = Vec::new();
+    push_digest_field(&mut input, b"format", b"s2-unit-identity-v1");
+    push_digest_field(&mut input, b"unit", unit_id.as_bytes());
+    push_digest_list(&mut input, b"command", commands);
+    push_digest_phase_list(&mut input, phases);
+    push_digest_list(&mut input, b"check", check_commands);
+    push_digest_field(&mut input, b"platform", platform.as_str().as_bytes());
+    push_digest_field(&mut input, b"trust", trust.as_str().as_bytes());
+    for (name, value) in [
+        (b"cap.docker".as_slice(), capabilities.docker),
+        (
+            b"cap.nested-privileged-docker".as_slice(),
+            capabilities.nested_privileged_docker,
+        ),
+        (
+            b"cap.buildx-compose".as_slice(),
+            capabilities.buildx_compose,
+        ),
+        (
+            b"cap.testcontainers".as_slice(),
+            capabilities.testcontainers,
+        ),
+        (
+            b"cap.services-with-readiness".as_slice(),
+            capabilities.services_with_readiness,
+        ),
+        (
+            b"cap.browser-binaries".as_slice(),
+            capabilities.browser_binaries,
+        ),
+        (
+            b"cap.native-macos-arm64".as_slice(),
+            capabilities.native_macos_arm64,
+        ),
+    ] {
+        push_digest_field(&mut input, name, &[u8::from(value)]);
+    }
+    let mut sorted_dependencies = depends_on.to_vec();
+    sorted_dependencies.sort_unstable();
+    push_digest_list(&mut input, b"depends", &sorted_dependencies);
+    format!("{:016x}", crate::s2::content_digest_bytes(&input))
+}
+
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
-/// declarations × command/profile/features/fixture digests.
+/// declarations × canonical per-unit identity digests.
 pub(crate) fn plan_digest(
     units: &[(String, ProviderSet, String)],
     exclusions: &[(String, ProviderId, ExclusionReason)],
 ) -> String {
-    let mut digest_input = String::new();
-    for (unit_id, providers, command_digest) in units {
-        let _ = write!(digest_input, "unit:{unit_id}");
+    let mut digest_input = Vec::new();
+    let mut sorted_units = units.iter().collect::<Vec<_>>();
+    sorted_units
+        .sort_by(|left, right| (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2)));
+    for (unit_id, providers, unit_digest) in sorted_units {
+        push_digest_field(&mut digest_input, b"unit.id", unit_id.as_bytes());
         for provider in providers {
-            let _ = write!(digest_input, ":{provider}");
+            push_digest_field(
+                &mut digest_input,
+                b"unit.provider",
+                provider.as_str().as_bytes(),
+            );
         }
-        let _ = writeln!(digest_input, ":{command_digest}");
+        push_digest_field(&mut digest_input, b"unit.identity", unit_digest.as_bytes());
     }
-    for (unit_id, provider, reason) in exclusions {
-        let _ = writeln!(
-            digest_input,
-            "excluded:{unit_id}:{provider}:{}",
-            reason.as_str()
+    let mut sorted_exclusions = exclusions.iter().collect::<Vec<_>>();
+    sorted_exclusions.sort_by(|left, right| {
+        (&left.0, &left.1, left.2.as_str()).cmp(&(&right.0, &right.1, right.2.as_str()))
+    });
+    for (unit_id, provider, reason) in sorted_exclusions {
+        push_digest_field(&mut digest_input, b"excluded.unit", unit_id.as_bytes());
+        push_digest_field(
+            &mut digest_input,
+            b"excluded.provider",
+            provider.as_str().as_bytes(),
+        );
+        push_digest_field(
+            &mut digest_input,
+            b"excluded.reason",
+            reason.as_str().as_bytes(),
         );
     }
-    let digest = crate::s2::content_digest_bytes(digest_input.as_bytes());
+    let digest = crate::s2::content_digest_bytes(&digest_input);
     format!("{digest:016x}")
+}
+
+fn push_digest_list(input: &mut Vec<u8>, field: &[u8], values: &[String]) {
+    push_digest_count(input, field, values.len());
+    for value in values {
+        push_digest_field(input, field, value.as_bytes());
+    }
+}
+
+fn push_digest_phase_list(input: &mut Vec<u8>, phases: &[ValidationPhase]) {
+    push_digest_count(input, b"phase", phases.len());
+    for phase in phases {
+        push_digest_field(input, b"phase", phase.as_str().as_bytes());
+    }
+}
+
+fn push_digest_count(input: &mut Vec<u8>, field: &[u8], count: usize) {
+    push_digest_field(input, field, &(count as u64).to_be_bytes());
+}
+
+fn push_digest_field(input: &mut Vec<u8>, field: &[u8], value: &[u8]) {
+    input.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    input.extend_from_slice(field);
+    input.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    input.extend_from_slice(value);
 }
 
 /// Full result identity (spec §2): repository + sha + run + attempt +
@@ -696,6 +797,14 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
+        if run.platform_for(&identity.unit_id) != Some(identity.platform) {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "platform does not match the planned unit".to_owned(),
+            });
+            continue;
+        }
         if !expected.contains(&key) {
             // A record for a pair outside the expected set is either a claim
             // for another provider's work or an unselected unit: both fail.
@@ -783,6 +892,7 @@ pub(crate) struct RunIdentity {
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
     pub(crate) command_digests: BTreeMap<String, String>,
+    pub(crate) platforms: BTreeMap<String, Platform>,
 }
 
 impl RunIdentity {
@@ -795,6 +905,14 @@ impl RunIdentity {
             .get(unit_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "D2 part-A strict-results API; no schema-2 caller yet"
+    )]
+    fn platform_for(&self, unit_id: &str) -> Option<Platform> {
+        self.platforms.get(unit_id).copied()
     }
 }
 
