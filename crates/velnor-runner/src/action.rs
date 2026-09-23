@@ -7,7 +7,6 @@ use crate::{
     script_step::{step_environment, value_truthy, ScriptStep},
 };
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Deserializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -18,100 +17,11 @@ use velnor_model::action_reference::{
     resolve_action_path, ActionImageReference, RepositoryActionReference,
 };
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionMetadata {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    pub runs: ActionRuns,
-    #[serde(default)]
-    pub inputs: BTreeMap<String, ActionInput>,
-    #[serde(default)]
-    pub outputs: BTreeMap<String, ActionOutput>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionInput {
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(
-        default,
-        rename = "default",
-        deserialize_with = "deserialize_optional_string_scalar"
-    )]
-    pub default_value: Option<String>,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionOutput {
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub value: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionRuns {
-    pub using: String,
-    #[serde(default)]
-    pub main: Option<String>,
-    #[serde(default)]
-    pub pre: Option<String>,
-    #[serde(default, rename = "pre-if", alias = "preIf")]
-    pub pre_if: Option<String>,
-    #[serde(default)]
-    pub post: Option<String>,
-    #[serde(default, rename = "post-if", alias = "postIf")]
-    pub post_if: Option<String>,
-    #[serde(default)]
-    pub image: Option<String>,
-    #[serde(default)]
-    pub entrypoint: Option<String>,
-    /// Docker-action pre/post entrypoints (`runs.pre-entrypoint` /
-    /// `runs.post-entrypoint`): upstream runs them as the Pre/Post stage
-    /// with the same image and args
-    /// (`ContainerActionHandler.cs: RunAsync(stage)`).
-    #[serde(default, rename = "pre-entrypoint", alias = "preEntrypoint")]
-    pub pre_entrypoint: Option<String>,
-    #[serde(default, rename = "post-entrypoint", alias = "postEntrypoint")]
-    pub post_entrypoint: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub steps: Vec<CompositeActionStep>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct CompositeActionStep {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub shell: Option<String>,
-    #[serde(default)]
-    pub run: Option<String>,
-    #[serde(default)]
-    pub uses: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_string_map")]
-    pub with: BTreeMap<String, String>,
-    #[serde(default, deserialize_with = "deserialize_string_map")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, rename = "if")]
-    pub condition: Option<String>,
-    #[serde(default, rename = "working-directory", alias = "workingDirectory")]
-    pub working_directory: Option<String>,
-    #[serde(
-        default,
-        rename = "continue-on-error",
-        alias = "continueOnError",
-        deserialize_with = "deserialize_optional_string_scalar"
-    )]
-    pub continue_on_error: Option<String>,
-}
+pub use velnor_action_contract::{
+    parse as parse_action_metadata, ActionInput, ActionMetadata, ActionOutput, ActionRuns,
+    BooleanValue, CompositeRuns, CompositeStep, DockerRuns, NodeRuns, PluginRuns, RunStep,
+    UsesStep,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionRuntime {
@@ -261,31 +171,6 @@ pub fn unsupported_action_error(repository: &str) -> Option<&'static str> {
     }
 }
 
-impl ActionMetadata {
-    pub fn runtime(&self) -> Result<ActionRuntime> {
-        let using = self.runs.using.to_ascii_lowercase();
-        if matches!(using.as_str(), "node12" | "node16" | "node20" | "node24") {
-            let main =
-                self.runs.main.clone().ok_or_else(|| {
-                    anyhow::anyhow!("JavaScript action metadata missing runs.main")
-                })?;
-            return Ok(ActionRuntime::JavaScript { node: using, main });
-        }
-        if using == "composite" {
-            return Ok(ActionRuntime::Composite);
-        }
-        if using == "docker" {
-            let image = self
-                .runs
-                .image
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("Docker action metadata missing runs.image"))?;
-            return Ok(ActionRuntime::Docker { image });
-        }
-        bail!("unsupported action runtime '{}'", self.runs.using)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryActionPlan {
     pub step_id: String,
@@ -323,102 +208,11 @@ pub struct CompositeActionOutputs {
     pub outputs: BTreeMap<String, String>,
 }
 
-pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
-    if !metadata_document_within_budget(contents) {
-        bail!("action metadata nesting exceeds the admission parser budget");
-    }
-    serde_yaml::from_str(contents).context("parse action metadata")
-}
-
-const MAX_METADATA_PARSE_NESTING: usize = 64;
 const MAX_LOCAL_ACTION_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_ACTION_INPUTS: usize = 256;
 const MAX_ACTION_INPUT_NAME_BYTES: usize = 256;
 const MAX_ACTION_INPUT_VALUE_BYTES: usize = 64 * 1024;
 const MAX_ACTION_INPUT_BYTES: usize = 256 * 1024;
-
-fn metadata_document_within_budget(contents: &str) -> bool {
-    let mut flow_depth = 0usize;
-    let mut block_scalar_indent = None;
-    for line in contents.lines() {
-        let indentation = line
-            .bytes()
-            .take_while(|byte| *byte == b' ' || *byte == b'\t')
-            .count();
-        if indentation > MAX_METADATA_PARSE_NESTING * 2 {
-            return false;
-        }
-        if block_scalar_indent.is_some_and(|base| indentation > base) {
-            continue;
-        }
-        block_scalar_indent = None;
-        let mut single_quoted = false;
-        let mut double_quoted = false;
-        let mut escaped = false;
-        for byte in line.bytes() {
-            if double_quoted {
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == b'"' {
-                    double_quoted = false;
-                }
-                continue;
-            }
-            if single_quoted {
-                if byte == b'\'' {
-                    single_quoted = false;
-                }
-                continue;
-            }
-            match byte {
-                b'#' => break,
-                b'\'' => single_quoted = true,
-                b'"' => double_quoted = true,
-                b'[' | b'{' => {
-                    flow_depth = flow_depth.saturating_add(1);
-                    if flow_depth > MAX_METADATA_PARSE_NESTING {
-                        return false;
-                    }
-                }
-                b']' | b'}' => flow_depth = flow_depth.saturating_sub(1),
-                _ => {}
-            }
-        }
-        let trimmed = line.trim_end();
-        if trimmed.ends_with('|') || trimmed.ends_with('>') {
-            block_scalar_indent = Some(indentation);
-        }
-    }
-    true
-}
-
-fn deserialize_optional_string_scalar<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(value.map(|value| input_value(&value)))
-}
-
-fn deserialize_string_map<'de, D>(
-    deserializer: D,
-) -> std::result::Result<BTreeMap<String, String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Some(object) = Option::<BTreeMap<String, serde_json::Value>>::deserialize(deserializer)?
-    else {
-        return Ok(BTreeMap::new());
-    };
-    Ok(object
-        .into_iter()
-        .map(|(name, value)| (name, input_value(&value)))
-        .collect())
-}
 
 pub fn repository_action_plans(
     steps: &[ActionStep],

@@ -4052,6 +4052,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "velnor-action-contract",
  "velnor-control",
  "velnor-model",
  "wiremock",
@@ -4103,6 +4104,7 @@ dependencies = [
  "termrock",
  "toml",
  "uuid",
+ "velnor-action-contract",
  "velnor-model",
  "velnor-runner",
 ]
