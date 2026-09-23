@@ -617,6 +617,10 @@ pub enum ValidationPhase {
     Clippy,
     Test,
     Doctest,
+    #[serde(rename = "swift-format")]
+    SwiftFormat,
+    #[serde(rename = "swift-lint")]
+    SwiftLint,
     #[serde(rename = "xcodegen-generate")]
     XcodegenGenerate,
     #[serde(rename = "swift-build")]
@@ -633,11 +637,13 @@ impl ValidationPhase {
     /// tests, then doctests, then `XcodeGen` generation, then Swift builds and
     /// executable runs, then tests. `Check` is prerequisite-only and never
     /// renders a validation step.
-    pub(crate) const RUNNABLE: [Self; 8] = [
+    pub(crate) const RUNNABLE: [Self; 10] = [
         Self::Fmt,
         Self::Clippy,
         Self::Test,
         Self::Doctest,
+        Self::SwiftFormat,
+        Self::SwiftLint,
         Self::XcodegenGenerate,
         Self::SwiftBuild,
         Self::SwiftRun,
@@ -651,6 +657,8 @@ impl ValidationPhase {
             "clippy" => Self::Clippy,
             "test" => Self::Test,
             "doctest" => Self::Doctest,
+            "swift-format" => Self::SwiftFormat,
+            "swift-lint" => Self::SwiftLint,
             "xcodegen-generate" => Self::XcodegenGenerate,
             "swift-build" => Self::SwiftBuild,
             "swift-run" => Self::SwiftRun,
@@ -668,6 +676,8 @@ impl ValidationPhase {
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doctest => "doctest",
+            Self::SwiftFormat => "swift-format",
+            Self::SwiftLint => "swift-lint",
             Self::XcodegenGenerate => "xcodegen-generate",
             Self::SwiftBuild => "swift-build",
             Self::SwiftRun => "swift-run",
@@ -683,6 +693,8 @@ impl ValidationPhase {
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
             Self::Doctest => "Doctests",
+            Self::SwiftFormat => "Swift format check",
+            Self::SwiftLint => "Swift lint check",
             Self::XcodegenGenerate => "XcodeGen project generation",
             Self::SwiftBuild => "Swift build",
             Self::SwiftRun => "Swift executable runs",
@@ -705,7 +717,12 @@ impl ValidationPhase {
     pub(crate) fn allows_empty_prerequisites(self) -> bool {
         matches!(
             self,
-            Self::XcodegenGenerate | Self::SwiftBuild | Self::SwiftRun | Self::SwiftTest
+            Self::SwiftFormat
+                | Self::SwiftLint
+                | Self::XcodegenGenerate
+                | Self::SwiftBuild
+                | Self::SwiftRun
+                | Self::SwiftTest
         )
     }
 }

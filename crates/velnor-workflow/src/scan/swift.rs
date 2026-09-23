@@ -26,6 +26,126 @@ fn append_apple_toolchain_pin_paths(paths: &mut Vec<String>) {
     );
 }
 
+const SWIFT_FORMAT_CONFIG: &str = ".swift-format";
+const SWIFT_LINT_CONFIGS: [&str; 2] = [".swiftlint.yml", ".swiftlint.yaml"];
+
+fn join_style_path(root: &str, name: &str) -> String {
+    if root == "." {
+        name.to_owned()
+    } else {
+        format!("{root}/{name}")
+    }
+}
+
+fn parent_style_path(path: &str) -> Option<String> {
+    if path == "." {
+        None
+    } else {
+        Some(
+            path.rsplit_once('/')
+                .map_or_else(|| ".".to_owned(), |(parent, _)| parent.to_owned()),
+        )
+    }
+}
+
+/// Find the nearest repository config at the unit root or one of its
+/// ancestors. A root unit never inherits a nested package's config.
+fn nearest_style_config(unit_root: &str, files: &[String], names: &[&str]) -> Option<String> {
+    let mut scope = unit_root.to_owned();
+    loop {
+        for name in names {
+            let candidate = join_style_path(&scope, name);
+            if files.iter().any(|file| file == &candidate) {
+                return Some(candidate);
+            }
+        }
+        let Some(parent) = parent_style_path(&scope) else {
+            break;
+        };
+        scope = parent;
+    }
+    None
+}
+
+fn relative_style_path(from: &str, to: &str) -> String {
+    let from_parts = if from == "." {
+        Vec::new()
+    } else {
+        from.split('/').collect::<Vec<_>>()
+    };
+    let to_parts = if to == "." {
+        Vec::new()
+    } else {
+        to.split('/').collect::<Vec<_>>()
+    };
+    let common = from_parts
+        .iter()
+        .zip(&to_parts)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = Vec::new();
+    parts.extend(std::iter::repeat_n("..", from_parts.len() - common));
+    parts.extend(to_parts[common..].iter().copied());
+    if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn swift_style_checks(unit_root: &str, files: &[String]) -> Vec<(String, ValidationPhase, String)> {
+    let mut checks = Vec::new();
+    if let Some(config) = nearest_style_config(unit_root, files, &[SWIFT_FORMAT_CONFIG]) {
+        let config_arg = shell_quote(&relative_style_path(unit_root, &config));
+        checks.push((
+            format!(
+                "{}swift format lint --configuration {config_arg} --recursive --strict .",
+                shell_change_dir(unit_root)
+            ),
+            ValidationPhase::SwiftFormat,
+            config,
+        ));
+    }
+    if let Some(config) = nearest_style_config(unit_root, files, &SWIFT_LINT_CONFIGS) {
+        let config_arg = shell_quote(&relative_style_path(unit_root, &config));
+        checks.push((
+            format!(
+                "{}swiftlint lint --config {config_arg} --strict",
+                shell_change_dir(unit_root)
+            ),
+            ValidationPhase::SwiftLint,
+            config,
+        ));
+    }
+    checks
+}
+
+fn apply_swift_style_checks(unit: &mut Unit, files: &[String]) {
+    let checks = swift_style_checks(&unit.root, files);
+    if checks.is_empty() {
+        return;
+    }
+    let mut commands = checks
+        .iter()
+        .map(|(command, _, _)| command.clone())
+        .collect::<Vec<_>>();
+    commands.extend(std::mem::take(&mut unit.pr_commands));
+    unit.pr_commands = commands.clone();
+    unit.full_commands = commands;
+
+    let mut phases = checks
+        .iter()
+        .map(|(_, phase, _)| *phase)
+        .collect::<Vec<_>>();
+    phases.extend(std::mem::take(&mut unit.phases));
+    unit.phases = phases;
+
+    unit.watch
+        .extend(checks.into_iter().map(|(_, _, config)| config));
+    unit.watch.sort();
+    unit.watch.dedup();
+}
+
 fn call_present(contents: &str, call: &str) -> bool {
     let mut rest = contents;
     while let Some(found) = rest.find(call) {
@@ -383,6 +503,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             mbx: None,
             prepared_tools: Vec::new(),
         };
+        apply_swift_style_checks(&mut unit, files);
         unit.watch.sort();
         unit.watch.dedup();
         units.push(unit);
@@ -425,6 +546,7 @@ pub(crate) fn detect(
             ));
         }
         let mut unit = swift_package_unit(&package_root, has_tests);
+        apply_swift_style_checks(&mut unit, context.files);
         if package_manifest_needs_xcframework(context.root, &package_root) {
             unit.platform = crate::platform::PlatformRequirement::apple_xcframework();
         }
@@ -471,10 +593,12 @@ pub(crate) fn detect(
 #[cfg(test)]
 mod tests {
     use super::{
-        has_swift_call, is_xcodegen_spec, swift_package_unit, xcode_scheme_has_test_action,
+        apply_swift_style_checks, has_swift_call, is_xcodegen_spec, swift_package_unit,
+        swift_style_checks, xcode_scheme_has_test_action, xcode_scheme_units,
         APPLE_TOOLCHAIN_PIN_KEY_FILES,
     };
     use crate::ValidationPhase;
+    use std::fs;
 
     fn assert_apple_toolchain_pin_paths(unit: &crate::Unit) {
         assert!(
@@ -552,5 +676,84 @@ mod tests {
         assert!(xcode_scheme_has_test_action(
             "<Scheme><BuildAction/><TestAction/></Scheme>"
         ));
+    }
+
+    #[test]
+    fn swift_style_fixture_detects_nearest_configs_and_emits_commands() {
+        let files = vec![
+            ".swift-format".to_owned(),
+            ".swiftlint.yml".to_owned(),
+            "clients/app/Package.swift".to_owned(),
+            "clients/app/Sources/App.swift".to_owned(),
+            "clients/app/.swiftlint.yaml".to_owned(),
+        ];
+        let mut unit = swift_package_unit("clients/app", true);
+        apply_swift_style_checks(&mut unit, &files);
+        assert_eq!(
+            unit.pr_commands,
+            vec![
+                "cd -- 'clients/app' && swift format lint --configuration '../../.swift-format' --recursive --strict .".to_owned(),
+                "cd -- 'clients/app' && swiftlint lint --config '.swiftlint.yaml' --strict".to_owned(),
+                "cd -- 'clients/app' && swift build".to_owned(),
+                "cd -- 'clients/app' && swift test --parallel".to_owned(),
+            ]
+        );
+        assert_eq!(
+            unit.phases,
+            vec![
+                ValidationPhase::SwiftFormat,
+                ValidationPhase::SwiftLint,
+                ValidationPhase::SwiftBuild,
+                ValidationPhase::SwiftTest,
+            ]
+        );
+        assert!(unit.watch.contains(&".swift-format".to_owned()));
+        assert!(unit
+            .watch
+            .contains(&"clients/app/.swiftlint.yaml".to_owned()));
+        assert!(
+            swift_style_checks(".", &["clients/app/.swift-format".to_owned()]).is_empty(),
+            "a root unit must not inherit a nested package config"
+        );
+    }
+
+    #[test]
+    fn shared_scheme_style_fixture_adds_checks_before_xcodebuild() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-root-swift-style-{}", std::process::id()));
+        let scheme_dir = root.join("App.xcodeproj/xcshareddata/xcschemes");
+        assert!(fs::create_dir_all(&scheme_dir).is_ok());
+        assert!(fs::write(
+            root.join("App.xcodeproj/project.pbxproj"),
+            "// generic fixture\n"
+        )
+        .is_ok());
+        assert!(fs::write(
+            scheme_dir.join("App.xcscheme"),
+            "<Scheme><BuildAction/><TestAction/></Scheme>\n"
+        )
+        .is_ok());
+        let files = vec![
+            ".swift-format".to_owned(),
+            ".swiftlint.yml".to_owned(),
+            "App.xcodeproj/project.pbxproj".to_owned(),
+            "App.xcodeproj/xcshareddata/xcschemes/App.xcscheme".to_owned(),
+        ];
+        let units = xcode_scheme_units(&root, &files);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].pr_commands.len(), 4);
+        assert!(units[0].pr_commands[0].contains("swift format lint"));
+        assert!(units[0].pr_commands[1].contains("swiftlint lint"));
+        assert!(units[0].pr_commands[2].contains("xcodebuild"));
+        assert_eq!(
+            units[0].phases,
+            vec![
+                ValidationPhase::SwiftFormat,
+                ValidationPhase::SwiftLint,
+                ValidationPhase::SwiftBuild,
+                ValidationPhase::SwiftTest,
+            ]
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }
