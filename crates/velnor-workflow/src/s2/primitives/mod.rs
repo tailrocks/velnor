@@ -999,11 +999,11 @@ pub(crate) fn generate(
     config: &ProjectConfig,
     generation: Option<&RepoGenerationConfig>,
 ) -> Result<Surface, GeneratorError> {
-    // Capability staging boundary: the checked-in repository config is
-    // consumed by a pinned runtime that predates `Precondition`. Keep its
-    // generated tree legacy-compatible until a later pin/config activation;
-    // unconfigured fixtures exercise the typed capability now.
-    let precondition_phases_enabled = generation.is_none();
+    // Capability staging boundary: every generated surface is consumed by a
+    // published runtime that predates `Precondition`. Keep activation off
+    // until a later runtime pin promotes it; direct RenderCtx tests enable the
+    // staged capability explicitly.
+    let precondition_phases_enabled = false;
     let declared = match generation {
         Some(generation) => generation
             .declare()

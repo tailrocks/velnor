@@ -7,10 +7,32 @@
 //! first on the units the declaration names.
 
 use super::{Args, Primitive, RenderCtx, Rendered, REGEN_GATE};
-use crate::s2::GeneratorError;
+use crate::s2::{GeneratorError, Unit};
 
 /// Declare the regeneration gate.
 pub(crate) struct RegenGate;
+
+fn normalize_legacy_lane(lane: &mut Vec<String>, command: &str) -> bool {
+    let before = lane.clone();
+    lane.retain(|candidate| candidate != command);
+    lane.insert(0, command.to_owned());
+    *lane != before
+}
+
+fn apply_legacy_regen_gate(unit: &mut Unit, command: &str) {
+    // The published runtime has no typed precondition phase. Normalize every
+    // active lane so a command that was already present cannot remain late or
+    // duplicated, and never retain phase evidence for the untyped shape.
+    let had_phase_evidence = !unit.phases.is_empty() || !unit.check_commands.is_empty();
+    let mut lanes = vec![&mut unit.pr_commands, &mut unit.full_commands];
+    let mut changed = false;
+    for lane in &mut lanes {
+        changed |= normalize_legacy_lane(lane, command);
+    }
+    if changed || had_phase_evidence {
+        unit.clear_phases();
+    }
+}
 
 impl Primitive for RegenGate {
     fn id(&self) -> &'static str {
@@ -41,25 +63,8 @@ impl Primitive for RegenGate {
                 // composable precondition instead of a reason to collapse the
                 // unit.
                 unit.prepend_precondition_commands(std::slice::from_ref(&command))?;
-            } else if !unit
-                .pr_commands
-                .iter()
-                .any(|candidate| candidate == &command)
-            {
-                // The configured tree still targets a runtime without the
-                // typed precondition phase. Preserve its legacy output until
-                // a later runtime pin promotes the staged capability.
-                unit.pr_commands.insert(0, command.clone());
-                unit.clear_phases();
-            }
-            if !ctx.precondition_phases_enabled
-                && !unit
-                    .full_commands
-                    .iter()
-                    .any(|candidate| candidate == &command)
-            {
-                unit.full_commands.insert(0, command.clone());
-                unit.clear_phases();
+            } else {
+                apply_legacy_regen_gate(&mut unit, &command);
             }
             units.push(unit);
         }
@@ -67,5 +72,83 @@ impl Primitive for RegenGate {
             units,
             ..Rendered::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_legacy_regen_gate;
+    use crate::s2::{provider, Unit, UnitKind, ValidationPhase};
+
+    fn unit() -> Unit {
+        Unit {
+            xcode: None,
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            pinned_lockfile: false,
+            watch: Vec::new(),
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            phases: Vec::new(),
+            check_commands: Vec::new(),
+            depends_on: Vec::new(),
+            cache: None,
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            trust: provider::TrustReq::UntrustedOk,
+            platform: provider::Platform::LinuxX64,
+            capabilities: provider::Capabilities::default(),
+            workspace_check: false,
+            reads_closed: false,
+            full_history: false,
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            docker_contexts: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_regen_clears_existing_or_misplaced_phase_evidence() {
+        let command = "cargo run -- --plain --check";
+        let mut misplaced = unit();
+        misplaced.pr_commands = vec!["cargo fmt --check".to_owned(), command.to_owned()];
+        misplaced.full_commands = misplaced.pr_commands.clone();
+        misplaced.phases = vec![ValidationPhase::Fmt, ValidationPhase::Test];
+        apply_legacy_regen_gate(&mut misplaced, command);
+        assert!(misplaced.phases.is_empty());
+        assert_eq!(misplaced.pr_commands[0], command);
+        assert_eq!(misplaced.full_commands[0], command);
+
+        let mut stale = unit();
+        stale.pr_commands = vec![
+            command.to_owned(),
+            "cargo fmt --check".to_owned(),
+            command.to_owned(),
+        ];
+        stale.full_commands = stale.pr_commands.clone();
+        stale.phases = vec![
+            ValidationPhase::Fmt,
+            ValidationPhase::Test,
+            ValidationPhase::Doctest,
+        ];
+        apply_legacy_regen_gate(&mut stale, command);
+        assert!(stale.phases.is_empty());
+        assert_eq!(stale.pr_commands[0], command);
+        assert_eq!(stale.full_commands[0], command);
+        assert_eq!(
+            stale
+                .pr_commands
+                .iter()
+                .filter(|candidate| *candidate == command)
+                .count(),
+            1
+        );
     }
 }

@@ -479,6 +479,10 @@ pub(crate) struct RenderCtx<'a> {
     /// The aggregate passes them to the kind-reusable callers so caller
     /// `with:` values and callee step gates derive from one contract.
     pub(crate) contracts: &'a BTreeMap<String, UnitContract>,
+    /// Whether this render target's runtime can parse the staged typed
+    /// `precondition` phase. The schema-1 bridge keeps this false until its
+    /// published runtime pin promotes the capability.
+    pub(crate) precondition_phases_enabled: bool,
 }
 
 /// One render primitive of the CI surface.
@@ -1119,6 +1123,11 @@ pub(crate) fn generate(
     config: &ProjectConfig,
     generation: Option<&RepoGenerationConfig>,
 ) -> Result<Surface, GeneratorError> {
+    // The schema-1 bridge emits files consumed by the published runtime, so
+    // it must not activate a phase name that the pinned runtime cannot parse.
+    // Direct primitive tests construct a RenderCtx with the staged capability
+    // explicitly enabled.
+    let precondition_phases_enabled = false;
     let declared = match generation {
         Some(generation) => generation
             .declare()
@@ -1164,6 +1173,7 @@ pub(crate) fn generate(
                 &cache,
                 &[],
                 &BTreeMap::new(),
+                precondition_phases_enabled,
             ),
             &row.args(),
         )?;
@@ -1200,6 +1210,7 @@ pub(crate) fn generate(
                 &cache,
                 &nodes,
                 &contracts,
+                precondition_phases_enabled,
             ),
             &row.args(),
         )?;
@@ -1303,6 +1314,7 @@ fn ctx<'a>(
     cache: &'a cache::ResolvedCache,
     nodes: &'a [GraphNode],
     contracts: &'a BTreeMap<String, UnitContract>,
+    precondition_phases_enabled: bool,
 ) -> RenderCtx<'a> {
     RenderCtx {
         root,
@@ -1317,6 +1329,7 @@ fn ctx<'a>(
         cache,
         nodes,
         contracts,
+        precondition_phases_enabled,
     }
 }
 

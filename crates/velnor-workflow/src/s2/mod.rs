@@ -872,10 +872,11 @@ impl Unit {
 
     /// Prefix commands required before validation on every command lane.
     /// Phased units get one `precondition` tag per inserted command, so their
-    /// existing phase identity and order remain intact. A phased unit must be
-    /// in one of two complete states across both lanes: both already have the
-    /// whole prefix, or neither has any of it. Refusing partial state prevents
-    /// the PR/full vectors from acquiring a different positional phase map.
+    /// existing phase identity and order remain intact. Existing typed
+    /// preconditions must be one identical leading prefix across both shared
+    /// lanes; distinct callers may then add a deduplicated prefix batch.
+    /// Refusing partial state prevents the PR/full vectors from acquiring a
+    /// different positional phase map.
     pub(crate) fn prepend_precondition_commands(
         &mut self,
         commands: &[String],
@@ -898,6 +899,12 @@ impl Unit {
         ];
 
         if phased {
+            if lanes.len() > 2 {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` has provider override command lanes; typed preconditions require shared lanes",
+                    self.id
+                )));
+            }
             for (lane, commands) in &lanes {
                 if commands.len() != phase_count {
                     return Err(GeneratorError::usage(format!(
@@ -908,54 +915,68 @@ impl Unit {
                 }
             }
 
-            // 0 = no requested command anywhere, 1 = the complete requested
-            // prefix with no later duplicate, 2 = a partial or misplaced
-            // prefix. Only states 0 and 1 compose positionally.
-            let prefix_state = |lane: &[String]| {
-                if lane.starts_with(&requested)
-                    && !lane[requested.len()..]
-                        .iter()
-                        .any(|command| requested.contains(command))
-                {
-                    1_u8
-                } else if requested.iter().all(|command| !lane.contains(command)) {
-                    0_u8
-                } else {
-                    2_u8
-                }
-            };
-            let state = prefix_state(lanes[0].1);
-            if state == 2 || lanes.iter().any(|(_, lane)| prefix_state(lane) != state) {
+            // Existing typed preconditions are the leading phase-tagged
+            // prefix. Merge only new commands ahead of that prefix: callers
+            // may arrive in either order, and a later caller may repeat a
+            // command already contributed by an earlier one. Both command
+            // lanes must expose the same prefix, or their phase maps diverge.
+            // The requested batch's order is retained: shell recipes may
+            // depend on it, while later batches are prepended.
+            let precondition_count = self
+                .phases
+                .iter()
+                .take_while(|phase| **phase == ValidationPhase::Precondition)
+                .count();
+            if self.phases[precondition_count..].contains(&ValidationPhase::Precondition) {
                 return Err(GeneratorError::usage(format!(
-                    "unit `{}` has a partial or misplaced precondition across command lanes; both lanes must omit the gate or carry the same prefix",
+                    "unit `{}` has a misplaced precondition phase; preconditions must be the leading phase prefix",
                     self.id
                 )));
             }
-            if state == 1 {
-                if self.phases[..requested.len()]
-                    .iter()
-                    .any(|phase| *phase != ValidationPhase::Precondition)
-                {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` has a precondition command without a matching precondition phase tag",
-                        self.id
-                    )));
-                }
-                return Ok(());
-            }
-            if self.phases.contains(&ValidationPhase::Precondition) {
+            let existing_prefix = lanes[0].1[..precondition_count].to_vec();
+            if lanes
+                .iter()
+                .any(|(_, lane)| lane.get(..precondition_count) != Some(existing_prefix.as_slice()))
+            {
                 return Err(GeneratorError::usage(format!(
-                    "unit `{}` has a precondition phase tag without a matching command prefix",
+                    "unit `{}` has a partial or misplaced precondition across command lanes; both lanes must carry the same prefix",
+                    self.id
+                )));
+            }
+            if lanes.iter().any(|(_, lane)| {
+                lane[precondition_count..]
+                    .iter()
+                    .any(|command| requested.contains(command))
+            }) {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` has a requested precondition command outside the typed prefix",
                     self.id
                 )));
             }
 
+            if lanes.iter().any(|(_, lane)| {
+                lane[precondition_count..]
+                    .iter()
+                    .any(|command| existing_prefix.contains(command))
+            }) {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` has a duplicate precondition command outside the typed prefix",
+                    self.id
+                )));
+            }
+            let additions = requested
+                .into_iter()
+                .filter(|command| !existing_prefix.contains(command))
+                .collect::<Vec<_>>();
+            if additions.is_empty() {
+                return Ok(());
+            }
             for (_, lane) in &mut lanes {
-                for command in requested.iter().rev() {
+                for command in additions.iter().rev() {
                     lane.insert(0, command.clone());
                 }
             }
-            let mut phase_tags = vec![ValidationPhase::Precondition; requested.len()];
+            let mut phase_tags = vec![ValidationPhase::Precondition; additions.len()];
             phase_tags.extend(self.phases.iter().copied());
             self.phases = phase_tags;
             return Ok(());
@@ -1983,11 +2004,11 @@ fn scan_target(
             .as_ref()
             .and_then(|generation| generation.native_apple().deployment_floor.as_deref()),
     )?;
-    // The checked-in repository is configured against a pinned runtime that
-    // predates the typed `Precondition` phase. Stage the capability in the
-    // scanner and direct tests, but keep this configured generation legacy
-    // compatible until a later runtime promotion activates it.
-    let precondition_phases_enabled = generation.is_none();
+    // Both configured and default S2 generation paths emit files consumed by
+    // the published runtime. Keep activation disabled until the runtime pin
+    // can parse the staged `Precondition` phase; direct scanner tests pass the
+    // capability explicitly through `scan_shape_with_precondition_phases`.
+    let precondition_phases_enabled = false;
     let shape = scan::scan_shape_with_precondition_phases(
         root,
         &scan_providers,

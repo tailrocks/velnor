@@ -1019,15 +1019,25 @@ fn select_app_scheme(spec: &XcodeGenSpec, app: &XcodeGenTarget) -> (SchemePick, 
 /// then build (and, for a declared testable scheme, test) the app.
 /// Returns `None` when a committed generated project with shared schemes
 /// already covers the spec, so the two surfaces never double-verify.
-fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<String>) {
+fn xcodegen_unit(
+    repo_root: &Path,
+    spec: &XcodeGenSpec,
+    files: &[String],
+) -> (Option<Unit>, Vec<String>) {
     let mut notes = Vec::new();
-    let root = parent_path(&spec.path);
-    let generated = join_repo_path(&root, &format!("{}.xcodeproj", spec.name));
+    let spec_root = parent_path(&spec.path);
+    let generated = join_repo_path(&spec_root, &format!("{}.xcodeproj", spec.name));
     let generated_prefix = format!("{generated}/");
     let covered_by_committed_project = files.iter().any(|file| {
         file.starts_with(&generated_prefix)
             && file.contains("/xcshareddata/xcschemes/")
             && file.ends_with(".xcscheme")
+    }) || files.iter().any(|file| {
+        let Some((container, _)) = file.split_once("/xcshareddata/xcschemes/") else {
+            return false;
+        };
+        container.ends_with(".xcworkspace")
+            && xcode_workspace_references_project(repo_root, container, &generated)
     });
     if covered_by_committed_project {
         notes.push(format!(
@@ -1041,7 +1051,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
         .iter()
         .filter(|target| target.target_type.as_deref() == Some("application"))
         .collect::<Vec<_>>();
-    let command_prefix = shell_change_dir(&root);
+    let command_prefix = shell_change_dir(&spec_root);
     let spec_file = spec.path.rsplit('/').next().unwrap_or(&spec.path);
     let mut commands = vec![format!(
         "{command_prefix}xcodegen generate --spec {}",
@@ -1065,7 +1075,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
             ));
             return (
                 Some(xcodegen_generate_unit(
-                    spec, &root, spec_file, commands, phases, label, &id_part,
+                    spec, &spec_root, spec_file, commands, phases, label, &id_part,
                 )),
                 notes,
             );
@@ -1109,7 +1119,7 @@ fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<St
     }
     (
         Some(xcodegen_generate_unit(
-            spec, &root, spec_file, commands, phases, label, &id_part,
+            spec, &spec_root, spec_file, commands, phases, label, &id_part,
         )),
         notes,
     )
@@ -1271,6 +1281,32 @@ fn xcode_scheme_referenced_container(contents: &str) -> Option<String> {
     let marker = "ReferencedContainer=\"container:";
     let start = contents.find(marker)? + marker.len();
     Some(contents[start..].split('\"').next()?.to_owned())
+}
+
+fn xcode_workspace_references_project(root: &Path, workspace: &str, project: &str) -> bool {
+    let contents =
+        fs::read_to_string(root.join(join_repo_path(workspace, "contents.xcworkspacedata")))
+            .unwrap_or_default();
+    let workspace_root = parent_path(workspace);
+    let mut remaining = contents.as_str();
+    while let Some(found) = remaining.find("location=\"") {
+        let value = &remaining[found + "location=\"".len()..];
+        let Some(end) = value.find('"') else {
+            break;
+        };
+        let location = &value[..end];
+        let relative = location
+            .strip_prefix("group:")
+            .or_else(|| location.strip_prefix("container:"));
+        if relative
+            .and_then(|relative| resolve_repo_path(&workspace_root, relative))
+            .is_some_and(|candidate| candidate == project)
+        {
+            return true;
+        }
+        remaining = &value[end + 1..];
+    }
+    false
 }
 
 fn xcode_project_is_ios(contents: &str) -> bool {
@@ -1636,7 +1672,7 @@ fn detect_xcodegen_specs(
             continue;
         };
         shape.detected.push(format!("xcodegen:{}", merged.path));
-        let (unit, unit_notes) = xcodegen_unit(&merged, context.files);
+        let (unit, unit_notes) = xcodegen_unit(context.root, &merged, context.files);
         shape.limitations.extend(unit_notes);
         let consumer_root = parent_path(&merged.path);
         let owner_ids = if let Some(mut unit) = unit {
@@ -1650,16 +1686,17 @@ fn detect_xcodegen_specs(
             // project with several shared schemes cannot lose the producer
             // prerequisite merely because XcodeGen generation is skipped.
             let project_name = format!("{}.xcodeproj", merged.name);
+            let project_file =
+                join_repo_path(&consumer_root, &format!("{project_name}/project.pbxproj"));
             shape
                 .units
                 .iter()
                 .filter(|candidate| {
                     candidate.kind == UnitKind::Swift
                         && candidate.root == consumer_root
-                        && candidate
-                            .pr_commands
-                            .iter()
-                            .any(|command| command.contains(&project_name))
+                        && candidate.cache.as_ref().is_some_and(|cache| {
+                            cache.key_files.iter().any(|key| key == &project_file)
+                        })
                 })
                 .map(|candidate| candidate.id.clone())
                 .collect::<Vec<_>>()
@@ -1700,6 +1737,7 @@ mod tests {
         PackageFacts, ValidationPhase, XcodeGenSpec, APPLE_TOOLCHAIN_PIN_KEY_FILES, XCODEGEN_TOOL,
     };
     use std::collections::BTreeMap;
+    use std::path::Path;
 
     #[expect(
         clippy::panic,
@@ -1994,7 +2032,7 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         let spec = must_some(spec, "spec merges");
         assert_eq!(spec.name, "Widget");
-        let (unit, notes) = xcodegen_unit(&spec, &[]);
+        let (unit, notes) = xcodegen_unit(Path::new("."), &spec, &[]);
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("No declared scheme"), "{}", notes[0]);
         let unit = must_some(unit, "unit is emitted");
@@ -2127,7 +2165,7 @@ mod tests {
             "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n  WidgetAppTests:\n    type: bundle.unit-test\n    platform: macOS\nschemes:\n  Other:\n    build:\n      targets:\n        WidgetApp: all\n  WidgetApp:\n    build:\n      targets:\n        WidgetApp: all\n    test:\n      targets:\n        - WidgetAppTests\n",
         )]);
         let (spec, _) = load_merged("app/project.yml", &files);
-        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        let (unit, notes) = xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &[]);
         assert!(notes.is_empty(), "{notes:?}");
         let unit = must_some(unit, "unit is emitted");
         assert_eq!(unit.pr_commands.len(), 3, "{:?}", unit.pr_commands);
@@ -2143,7 +2181,7 @@ mod tests {
             "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\nschemes:\n  Nightly:\n    build:\n      targets:\n        WidgetApp: all\n",
         )]);
         let (spec, _) = load_merged("app/project.yml", &files);
-        let (unit, _) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        let (unit, _) = xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &[]);
         let unit = must_some(unit, "unit is emitted");
         assert!(unit.pr_commands[1].contains("-scheme 'Nightly'"));
         assert_eq!(
@@ -2160,7 +2198,7 @@ mod tests {
             "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\nschemes:\n  Alpha:\n    build:\n      targets:\n        WidgetApp: all\n  Beta:\n    build:\n      targets:\n        WidgetApp: all\n",
         )]);
         let (spec, _) = load_merged("app/project.yml", &files);
-        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        let (unit, notes) = xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &[]);
         assert!(
             notes
                 .iter()
@@ -2180,7 +2218,7 @@ mod tests {
             "name: Widget\ntargets:\n  One:\n    type: application\n    platform: macOS\n  Two:\n    type: application\n    platform: macOS\n",
         )]);
         let (spec, _) = load_merged("app/project.yml", &files);
-        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        let (unit, notes) = xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &[]);
         assert!(
             notes
                 .iter()
@@ -2199,7 +2237,7 @@ mod tests {
             "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: tvOS\n",
         )]);
         let (spec, _) = load_merged("app/project.yml", &files);
-        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        let (unit, notes) = xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &[]);
         assert!(notes.iter().any(|note| note.contains("tvOS")), "{notes:?}");
         assert_eq!(must_some(unit, "unit").pr_commands.len(), 1);
     }
@@ -2210,7 +2248,8 @@ mod tests {
         let (spec, _) = load_merged("app/project.yml", &files);
         let tracked =
             vec!["app/Widget.xcodeproj/xcshareddata/xcschemes/Widget.xcscheme".to_owned()];
-        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &tracked);
+        let (unit, notes) =
+            xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &tracked);
         assert!(unit.is_none());
         assert!(
             notes.iter().any(|note| note.contains("Committed")),
@@ -2223,7 +2262,7 @@ mod tests {
         let files = spec_files(&[("app/project.yml", MINIMAL_APP)]);
         let (spec, _) = load_merged("app/project.yml", &files);
         let tracked = vec!["app/Widget.xcodeproj/project.pbxproj".to_owned()];
-        let (unit, _) = xcodegen_unit(&must_some(spec, "spec merges"), &tracked);
+        let (unit, _) = xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &tracked);
         assert!(unit.is_some());
     }
 
@@ -2234,7 +2273,7 @@ mod tests {
             "name: Widget\noptions:\n  minimumXcodeGenVersion: 2.46.0\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
         )]);
         let (spec, _) = load_merged("app/project.yml", &files);
-        let (unit, _) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        let (unit, _) = xcodegen_unit(Path::new("."), &must_some(spec, "spec merges"), &[]);
         assert_eq!(
             must_some(unit, "unit").tool_version.as_deref(),
             Some("2.46.0")
@@ -2434,6 +2473,103 @@ mod tests {
             "committed shared-scheme consumer",
         );
         assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
+        assert!(
+            shape.swift_consumers.is_empty(),
+            "joined consumers are drained"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn committed_xcodegen_workspace_scheme_keeps_native_join() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "app/project.yml",
+                "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: ../target/xcframework/BridgeCore.xcframework\n",
+            ),
+            (
+                "app/Widget.xcodeproj/project.pbxproj",
+                "SDKROOT = macosx;\n",
+            ),
+            (
+                "app/Workspace.xcworkspace/contents.xcworkspacedata",
+                "<Workspace><FileRef location=\"group:Widget.xcodeproj\"/></Workspace>\n",
+            ),
+            (
+                "app/Workspace.xcworkspace/xcshareddata/xcschemes/WidgetApp.xcscheme",
+                "<Scheme><BuildAction><BuildableReference ReferencedContainer=\"container:Widget.xcodeproj\"/></BuildAction></Scheme>\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        assert!(
+            !shape
+                .units
+                .iter()
+                .any(|unit| unit.id.starts_with("swift-xcodegen-")),
+            "the committed workspace project owns verification"
+        );
+        let consumer = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-xcworkspace-widgetapp"),
+            "committed workspace shared-scheme consumer",
+        );
+        assert!(
+            consumer.pr_commands[0]
+                .contains("xcodebuild -workspace 'Workspace.xcworkspace' -scheme 'WidgetApp'"),
+            "the workspace scheme remains a workspace build: {consumer:?}"
+        );
+        assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
+        assert!(
+            shape.swift_consumers.is_empty(),
+            "joined consumers are drained"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xcodegen_owner_matching_does_not_use_project_name_substrings() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "app/project.yml",
+                "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: ../target/xcframework/BridgeCore.xcframework\n",
+            ),
+            (
+                "app/Widget.xcodeproj/xcshareddata/xcschemes/WidgetApp.xcscheme",
+                "<Scheme><BuildAction/></Scheme>\n",
+            ),
+            (
+                "app/OtherWidget.xcodeproj/xcshareddata/xcschemes/OtherWidgetApp.xcscheme",
+                "<Scheme><BuildAction/></Scheme>\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let widget = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-xcodeproj-widgetapp"),
+            "Widget shared-scheme consumer",
+        );
+        let other = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-xcodeproj-otherwidgetapp"),
+            "OtherWidget shared-scheme consumer",
+        );
+        assert_eq!(widget.prerequisites.len(), 1, "{widget:?}");
+        assert!(
+            other.prerequisites.is_empty(),
+            "a similarly named project must not own Widget's native edge: {other:?}"
+        );
         assert!(
             shape.swift_consumers.is_empty(),
             "joined consumers are drained"

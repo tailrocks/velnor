@@ -411,10 +411,21 @@ pub(crate) fn prepare_command(task: &str, env: &BTreeMap<String, String>) -> Str
 /// Returns a usage error for an edge that names an unknown producer or a
 /// product the producer does not declare, for an object-transport toggle on a
 /// unit that cannot use it, and for a unit no enabled lane can execute.
+#[cfg(test)]
 pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+    resolve_with_precondition_phases(config, true)
+}
+
+/// Resolve the platform surface with an explicit precondition-phase
+/// capability. Schema-1 generation config keeps the legacy command shape until
+/// its pinned runtime can parse the staged `precondition` phase.
+pub(crate) fn resolve_with_precondition_phases(
+    config: &mut ProjectConfig,
+    precondition_phases_enabled: bool,
+) -> Result<(), GeneratorError> {
     validate_mbx_toggles(config)?;
     validate_product_inputs(config)?;
-    materialize_prerequisites(config)?;
+    materialize_prerequisites(config, precondition_phases_enabled)?;
     validate_placement(config)?;
     Ok(())
 }
@@ -480,7 +491,10 @@ fn find_product<'a>(
 /// product's input closure into its producer watch set, prepare commands (so
 /// the consumer rebuilds each product before its own checks on every lane),
 /// and merge consumer env (so product outputs reach the checks).
-fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+fn materialize_prerequisites(
+    config: &mut ProjectConfig,
+    precondition_phases_enabled: bool,
+) -> Result<(), GeneratorError> {
     for unit in &config.units {
         for prerequisite in &unit.prerequisites {
             let Some(producer) = config
@@ -570,7 +584,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
         if let Some(commands) = prepared.remove(&unit.id) {
-            prepend_prepare_commands(unit, &commands)?;
+            prepend_prepare_commands(unit, &commands, precondition_phases_enabled)?;
         }
     }
     Ok(())
@@ -601,8 +615,36 @@ fn materialize_product_input_watches(config: &mut ProjectConfig) {
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every lane and in
 /// local runs, which read the same serialized vectors.
-fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) -> Result<(), GeneratorError> {
-    unit.prepend_precondition_commands(commands)?;
+fn prepend_prepare_commands(
+    unit: &mut Unit,
+    commands: &[String],
+    precondition_phases_enabled: bool,
+) -> Result<(), GeneratorError> {
+    if precondition_phases_enabled {
+        unit.prepend_precondition_commands(commands)?;
+    } else {
+        let mut pr_commands = commands.to_vec();
+        pr_commands.extend(unit.pr_commands.iter().cloned());
+        unit.pr_commands = pr_commands;
+        let mut full_commands = commands.to_vec();
+        full_commands.extend(unit.full_commands.iter().cloned());
+        unit.full_commands = full_commands;
+        for commands_for_lane in [
+            &mut unit.github_pr_commands,
+            &mut unit.github_full_commands,
+            &mut unit.velnor_pr_commands,
+            &mut unit.velnor_full_commands,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut prefixed = commands.to_vec();
+            prefixed.extend(commands_for_lane.iter().cloned());
+            *commands_for_lane = prefixed;
+        }
+        // The pinned schema-1 runtime has no typed precondition phase.
+        unit.clear_phases();
+    }
     unit.watch.sort();
     unit.watch.dedup();
     Ok(())
@@ -997,7 +1039,7 @@ mod tests {
         let prepare = "mise run build-xcframework".to_owned();
 
         must_ok(
-            super::prepend_prepare_commands(&mut consumer, std::slice::from_ref(&prepare)),
+            super::prepend_prepare_commands(&mut consumer, std::slice::from_ref(&prepare), true),
             "Rust prepare insertion",
         );
 
@@ -1024,6 +1066,130 @@ mod tests {
             consumer.check_commands,
             vec!["cargo check --all-targets".to_owned()]
         );
+    }
+
+    #[test]
+    fn phased_preconditions_merge_platform_and_regen_call_orders() {
+        let native = "mise run build-xcframework".to_owned();
+        let regen = "cargo run -- --check".to_owned();
+        for (first, second) in [
+            (native.clone(), regen.clone()),
+            (regen.clone(), native.clone()),
+        ] {
+            let mut consumer = unit("rust-app", UnitKind::Rust);
+            consumer.pr_commands = vec![
+                "cargo fmt --check".to_owned(),
+                "cargo clippy --all-targets".to_owned(),
+                "cargo test --all-targets".to_owned(),
+            ];
+            consumer.full_commands = consumer.pr_commands.clone();
+            consumer.phases = vec![
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ];
+            consumer.check_commands = vec!["cargo check --all-targets".to_owned()];
+
+            must_ok(
+                super::prepend_prepare_commands(&mut consumer, std::slice::from_ref(&first), true),
+                "platform/native precondition",
+            );
+            must_ok(
+                consumer.prepend_precondition_commands(std::slice::from_ref(&second)),
+                "regen precondition",
+            );
+            must_ok(
+                consumer.prepend_precondition_commands(&[
+                    first.clone(),
+                    second.clone(),
+                    first.clone(),
+                ]),
+                "duplicate preconditions compose",
+            );
+
+            assert_eq!(
+                consumer.pr_commands,
+                vec![
+                    second.clone(),
+                    first.clone(),
+                    "cargo fmt --check".to_owned(),
+                    "cargo clippy --all-targets".to_owned(),
+                    "cargo test --all-targets".to_owned(),
+                ]
+            );
+            assert_eq!(consumer.full_commands, consumer.pr_commands);
+            assert_eq!(
+                consumer.phases,
+                vec![
+                    ValidationPhase::Precondition,
+                    ValidationPhase::Precondition,
+                    ValidationPhase::Fmt,
+                    ValidationPhase::Clippy,
+                    ValidationPhase::Test,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn phased_preconditions_reject_provider_override_without_mutation() {
+        let mut consumer = unit("rust-app", UnitKind::Rust);
+        consumer.pr_commands = vec!["cargo fmt --check".to_owned()];
+        consumer.full_commands = consumer.pr_commands.clone();
+        consumer.github_pr_commands = Some(consumer.pr_commands.clone());
+        consumer.phases = vec![ValidationPhase::Fmt];
+        let before = consumer.clone();
+
+        let error = must_err(
+            consumer.prepend_precondition_commands(&["cargo run -- --check".to_owned()]),
+            "provider override precondition",
+        );
+        assert!(error.to_string().contains("provider override"), "{error}");
+        assert_eq!(consumer, before, "rejecting an override must not mutate it");
+    }
+
+    #[test]
+    fn unphased_preconditions_deduplicate_shared_and_provider_lanes() {
+        let native = "mise run build-xcframework".to_owned();
+        let regen = "cargo run -- --check".to_owned();
+        let mut consumer = unit("declared-app", UnitKind::Rust);
+        consumer.pr_commands = vec!["cargo test".to_owned(), native.clone(), native.clone()];
+        consumer.full_commands = consumer.pr_commands.clone();
+        consumer.github_pr_commands = Some(vec![native.clone(), "github test".to_owned()]);
+        consumer.github_full_commands = Some(vec!["github full".to_owned(), native.clone()]);
+        consumer.velnor_pr_commands = Some(vec!["velnor test".to_owned(), native.clone()]);
+        consumer.velnor_full_commands = Some(vec![native.clone(), "velnor full".to_owned()]);
+
+        must_ok(
+            consumer.prepend_precondition_commands(&[native.clone(), native.clone()]),
+            "native precondition",
+        );
+        must_ok(
+            consumer.prepend_precondition_commands(&[regen.clone(), native.clone(), regen.clone()]),
+            "regen precondition",
+        );
+
+        for commands in [
+            consumer.pr_commands.as_slice(),
+            consumer.full_commands.as_slice(),
+            consumer.github_pr_commands.as_deref().unwrap_or_default(),
+            consumer.github_full_commands.as_deref().unwrap_or_default(),
+            consumer.velnor_pr_commands.as_deref().unwrap_or_default(),
+            consumer.velnor_full_commands.as_deref().unwrap_or_default(),
+        ] {
+            assert_eq!(&commands[..2], &[regen.clone(), native.clone()]);
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| *command == &native)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                commands.iter().filter(|command| *command == &regen).count(),
+                1
+            );
+        }
     }
 
     #[test]

@@ -425,6 +425,7 @@ mod tests {
             cache: &cache,
             nodes: &nodes,
             contracts: &contracts,
+            precondition_phases_enabled: true,
         };
         // One declared input no scan watch owns, plus one overlapping an
         // already-watched path: the union is idempotent.
@@ -510,6 +511,7 @@ mod tests {
             cache: &cache,
             nodes: &nodes,
             contracts: &contracts,
+            precondition_phases_enabled: true,
         };
         // A script contract owns its script plus its declared input bound;
         // an unresolved contract unions its best-known bound. Neither script
@@ -598,6 +600,7 @@ mod tests {
             cache: &cache,
             nodes: &nodes,
             contracts: &contracts,
+            precondition_phases_enabled: true,
         };
         // A uniform `complete` claim closes the unit; an open contract
         // leaves it open.
@@ -687,6 +690,7 @@ mod tests {
             cache: &cache,
             nodes: &nodes,
             contracts: &contracts,
+            precondition_phases_enabled: true,
         };
         let args = BTreeMap::new();
         let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&args))?;
@@ -874,6 +878,7 @@ mod tests {
             cache: &cache,
             nodes: &nodes,
             contracts: &contracts,
+            precondition_phases_enabled: true,
         };
         let args = BTreeMap::new();
         let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&args))?;

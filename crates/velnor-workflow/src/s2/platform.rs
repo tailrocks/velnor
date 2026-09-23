@@ -568,6 +568,7 @@ pub(crate) fn guarded_rebuild_command(marker: &str, commands: &[String]) -> Stri
 /// object-transport toggle on a unit that cannot use it, and for a unit no
 /// enabled lane can execute.
 #[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     resolve_with_precondition_phases(config, true)
 }
@@ -1258,6 +1259,72 @@ mod tests {
             ]
         );
         assert!(consumer.check_commands.is_empty());
+    }
+
+    #[test]
+    fn phased_apple_preconditions_merge_call_orders_and_duplicates() {
+        let native = "mise run build-xcframework".to_owned();
+        let regen = "cargo run -- --check".to_owned();
+        for (first, second) in [
+            (native.clone(), regen.clone()),
+            (regen.clone(), native.clone()),
+        ] {
+            let mut consumer = unit("swift-app", UnitKind::Swift);
+            consumer.pr_commands = vec![
+                "xcodegen generate".to_owned(),
+                "swift build".to_owned(),
+                "swift run app".to_owned(),
+                "swift test".to_owned(),
+            ];
+            consumer.full_commands = consumer.pr_commands.clone();
+            consumer.phases = vec![
+                ValidationPhase::XcodegenGenerate,
+                ValidationPhase::SwiftBuild,
+                ValidationPhase::SwiftRun,
+                ValidationPhase::SwiftTest,
+            ];
+
+            must_ok(
+                super::prepend_prepare_commands(&mut consumer, std::slice::from_ref(&first), true),
+                "platform/native precondition",
+            );
+            must_ok(
+                consumer.prepend_precondition_commands(std::slice::from_ref(&second)),
+                "regen precondition",
+            );
+            must_ok(
+                consumer.prepend_precondition_commands(&[
+                    first.clone(),
+                    second.clone(),
+                    first.clone(),
+                ]),
+                "duplicate preconditions compose",
+            );
+
+            assert_eq!(
+                consumer.pr_commands,
+                vec![
+                    second.clone(),
+                    first.clone(),
+                    "xcodegen generate".to_owned(),
+                    "swift build".to_owned(),
+                    "swift run app".to_owned(),
+                    "swift test".to_owned(),
+                ]
+            );
+            assert_eq!(consumer.full_commands, consumer.pr_commands);
+            assert_eq!(
+                consumer.phases,
+                vec![
+                    ValidationPhase::Precondition,
+                    ValidationPhase::Precondition,
+                    ValidationPhase::XcodegenGenerate,
+                    ValidationPhase::SwiftBuild,
+                    ValidationPhase::SwiftRun,
+                    ValidationPhase::SwiftTest,
+                ]
+            );
+        }
     }
 
     #[test]
