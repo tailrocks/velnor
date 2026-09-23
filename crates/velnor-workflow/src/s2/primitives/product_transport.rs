@@ -375,6 +375,19 @@ fn check_identity_shape(
     Ok(())
 }
 
+fn check_exact_reuse_identity(
+    identity: &ProductIdentity,
+    context: &str,
+) -> Result<(), GeneratorError> {
+    if identity.exact_reuse_allowed() {
+        return Ok(());
+    }
+    Err(GeneratorError::usage(format!(
+        "{context} native-cache transport requires a complete exact-reuse-eligible typed product identity; missing: {}",
+        identity.missing_dimensions().join(", ")
+    )))
+}
+
 fn identity_digest_matches_input(identity: &ProductIdentity, inputs_digest: &str) -> bool {
     identity
         .inputs_digest
@@ -611,6 +624,9 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             &request.producer,
             &request.product,
         )?;
+        if request.mode == TransportMode::NativeCache {
+            check_exact_reuse_identity(identity, "stage-product")?;
+        }
         if !identity_digest_matches_input(identity, &request.inputs_digest) {
             return Err(GeneratorError::usage(
                 "stage-product product identity inputs_digest does not match --digest",
@@ -852,6 +868,10 @@ fn check_manifest_identity(
         (Some(got), Some(want)) => {
             check_identity_shape(got, "product manifest", &request.producer, &request.product)?;
             check_identity_shape(want, "verify-product", &request.producer, &request.product)?;
+            if request.mode == TransportMode::NativeCache {
+                check_exact_reuse_identity(got, "product manifest")?;
+                check_exact_reuse_identity(want, "verify-product")?;
+            }
             if got != want {
                 return Err(GeneratorError::usage(
                     "product manifest typed identity mismatch".to_owned(),
@@ -1805,6 +1825,61 @@ mod tests {
         );
         assert!(message.contains("native-cache"), "{message}");
         assert!(message.contains("typed product identity"), "{message}");
+    }
+
+    #[test]
+    fn native_cache_rejects_incomplete_typed_identity_for_stage_and_verify() {
+        let digest = "f".repeat(64);
+        let producer = scratch("native-cache-incomplete-producer");
+        stage_fixture(&producer);
+
+        let mut incomplete = identity("xcframework-foo", &digest);
+        incomplete.sdk.clear();
+        let incomplete_stage = producer.join("incomplete-stage");
+        let stage_error = stage_product(
+            &producer,
+            &StageRequest {
+                mode: TransportMode::NativeCache,
+                inputs_digest: digest.clone(),
+                identity: Some(incomplete.clone()),
+                stage: incomplete_stage,
+                ..stage_request(&producer.join("unused-stage"))
+            },
+        )
+        .expect_err("native-cache staging needs complete identity");
+        let message = format!("{stage_error}");
+        assert!(message.contains("exact-reuse-eligible"), "{message}");
+        assert!(message.contains("sdk"), "{message}");
+
+        let typed_stage = producer.join("typed-stage");
+        stage_product(
+            &producer,
+            &StageRequest {
+                mode: TransportMode::NativeCache,
+                inputs_digest: digest.clone(),
+                identity: Some(identity("xcframework-foo", &digest)),
+                stage: typed_stage.clone(),
+                ..stage_request(&typed_stage)
+            },
+        )
+        .expect("native-cache staging with complete identity");
+
+        let consumer = scratch("native-cache-incomplete-consumer");
+        let env_file = consumer.join("github-env");
+        let verify_error = verify_product(
+            &consumer,
+            &VerifyRequest {
+                mode: TransportMode::NativeCache,
+                inputs_digest: digest,
+                identity: Some(incomplete),
+                stage: typed_stage,
+                ..verify_request(&consumer.join("unused-stage"), &env_file)
+            },
+        )
+        .expect_err("native-cache verification needs complete identity");
+        let message = format!("{verify_error}");
+        assert!(message.contains("exact-reuse-eligible"), "{message}");
+        assert!(message.contains("sdk"), "{message}");
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
