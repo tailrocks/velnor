@@ -26,15 +26,15 @@
 )]
 #![cfg(feature = "test-support")]
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use velnor_control::permit_ledger::{PermitLane, PermitLedger, PermitState};
-use velnor_runner::scaleset::worker::dind::DIND_DATA_ROOT;
+use velnor_runner::scaleset::worker::dind::{DIND_DATA_ROOT, DIND_SOCKET_GID};
 use velnor_runner::scaleset::worker::ownership::{
-    ROLE_RUNNER, ROLE_VOLUME_HOLDER, WORKER_ROLE_LABEL,
+    ROLE_DIND, ROLE_RUNNER, ROLE_VOLUME_HOLDER, WORKER_ROLE_LABEL,
 };
 use velnor_runner::scaleset::worker::{
     HomogeneousProfile, OwnershipId, PinnedImage, ToolContentAttestation, ToolContentExpectation,
@@ -195,6 +195,10 @@ fn group_json() -> serde_json::Value {
 }
 
 fn set_json(id: i32, labels: &[&str]) -> serde_json::Value {
+    set_json_with_policy(id, labels, false)
+}
+
+fn set_json_with_policy(id: i32, labels: &[&str], disable_update: bool) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "name": SET_NAME,
@@ -203,9 +207,13 @@ fn set_json(id: i32, labels: &[&str]) -> serde_json::Value {
         "labels": labels.iter().map(|name| {
             serde_json::json!({ "type": "User", "name": name })
         }).collect::<Vec<_>>(),
-        "RunnerSetting": { "disableUpdate": false },
+        "RunnerSetting": { "disableUpdate": disable_update },
         "createdOn": "2026-09-17T00:00:00Z",
     })
+}
+
+fn pinned_set_json(id: i32, labels: &[&str]) -> serde_json::Value {
+    set_json_with_policy(id, labels, true)
 }
 
 /// Group-by-name lookup (the trailing-slash-tolerant path form).
@@ -222,12 +230,20 @@ async fn mount_group_lookup(server: &MockServer) {
 async fn mount_set_get_or_create(server: &MockServer) {
     let looked_up = Arc::new(AtomicBool::new(false));
     let seen = looked_up.clone();
+    let policy_pinned = Arc::new(AtomicBool::new(false));
+    let get_policy_pinned = policy_pinned.clone();
     Mock::given(method("GET"))
         .and(path(sets_path()))
         .respond_with(move |_: &Request| {
             if seen.swap(true, Ordering::SeqCst) {
+                let disable_update = get_policy_pinned.load(Ordering::SeqCst);
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "count": 1, "value": [set_json(SCALE_SET_ID, &["velnor", "linux"])]
+                    "count": 1,
+                    "value": [set_json_with_policy(
+                        SCALE_SET_ID,
+                        &["velnor", "linux"],
+                        disable_update,
+                    )]
                 }))
             } else {
                 ResponseTemplate::new(200)
@@ -243,18 +259,46 @@ async fn mount_set_get_or_create(server: &MockServer) {
         )
         .mount(server)
         .await;
+    let patch_policy_pinned = policy_pinned.clone();
     Mock::given(method("PATCH"))
         .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(set_json(SCALE_SET_ID, &["velnor", "linux"])),
-        )
+        .and(body_string_contains("\"disableUpdate\":true"))
+        .respond_with(move |_request: &Request| {
+            patch_policy_pinned.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200)
+                .set_body_json(pinned_set_json(SCALE_SET_ID, &["velnor", "linux"]))
+        })
         .mount(server)
         .await;
-    let _ = looked_up;
 }
 
 /// Adopt-by-id: the set exists with drifted labels; PATCH reconciles.
 async fn mount_set_adopt_with_drift(server: &MockServer) {
+    let policy_pinned = Arc::new(AtomicBool::new(false));
+    Mock::given(method("GET"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(set_json(SCALE_SET_ID, &["velnor", "stale-label"])),
+        )
+        .mount(server)
+        .await;
+    let patch_policy_pinned = policy_pinned.clone();
+    Mock::given(method("PATCH"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .and(body_string_contains("\"disableUpdate\":true"))
+        .respond_with(move |_request: &Request| {
+            patch_policy_pinned.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200)
+                .set_body_json(pinned_set_json(SCALE_SET_ID, &["velnor", "linux"]))
+        })
+        .mount(server)
+        .await;
+}
+
+/// Failure fixture: GitHub accepts the PATCH but ignores the pin, so
+/// production validation must refuse the returned set.
+async fn mount_set_adopt_with_drift_ignoring_runner_policy(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
         .respond_with(
@@ -265,6 +309,7 @@ async fn mount_set_adopt_with_drift(server: &MockServer) {
         .await;
     Mock::given(method("PATCH"))
         .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .and(body_string_contains("\"disableUpdate\":true"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(set_json(SCALE_SET_ID, &["velnor", "linux"])),
         )
@@ -467,10 +512,18 @@ async fn mount_jit(server: &MockServer, blob: &str) {
 
 #[derive(Debug, Clone)]
 struct FakeMount {
+    kind: String,
     name: String,
+    source: String,
     destination: String,
     driver: String,
     read_write: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FakeVolume {
+    labels: BTreeMap<String, String>,
+    mountpoint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -479,6 +532,10 @@ struct FakeContainer {
     image: String,
     entrypoint: Option<Vec<String>>,
     command: Option<Vec<String>>,
+    /// Stable network name used as the NetworkSettings map key. The
+    /// attachment ID is intentionally tracked separately so same-name network
+    /// replacement preserves the old container identity.
+    network_name: String,
     network_mode: String,
     /// Network ID captured when the container joined its network. A later
     /// same-name network replacement must not rewrite this attachment.
@@ -512,7 +569,7 @@ struct FakeEngine {
     /// `rm` of these containers exits 1 (cleanup-failure injection).
     fail_rm: Vec<String>,
     /// Anonymous volumes created by holder `--mount type=volume` entries.
-    volumes: HashSet<String>,
+    volumes: HashMap<String, FakeVolume>,
     next_id: u64,
     next_volume_id: u64,
     next_network_id: u64,
@@ -734,13 +791,36 @@ fn anonymous_mount(engine: &mut FakeEngine, spec: &str) -> FakeMount {
         "holder mount must be anonymous: {spec}"
     );
     let destination = fields.get("target").unwrap().to_string();
+    let labels = spec
+        .split(',')
+        .filter_map(|field| field.strip_prefix("volume-label="))
+        .map(|label| {
+            label
+                .split_once('=')
+                .unwrap_or_else(|| panic!("volume label has no value: {label}"))
+        })
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    eprintln!("temporary volume labels: {labels:?}");
     engine.next_volume_id += 1;
     let name = format!("fake-anonymous-volume-{:04}", engine.next_volume_id);
+    let mountpoint = format!("/var/lib/docker/volumes/{name}/_data");
     assert!(
-        engine.volumes.insert(name.clone()),
+        engine
+            .volumes
+            .insert(
+                name.clone(),
+                FakeVolume {
+                    labels,
+                    mountpoint: mountpoint.clone(),
+                },
+            )
+            .is_none(),
         "duplicate fake volume {name}"
     );
     FakeMount {
+        kind: "volume".to_owned(),
+        source: mountpoint,
         name,
         destination,
         driver: "local".to_owned(),
@@ -753,7 +833,9 @@ fn bind_mount(spec: &str) -> FakeMount {
         .rsplit_once(':')
         .unwrap_or_else(|| panic!("bind mount has no destination: {spec}"));
     FakeMount {
+        kind: "bind".to_owned(),
         name: source.to_owned(),
+        source: source.to_owned(),
         destination: destination.to_owned(),
         driver: "local".to_owned(),
         read_write: true,
@@ -765,11 +847,13 @@ fn mounts_json(mounts: &[FakeMount]) -> serde_json::Value {
         .iter()
         .map(|mount| {
             serde_json::json!({
-                "Type": "volume",
+                "Type": mount.kind,
                 "Name": mount.name,
+                "Source": mount.source,
                 "Destination": mount.destination,
                 "Driver": mount.driver,
                 "RW": mount.read_write,
+                "Propagation": if mount.kind == "bind" { "rprivate" } else { "" },
             })
         })
         .collect::<Vec<_>>())
@@ -780,6 +864,7 @@ impl WorkerRunner for FakeDocker {
         assert_eq!(program, "docker");
         let mut engine = self.lock();
         engine.seen.push(args.to_vec());
+        eprintln!("fake docker: {args:?}");
         let head = args.first().cloned().unwrap_or_default();
         match head.as_str() {
             "create" => {
@@ -813,15 +898,27 @@ impl WorkerRunner for FakeDocker {
                     Some(command) if !command.is_empty() => Some(command.to_vec()),
                     _ => None,
                 };
+                let entrypoint = args
+                    .iter()
+                    .position(|arg| arg == "--entrypoint")
+                    .and_then(|at| args.get(at + 1))
+                    .map(|entrypoint| {
+                        if entrypoint.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![entrypoint.clone()]
+                        }
+                    });
                 let network_mode = args
                     .iter()
                     .position(|arg| arg == "--network")
                     .and_then(|at| args.get(at + 1))
                     .cloned()
                     .unwrap_or_default();
-                let network_attachment_id = engine
-                    .networks
-                    .get(&network_mode)
+                let network_name = resolve_network_name(&engine, &network_mode)
+                    .unwrap_or_else(|| network_mode.clone());
+                let network_attachment_id = resolve_network_name(&engine, &network_mode)
+                    .and_then(|name| engine.networks.get(&name))
                     .map(|network| network.id.clone());
                 let volumes_from = args
                     .iter()
@@ -887,8 +984,9 @@ impl WorkerRunner for FakeDocker {
                     FakeContainer {
                         id,
                         image,
-                        entrypoint: None,
+                        entrypoint,
                         command,
+                        network_name,
                         network_mode,
                         network_attachment_id,
                         status: "created".to_owned(),
@@ -1002,6 +1100,52 @@ impl WorkerRunner for FakeDocker {
                     let name =
                         resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                     return match engine.containers.get(&name) {
+                        Some(entry) if format.contains(".HostConfig.Mounts") => {
+                            let role = container_role(&entry.labels);
+                            let labels = entry
+                                .labels
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect::<BTreeMap<_, _>>();
+                            let groups = (role == Some(ROLE_RUNNER))
+                                .then(|| vec![DIND_SOCKET_GID.to_owned()]);
+                            let requested_mounts = (role == Some(ROLE_VOLUME_HOLDER)).then(|| {
+                                entry
+                                    .mounts
+                                    .iter()
+                                    .map(|mount| {
+                                        serde_json::json!({
+                                            "Type": "volume",
+                                            "Source": "",
+                                            "Target": mount.destination,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                            let projection = format!(
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                                serde_json::to_string(&entry.id).expect("id serializes"),
+                                mounts_json(&entry.mounts),
+                                role == Some(ROLE_DIND),
+                                "{}",
+                                false,
+                                serde_json::to_string(&groups).expect("groups serialize"),
+                                serde_json::to_string(&entry.entrypoint)
+                                    .expect("entrypoint serializes"),
+                                serde_json::to_string(&entry.command).expect("command serializes"),
+                                serde_json::to_string(if role == Some(ROLE_RUNNER) {
+                                    "runner"
+                                } else {
+                                    ""
+                                })
+                                .expect("user serializes"),
+                                serde_json::to_string(&labels).expect("labels serialize"),
+                                serde_json::to_string(&requested_mounts)
+                                    .expect("requested mounts serialize"),
+                            );
+                            eprintln!("fake isolation projection: {projection}");
+                            Ok(ok(&projection))
+                        }
                         Some(entry) if format.contains(".Mounts") => {
                             let entrypoint = serde_json::to_string(&entry.entrypoint)
                                 .expect("entrypoint serializes");
@@ -1037,7 +1181,7 @@ impl WorkerRunner for FakeDocker {
                                 let mut networks = serde_json::Map::new();
                                 if let Some(network_id) = &entry.network_attachment_id {
                                     networks.insert(
-                                        entry.network_mode.clone(),
+                                        entry.network_name.clone(),
                                         serde_json::json!({"NetworkID": network_id}),
                                     );
                                 }
@@ -1305,7 +1449,32 @@ impl WorkerRunner for FakeDocker {
                     other => panic!("fake docker: unexpected network verb {other}"),
                 }
             }
-            "volume" => panic!("fake docker forbids name-based volume commands: {args:?}"),
+            "volume" => {
+                let verb = args.get(1).cloned().unwrap_or_default();
+                match verb.as_str() {
+                    "inspect" => {
+                        let target = target_name(args);
+                        match engine.volumes.get(&target) {
+                            Some(volume) => Ok(WorkerOutput {
+                                code: 0,
+                                stdout: format!(
+                                    "{}\t{}\t{}\tnull\t{}\n",
+                                    serde_json::to_string(&target).expect("volume name serializes"),
+                                    serde_json::to_string("local")
+                                        .expect("volume driver serializes"),
+                                    serde_json::to_string(&volume.labels)
+                                        .expect("volume labels serialize"),
+                                    serde_json::to_string(&volume.mountpoint)
+                                        .expect("volume mountpoint serializes"),
+                                ),
+                                stderr: String::new(),
+                            }),
+                            None => Ok(missing("volume", &target)),
+                        }
+                    }
+                    other => panic!("fake docker: unexpected volume verb {other}"),
+                }
+            }
             other => panic!("fake docker: unexpected verb {other} in {args:?}"),
         }
     }
@@ -1313,6 +1482,9 @@ impl WorkerRunner for FakeDocker {
 
 fn assert_holder_contract(docker: &FakeDocker, identity: &WorkerIdentity) {
     let holder = identity.volume_holder_container();
+    let holder_id = docker
+        .container_id(&holder)
+        .expect("holder id captured before worker creates");
     let dind = identity.dind_container();
     let runner = identity.runner_container();
     let creates = docker.creates();
@@ -1355,7 +1527,7 @@ fn assert_holder_contract(docker: &FakeDocker, identity: &WorkerIdentity) {
             .iter()
             .position(|arg| arg == "--volumes-from")
             .expect("worker create uses --volumes-from");
-        assert_eq!(child_create.get(volumes_from_at + 1), Some(&holder));
+        assert_eq!(child_create.get(volumes_from_at + 1), Some(&holder_id));
     }
 
     let holder_mounts = docker.mounts_for(&holder);
@@ -1375,7 +1547,7 @@ fn assert_holder_contract(docker: &FakeDocker, identity: &WorkerIdentity) {
         ])
     );
     for child in [&dind, &runner] {
-        assert_eq!(docker.volumes_from_for(child), vec![holder.clone()]);
+        assert_eq!(docker.volumes_from_for(child), vec![holder_id.clone()]);
         let mounts = docker.mounts_for(child);
         for destination in [WORK_DIR, TOOL_CACHE_DIR, DIND_DATA_ROOT] {
             assert!(
@@ -1741,12 +1913,20 @@ async fn registration_create_race_adopts_instead_of_failing() {
     // Lookup misses, create loses a same-name race (409), re-read adopts.
     let looked_up = Arc::new(AtomicBool::new(false));
     let seen = looked_up.clone();
+    let policy_pinned = Arc::new(AtomicBool::new(false));
+    let get_policy_pinned = policy_pinned.clone();
     Mock::given(method("GET"))
         .and(path(sets_path()))
         .respond_with(move |_: &Request| {
             if seen.swap(true, Ordering::SeqCst) {
+                let disable_update = get_policy_pinned.load(Ordering::SeqCst);
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "count": 1, "value": [set_json(SCALE_SET_ID, &["velnor", "linux"])]
+                    "count": 1,
+                    "value": [set_json_with_policy(
+                        SCALE_SET_ID,
+                        &["velnor", "linux"],
+                        disable_update,
+                    )]
                 }))
             } else {
                 ResponseTemplate::new(200)
@@ -1760,6 +1940,17 @@ async fn registration_create_race_adopts_instead_of_failing() {
         .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
             "typeName": "RunnerExistsError", "message": "already exists"
         })))
+        .mount(&server)
+        .await;
+    let patch_policy_pinned = policy_pinned.clone();
+    Mock::given(method("PATCH"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .and(body_string_contains("\"disableUpdate\":true"))
+        .respond_with(move |_request: &Request| {
+            patch_policy_pinned.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200)
+                .set_body_json(pinned_set_json(SCALE_SET_ID, &["velnor", "linux"]))
+        })
         .mount(&server)
         .await;
 
@@ -1778,6 +1969,7 @@ async fn registration_create_race_adopts_instead_of_failing() {
         !reconciled.created,
         "the race winner's set is adopted, not re-created"
     );
+    assert!(reconciled.set.runner_setting.disable_update);
     assert_eq!(set_delete_calls(&server).await, 0);
 }
 
@@ -1997,16 +2189,28 @@ async fn wait_for(
     what: &str,
     mut done: impl FnMut(&DemandStore, &SharedLedger) -> bool,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     loop {
         let demand = DemandStore::open(db).unwrap();
         let ledger = SharedLedger::open(ledger_path).unwrap();
         if done(&demand, &ledger) {
             return;
         }
+        let observed = demand
+            .get(SCALE_SET_ID, REQUEST_ID)
+            .unwrap()
+            .map(|row| row.state);
+        let occupied = ledger.occupied().unwrap();
+        let live_states = WorkerRegistry::open(db)
+            .unwrap()
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .map(|row| format!("{}:{:?}", row.runner_name, row.worker_state))
+            .collect::<Vec<_>>();
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{what} did not converge in 30s"
+            "{what} did not converge in 30s: state={observed:?}, occupied={occupied}, live={live_states:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -2014,6 +2218,8 @@ async fn wait_for(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_adopts_live_worker_without_reprovision() {
+    let _tracing =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
     let server = MockServer::start().await;
     mount_token_chain(&server).await;
     mount_group_lookup(&server).await;
@@ -2302,8 +2508,9 @@ async fn restart_rejects_recreated_network_attachment() {
     let error = daemon2.start().await.unwrap_err();
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("network attachment mismatch"),
-        "replacement must fail restart attestation: {rendered}"
+        rendered.contains("network mode mismatch")
+            || rendered.contains("network attachment mismatch"),
+        "replacement must fail restart network identity attestation: {rendered}"
     );
     assert_eq!(
         docker.creates().len(),

@@ -37,6 +37,16 @@ impl RegistrationPlan {
         if self.group_id.is_none() && self.group_name.as_ref().is_none_or(String::is_empty) {
             anyhow::bail!("scale-set registration needs a runner group ID or name");
         }
+        if let Some(id) = self.group_id
+            && id <= 0
+        {
+            anyhow::bail!("scale-set runner group ID must be positive, got {id}");
+        }
+        if let Some(id) = self.set_id
+            && id <= 0
+        {
+            anyhow::bail!("scale-set ID must be positive, got {id}");
+        }
         match (self.set_id, self.set_name.as_ref()) {
             (Some(_), Some(_)) => {
                 anyhow::bail!(
@@ -62,7 +72,8 @@ pub struct ReconciledSet {
     pub set: RunnerScaleSet,
     /// The set did not exist and was created by this call.
     pub created: bool,
-    /// The live set's labels drifted and were patched back.
+    /// The live set's labels drifted and were patched back. The immutable
+    /// runner policy is reported separately by the returned set itself.
     pub labels_updated: bool,
 }
 
@@ -113,25 +124,17 @@ async fn adopt_by_id(
         .get_runner_scale_set_by_id(set_id)
         .await
         .with_context(|| format!("adopt scale set {set_id}"))?;
-    if live.runner_group_id != group_id {
-        anyhow::bail!(
-            "scale set {set_id} lives in runner group {} ({:?}), not the configured group {group_id} ({group_name:?}): refusing to move it",
-            live.runner_group_id,
-            live.runner_group_name,
-        );
-    }
-    let mut labels_updated = false;
-    let mut set = live;
-    if labels_drifted(&set.labels, &plan.labels) {
-        set.labels = desired_labels(&plan.labels);
-        set.runner_group_name = group_name.to_owned();
-        let updated = client
-            .update_runner_scale_set(set_id, &set)
-            .await
-            .with_context(|| format!("reconcile labels on scale set {set_id}"))?;
-        set = updated;
-        labels_updated = true;
-    }
+    let (set, labels_updated) = reconcile_live_set(
+        client,
+        plan,
+        live,
+        group_id,
+        group_name,
+        Some(set_id),
+        None,
+        &format!("reconcile scale-set {set_id}"),
+    )
+    .await?;
     Ok(ReconciledSet {
         group_id,
         group_name: group_name.to_owned(),
@@ -153,17 +156,18 @@ async fn get_or_create_by_name(
         .await
         .with_context(|| format!("look up scale set {name:?} in group {group_id}"))?
     {
-        Some(mut live) => {
-            let mut labels_updated = false;
-            if labels_drifted(&live.labels, &plan.labels) {
-                live.labels = desired_labels(&plan.labels);
-                live.runner_group_name = group_name.to_owned();
-                live = client
-                    .update_runner_scale_set(live.id, &live)
-                    .await
-                    .with_context(|| format!("reconcile labels on scale set {name:?}"))?;
-                labels_updated = true;
-            }
+        Some(live) => {
+            let (live, labels_updated) = reconcile_live_set(
+                client,
+                plan,
+                live,
+                group_id,
+                group_name,
+                None,
+                Some(name),
+                &format!("reconcile scale-set {name:?}"),
+            )
+            .await?;
             Ok(ReconciledSet {
                 group_id,
                 group_name: group_name.to_owned(),
@@ -179,19 +183,32 @@ async fn get_or_create_by_name(
                 runner_group_id: group_id,
                 runner_group_name: group_name.to_owned(),
                 labels: desired_labels(&plan.labels),
-                runner_setting: RunnerSetting::default(),
+                runner_setting: pinned_runner_setting(),
                 created_on: "0001-01-01T00:00:00Z".to_string(),
                 runner_jit_config_url: String::new(),
                 statistics: None,
             };
             match client.create_runner_scale_set(&fresh).await {
-                Ok(set) => Ok(ReconciledSet {
-                    group_id,
-                    group_name: group_name.to_owned(),
-                    set,
-                    created: true,
-                    labels_updated: false,
-                }),
+                Ok(set) => {
+                    let (set, labels_updated) = reconcile_live_set(
+                        client,
+                        plan,
+                        set,
+                        group_id,
+                        group_name,
+                        None,
+                        Some(name),
+                        &format!("verify created scale-set {name:?}"),
+                    )
+                    .await?;
+                    Ok(ReconciledSet {
+                        group_id,
+                        group_name: group_name.to_owned(),
+                        set,
+                        created: true,
+                        labels_updated,
+                    })
+                }
                 Err(error) if is_create_race(&error) => {
                     // A concurrent creator won: adopt what is there now.
                     let live = client
@@ -203,12 +220,23 @@ async fn get_or_create_by_name(
                         .with_context(|| {
                             format!("scale set {name:?} still missing after create conflict")
                         })?;
+                    let (live, labels_updated) = reconcile_live_set(
+                        client,
+                        plan,
+                        live,
+                        group_id,
+                        group_name,
+                        None,
+                        Some(name),
+                        &format!("reconcile raced scale-set {name:?}"),
+                    )
+                    .await?;
                     Ok(ReconciledSet {
                         group_id,
                         group_name: group_name.to_owned(),
                         set: live,
                         created: false,
-                        labels_updated: false,
+                        labels_updated,
                     })
                 }
                 Err(error) => Err(anyhow::Error::new(error)
@@ -216,6 +244,174 @@ async fn get_or_create_by_name(
             }
         }
     }
+}
+
+/// The official runner image is immutable: a scale set must not allow the
+/// runner process to self-update away from the digest Velnor provisioned.
+/// This is a registration invariant, not a best-effort image hint.
+fn pinned_runner_setting() -> RunnerSetting {
+    RunnerSetting {
+        disable_update: true,
+    }
+}
+
+/// Validate and prepare one live set for adoption or post-create verification.
+/// The same path is used for ID adoption, name adoption, and a create race so
+/// no registration route can bypass the immutable-runner policy.
+fn prepare_live_set(
+    mut set: RunnerScaleSet,
+    plan: &RegistrationPlan,
+    expected_group_id: i32,
+    expected_group_name: &str,
+    expected_set_id: Option<i32>,
+    expected_set_name: Option<&str>,
+) -> Result<(RunnerScaleSet, bool, bool)> {
+    validate_live_identity(
+        &set,
+        expected_group_id,
+        expected_group_name,
+        expected_set_id,
+        expected_set_name,
+    )?;
+
+    let labels_updated = labels_drifted(&set.labels, &plan.labels);
+    let group_name_updated =
+        !expected_group_name.is_empty() && set.runner_group_name != expected_group_name;
+    let runner_policy_updated = !set.runner_setting.disable_update;
+
+    if labels_updated {
+        set.labels = desired_labels(&plan.labels);
+    }
+    if group_name_updated {
+        set.runner_group_name = expected_group_name.to_owned();
+    }
+    if runner_policy_updated {
+        set.runner_setting = pinned_runner_setting();
+    }
+
+    Ok((
+        set,
+        labels_updated,
+        labels_updated || group_name_updated || runner_policy_updated,
+    ))
+}
+
+/// Apply any required PATCH and fail closed if GitHub does not return the
+/// requested identity and immutable runner setting.
+async fn reconcile_live_set(
+    client: &ScaleSetClient,
+    plan: &RegistrationPlan,
+    live: RunnerScaleSet,
+    expected_group_id: i32,
+    expected_group_name: &str,
+    expected_set_id: Option<i32>,
+    expected_set_name: Option<&str>,
+    operation: &str,
+) -> Result<(RunnerScaleSet, bool)> {
+    let (prepared, labels_updated, needs_update) = prepare_live_set(
+        live,
+        plan,
+        expected_group_id,
+        expected_group_name,
+        expected_set_id,
+        expected_set_name,
+    )?;
+    let set = if needs_update {
+        client
+            .update_runner_scale_set(prepared.id, &prepared)
+            .await
+            .with_context(|| format!("{operation}: update scale-set registration policy"))?
+    } else {
+        prepared
+    };
+    validate_reconciled_set(
+        &set,
+        plan,
+        expected_group_id,
+        expected_group_name,
+        expected_set_id,
+        expected_set_name,
+    )
+    .with_context(|| format!("{operation}: server returned an invalid scale-set identity"))?;
+    Ok((set, labels_updated))
+}
+
+fn validate_live_identity(
+    set: &RunnerScaleSet,
+    expected_group_id: i32,
+    expected_group_name: &str,
+    expected_set_id: Option<i32>,
+    expected_set_name: Option<&str>,
+) -> Result<()> {
+    if set.id <= 0 {
+        anyhow::bail!(
+            "scale-set registration returned a non-positive set ID {}",
+            set.id
+        );
+    }
+    if let Some(expected_id) = expected_set_id
+        && set.id != expected_id
+    {
+        anyhow::bail!(
+            "scale-set registration returned ID {}, not the pinned ID {}: refusing to adopt it",
+            set.id,
+            expected_id,
+        );
+    }
+    if set.name.is_empty() {
+        anyhow::bail!("scale-set registration returned an empty set name");
+    }
+    if set.runner_group_id != expected_group_id {
+        anyhow::bail!(
+            "scale set {} lives in runner group {} ({:?}), not the configured group {} ({:?}): refusing to move it",
+            set.id,
+            set.runner_group_id,
+            set.runner_group_name,
+            expected_group_id,
+            expected_group_name,
+        );
+    }
+    if let Some(expected_name) = expected_set_name
+        && set.name != expected_name
+    {
+        anyhow::bail!(
+            "scale set {} has name {:?}, not the configured name {:?}: refusing to adopt it",
+            set.id,
+            set.name,
+            expected_name,
+        );
+    }
+    Ok(())
+}
+
+fn validate_reconciled_set(
+    set: &RunnerScaleSet,
+    plan: &RegistrationPlan,
+    expected_group_id: i32,
+    expected_group_name: &str,
+    expected_set_id: Option<i32>,
+    expected_set_name: Option<&str>,
+) -> Result<()> {
+    validate_live_identity(
+        set,
+        expected_group_id,
+        expected_group_name,
+        expected_set_id,
+        expected_set_name,
+    )?;
+    if !set.runner_setting.disable_update {
+        anyhow::bail!(
+            "scale set {} did not retain RunnerSetting.disableUpdate=true; refusing an auto-updating official runner",
+            set.id
+        );
+    }
+    if !plan.labels.is_empty() && labels_drifted(&set.labels, &plan.labels) {
+        anyhow::bail!(
+            "scale set {} did not retain the configured labels after reconciliation",
+            set.id
+        );
+    }
+    Ok(())
 }
 
 /// A create that lost a same-name race surfaces as 409/conflict (or
@@ -302,6 +498,12 @@ mod tests {
             ..plan()
         };
         assert!(empty_name.validate().is_err());
+        let non_positive_set_id = RegistrationPlan {
+            set_id: Some(0),
+            set_name: None,
+            ..plan()
+        };
+        assert!(non_positive_set_id.validate().is_err());
         let reserved_label = RegistrationPlan {
             labels: vec!["uBuNtU-24.04".into()],
             ..plan()
@@ -312,6 +514,72 @@ mod tests {
             .to_string()
             .contains("reserved for GitHub-hosted runner selection"));
         assert!(plan().validate().is_ok());
+    }
+
+    fn live_set(disable_update: bool) -> RunnerScaleSet {
+        RunnerScaleSet {
+            id: 7,
+            name: "velnor-set".into(),
+            runner_group_id: 3,
+            runner_group_name: "velnor".into(),
+            labels: desired_labels(&["velnor".into(), "linux".into()]),
+            runner_setting: RunnerSetting { disable_update },
+            created_on: "2026-09-17T00:00:00Z".into(),
+            runner_jit_config_url: String::new(),
+            statistics: None,
+        }
+    }
+
+    #[test]
+    fn pinned_runner_policy_disables_official_self_update() {
+        assert!(pinned_runner_setting().disable_update);
+
+        let (prepared, labels_updated, needs_update) = prepare_live_set(
+            live_set(false),
+            &plan(),
+            3,
+            "velnor",
+            None,
+            Some("velnor-set"),
+        )
+        .unwrap();
+        assert!(!labels_updated);
+        assert!(needs_update);
+        assert!(prepared.runner_setting.disable_update);
+    }
+
+    #[test]
+    fn live_identity_validation_rejects_invalid_upstream_objects() {
+        let mut missing_id = live_set(true);
+        missing_id.id = 0;
+        assert!(validate_live_identity(&missing_id, 3, "velnor", None, None).is_err());
+
+        let mut wrong_group = live_set(true);
+        wrong_group.runner_group_id = 9;
+        let error = validate_live_identity(&wrong_group, 3, "velnor", None, None).unwrap_err();
+        assert!(error.to_string().contains("not the configured group"));
+
+        let error =
+            validate_live_identity(&live_set(true), 3, "velnor", None, Some("other")).unwrap_err();
+        assert!(error.to_string().contains("refusing to adopt"));
+
+        let error =
+            validate_live_identity(&live_set(true), 3, "velnor", Some(8), None).unwrap_err();
+        assert!(error.to_string().contains("pinned ID"));
+    }
+
+    #[test]
+    fn reconciled_set_rejects_server_that_keeps_updates_enabled() {
+        let error = validate_reconciled_set(
+            &live_set(false),
+            &plan(),
+            3,
+            "velnor",
+            None,
+            Some("velnor-set"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disableUpdate=true"));
     }
 
     #[test]

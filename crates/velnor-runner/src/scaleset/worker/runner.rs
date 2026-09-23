@@ -36,7 +36,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::dind::{verify_volume_holder_reference, BUILDKIT_CACHE_DIR, DIND_SOCKET, STATE_MOUNT};
+#[cfg(test)]
+use super::dind::BUILDKIT_CACHE_DIR;
+use super::dind::{verify_volume_holder_reference, DIND_SOCKET, STATE_MOUNT};
 use super::ownership::{
     WorkerIdentity, OWNERSHIP_LABEL, ROLE_RUNNER, RUNNER_LABEL, SCALE_SET_LABEL, WORKER_ROLE_LABEL,
 };
@@ -1007,48 +1009,42 @@ impl RunnerSpec {
     /// * App keys never appear, and the JIT blob never appears in argv:
     ///   it travels via `--env-file` only.
     #[must_use]
-    pub fn create_args_with_env_file(&self, env_file: &Path) -> Vec<String> {
-        let cargo_registry = self
-            .state_dir
-            .parent()
-            .unwrap_or(&self.state_dir)
-            .join("cargo/registry");
-        let cargo_git = self
-            .state_dir
-            .parent()
-            .unwrap_or(&self.state_dir)
-            .join("cargo/git");
-        let _ = std::fs::create_dir_all(&cargo_registry);
-        let _ = std::fs::create_dir_all(&cargo_git);
+    pub fn create_args_with_env_file(
+        &self,
+        env_file: &Path,
+        dind_id: &str,
+        holder_id: &str,
+    ) -> Vec<String> {
         let mut args = vec![
             "create".to_string(),
             "--name".to_string(),
             self.identity.runner_container(),
             "--network".to_string(),
-            format!("container:{}", self.identity.dind_container()),
+            format!("container:{dind_id}"),
             "--env-file".to_string(),
             env_file.display().to_string(),
             "--env".to_string(),
             format!("{RUNNER_NAME_ENV}={}", self.identity.runner_name()),
             "--env".to_string(),
             format!("DOCKER_HOST=unix://{DIND_SOCKET}"),
+            "--group-add".to_string(),
+            super::dind::DIND_SOCKET_GID.to_string(),
             "--env".to_string(),
             "RUNNER_WORK_FOLDER=".to_string() + RUNNER_WORK_DIR,
             "--volume".to_string(),
             format!("{}:{STATE_MOUNT}", self.state_dir.display()),
             "--volumes-from".to_string(),
-            self.identity.volume_holder_container(),
-            "--volume".to_string(),
-            format!(
-                "{}:{BUILDKIT_CACHE_DIR}",
-                self.state_dir.join("buildkit-cache").display()
-            ),
-            "--volume".to_string(),
-            format!("{}:/home/runner/.cargo/registry", cargo_registry.display()),
-            "--volume".to_string(),
-            format!("{}:/home/runner/.cargo/git", cargo_git.display()),
+            holder_id.to_string(),
         ];
         args.extend(self.identity.label_args(ROLE_RUNNER));
+        args.extend([
+            "--label".to_string(),
+            format!(
+                "{}={}",
+                super::ownership::STATE_SOURCE_LABEL,
+                self.state_dir.display()
+            ),
+        ]);
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
         // The official image has no ENTRYPOINT and defaults to /bin/bash.
@@ -1221,6 +1217,7 @@ fn validate_runner_identity(
     identity: &WorkerIdentity,
     labels: &BTreeMap<String, String>,
     network_mode: &str,
+    dind_id: &str,
 ) -> Result<()> {
     let expected_labels = [
         (OWNERSHIP_LABEL, identity.ownership().as_str()),
@@ -1241,7 +1238,7 @@ fn validate_runner_identity(
         }
     }
 
-    let expected_network = format!("container:{}", identity.dind_container());
+    let expected_network = format!("container:{dind_id}");
     if network_mode != expected_network {
         anyhow::bail!(
             "{object_name} has network mode {network_mode:?}, expected {expected_network:?}"
@@ -1356,17 +1353,19 @@ pub(crate) fn attest_restart_runner(
 
     let projection = parse_restart_runner_projection(&inspected.stdout)
         .with_context(|| format!("attest restart runner {name}"))?;
+    let dind_id = super::ownership::container_id(runner, &identity.dind_container())?;
     validate_runner_identity(
         &format!("restart runner {name}"),
         identity,
         &projection.labels,
         &projection.network_mode,
+        &dind_id,
     )?;
     verify_volume_holder_reference(
         "restart runner",
         &name,
         projection.volumes_from.as_deref(),
-        identity,
+        &super::ownership::container_id(runner, &identity.volume_holder_container())?,
     )?;
 
     let expected_image = expected_image.reference();
@@ -1404,9 +1403,14 @@ fn create_and_start_runner(
     spec: &RunnerSpec,
     name: &str,
     before_start: &mut dyn FnMut() -> Result<()>,
-) -> Result<RunnerProvision> {
+    dind_id: &str,
+    holder: &super::dind::VolumeHolderAttestation,
+) -> Result<(RunnerProvision, String)> {
     let env_file = spec.write_env_file()?;
-    let created = runner.run("docker", &spec.create_args_with_env_file(&env_file));
+    let created = runner.run(
+        "docker",
+        &spec.create_args_with_env_file(&env_file, dind_id, &holder.id),
+    );
     // Scrubbing is part of the create boundary. Never start/adopt the
     // runner if the secret file could not be removed.
     let scrubbed = spec.scrub_jit_env_files();
@@ -1431,11 +1435,21 @@ fn create_and_start_runner(
             created.stderr.trim()
         );
     }
+    let id = super::dind::parse_container_id(&created.stdout)
+        .context("runner create returned no immutable id")?;
+    super::ownership::attest_isolation(
+        runner,
+        spec.identity(),
+        &id,
+        ROLE_RUNNER,
+        &holder.mounts,
+        Some(spec.state_dir()),
+    )?;
     before_start().context("persist runner startup deadline")?;
     let started = runner
         .run(
             "docker",
-            &["start".to_string(), "--".to_string(), name.to_string()],
+            &["start".to_string(), "--".to_string(), id.clone()],
         )
         .with_context(|| format!("start runner container {name}"))?;
     if started.code != 0 {
@@ -1445,7 +1459,7 @@ fn create_and_start_runner(
             started.stderr.trim()
         );
     }
-    Ok(RunnerProvision::Created)
+    Ok((RunnerProvision::Created, id))
 }
 
 /// Ensure the runner container exists and is started, adopting on retry.
@@ -1464,7 +1478,9 @@ pub(crate) fn ensure_runner(
     runner: &mut dyn WorkerRunner,
     spec: &RunnerSpec,
     before_start: &mut dyn FnMut() -> Result<()>,
-) -> Result<RunnerProvision> {
+    dind_id: &str,
+    holder: &super::dind::VolumeHolderAttestation,
+) -> Result<(RunnerProvision, String)> {
     // A prior process may have died after writing the env file. Scrub both
     // the host-only location and the legacy mounted path before inspecting
     // or adopting any runner container.
@@ -1484,7 +1500,7 @@ pub(crate) fn ensure_runner(
         .with_context(|| format!("inspect runner container {name}"))?;
     if inspect.code != 0 {
         if crate::docker::client::daemon_reports_missing(&inspect.stderr) {
-            return create_and_start_runner(runner, spec, &name, before_start);
+            return create_and_start_runner(runner, spec, &name, before_start, dind_id, holder);
         }
         anyhow::bail!(
             "inspect runner container {name} exited {}: {}",
@@ -1496,7 +1512,8 @@ pub(crate) fn ensure_runner(
         anyhow::bail!("inspect runner container {name} returned empty id");
     }
 
-    super::dind::verify_container_ownership(runner, &name, &spec.identity().ownership().as_str())?;
+    let id = inspect.stdout.trim();
+    super::dind::verify_container_ownership(runner, id, &spec.identity().ownership().as_str())?;
     let config = runner
         .run(
             "docker",
@@ -1505,7 +1522,7 @@ pub(crate) fn ensure_runner(
                 "--format".to_string(),
                 r#"{{json .Config.Image}}{{"\t"}}{{json .Config.Labels}}{{"\t"}}{{json .HostConfig.NetworkMode}}{{"\t"}}{{json .HostConfig.VolumesFrom}}{{"\t"}}{{json .Config.Entrypoint}}{{"\t"}}{{json .Config.Cmd}}{{"\t"}}{{json .State.Status}}"#.to_string(),
                 "--".to_string(),
-                name.clone(),
+                id.to_string(),
             ],
         )
         .with_context(|| format!("inspect runner command {name}"))?;
@@ -1523,14 +1540,23 @@ pub(crate) fn ensure_runner(
         spec.identity(),
         &config.labels,
         &config.network_mode,
+        dind_id,
     )?;
     verify_volume_holder_reference(
         "runner container",
         &name,
         config.volumes_from.as_deref(),
-        spec.identity(),
+        &holder.id,
     )?;
     let image = spec.image.reference();
+    super::ownership::attest_isolation(
+        runner,
+        spec.identity(),
+        id,
+        ROLE_RUNNER,
+        &holder.mounts,
+        Some(spec.state_dir()),
+    )?;
     if runner_status_is_running(&config.status) {
         if !runner_container_config_matches(&config, &image) {
             anyhow::bail!(
@@ -1541,13 +1567,13 @@ pub(crate) fn ensure_runner(
         // race between inspect and start could restart a one-shot JIT
         // container after it exits and reuse its persisted secret.
         before_start().context("persist runner startup deadline")?;
-        return Ok(RunnerProvision::Adopted);
+        return Ok((RunnerProvision::Adopted, id.to_string()));
     }
     if runner_status_is_safe_to_recreate(&config.status) {
         let removed = runner
             .run(
                 "docker",
-                &crate::docker::client::container_remove_args(&name, false, false),
+                &crate::docker::client::container_remove_args(id, false, false),
             )
             .with_context(|| format!("remove stopped runner container {name}"))?;
         if removed.code != 0 {
@@ -1557,7 +1583,7 @@ pub(crate) fn ensure_runner(
                 removed.stderr.trim()
             );
         }
-        return create_and_start_runner(runner, spec, &name, before_start);
+        return create_and_start_runner(runner, spec, &name, before_start, dind_id, holder);
     }
     Err(runner_status_error(&config.status))
 }
@@ -1595,6 +1621,13 @@ pub(crate) fn runner_connection(
     identity: &WorkerIdentity,
 ) -> Result<RunnerConnection> {
     let name = identity.runner_container();
+    runner_connection_at(runner, &name)
+}
+
+pub(crate) fn runner_connection_at(
+    runner: &mut dyn WorkerRunner,
+    name: &str,
+) -> Result<RunnerConnection> {
     // Raw calls (not the `Docker` facade): connectivity needs inspect +
     // logs back-to-back on one runner borrow, and the facade owns its
     // borrow for its whole lifetime.
@@ -1625,7 +1658,7 @@ pub(crate) fn runner_connection(
                 "--tail".to_string(),
                 "2000".to_string(),
                 "--".to_string(),
-                name.clone(),
+                name.to_string(),
             ],
         )
         .with_context(|| format!("read runner container logs {name}"))?;
@@ -1665,6 +1698,7 @@ mod tests {
     struct ScriptRunner {
         results: VecDeque<WorkerOutput>,
         seen: Vec<Vec<String>>,
+        state_dir: String,
     }
 
     impl ScriptRunner {
@@ -1672,6 +1706,7 @@ mod tests {
             Self {
                 results: results.into(),
                 seen: Vec::new(),
+                state_dir: "/tmp/worker".into(),
             }
         }
 
@@ -1699,10 +1734,45 @@ mod tests {
                 "unexpected program {program}"
             );
             self.seen.push(args.to_vec());
+            if args
+                .iter()
+                .any(|arg| arg == super::super::ownership::ISOLATION_FORMAT)
+            {
+                return Ok(Self::ok(&super::super::ownership::fixtures::isolation(
+                    &identity(),
+                    args.last().unwrap(),
+                    ROLE_RUNNER,
+                    &self.state_dir,
+                )));
+            }
+            if args.iter().any(|arg| arg == "{{.Id}}") {
+                if args.last() == Some(&identity().dind_container()) {
+                    return Ok(Self::ok("dind-object-id"));
+                }
+                if args.last() == Some(&identity().volume_holder_container()) {
+                    return Ok(Self::ok("holder-object-id"));
+                }
+            }
             self.results
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("script exhausted at {program} {}", args.join(" ")))
         }
+    }
+
+    fn ensure_runner(
+        runner: &mut ScriptRunner,
+        spec: &RunnerSpec,
+        before_start: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RunnerProvision> {
+        runner.state_dir = spec.state_dir().display().to_string();
+        super::ensure_runner(
+            runner,
+            spec,
+            before_start,
+            "dind-object-id",
+            &super::super::ownership::fixtures::holder(),
+        )
+        .map(|outcome| outcome.0)
     }
 
     fn identity() -> WorkerIdentity {
@@ -1726,7 +1796,7 @@ mod tests {
     ) -> String {
         let mut labels = identity().labels();
         labels.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
-        let network_mode = format!("container:{}", identity().dind_container());
+        let network_mode = "container:dind-object-id".to_string();
         container_config_parts_with(image, &labels, &network_mode, entrypoint, command, status)
     }
 
@@ -1738,7 +1808,7 @@ mod tests {
         command: Option<&[&str]>,
         status: &str,
     ) -> String {
-        let volumes_from = Some(vec![identity().volume_holder_container()]);
+        let volumes_from = Some(vec!["holder-object-id".to_string()]);
         format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             serde_json::to_string(image).unwrap(),
@@ -1756,11 +1826,7 @@ mod tests {
     }
 
     fn restart_runner_projection(labels: &BTreeMap<String, String>, status: &str) -> String {
-        restart_runner_projection_with(
-            labels,
-            Some(vec![identity().volume_holder_container()]),
-            status,
-        )
+        restart_runner_projection_with(labels, Some(vec!["holder-object-id".to_string()]), status)
     }
 
     fn restart_runner_projection_with(
@@ -1772,7 +1838,7 @@ mod tests {
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             serde_json::to_string(RUNNER_REF).unwrap(),
             serde_json::to_string(labels).unwrap(),
-            serde_json::to_string(&format!("container:{}", identity().dind_container())).unwrap(),
+            serde_json::to_string(&"container:dind-object-id".to_string()).unwrap(),
             serde_json::to_string(&volumes_from).unwrap(),
             serde_json::to_string(&Some(Vec::<String>::new())).unwrap(),
             serde_json::to_string(&Some(vec![RUNNER_START_COMMAND.to_string()])).unwrap(),
@@ -1812,7 +1878,7 @@ mod tests {
         let expected_image = PinnedImage::parse(RUNNER_REF).unwrap();
         let mut labels = identity().labels();
         labels.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
-        let holder = identity().volume_holder_container();
+        let holder = "holder-object-id".to_string();
         for volumes_from in [
             None,
             Some(Vec::new()),
@@ -1911,7 +1977,8 @@ mod tests {
             "jit-blob",
         );
         let env_file_path = spec.jit_env_file_path().unwrap();
-        let args = spec.create_args_with_env_file(&env_file_path);
+        let args =
+            spec.create_args_with_env_file(&env_file_path, "dind-object-id", "holder-object-id");
         assert!(args.contains(&"--network".to_string()));
         assert!(args
             .contains(&"container:velnor-scaleset-dind-s7-velnor-set-0007-2ad92676".to_string()));
@@ -2033,7 +2100,11 @@ mod tests {
             "jit-blob",
         );
         let args = spec
-            .create_args_with_env_file(&spec.jit_env_file_path().unwrap())
+            .create_args_with_env_file(
+                &spec.jit_env_file_path().unwrap(),
+                "dind-object-id",
+                "holder-object-id",
+            )
             .join("\n");
         // The holder supplies the shared absolute workspace, tool-cache, and
         // DinD data mounts to both containers; runner argv must reference the
@@ -2048,7 +2119,7 @@ mod tests {
         }
         assert!(args.contains(&format!(
             "--volumes-from\n{}",
-            spec.identity().volume_holder_container()
+            "holder-object-id".to_string()
         )));
         assert!(!args.contains(&format!(":{RUNNER_WORK_DIR}")));
         assert!(!args.contains(&format!(":{TOOL_CACHE_DIR}")));
@@ -2063,7 +2134,11 @@ mod tests {
             "jit-blob",
         );
         let args = spec
-            .create_args_with_env_file(&spec.jit_env_file_path().unwrap())
+            .create_args_with_env_file(
+                &spec.jit_env_file_path().unwrap(),
+                "dind-object-id",
+                "holder-object-id",
+            )
             .join("\n");
         for forbidden in [
             "curl",
@@ -2081,7 +2156,11 @@ mod tests {
                 "worker create argv contains floating install path {forbidden}: {args}"
             );
         }
-        let create_args = spec.create_args_with_env_file(&spec.jit_env_file_path().unwrap());
+        let create_args = spec.create_args_with_env_file(
+            &spec.jit_env_file_path().unwrap(),
+            "dind-object-id",
+            "holder-object-id",
+        );
         assert_eq!(
             create_args.get(create_args.len() - 2),
             Some(&RUNNER_REF.to_string())
@@ -2103,7 +2182,7 @@ mod tests {
         assert_eq!(config.image, RUNNER_REF);
         assert_eq!(
             config.volumes_from,
-            Some(vec![identity().volume_holder_container()])
+            Some(vec!["holder-object-id".to_string()])
         );
         assert_eq!(config.entrypoint, Vec::<String>::new());
         assert_eq!(config.command, Some(vec![RUNNER_START_COMMAND.to_string()]));
@@ -2145,7 +2224,7 @@ mod tests {
             (
                 "missing-scale-set",
                 missing_scale_set,
-                format!("container:{}", identity().dind_container()),
+                "container:dind-object-id".to_string(),
                 format!("missing label {SCALE_SET_LABEL}"),
             ),
             (

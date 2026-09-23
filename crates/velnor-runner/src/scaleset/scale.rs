@@ -47,8 +47,8 @@ use crate::scaleset::demand::{
     grant_oldest, resolve_job_request_id, Demand, DemandState, DemandStore, SubmitOutcome,
 };
 use crate::scaleset::intents::{
-    mint_batch_id, permit_holder, reconcile_returned_ids, AcquireBatchStore, AcquireClaimOutcome,
-    ProvisionIntentStore,
+    mint_batch_id, permit_holder, reconcile_returned_ids_checked, AcquireBatchStore,
+    AcquireClaimOutcome, ProvisionIntentStore,
 };
 use crate::scaleset::metrics::Metrics;
 use crate::scaleset::reconcile::{transition_or_adopt, unknown_event};
@@ -213,7 +213,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             return self.scale_idle().await;
         };
         if message.message_id == crate::scaleset::listener::INITIAL_MESSAGE_ID {
-            return self.scale_initial(message);
+            return self.scale_initial(message).await;
         }
         self.scale_message(message).await
     }
@@ -263,7 +263,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         })
     }
 
-    fn scale_initial(
+    async fn scale_initial(
         &mut self,
         message: &RunnerScaleSetMessage,
     ) -> Result<ScaleOutcome, ScaleError<Q::Error, W::Error>> {
@@ -271,12 +271,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             return Err(ScaleError::MissingInitialStats);
         };
         self.cached_stats = Some(stats);
-        let local = self.local_count()?;
-        Ok(ScaleOutcome {
-            kind: ScaleKind::Initial,
-            decision: Some(reconcile_population(&stats, local)),
-            ..ScaleOutcome::empty()
-        })
+        // Initial statistics are authoritative, but they are not a reason to
+        // skip durable work already present before this process connected.
+        // Replay the same grant/acquire/provision pipeline as an empty poll,
+        // then retain the Initial kind for listener accounting.
+        let mut outcome = self.scale_idle().await?;
+        outcome.kind = ScaleKind::Initial;
+        Ok(outcome)
     }
 
     async fn scale_message(
@@ -961,7 +962,53 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 return Ok((Vec::new(), Vec::new(), request_ids));
             }
         };
-        let (acquired, missing) = reconcile_returned_ids(&request_ids, &returned);
+        let reconciliation =
+            reconcile_returned_ids_checked(&request_ids, &returned).map_err(ScaleError::Store)?;
+        let attempt = self
+            .batches
+            .next_response_attempt(&batch_id)
+            .map_err(ScaleError::Store)?;
+        self.batches
+            .record_response(&batch_id, attempt, &reconciliation)
+            .map_err(ScaleError::Store)?;
+        if !reconciliation.unexpected.is_empty() {
+            // A foreign or duplicate response ID makes the entire wire
+            // observation untrustworthy. Preserve the response evidence, but
+            // do not authorize even the valid subset; retry as one uncertain
+            // batch through the existing reconciliation path.
+            for request_id in &request_ids {
+                let changed = self
+                    .demand
+                    .compare_and_set_state(
+                        self.config.scale_set_id,
+                        *request_id,
+                        DemandState::AcquireIntent,
+                        generation,
+                        DemandState::Uncertain,
+                        None,
+                        generation,
+                    )
+                    .map_err(ScaleError::Store)?;
+                if !changed {
+                    return Err(ScaleError::Store(anyhow::anyhow!(
+                        "acquire request {request_id} changed before anomalous response fencing"
+                    )));
+                }
+            }
+            self.batches
+                .resolve(&batch_id, true)
+                .map_err(ScaleError::Store)?;
+            self.metrics.inc_uncertain_batches();
+            tracing::warn!(
+                batch = batch_id.as_str(),
+                attempt,
+                unexpected = ?reconciliation.unexpected,
+                "acquirejobs returned anomalous IDs; batch uncertain"
+            );
+            return Ok((Vec::new(), Vec::new(), request_ids));
+        }
+        let acquired = reconciliation.acquired;
+        let missing = reconciliation.missing;
         for request_id in &acquired {
             let changed = self
                 .demand
@@ -1416,10 +1463,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_id_identity_replays_without_raw_zero_lookup() {
+    async fn request_identity_replays_without_local_id_fallback() {
         let path = temp_path("job-id-identity");
         let mut processor = processor(&path, ScriptedQueue::default());
-        let offer = push_offer(0);
+        let offer = push_offer(501);
         let request_id = resolve_job_request_id(&offer.base).unwrap();
         assert_ne!(request_id, 0);
 
@@ -1512,6 +1559,70 @@ mod tests {
         // Redelivered offer keeps its age; the acquired one provisions.
         assert_eq!(outcome.provisioned, vec![601]);
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn anomalous_acquire_response_is_persisted_and_made_uncertain() {
+        let path = temp_path("anomalous-response");
+        let queue = ScriptedQueue {
+            answer: std::sync::Mutex::new(Some(Ok(vec![701, 999, 701]))),
+        };
+        let mut processor = processor(&path, queue);
+        let outcome = processor
+            .scale(Some(&message(12, vec![push_offer(701), push_offer(702)])))
+            .await
+            .unwrap();
+
+        // The valid subset is evidence only; a foreign ID and duplicate make
+        // the complete response unsafe to authorize.
+        assert!(outcome.acquired.is_empty());
+        assert!(outcome.missing.is_empty());
+        assert_eq!(outcome.uncertain, vec![701, 702]);
+        for request_id in [701, 702] {
+            assert_eq!(
+                processor
+                    .demand_mut()
+                    .get(7, request_id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                DemandState::Uncertain
+            );
+        }
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 2);
+
+        let batch = processor
+            .batches_mut()
+            .open_batches(7, usize::MAX)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(batch.state, crate::scaleset::intents::BatchState::Uncertain);
+        let responses = processor.batches_mut().responses(&batch.batch_id).unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].reconciliation.requested, vec![701, 702]);
+        assert_eq!(responses[0].reconciliation.returned, vec![701, 999, 701]);
+        assert_eq!(responses[0].reconciliation.acquired, vec![701]);
+        assert_eq!(responses[0].reconciliation.missing, vec![702]);
+        assert_eq!(responses[0].reconciliation.unexpected, vec![999, 701]);
+
+        // Redelivery cannot authorize or provision the same batch again.
+        let replay = processor
+            .scale(Some(&message(13, vec![push_offer(701), push_offer(702)])))
+            .await
+            .unwrap();
+        assert!(replay.acquired.is_empty());
+        assert!(replay.provisioned.is_empty());
+        assert_eq!(
+            processor
+                .batches_mut()
+                .responses(&batch.batch_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 2);
     }
 
     #[tokio::test]

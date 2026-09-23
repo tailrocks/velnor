@@ -44,6 +44,17 @@ use crate::scaleset::session::MessageSessionClient;
 /// Carries session statistics only; never ACKed, never persisted as cursor.
 pub const INITIAL_MESSAGE_ID: i32 = -1;
 
+/// Validate the server-owned session identity before it becomes a durable
+/// cursor fence. The current Scale Set API uses UUID session IDs; accepting a
+/// malformed or nil value would make restart fencing and deletion ambiguous.
+pub(crate) fn validate_session_id(session_id: &str) -> Result<()> {
+    let uuid = uuid::Uuid::parse_str(session_id).context("scale-set session id is not a UUID")?;
+    if uuid.is_nil() {
+        anyhow::bail!("scale-set session id is nil");
+    }
+    Ok(())
+}
+
 /// The queue surface the loop needs: acquire (for `Scale`) plus the poll
 /// triplet (for the listener). [`ClientSession`] adapts the real client.
 pub trait LoopSession: QueueSession + Clone {
@@ -460,6 +471,7 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             return Err(ListenerError::MissingSessionStats);
         };
         let (session_id, owner) = self.session.session_identity().await;
+        validate_session_id(&session_id).map_err(ListenerError::Store)?;
         let generation = self
             .processor
             .ledger_generation()
@@ -494,17 +506,25 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
         generation: u64,
     ) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
         self.metrics.inc_nil_polls();
-        if let Some(stats) = self.session.session_statistics().await {
-            let session_id = self.session_id.clone().ok_or_else(|| {
-                ListenerError::Store(anyhow::anyhow!(
-                    "scale-set session identity missing before statistics persistence"
-                ))
-            })?;
-            self.cursors
-                .save_stats(self.config.scale_set_id, &session_id, &stats, generation)
-                .map_err(ListenerError::Store)?;
-            self.processor.set_cached_stats(stats);
-        }
+        self.idle_reconcile(generation).await?;
+        // Uncertain resolution can promote rows to Acquired; the same nil
+        // pass must provision those rows and drain any older Granted work.
+        let outcome = self
+            .processor
+            .scale(None)
+            .await
+            .map_err(ListenerError::Scale)?;
+        debug_assert!(matches!(outcome.kind, ScaleKind::Nil));
+        Ok(outcome)
+    }
+
+    /// Run recovery work independently of whether the long poll returned an
+    /// empty response. A continuous message stream must not starve overdue
+    /// uncertain acquire batches or lane reconciliation.
+    async fn idle_reconcile(
+        &mut self,
+        generation: u64,
+    ) -> Result<(), ListenerError<S::Error, W::Error>> {
         self.processor
             .lane_mut()
             .idle_tick()
@@ -521,16 +541,8 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             &self.metrics,
         )
         .await
-        .map_err(ListenerError::Reconcile)?;
-        // Uncertain resolution can promote rows to Acquired; the same nil
-        // pass must provision those rows and drain any older Granted work.
-        let outcome = self
-            .processor
-            .scale(None)
-            .await
-            .map_err(ListenerError::Scale)?;
-        debug_assert!(matches!(outcome.kind, ScaleKind::Nil));
-        Ok(outcome)
+        .map_err(ListenerError::Reconcile)
+        .map(|_| ())
     }
 
     /// Real message: persist stats, Scale, ACK-then-persist-cursor.
@@ -550,6 +562,7 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
                 .save_stats(self.config.scale_set_id, &session_id, &stats, generation)
                 .map_err(ListenerError::Store)?;
         }
+        self.idle_reconcile(generation).await?;
         let outcome = self
             .processor
             .scale(Some(&message))
@@ -639,6 +652,11 @@ mod tests {
     use std::sync::Mutex;
     use velnor_model::{ScaleSetJobAvailable, ScaleSetJobMessage, ScaleSetJobMessageType};
 
+    const SESSION_ID: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    const SESSION_OLD_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const SESSION_NEW_ID: &str = "22222222-2222-4222-8222-222222222222";
+    const SESSION_NEXT_ID: &str = "33333333-3333-4333-8333-333333333333";
+
     #[derive(Debug)]
     struct SessionError(String);
 
@@ -687,7 +705,7 @@ mod tests {
         }
 
         async fn session_identity(&self) -> (String, String) {
-            ("session-1".to_owned(), "octo-org".to_owned())
+            (SESSION_ID.to_owned(), "octo-org".to_owned())
         }
 
         async fn get_message(
@@ -711,7 +729,7 @@ mod tests {
                     SessionError(format!("open interleaved cursor store: {error:#}"))
                 })?;
                 cursors
-                    .save_cursor(7, "session-1", 100, 0)
+                    .save_cursor(7, SESSION_ID, 100, 0)
                     .map_err(|error| {
                         SessionError(format!("advance interleaved cursor: {error:#}"))
                     })?;
@@ -784,21 +802,21 @@ mod tests {
         let path = temp_path("session-fence");
         let mut current = SessionStore::open(&path).unwrap();
         current
-            .save_session(7, "session-new", "octo-org", 2)
+            .save_session(7, SESSION_NEW_ID, "octo-org", 2)
             .unwrap();
-        current.save_cursor(7, "session-new", 41, 2).unwrap();
+        current.save_cursor(7, SESSION_NEW_ID, 41, 2).unwrap();
         drop(current);
 
         let mut stale = SessionStore::open(&path).unwrap();
         let error = stale
-            .save_session(7, "session-old", "octo-org", 1)
+            .save_session(7, SESSION_OLD_ID, "octo-org", 1)
             .unwrap_err();
         assert!(error.to_string().contains("fenced"));
-        let error = stale.save_cursor(7, "session-old", 99, 1).unwrap_err();
+        let error = stale.save_cursor(7, SESSION_OLD_ID, 99, 1).unwrap_err();
         assert!(error.to_string().contains("fenced"));
 
         let cursor = stale.get(7).unwrap().unwrap();
-        assert_eq!(cursor.session_id, "session-new");
+        assert_eq!(cursor.session_id, SESSION_NEW_ID);
         assert_eq!(cursor.generation, 2);
         assert_eq!(cursor.last_message_id, 41);
     }
@@ -807,13 +825,13 @@ mod tests {
     fn session_store_keeps_same_session_cursor_monotonic() {
         let path = temp_path("cursor-monotonic");
         let mut store = SessionStore::open(&path).unwrap();
-        store.save_session(7, "session-1", "octo-org", 3).unwrap();
-        store.save_cursor(7, "session-1", 41, 3).unwrap();
+        store.save_session(7, SESSION_ID, "octo-org", 3).unwrap();
+        store.save_cursor(7, SESSION_ID, 41, 3).unwrap();
 
-        let error = store.save_cursor(7, "session-1", 40, 3).unwrap_err();
+        let error = store.save_cursor(7, SESSION_ID, 40, 3).unwrap_err();
         assert!(error.to_string().contains("regressed"));
-        store.save_cursor(7, "session-1", 42, 3).unwrap();
-        store.save_session(7, "session-1", "octo-org", 4).unwrap();
+        store.save_cursor(7, SESSION_ID, 42, 3).unwrap();
+        store.save_session(7, SESSION_ID, "octo-org", 4).unwrap();
         assert_eq!(store.get(7).unwrap().unwrap().last_message_id, 42);
     }
 
@@ -821,7 +839,7 @@ mod tests {
     fn concurrent_session_writers_keep_the_highest_generation() {
         let path = temp_path("session-concurrent");
         let mut seed = SessionStore::open(&path).unwrap();
-        seed.save_session(7, "session-1", "octo-org", 1).unwrap();
+        seed.save_session(7, SESSION_ID, "octo-org", 1).unwrap();
         drop(seed);
 
         let mut older = SessionStore::open(&path).unwrap();
@@ -830,12 +848,12 @@ mod tests {
         let older_start = start.clone();
         let older_thread = std::thread::spawn(move || {
             older_start.wait();
-            older.save_session(7, "session-2", "octo-org", 2)
+            older.save_session(7, SESSION_NEW_ID, "octo-org", 2)
         });
         let newer_start = start.clone();
         let newer_thread = std::thread::spawn(move || {
             newer_start.wait();
-            newer.save_session(7, "session-3", "octo-org", 3)
+            newer.save_session(7, SESSION_NEXT_ID, "octo-org", 3)
         });
         start.wait();
 
@@ -847,7 +865,7 @@ mod tests {
         }
 
         let cursor = SessionStore::open(&path).unwrap().get(7).unwrap().unwrap();
-        assert_eq!(cursor.session_id, "session-3");
+        assert_eq!(cursor.session_id, SESSION_NEXT_ID);
         assert_eq!(cursor.generation, 3);
         assert_eq!(cursor.last_message_id, 0);
     }
@@ -965,7 +983,7 @@ mod tests {
         let cursors = SessionStore::open(&path).unwrap();
         let cursor = cursors.get(7).unwrap().unwrap();
         assert_eq!(cursor.last_message_id, 41);
-        assert_eq!(cursor.session_id, "session-1");
+        assert_eq!(cursor.session_id, SESSION_ID);
         let snapshot = listener.metrics().snapshot();
         assert_eq!(snapshot.polls, 2);
         assert_eq!(snapshot.messages, 1);

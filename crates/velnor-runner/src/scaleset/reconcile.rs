@@ -21,7 +21,7 @@ use anyhow::Result;
 use crate::scaleset::capacity::{AcquireOutcome, CapacityLedger, LedgerLane, LedgerPermitState};
 use crate::scaleset::converge::WorkerLane;
 use crate::scaleset::demand::{DemandState, DemandStore};
-use crate::scaleset::intents::{permit_holder, reconcile_returned_ids, AcquireBatchStore};
+use crate::scaleset::intents::{permit_holder, reconcile_returned_ids_checked, AcquireBatchStore};
 use crate::scaleset::metrics::Metrics;
 use crate::scaleset::scale::QueueSession;
 use crate::scaleset::shared_ledger::to_control_state;
@@ -454,8 +454,18 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
         }
     };
     require_generation(ledger, generation)?;
-    let (acquired, missing) = reconcile_returned_ids(&uncertain, &returned);
-    for request_id in &acquired {
+    let reconciliation = reconcile_returned_ids_checked(&uncertain, &returned)?;
+    let attempt = batches.next_response_attempt(&batch.batch_id)?;
+    batches.record_response(&batch.batch_id, attempt, &reconciliation)?;
+    if !reconciliation.unexpected.is_empty() {
+        anyhow::bail!(
+            "AcquireJobs returned anomalous RunnerRequestIDs for batch {:?}/{}: {:?}",
+            batch.batch_id,
+            attempt,
+            reconciliation.unexpected
+        );
+    }
+    for request_id in &reconciliation.acquired {
         require_generation(ledger, generation)?;
         let state = if canceled_pending.contains(request_id) {
             DemandState::CanceledAcquired
@@ -470,7 +480,7 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
             generation,
         )?;
     }
-    for request_id in &missing {
+    for request_id in &reconciliation.missing {
         require_generation(ledger, generation)?;
         let holder = permit_holder(batch.scale_set_id, *request_id);
         if canceled_pending.contains(request_id) {
@@ -500,8 +510,8 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
             )?;
         }
     }
-    metrics.add_acquired_ids(acquired.len() as u64);
-    metrics.add_missing_ids(missing.len() as u64);
+    metrics.add_acquired_ids(reconciliation.acquired.len() as u64);
+    metrics.add_missing_ids(reconciliation.missing.len() as u64);
     batches.resolve(&batch.batch_id, false)?;
     Ok(true)
 }

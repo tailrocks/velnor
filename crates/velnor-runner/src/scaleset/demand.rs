@@ -407,37 +407,90 @@ fn parse_offer_identity(probe: &OfferProbe<'_>) -> Option<OfferIdentity> {
     })
 }
 
-/// Resolve the canonical durable request ID from a job message.
+/// The wire `runnerRequestId` assigned by Actions Service.
 ///
-/// Upstream Actions Service transmits `runnerRequestId` on job offers.
-/// When direct scale-set assignment is active, `runnerRequestId` may be 0,
-/// but `jobId` (GUID) is consistently transmitted across `JobAssigned`,
-/// `JobStarted`, and `JobCompleted`. We project non-zero `runnerRequestId`
-/// when present, else hash `jobId` stably. A missing job ID is rejected
-/// instead of collapsing unrelated offers onto a sentinel key.
-#[must_use]
-pub fn resolve_job_request_id(base: &velnor_model::ScaleSetJobMessage) -> Option<i64> {
-    resolve_job_request_identity(base).map(|(request_id, _)| request_id)
+/// This is intentionally distinct from a workflow `jobId` and from any local
+/// correlation key. Only this type may become an `AcquireJobs` request ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RunnerRequestId(i64);
+
+impl RunnerRequestId {
+    /// Construct a wire request ID. Actions IDs are positive; zero and
+    /// negative values are missing/malformed, never local IDs in disguise.
+    #[must_use]
+    pub fn new(value: i64) -> Option<Self> {
+        (value > 0).then_some(Self(value))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn identity_key(self) -> String {
+        format!("runner-request:{}", self.0)
+    }
 }
 
-/// Resolve the durable ID plus the exact source identity used to derive it.
-/// The i64 fallback remains a lookup key for the existing schema, but the
-/// original job ID is stored beside it so a hash collision fails closed.
+/// Exact local correlation identity from the opaque workflow `jobId`.
+///
+/// A job ID can correlate lifecycle observations, but it is not a
+/// `RunnerRequestId` and must never be serialized into an `AcquireJobs` body.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalCorrelationId(String);
+
+impl LocalCorrelationId {
+    #[must_use]
+    pub fn new(job_id: &str) -> Option<Self> {
+        (!job_id.is_empty() && !job_id.chars().any(char::is_control))
+            .then(|| Self(job_id.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Resolve only the upstream wire request ID.
+#[must_use]
+pub fn resolve_runner_request_id(
+    base: &velnor_model::ScaleSetJobMessage,
+) -> Option<RunnerRequestId> {
+    RunnerRequestId::new(base.runner_request_id)
+}
+
+/// Resolve the local job correlation identity without pretending it is a
+/// server acquisition ID.
+#[must_use]
+pub fn resolve_local_correlation_id(
+    base: &velnor_model::ScaleSetJobMessage,
+) -> Option<LocalCorrelationId> {
+    LocalCorrelationId::new(&base.job_id)
+}
+
+/// Resolve the canonical upstream request ID from a job message.
+///
+/// Upstream `actions/scaleset` passes `JobMessageBase.RunnerRequestID` directly
+/// to `AcquireJobs`. A zero/malformed wire value is therefore absent, even
+/// when `jobId` is present. Hashes remain storage-only projections and are
+/// never promoted into this namespace.
+#[must_use]
+pub fn resolve_job_request_id(base: &velnor_model::ScaleSetJobMessage) -> Option<i64> {
+    resolve_runner_request_id(base).map(RunnerRequestId::get)
+}
+
+/// Resolve the durable request ID plus its exact wire identity.
+///
+/// The returned tuple contains only a `RunnerRequestId`. The separate
+/// `LocalCorrelationId` path is deliberately not a fallback.
 #[must_use]
 pub fn resolve_job_request_identity(
     base: &velnor_model::ScaleSetJobMessage,
 ) -> Option<(i64, String)> {
-    if base.runner_request_id != 0 {
-        Some((
-            base.runner_request_id,
-            format!("runner-request:{}", base.runner_request_id),
-        ))
-    } else if !base.job_id.is_empty() {
-        let request_id = crate::scaleset::intents::stable_i64(&base.job_id);
-        (request_id != 0).then(|| (request_id, format!("job-id:{}", base.job_id)))
-    } else {
-        None
-    }
+    let request_id = resolve_runner_request_id(base)?;
+    Some((request_id.get(), request_id.identity_key()))
 }
 
 /// Classify one offer. Pure over the offer: no I/O, no clock.
@@ -1442,5 +1495,35 @@ mod tests {
             .list_in_states_all(&[DemandState::Acquired])
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn runner_request_id_never_falls_back_to_local_job_correlation() {
+        let mut message = offer(0, "push").base;
+        assert_eq!(resolve_runner_request_id(&message), None);
+        assert_eq!(resolve_job_request_id(&message), None);
+        assert_eq!(
+            resolve_job_request_identity(&message),
+            None,
+            "jobId is not an AcquireJobs identity"
+        );
+        let local = resolve_local_correlation_id(&message).unwrap();
+        assert_eq!(local.as_str(), "job-0");
+
+        message.runner_request_id = 42;
+        let wire = resolve_runner_request_id(&message).unwrap();
+        assert_eq!(wire.get(), 42);
+        assert_eq!(resolve_job_request_id(&message), Some(42));
+        assert_eq!(wire.identity_key(), "runner-request:42");
+    }
+
+    #[test]
+    fn negative_or_zero_runner_request_ids_fail_closed() {
+        let mut message = offer(1, "push").base;
+        for value in [0, -1] {
+            message.runner_request_id = value;
+            assert!(resolve_runner_request_id(&message).is_none());
+            assert!(resolve_job_request_id(&message).is_none());
+        }
     }
 }

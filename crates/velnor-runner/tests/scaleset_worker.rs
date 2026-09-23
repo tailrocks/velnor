@@ -25,6 +25,7 @@ use velnor_control::permit_ledger::{PermitLedger, PermitState};
 use velnor_model::ScaleSetWorkerState;
 use velnor_runner::scaleset::allocator::ScaleSetAllocator;
 use velnor_runner::scaleset::permit_holder;
+use velnor_runner::scaleset::worker::{dind, runner};
 use velnor_runner::scaleset::worker::{
     provision_worker, DockerToolContentHook, HomogeneousProfile, OwnershipId, PinnedImage,
     ProvisionPlan, ScaleSetWorker, Supervision, SupervisionOutcome, ToolContentAttestation,
@@ -161,21 +162,112 @@ fn owned_network_projection(identity: &WorkerIdentity, id: &str) -> String {
     )
 }
 
-fn holder_projection(identity: &WorkerIdentity) -> String {
+fn holder_projection(identity: &WorkerIdentity, id: &str) -> String {
     let mounts = serde_json::json!([
-        {"Type":"volume","Name":"anonymous-work","Destination":"/home/runner/_work","Driver":"local","RW":true},
-        {"Type":"volume","Name":"anonymous-tools","Destination":"/opt/hostedtoolcache","Driver":"local","RW":true},
-        {"Type":"volume","Name":"anonymous-docker","Destination":"/var/lib/docker","Driver":"local","RW":true}
+        {"Type":"volume","Name":"anonymous-work","Source":"/var/lib/docker/volumes/anonymous-work/_data","Destination":"/home/runner/_work","Driver":"local","RW":true},
+        {"Type":"volume","Name":"anonymous-tools","Source":"/var/lib/docker/volumes/anonymous-tools/_data","Destination":"/opt/hostedtoolcache","Driver":"local","RW":true},
+        {"Type":"volume","Name":"anonymous-docker","Source":"/var/lib/docker/volumes/anonymous-docker/_data","Destination":"/var/lib/docker","Driver":"local","RW":true}
     ]);
     format!(
         "{}\t{}\t{}\tnull\t{}\t{}\t{}\n",
-        serde_json::to_string("holder-id").unwrap(),
+        serde_json::to_string(id).unwrap(),
         serde_json::to_string(&format!("{RUNNER_REPOSITORY}@{RUNNER_INDEX_DIGEST}")).unwrap(),
         serde_json::to_string(&identity_labels(identity, "volume-holder")).unwrap(),
         serde_json::to_string(&vec!["/bin/true"]).unwrap(),
         serde_json::to_string("created").unwrap(),
         mounts
     )
+}
+
+fn holder_volume_projection(identity: &WorkerIdentity, name: &str) -> String {
+    let labels = identity_labels(identity, "volume-holder");
+    [
+        serde_json::to_string(name).unwrap(),
+        serde_json::to_string("local").unwrap(),
+        serde_json::to_string(&labels).unwrap(),
+        "null".to_owned(),
+        serde_json::to_string(&format!("/var/lib/docker/volumes/{name}/_data")).unwrap(),
+    ]
+    .join("\t")
+}
+
+fn holder_isolation_projection(identity: &WorkerIdentity, id: &str) -> String {
+    let labels = identity_labels(identity, "volume-holder");
+    let mounts = serde_json::json!([
+        {"Type":"volume","Name":"anonymous-work","Source":"/var/lib/docker/volumes/anonymous-work/_data","Destination":"/home/runner/_work","Driver":"local","RW":true,"Propagation":""},
+        {"Type":"volume","Name":"anonymous-tools","Source":"/var/lib/docker/volumes/anonymous-tools/_data","Destination":"/opt/hostedtoolcache","Driver":"local","RW":true,"Propagation":""},
+        {"Type":"volume","Name":"anonymous-docker","Source":"/var/lib/docker/volumes/anonymous-docker/_data","Destination":"/var/lib/docker","Driver":"local","RW":true,"Propagation":""}
+    ]);
+    let requested = serde_json::json!([
+        {"Type":"volume","Target":"/home/runner/_work","Source":""},
+        {"Type":"volume","Target":"/opt/hostedtoolcache","Source":""},
+        {"Type":"volume","Target":"/var/lib/docker","Source":""}
+    ]);
+    [
+        serde_json::to_string(id).unwrap(),
+        mounts.to_string(),
+        "false".to_owned(),
+        "{}".to_owned(),
+        "false".to_owned(),
+        "null".to_owned(),
+        "null".to_owned(),
+        serde_json::to_string(&vec!["/bin/true"]).unwrap(),
+        serde_json::to_string("").unwrap(),
+        serde_json::to_string(&labels).unwrap(),
+        requested.to_string(),
+    ]
+    .join("\t")
+}
+
+fn container_isolation_projection(
+    identity: &WorkerIdentity,
+    id: &str,
+    role: &str,
+    state_dir: &std::path::Path,
+) -> String {
+    let mut labels = identity_labels(identity, role);
+    labels.insert(
+        "velnor.scaleset.state-source".to_owned(),
+        state_dir.display().to_string(),
+    );
+    let mounts = serde_json::json!([
+        {"Type":"volume","Name":"anonymous-work","Source":"/var/lib/docker/volumes/anonymous-work/_data","Destination":"/home/runner/_work","Driver":"local","RW":true,"Propagation":""},
+        {"Type":"volume","Name":"anonymous-tools","Source":"/var/lib/docker/volumes/anonymous-tools/_data","Destination":"/opt/hostedtoolcache","Driver":"local","RW":true,"Propagation":""},
+        {"Type":"volume","Name":"anonymous-docker","Source":"/var/lib/docker/volumes/anonymous-docker/_data","Destination":"/var/lib/docker","Driver":"local","RW":true,"Propagation":""},
+        {"Type":"bind","Source":state_dir,"Destination":"/velnor/scaleset","RW":true,"Propagation":"rprivate"}
+    ]);
+    let groups = if role == "runner" {
+        serde_json::json!([dind::DIND_SOCKET_GID])
+    } else {
+        serde_json::Value::Null
+    };
+    let entrypoint = if role == "dind" {
+        serde_json::json!([dind::DIND_ENTRYPOINT])
+    } else {
+        serde_json::Value::Null
+    };
+    let command = if role == "dind" {
+        serde_json::json!(dind::daemon_command())
+    } else {
+        serde_json::json!([runner::RUNNER_START_COMMAND])
+    };
+    [
+        serde_json::json!(id),
+        mounts,
+        serde_json::json!(role == "dind"),
+        serde_json::json!({}),
+        serde_json::json!(false),
+        groups,
+        entrypoint,
+        command,
+        serde_json::json!(if role == "dind" { "" } else { "runner" }),
+        serde_json::json!(labels),
+        serde_json::Value::Null,
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join("\t")
 }
 
 #[test]
@@ -289,12 +381,19 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
             "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
         ),
         ScriptRunner::ok("holderid\n"),
-        ScriptRunner::ok(&holder_projection(&identity)),
+        ScriptRunner::ok(&holder_projection(&identity, "holderid")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-work")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-tools")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-docker")),
+        ScriptRunner::ok(&holder_isolation_projection(&identity, "holderid")),
         ScriptRunner::fail(
             1,
             "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
         ),
         ScriptRunner::ok("dindid\n"),
+        ScriptRunner::ok(&container_isolation_projection(
+            &identity, "dindid", "dind", &state_dir,
+        )),
         ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
         ScriptRunner::ok("28.5.2\n"),
         ScriptRunner::fail(
@@ -302,6 +401,9 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
             "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
         ),
         ScriptRunner::ok("runnerid\n"),
+        ScriptRunner::ok(&container_isolation_projection(
+            &identity, "runnerid", "runner", &state_dir,
+        )),
         ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
         ScriptRunner::ok("running\n"),
         ScriptRunner::ok("Connected to GitHub\n"),
@@ -320,7 +422,11 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         )),
         ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
         ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
-        ScriptRunner::ok(&holder_projection(&identity)),
+        ScriptRunner::ok(&holder_projection(&identity, "holder-id")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-work")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-tools")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-docker")),
+        ScriptRunner::ok(&holder_isolation_projection(&identity, "holder-id")),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("RUNNER-LOGS\n"),
         ScriptRunner::ok("DIND-LOGS\n"),
@@ -333,7 +439,11 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         )),
         ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
         ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
-        ScriptRunner::ok(&holder_projection(&identity)),
+        ScriptRunner::ok(&holder_projection(&identity, "holder-id")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-work")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-tools")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-docker")),
+        ScriptRunner::ok(&holder_isolation_projection(&identity, "holder-id")),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("dind\n"),
         ScriptRunner::ok("dind\n"),
@@ -433,24 +543,19 @@ fn cleanup_failure_retains_permit_uncertain() {
         )),
         ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
         ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
-        ScriptRunner::ok(&holder_projection(&identity)),
+        ScriptRunner::ok(&holder_projection(&identity, "holder-id")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-work")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-tools")),
+        ScriptRunner::ok(&holder_volume_projection(&identity, "anonymous-docker")),
+        ScriptRunner::ok(&holder_isolation_projection(&identity, "holder-id")),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("RUNNER-LOGS\n"),
         ScriptRunner::ok("DIND-LOGS\n"),
         ScriptRunner::ok("[{}]\n"),
         ScriptRunner::ok("[{}]\n"),
-        ScriptRunner::ok(&owned_container_projection(
-            &identity,
-            "runner",
-            "runner-id",
-        )),
-        ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
-        ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
-        ScriptRunner::ok(&holder_projection(&identity)),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("dind\n"),
         ScriptRunner::fail(1, "device or resource busy"), // rm dind fails
-        ScriptRunner::ok("holder\n"),
         ScriptRunner::ok("net\n"),
     ]);
     let report = supervision.cleanup(&mut script).unwrap();

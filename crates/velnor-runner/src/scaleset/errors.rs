@@ -8,7 +8,7 @@
 
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
-use thiserror::Error;
+use std::fmt;
 
 /// Well-known Actions exception names mapped by `newRequestResponseError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub struct ActionsApiException {
 impl std::fmt::Debug for ActionsApiException {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActionsApiException")
-            .field("type_name", &self.type_name)
+            .field("type_name", &redact_text(&self.type_name))
             .field("message", &"<redacted>")
             .finish()
     }
@@ -78,7 +78,7 @@ impl std::fmt::Debug for ActionsApiException {
 
 impl std::fmt::Display for ActionsApiException {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.type_name, self.message)
+        write!(f, "{}: <redacted>", redact_text(&self.type_name))
     }
 }
 
@@ -102,11 +102,11 @@ pub struct RequestFailure {
 impl std::fmt::Debug for RequestFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RequestFailure")
-            .field("method", &self.method)
+            .field("method", &redact_text(&self.method))
             .field("url", &redact_url(&self.url))
-            .field("status", &self.status)
-            .field("activity", &self.activity)
-            .field("request_id", &self.request_id)
+            .field("status", &redact_text(&self.status))
+            .field("activity", &redact_text(&self.activity))
+            .field("request_id", &redact_text(&self.request_id))
             .field("message", &"<redacted>")
             .field("fault", &self.fault)
             .field("status_fault", &self.status_fault)
@@ -123,30 +123,74 @@ impl std::fmt::Display for RequestFailure {
         write!(
             f,
             "request {} {} failed(status={:?}{}{}): {}",
-            self.method, self.url, self.status, self.activity, self.request_id, self.message
+            redact_text(&self.method),
+            redact_url(&self.url),
+            redact_text(&self.status),
+            redact_text(&self.activity),
+            redact_text(&self.request_id),
+            redact_text(&self.message)
         )
     }
 }
 
 /// Scale-set protocol error.
-#[derive(Debug, Error)]
 pub enum ScaleSetError {
     /// A request failed; mirrors `newRequestResponseError` output.
-    #[error("{0}")]
     RequestFailed(Box<RequestFailure>),
     /// Transport failure (mirrors `sendRequest` failure wrapping).
-    #[error("failed to send request: {0}")]
     Transport(String),
     /// Local request-construction failure.
-    #[error("{0}")]
     Local(String),
     /// Context wrapper that preserves typed faults through `%w`-style layers.
-    #[error("{context}: {source}")]
     Context {
         context: String,
-        #[source]
         source: Box<ScaleSetError>,
     },
+}
+
+impl fmt::Debug for ScaleSetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequestFailed(failure) => f.debug_tuple("RequestFailed").field(failure).finish(),
+            Self::Transport(message) => f
+                .debug_struct("ScaleSetError::Transport")
+                .field("message", &redact_text(message))
+                .finish(),
+            Self::Local(message) => f
+                .debug_struct("ScaleSetError::Local")
+                .field("message", &redact_text(message))
+                .finish(),
+            Self::Context { context, source } => f
+                .debug_struct("ScaleSetError::Context")
+                .field("context", &redact_text(context))
+                .field("source", source)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Display for ScaleSetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequestFailed(failure) => failure.fmt(f),
+            Self::Transport(message) => {
+                write!(f, "failed to send request: {}", redact_text(message))
+            }
+            Self::Local(message) => f.write_str(&redact_text(message)),
+            Self::Context { context, source } => {
+                write!(f, "{}: {source}", redact_text(context))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ScaleSetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Context { source, .. } => Some(source.as_ref()),
+            Self::RequestFailed(_) | Self::Transport(_) | Self::Local(_) => None,
+        }
+    }
 }
 
 impl ScaleSetError {
@@ -252,6 +296,7 @@ fn error_message(
     fault: Option<ScaleSetFault>,
     detail: &str,
 ) -> ErrorDetails {
+    let detail = redact_text(detail);
     if body.is_empty() {
         return ErrorDetails {
             message: match fault {
@@ -266,7 +311,7 @@ fn error_message(
     // `errors.As(err, &scalesetErr)` branch).
     if let Some(fault) = fault {
         return ErrorDetails {
-            message: format!("{detail}: {}: {}", fault.as_str(), lossy(body)),
+            message: format!("{detail}: {}: response body redacted", fault.as_str()),
             fault: Some(fault),
             api_exception: None,
         };
@@ -276,7 +321,7 @@ fn error_message(
         && value.contains("text/plain")
     {
         return ErrorDetails {
-            message: format!("{detail}: {}", lossy(body)),
+            message: format!("{detail}: response body redacted"),
             fault: None,
             api_exception: None,
         };
@@ -285,10 +330,7 @@ fn error_message(
         Ok(exception) => exception,
         Err(_) => {
             return ErrorDetails {
-                message: format!(
-                    "{detail}: failed to unmarshal error response body: {:?}",
-                    lossy(body)
-                ),
+                message: format!("{detail}: failed to unmarshal error response body"),
                 fault: None,
                 api_exception: None,
             };
@@ -308,7 +350,7 @@ fn error_message(
         None
     };
     let message = match fault {
-        Some(fault) => format!("{detail}: {}: {}", fault.as_str(), api_exception.message),
+        Some(fault) => format!("{detail}: {}: response details redacted", fault.as_str()),
         None => format!("{detail}: {api_exception}"),
     };
     ErrorDetails {
@@ -316,10 +358,6 @@ fn error_message(
         fault,
         api_exception: Some(api_exception),
     }
-}
-
-fn lossy(body: &[u8]) -> String {
-    String::from_utf8_lossy(body).into_owned()
 }
 
 #[derive(serde::Deserialize)]
@@ -339,6 +377,144 @@ fn redact_url(raw: &str) -> String {
     url.set_query(None);
     url.set_fragment(None);
     url.to_string()
+}
+
+/// Redact credentials and authenticated URLs embedded in a diagnostic string.
+/// Response bodies are never passed through this function: callers use a
+/// fixed redacted description for body-bearing error paths instead.
+pub(crate) fn redact_text(raw: &str) -> String {
+    let with_urls = redact_embedded_urls(raw);
+    redact_sensitive_values(&with_urls)
+}
+
+fn redact_embedded_urls(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        let Some(relative_start) = find_url_start(&raw[cursor..]) else {
+            output.push_str(&raw[cursor..]);
+            break;
+        };
+        let start = cursor + relative_start;
+        output.push_str(&raw[cursor..start]);
+        let end = raw[start..]
+            .find(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, '"' | '\'' | '<' | '>' | ')' | ']' | '}' | ',')
+            })
+            .map_or(raw.len(), |offset| start + offset);
+        output.push_str(&redact_url(&raw[start..end]));
+        cursor = end;
+    }
+    output
+}
+
+fn find_url_start(raw: &str) -> Option<usize> {
+    ["https://", "http://"]
+        .iter()
+        .filter_map(|prefix| raw.find(prefix))
+        .min()
+}
+
+fn redact_sensitive_values(raw: &str) -> String {
+    const SCHEMES: [&str; 3] = ["Bearer ", "RemoteAuth ", "Basic "];
+    const KEYS: [&str; 13] = [
+        "token",
+        "access_token",
+        "refresh_token",
+        "authorization",
+        "credential",
+        "credentials",
+        "sig",
+        "signature",
+        "client_secret",
+        "private_key",
+        "password",
+        "secret",
+        "body",
+    ];
+
+    let mut output = String::with_capacity(raw.len());
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        if let Some((scheme, value_start)) = SCHEMES.iter().find_map(|scheme| {
+            raw[cursor..]
+                .get(..scheme.len())
+                .filter(|value| value.eq_ignore_ascii_case(scheme))
+                .map(|_| (*scheme, cursor + scheme.len()))
+        }) {
+            output.push_str(scheme);
+            output.push_str("<redacted>");
+            cursor = skip_secret_value(raw, value_start);
+            continue;
+        }
+
+        let Some((key_end, value_start)) = KEYS.iter().find_map(|key| {
+            if !raw[cursor..]
+                .get(..key.len())
+                .is_some_and(|value| value.eq_ignore_ascii_case(key))
+                || !is_value_key_boundary(raw, cursor)
+            {
+                return None;
+            }
+            let mut separator = cursor + key.len();
+            while raw
+                .as_bytes()
+                .get(separator)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                separator += 1;
+            }
+            let separator_byte = *raw.as_bytes().get(separator)?;
+            if separator_byte != b'=' && separator_byte != b':' {
+                return None;
+            }
+            let mut value_start = separator + 1;
+            while raw
+                .as_bytes()
+                .get(value_start)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                value_start += 1;
+            }
+            Some((separator + 1, value_start))
+        }) else {
+            let character = raw[cursor..].chars().next().unwrap_or_default();
+            output.push(character);
+            cursor += character.len_utf8();
+            continue;
+        };
+
+        output.push_str(&raw[cursor..key_end]);
+        output.push_str("<redacted>");
+        cursor = skip_secret_value(raw, value_start);
+    }
+    output
+}
+
+fn is_value_key_boundary(raw: &str, start: usize) -> bool {
+    raw[..start].chars().next_back().is_none_or(|character| {
+        !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+    })
+}
+
+fn skip_secret_value(raw: &str, start: usize) -> usize {
+    let Some(first) = raw[start..].chars().next() else {
+        return start;
+    };
+    if first == '\'' || first == '"' {
+        return raw[start + first.len_utf8()..]
+            .find(first)
+            .map_or(raw.len(), |offset| {
+                start + first.len_utf8() + offset + first.len_utf8()
+            });
+    }
+    raw[start..]
+        .find(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '&' | ',' | ';' | '}' | ']' | '"' | '\'')
+        })
+        .map_or(raw.len(), |offset| start + offset)
 }
 
 /// Strip a UTF-8 BOM exactly like `trimByteOrderMark` (`sendRequest` applies
@@ -481,7 +657,8 @@ mod tests {
         assert_eq!(exception.message, "details");
         assert!(error
             .to_string()
-            .contains("FutureActionsException: details"));
+            .contains("FutureActionsException: <redacted>"));
+        assert!(!error.to_string().contains("details"));
     }
 
     #[test]
@@ -499,6 +676,23 @@ mod tests {
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(!rendered.contains("url-secret"), "{rendered}");
         assert!(!rendered.contains("body-secret"), "{rendered}");
+        let rendered = error.to_string();
+        assert!(!rendered.contains("url-secret"), "{rendered}");
+        assert!(!rendered.contains("body-secret"), "{rendered}");
+    }
+
+    #[test]
+    fn display_and_debug_redact_embedded_transport_credentials() {
+        let error = ScaleSetError::Transport(
+            "curl https://queue.example/messages?sig=url-secret Bearer token-secret body=body-secret"
+                .into(),
+        );
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains("url-secret"), "{rendered}");
+            assert!(!rendered.contains("token-secret"), "{rendered}");
+            assert!(!rendered.contains("body-secret"), "{rendered}");
+            assert!(rendered.contains("<redacted>"), "{rendered}");
+        }
     }
 
     #[test]

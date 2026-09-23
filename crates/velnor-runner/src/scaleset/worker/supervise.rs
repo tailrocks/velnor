@@ -265,11 +265,36 @@ pub(crate) fn supervise_tick_with_runtime(
             persist_restarts(next_restart)?;
             restarts.record_used(next_restart);
             let name = identity.dind_container();
+            let Some(id) = inspect_owned_container(runner, identity, &name, ROLE_DIND)? else {
+                return Ok(SupervisionOutcome::WorkerFailed {
+                    reason: "DinD container disappeared; cannot restart a discovery name".into(),
+                });
+            };
+            let image = super::dind::admitted_runner_image()?;
+            let holder = match super::dind::attest_volume_holder(runner, identity, &image) {
+                Ok(holder) => holder,
+                Err(error)
+                    if error
+                        .downcast_ref::<super::RestartObjectMissing>()
+                        .is_some() =>
+                {
+                    return Ok(SupervisionOutcome::WorkerFailed {
+                        reason: "volume holder lost; worker requires owned cleanup reconciliation"
+                            .into(),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            super::ownership::attest_isolation(
+                runner,
+                identity,
+                &id,
+                ROLE_DIND,
+                &holder.mounts,
+                None,
+            )?;
             let started = runner
-                .run(
-                    "docker",
-                    &["start".to_string(), "--".to_string(), name.clone()],
-                )
+                .run("docker", &["start".to_string(), "--".to_string(), id])
                 .with_context(|| format!("restart DinD container {name}"))?;
             if started.code != 0 {
                 anyhow::bail!(
@@ -318,6 +343,9 @@ pub struct DiagnosticExport {
     pub runner_inspect: PathBuf,
     pub dind_inspect: PathBuf,
     pub failures: Vec<String>,
+    /// Same attested handles across export and deletion. Never resolve names
+    /// again within one cleanup transaction.
+    cleanup_targets: Option<CleanupTargets>,
 }
 
 /// Immutable cleanup handles captured by one pair-level ownership preflight.
@@ -376,6 +404,7 @@ impl DiagnosticPaths {
             runner_inspect: self.runner_inspect,
             dind_inspect: self.dind_inspect,
             failures,
+            cleanup_targets: None,
         }
     }
 }
@@ -679,6 +708,7 @@ pub(crate) fn prepare_cleanup(
     let paths = DiagnosticPaths::new(state_dir);
     let mut export = export_diagnostics_with_targets(runner, paths, &targets)?;
     export.failures.extend(stop_failures);
+    export.cleanup_targets = Some(targets);
     Ok(export)
 }
 
@@ -688,7 +718,10 @@ pub(crate) fn finish_cleanup(
     identity: &WorkerIdentity,
     export: DiagnosticExport,
 ) -> CleanupReport {
-    let failures = teardown_owned_resources(runner, identity);
+    let failures = match export.cleanup_targets.as_ref() {
+        Some(targets) => teardown_targets(runner, targets),
+        None => teardown_owned_resources(runner, identity),
+    };
     CleanupReport { export, failures }
 }
 
@@ -702,6 +735,10 @@ pub(crate) fn teardown_owned_resources(
         Ok(targets) => targets,
         Err(error) => return vec![format!("cleanup preflight: {error:#}")],
     };
+    teardown_targets(runner, &targets)
+}
+
+fn teardown_targets(runner: &mut dyn WorkerRunner, targets: &CleanupTargets) -> Vec<String> {
     let mut failures = Vec::new();
     if let Some(target) = targets.runner.as_ref() {
         remove_container(runner, target, false, &mut failures);
@@ -710,7 +747,12 @@ pub(crate) fn teardown_owned_resources(
         stop_container(runner, target, &mut failures);
         remove_container(runner, target, false, &mut failures);
     }
-    if let Some(target) = targets.holder.as_ref() {
+    // rm -v skips volumes still referenced by a container. Removing the last
+    // holder after any dependent failure would orphan anonymous volumes on
+    // retry. Keep the owner until every dependent is definitely absent.
+    if failures.is_empty()
+        && let Some(target) = targets.holder.as_ref()
+    {
         remove_container(runner, target, true, &mut failures);
     }
     if let Some(target) = targets.network.as_ref() {
@@ -1038,6 +1080,7 @@ pub struct Supervision {
     state_dir: PathBuf,
     restarts: RestartBudget,
     runner_start_deadline_epoch: Option<u64>,
+    cleanup_targets: std::cell::RefCell<Option<CleanupTargets>>,
 }
 
 impl Supervision {
@@ -1048,6 +1091,7 @@ impl Supervision {
             state_dir: state_dir.to_path_buf(),
             restarts: RestartBudget::new(MAX_DIND_RESTARTS),
             runner_start_deadline_epoch: None,
+            cleanup_targets: std::cell::RefCell::new(None),
         }
     }
 
@@ -1064,6 +1108,7 @@ impl Supervision {
             state_dir: state_dir.to_path_buf(),
             restarts: RestartBudget::from_used(MAX_DIND_RESTARTS, restarts_used),
             runner_start_deadline_epoch,
+            cleanup_targets: std::cell::RefCell::new(None),
         }
     }
 
@@ -1115,11 +1160,16 @@ impl Supervision {
         &self,
         runner: &mut dyn WorkerRunner,
     ) -> Result<DiagnosticExport> {
-        prepare_cleanup(runner, &self.identity, &self.state_dir)
+        let export = prepare_cleanup(runner, &self.identity, &self.state_dir)?;
+        *self.cleanup_targets.borrow_mut() = export.cleanup_targets.clone();
+        Ok(export)
     }
 
     pub(crate) fn teardown_owned_resources(&self, runner: &mut dyn WorkerRunner) -> Vec<String> {
-        teardown_owned_resources(runner, &self.identity)
+        match self.cleanup_targets.borrow().as_ref() {
+            Some(targets) => teardown_targets(runner, targets),
+            None => teardown_owned_resources(runner, &self.identity),
+        }
     }
 
     pub(crate) fn state_dir_exists(&self) -> Result<bool> {

@@ -22,14 +22,14 @@ use velnor_model::{
     SCALESET_API_VERSION, SCALESET_ENDPOINT,
 };
 
-use crate::protocol::redacted_authenticated_url;
+use crate::protocol::{redacted_authenticated_url, redacted_reqwest_error};
 use crate::scaleset::backoff::RetryPolicy;
 use crate::scaleset::config::GitHubConfig;
 use crate::scaleset::credentials::{
     ActionsAuth, GitHubAppAuth, InstallationAccessToken, PemJwtProvider,
 };
 use crate::scaleset::errors::{
-    request_response_error, trim_byte_order_mark, ScaleSetError, ScaleSetFault,
+    redact_text, request_response_error, trim_byte_order_mark, ScaleSetError, ScaleSetFault,
 };
 
 /// Classic agent endpoint (`runnerEndpoint`).
@@ -159,8 +159,12 @@ impl ScaleSetClient {
         system_info: SystemInfo,
         retry: RetryPolicy,
     ) -> Result<Self> {
-        let config = GitHubConfig::parse(github_config_url)
-            .with_context(|| format!("failed to parse githubConfigURL: {github_config_url}"))?;
+        let config = GitHubConfig::parse(github_config_url).with_context(|| {
+            format!(
+                "failed to parse githubConfigURL: {}",
+                redacted_authenticated_url(github_config_url)
+            )
+        })?;
         auth.validate().context("invalid credentials")?;
         let http = Client::builder()
             .timeout(retry.timeout)
@@ -736,7 +740,10 @@ impl ScaleSetClient {
 
     fn github_api_url(&self, path: &str) -> Result<Url, ScaleSetError> {
         self.inner.config.github_api_url(path).map_err(|error| {
-            ScaleSetError::Local(format!("failed to create new GitHub API request: {error}"))
+            ScaleSetError::Local(format!(
+                "failed to create new GitHub API request: {}",
+                redact_text(&error.to_string())
+            ))
         })
     }
 
@@ -814,7 +821,8 @@ impl ScaleSetClient {
                 .build()
                 .map_err(|error| {
                     ScaleSetError::Local(format!(
-                        "failed to create new request with context: {error}"
+                        "failed to create new request with context: {}",
+                        redacted_reqwest_error(&error)
                     ))
                 })?;
             let method_name = request.method().to_string();
@@ -856,7 +864,8 @@ impl ScaleSetClient {
                         let headers = response.headers().clone();
                         let body = response.bytes().await.map_err(|error| {
                             ScaleSetError::Transport(format!(
-                                "failed to read the response body: {error}"
+                                "failed to read the response body: {}",
+                                redacted_reqwest_error(&error)
                             ))
                         })?;
                         if RetryPolicy::retryable_status(status, admin_handshake)
@@ -888,7 +897,8 @@ impl ScaleSetClient {
                     }
                     Err(error) => {
                         return Err(ScaleSetError::Transport(format!(
-                            "failed to send request: {error}"
+                            "failed to send request: {}",
+                            redacted_reqwest_error(&error)
                         )));
                     }
                 }
@@ -921,18 +931,31 @@ fn run_curl_raw_request(
     let body_in_path = temp_dir.join(format!("velnor-req-body-{id}.tmp"));
 
     let write_res = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&header_in_path)?;
+        let mut file = create_private_temp_file(&header_in_path)?;
         for (name, val) in request.headers() {
             if let Ok(v) = val.to_str() {
                 writeln!(file, "{}: {}", name.as_str(), v)?;
             }
         }
         file.flush()?;
+        drop(file);
+
+        // Curl writes response headers itself. Pre-create the destination so
+        // its mode is private even when the process umask is permissive.
+        drop(create_private_temp_file(&header_out_path)?);
+
+        if let Some(bytes) = request.body().and_then(|body| body.as_bytes()) {
+            let mut body_file = create_private_temp_file(&body_in_path)?;
+            body_file.write_all(bytes)?;
+            body_file.flush()?;
+        }
         Ok(())
     })();
 
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&header_in_path);
+        let _ = std::fs::remove_file(&header_out_path);
+        let _ = std::fs::remove_file(&body_in_path);
         return Err(ScaleSetError::Local(format!(
             "failed to write curl header file: {e}"
         )));
@@ -960,14 +983,7 @@ fn run_curl_raw_request(
         .arg("0");
 
     let body_bytes = request.body().and_then(|b| b.as_bytes());
-    let has_body = if let Some(bytes) = body_bytes {
-        if let Err(e) = std::fs::write(&body_in_path, bytes) {
-            let _ = std::fs::remove_file(&header_in_path);
-            let _ = std::fs::remove_file(&body_in_path);
-            return Err(ScaleSetError::Local(format!(
-                "failed to write curl body file: {e}"
-            )));
-        }
+    let has_body = if body_bytes.is_some() {
         cmd.arg("--data-binary")
             .arg(format!("@{}", body_in_path.display()));
         true
@@ -1010,9 +1026,9 @@ fn run_curl_raw_request(
     let _ = std::fs::remove_file(&header_out_path);
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(ScaleSetError::Transport(format!(
-            "curl request {method_str} {url_str} exited with {}: {stderr}",
+            "curl request {method_str} {} exited with {}",
+            redacted_authenticated_url(url_str),
             output.status
         )));
     }
@@ -1026,6 +1042,22 @@ fn run_curl_raw_request(
         headers,
         body: trim_byte_order_mark(&output.stdout).to_vec(),
     })
+}
+
+/// Create a temporary transport file without granting group/world access.
+/// `create_new` prevents a shared temporary directory from turning a random
+/// path collision into a symlink/file substitution, while the explicit mode
+/// makes the result independent of the caller's umask.
+#[cfg(unix)]
+fn create_private_temp_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
 }
 
 fn parse_curl_headers(bytes: &[u8]) -> Result<(StatusCode, HeaderMap), ScaleSetError> {
@@ -1466,6 +1498,23 @@ mod tests {
         let rendered = format!("{client:?}");
         assert!(!rendered.contains("config-url-secret"), "{rendered}");
         assert!(!rendered.contains("pat-secret"), "{rendered}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_transport_files_are_mode_600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "velnor-private-transport-test-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let file = create_private_temp_file(&path).unwrap();
+        drop(file);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

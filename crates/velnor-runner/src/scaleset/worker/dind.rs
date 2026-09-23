@@ -38,6 +38,22 @@ use super::{WorkerOutput, WorkerRunner};
 pub const STATE_MOUNT: &str = "/velnor/scaleset";
 /// Guest-absolute private daemon socket (shared bind, same path both sides).
 pub const DIND_SOCKET: &str = "/velnor/scaleset/dind.sock";
+/// Numeric contract, independent of either image's group database. The
+/// official runner image defines docker as GID 123 (actions/runner v2.337.0,
+/// images/Dockerfile); supplementary membership is also explicit at create.
+pub const DIND_SOCKET_GID: &str = "123";
+pub const DIND_ENTRYPOINT: &str = "dockerd-entrypoint.sh";
+
+/// Supplying `dockerd` explicitly bypasses the entrypoint's flag-only branch
+/// which would add TCP 2375/2376 and a second Unix socket. Retain the upstream
+/// init/iptables setup; do not bypass it by replacing the entrypoint with dockerd.
+pub fn daemon_command() -> Vec<String> {
+    vec![
+        "dockerd".to_string(),
+        format!("--host=unix://{DIND_SOCKET}"),
+        format!("--group={DIND_SOCKET_GID}"),
+    ]
+}
 /// Guest-absolute BuildKit cache dir on the shared bind (identical path
 /// both sides; inner builds address `--cache-to/--cache-from
 /// type=local` here).
@@ -90,6 +106,8 @@ impl VolumeHolderSpec {
             self.identity.volume_holder_container(),
             "--network".to_string(),
             "none".to_string(),
+            "--entrypoint".to_string(),
+            String::new(),
         ];
         for target in [WORK_DIR, TOOL_CACHE_DIR, DIND_DATA_ROOT] {
             args.push("--mount".to_string());
@@ -175,29 +193,39 @@ impl DindSpec {
     /// * workspace and tool cache volumes mounted at identical paths to the runner
     ///   (`/home/runner/_work` and `/opt/hostedtoolcache`).
     #[must_use]
-    pub fn create_args(&self) -> Vec<String> {
+    pub fn create_args(&self, network_id: &str, holder_id: &str) -> Vec<String> {
         let mut args = vec![
             "create".to_string(),
             "--privileged".to_string(),
             "--name".to_string(),
             self.identity.dind_container(),
             "--network".to_string(),
-            self.identity.network(),
+            network_id.to_string(),
             "--env".to_string(),
             // No TLS material: the only listener is a filesystem socket
             // only this worker pair can reach.
             "DOCKER_TLS_CERTDIR=".to_string(),
+            "--entrypoint".to_string(),
+            DIND_ENTRYPOINT.to_string(),
             "--volumes-from".to_string(),
-            self.identity.volume_holder_container(),
+            holder_id.to_string(),
             "--volume".to_string(),
             format!("{}:{STATE_MOUNT}", self.state_dir.display()),
         ];
         args.extend(self.identity.label_args(ROLE_DIND));
+        args.extend([
+            "--label".to_string(),
+            format!(
+                "{}={}",
+                super::ownership::STATE_SOURCE_LABEL,
+                self.state_dir.display()
+            ),
+        ]);
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
         // dockerd with ONE listener: the private Unix socket. No
         // `tcp://` listener exists, so nothing can be published.
-        args.push(format!("-H unix://{DIND_SOCKET}"));
+        args.extend(daemon_command());
         args
     }
 
@@ -205,10 +233,10 @@ impl DindSpec {
     /// from INSIDE the daemon container (proves dockerd serves the
     /// socket; the dind image ships the CLI).
     #[must_use]
-    pub fn probe_args(&self) -> Vec<String> {
+    pub fn probe_args(&self, container_id: &str) -> Vec<String> {
         vec![
             "exec".to_string(),
-            self.identity.dind_container(),
+            container_id.to_string(),
             "docker".to_string(),
             "-H".to_string(),
             format!("unix://{DIND_SOCKET}"),
@@ -243,6 +271,7 @@ pub enum VolumeHolderProvision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VolumeHolderAttestation {
     pub id: String,
+    pub mounts: Vec<super::ownership::Mount>,
 }
 
 /// Parse `docker inspect --format {{.Id}}` output for adoption.
@@ -359,10 +388,11 @@ pub(crate) fn verify_volume_holder_reference(
     kind: &str,
     name: &str,
     volumes_from: Option<&[String]>,
-    identity: &WorkerIdentity,
+    holder_id: &str,
 ) -> Result<()> {
-    let expected = [identity.volume_holder_container()];
-    if volumes_from != Some(expected.as_slice()) {
+    let expected = [holder_id.to_string()];
+    let explicit_rw = [format!("{holder_id}:rw")];
+    if volumes_from != Some(expected.as_slice()) && volumes_from != Some(explicit_rw.as_slice()) {
         anyhow::bail!(
             "{kind} {name} has HostConfig.VolumesFrom {volumes_from:?}, expected exactly {:?}; refusing legacy named/direct volume wiring",
             expected
@@ -464,6 +494,20 @@ pub(crate) fn attest_volume_holder(
     identity: &WorkerIdentity,
     expected_image: &PinnedImage,
 ) -> Result<VolumeHolderAttestation> {
+    attest_volume_holder_at(
+        runner,
+        identity,
+        expected_image,
+        &identity.volume_holder_container(),
+    )
+}
+
+fn attest_volume_holder_at(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    expected_image: &PinnedImage,
+    target: &str,
+) -> Result<VolumeHolderAttestation> {
     let name = identity.volume_holder_container();
     let inspect = runner
         .run(
@@ -473,7 +517,7 @@ pub(crate) fn attest_volume_holder(
                 "--format".to_string(),
                 VOLUME_HOLDER_ATTEST_FORMAT.to_string(),
                 "--".to_string(),
-                name.clone(),
+                target.to_string(),
             ],
         )
         .with_context(|| format!("attest volume holder {name}"))?;
@@ -495,6 +539,9 @@ pub(crate) fn attest_volume_holder(
 
     if id.is_empty() {
         anyhow::bail!("volume holder {name} returned an empty id");
+    }
+    if target != name && id != target {
+        anyhow::bail!("volume holder changed immutable identity during attestation");
     }
     if image != expected_image.reference() {
         anyhow::bail!(
@@ -522,7 +569,51 @@ pub(crate) fn attest_volume_holder(
         anyhow::bail!("volume holder {name} has unsafe lifecycle status {status:?}");
     }
     verify_volume_holder_mounts(&name, &mounts)?;
-    Ok(VolumeHolderAttestation { id })
+    let mounts: Vec<super::ownership::Mount> =
+        serde_json::from_value(serde_json::Value::Array(mounts)).map_err(|error| {
+            eprintln!("temporary holder mount parse diagnostic: {error:#}");
+            error
+        })?;
+    eprintln!("temporary holder mounts parsed: {mounts:?}");
+    for mount in &mounts {
+        let inspected = runner.run("docker", &[
+            "volume".into(), "inspect".into(), "--format".into(),
+            r#"{{json .Name}}{{"\t"}}{{json .Driver}}{{"\t"}}{{json .Labels}}{{"\t"}}{{json .Options}}{{"\t"}}{{json .Mountpoint}}"#.into(),
+            "--".into(), mount.name.clone(),
+        ])?;
+        if inspected.code != 0 {
+            anyhow::bail!("holder volume inspection failed (exit {})", inspected.code);
+        }
+        let fields: Vec<_> = inspected.stdout.trim().split('\t').collect();
+        if fields.len() != 5 {
+            anyhow::bail!("malformed holder volume projection");
+        }
+        let volume_name: String = serde_json::from_str(fields[0])?;
+        let driver: String = serde_json::from_str(fields[1])?;
+        let labels: BTreeMap<String, String> = serde_json::from_str(fields[2])?;
+        let options: Option<BTreeMap<String, String>> = serde_json::from_str(fields[3])?;
+        let source: String = serde_json::from_str(fields[4])?;
+        eprintln!(
+            "temporary inspected volume: name={volume_name:?} mount={:?} driver={driver:?} source={source:?} expected_source={:?} labels={labels:?}",
+            mount.name, mount.source
+        );
+        if volume_name != mount.name
+            || driver != "local"
+            || source != mount.source
+            || !options.unwrap_or_default().is_empty()
+        {
+            anyhow::bail!("holder volume identity/driver/options mismatch");
+        }
+        verify_attested_labels(
+            "holder volume",
+            &mount.name,
+            &labels,
+            identity,
+            Some(ROLE_VOLUME_HOLDER),
+        )?;
+    }
+    super::ownership::attest_isolation(runner, identity, &id, ROLE_VOLUME_HOLDER, &mounts, None)?;
+    Ok(VolumeHolderAttestation { id, mounts })
 }
 
 /// Ensure the deterministic holder exists in the exact `created` state.
@@ -532,7 +623,7 @@ pub(crate) fn ensure_volume_holder(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
     image: &PinnedImage,
-) -> Result<VolumeHolderProvision> {
+) -> Result<(VolumeHolderProvision, VolumeHolderAttestation)> {
     let spec = VolumeHolderSpec::new(identity.clone(), image.clone());
     let name = identity.volume_holder_container();
     let inspect = runner
@@ -562,13 +653,13 @@ pub(crate) fn ensure_volume_holder(
         if parse_container_id(&created.stdout).is_none() {
             anyhow::bail!("create volume holder {name} returned an empty id");
         }
-        attest_volume_holder(runner, identity, image)
+        let holder = attest_volume_holder_at(runner, identity, image, created.stdout.trim())
             .with_context(|| format!("attest created volume holder {name}"))?;
-        return Ok(VolumeHolderProvision::Created);
+        return Ok((VolumeHolderProvision::Created, holder));
     }
-    attest_volume_holder(runner, identity, image)
+    let holder = attest_volume_holder_at(runner, identity, image, inspect.stdout.trim())
         .with_context(|| format!("attest existing volume holder {name}"))?;
-    Ok(VolumeHolderProvision::Adopted)
+    Ok((VolumeHolderProvision::Adopted, holder))
 }
 
 /// Read-only restart attestation for the worker's private bridge network.
@@ -667,6 +758,24 @@ fn attest_dind_with_allowed_states(
     expected_network_id: &str,
     allowed_states: &[ContainerState],
 ) -> Result<ContainerState> {
+    attest_dind_at(
+        runner,
+        identity,
+        expected_image,
+        expected_network_id,
+        allowed_states,
+        &identity.dind_container(),
+    )
+}
+
+fn attest_dind_at(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    expected_image: &PinnedImage,
+    expected_network_id: &str,
+    allowed_states: &[ContainerState],
+    target: &str,
+) -> Result<ContainerState> {
     if expected_network_id.is_empty() {
         anyhow::bail!("worker network id is empty");
     }
@@ -680,7 +789,7 @@ fn attest_dind_with_allowed_states(
                 "--format".to_string(),
                 DIND_ATTEST_FORMAT.to_string(),
                 "--".to_string(),
-                name.clone(),
+                target.to_string(),
             ],
         )
         .with_context(|| format!("attest DinD container {name}"))?;
@@ -705,11 +814,12 @@ fn attest_dind_with_allowed_states(
         );
     }
     verify_attested_labels("DinD container", &name, &labels, identity, Some(ROLE_DIND))?;
-    verify_volume_holder_reference("DinD container", &name, volumes_from.as_deref(), identity)?;
-    if network_mode != identity.network() {
+    let holder_id = super::ownership::container_id(runner, &identity.volume_holder_container())?;
+    verify_volume_holder_reference("DinD container", &name, volumes_from.as_deref(), &holder_id)?;
+    if network_mode != expected_network_id {
         anyhow::bail!(
             "DinD container {name} network mode mismatch: expected {:?}, found {network_mode:?}",
-            identity.network()
+            expected_network_id
         );
     }
     let attachment = networks
@@ -742,7 +852,12 @@ fn attest_dind_with_allowed_states(
 ///   start or adoption; foreign/unsafe objects fail closed.
 /// * Never pulls here: images are pulled + verified by the tool-content
 ///   hook ([`super::runner`]) before provisioning starts.
-pub(crate) fn ensure_dind(runner: &mut dyn WorkerRunner, spec: &DindSpec) -> Result<DindProvision> {
+pub(crate) fn ensure_dind(
+    runner: &mut dyn WorkerRunner,
+    spec: &DindSpec,
+    network_id: &str,
+    holder: &VolumeHolderAttestation,
+) -> Result<(DindProvision, String)> {
     std::fs::create_dir_all(spec.state_dir()).with_context(|| {
         format!(
             "create scale-set worker state dir {}",
@@ -771,7 +886,7 @@ pub(crate) fn ensure_dind(runner: &mut dyn WorkerRunner, spec: &DindSpec) -> Res
         .with_context(|| format!("inspect DinD container {name}"))?;
     if adoption_inspect_is_missing("DinD container", &name, &inspect)? {
         let created = runner
-            .run("docker", &spec.create_args())
+            .run("docker", &spec.create_args(network_id, &holder.id))
             .with_context(|| format!("create DinD container {name}"))?;
         if created.code != 0 {
             anyhow::bail!(
@@ -780,10 +895,19 @@ pub(crate) fn ensure_dind(runner: &mut dyn WorkerRunner, spec: &DindSpec) -> Res
                 created.stderr.trim()
             );
         }
+        let id = parse_container_id(&created.stdout).context("DinD create returned no id")?;
+        super::ownership::attest_isolation(
+            runner,
+            spec.identity(),
+            &id,
+            ROLE_DIND,
+            &holder.mounts,
+            Some(spec.state_dir()),
+        )?;
         let started = runner
             .run(
                 "docker",
-                &["start".to_string(), "--".to_string(), name.clone()],
+                &["start".to_string(), "--".to_string(), id.clone()],
             )
             .with_context(|| format!("start DinD container {name}"))?;
         if started.code != 0 {
@@ -793,25 +917,44 @@ pub(crate) fn ensure_dind(runner: &mut dyn WorkerRunner, spec: &DindSpec) -> Res
                 started.stderr.trim()
             );
         }
-        return Ok(DindProvision::Created);
+        return Ok((DindProvision::Created, id));
     }
 
     // The name lookup is only a fast existence check. Before any start or
     // adoption, prove the network and container projections against the
     // recorded identity and exact pinned image. This closes same-name
     // replacement and transitional-state races.
-    let network_id = attest_restart_network(runner, spec.identity())
-        .with_context(|| format!("attest worker network for DinD container {name}"))?;
-    let state = attest_provision_dind(runner, spec.identity(), spec.image(), &network_id)
-        .with_context(|| format!("attest DinD container {name} before adoption"))?;
+    let id = inspect.stdout.trim();
+    let state = attest_dind_at(
+        runner,
+        spec.identity(),
+        spec.image(),
+        network_id,
+        &[
+            ContainerState::Created,
+            ContainerState::Running,
+            ContainerState::Exited,
+            ContainerState::Dead,
+        ],
+        id,
+    )
+    .with_context(|| format!("attest DinD container {name} before adoption"))?;
+    super::ownership::attest_isolation(
+        runner,
+        spec.identity(),
+        id,
+        ROLE_DIND,
+        &holder.mounts,
+        Some(spec.state_dir()),
+    )?;
     if state == ContainerState::Running {
-        return Ok(DindProvision::Adopted);
+        return Ok((DindProvision::Adopted, id.to_string()));
     }
 
     let started = runner
         .run(
             "docker",
-            &["start".to_string(), "--".to_string(), name.clone()],
+            &["start".to_string(), "--".to_string(), id.to_string()],
         )
         .with_context(|| format!("start DinD container {name}"))?;
     if started.code != 0 {
@@ -821,7 +964,7 @@ pub(crate) fn ensure_dind(runner: &mut dyn WorkerRunner, spec: &DindSpec) -> Res
             started.stderr.trim()
         );
     }
-    Ok(DindProvision::Adopted)
+    Ok((DindProvision::Adopted, id.to_string()))
 }
 
 /// Adoption gate shared by both containers of a pair: the existing
@@ -875,9 +1018,9 @@ pub(crate) fn verify_container_ownership(
 /// A failing probe is NOT an error — the caller retries with its own
 /// backoff, then fails the worker when the deadline passes. Only a
 /// transport failure (the `docker exec` itself could not run) errors.
-pub(crate) fn dind_ready(runner: &mut dyn WorkerRunner, spec: &DindSpec) -> Result<bool> {
+pub(crate) fn dind_ready(runner: &mut dyn WorkerRunner, spec: &DindSpec, id: &str) -> Result<bool> {
     let probe = runner
-        .run("docker", &spec.probe_args())
+        .run("docker", &spec.probe_args(id))
         .context("probe DinD readiness")?;
     if probe.code != 0 {
         return Ok(false);
@@ -927,7 +1070,7 @@ pub fn network_create_args(identity: &WorkerIdentity) -> Vec<String> {
 pub(crate) fn ensure_network(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
-) -> Result<NetworkProvision> {
+) -> Result<(NetworkProvision, String)> {
     let name = identity.network();
     let inspect = runner
         .run(
@@ -953,15 +1096,18 @@ pub(crate) fn ensure_network(
                 created.stderr.trim()
             );
         }
-        return Ok(NetworkProvision::Created);
+        let id = parse_container_id(&created.stdout).context("network create returned no id")?;
+        return Ok((NetworkProvision::Created, id));
     }
-    verify_network_ownership(runner, identity)?;
-    Ok(NetworkProvision::Adopted)
+    let id = inspect.stdout.trim();
+    verify_network_ownership(runner, identity, id)?;
+    Ok((NetworkProvision::Adopted, id.to_string()))
 }
 
 fn verify_network_ownership(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
+    id: &str,
 ) -> Result<()> {
     let name = identity.network();
     let labels = runner
@@ -973,7 +1119,7 @@ fn verify_network_ownership(
                 "--format".to_string(),
                 r#"{{range $k, $v := .Labels}}{{$k}}={{$v}}{{"\n"}}{{end}}"#.to_string(),
                 "--".to_string(),
-                name.clone(),
+                id.to_string(),
             ],
         )
         .with_context(|| format!("inspect worker network labels {name}"))?;
@@ -1037,6 +1183,7 @@ mod tests {
     struct ScriptRunner {
         results: VecDeque<WorkerOutput>,
         seen: Vec<Vec<String>>,
+        state_dir: String,
     }
 
     impl ScriptRunner {
@@ -1044,6 +1191,7 @@ mod tests {
             Self {
                 results: results.into(),
                 seen: Vec::new(),
+                state_dir: "/tmp/velnor-test-dind-state".into(),
             }
         }
 
@@ -1068,10 +1216,54 @@ mod tests {
         fn run(&mut self, program: &str, args: &[String]) -> Result<WorkerOutput> {
             assert_eq!(program, "docker");
             self.seen.push(args.to_vec());
+            let identity = spec().identity().clone();
+            if args
+                .iter()
+                .any(|arg| arg == super::super::ownership::ISOLATION_FORMAT)
+            {
+                let id = args.last().unwrap();
+                let role = if id == "holder-object-id" {
+                    ROLE_VOLUME_HOLDER
+                } else {
+                    ROLE_DIND
+                };
+                return Ok(Self::ok(&super::super::ownership::fixtures::isolation(
+                    &identity,
+                    id,
+                    role,
+                    &self.state_dir,
+                )));
+            }
+            if args.starts_with(&["volume".into(), "inspect".into()]) {
+                return Ok(Self::ok(&super::super::ownership::fixtures::volume(
+                    &identity,
+                    args.last().unwrap(),
+                )));
+            }
+            if args.iter().any(|arg| arg == "{{.Id}}")
+                && args.last() == Some(&identity.volume_holder_container())
+                && self
+                    .results
+                    .front()
+                    .is_none_or(|r| !r.stdout.is_empty() && !r.stdout.contains("holder"))
+            {
+                return Ok(Self::ok("holder-object-id"));
+            }
             self.results
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("script exhausted at docker {}", args.join(" ")))
         }
+    }
+
+    fn ensure_dind(runner: &mut ScriptRunner, spec: &DindSpec) -> Result<DindProvision> {
+        runner.state_dir = spec.state_dir().display().to_string();
+        super::ensure_dind(
+            runner,
+            spec,
+            "network-id",
+            &super::super::ownership::fixtures::holder(),
+        )
+        .map(|outcome| outcome.0)
     }
 
     fn network_projection(spec: &DindSpec, network_id: &str) -> String {
@@ -1140,9 +1332,9 @@ mod tests {
             ROLE_VOLUME_HOLDER.to_string(),
         );
         let mounts = serde_json::json!([
-            {"Type":"volume","Name":"anonymous-work","Destination":WORK_DIR,"Driver":"local","RW":true},
-            {"Type":"volume","Name":"anonymous-tools","Destination":TOOL_CACHE_DIR,"Driver":"local","RW":true},
-            {"Type":"volume","Name":"anonymous-docker","Destination":DIND_DATA_ROOT,"Driver":"local","RW":true}
+            {"Type":"volume","Name":"anonymous-work","Source":"/var/lib/docker/volumes/anonymous-work/_data","Destination":WORK_DIR,"Driver":"local","RW":true},
+            {"Type":"volume","Name":"anonymous-tools","Source":"/var/lib/docker/volumes/anonymous-tools/_data","Destination":TOOL_CACHE_DIR,"Driver":"local","RW":true},
+            {"Type":"volume","Name":"anonymous-docker","Source":"/var/lib/docker/volumes/anonymous-docker/_data","Destination":DIND_DATA_ROOT,"Driver":"local","RW":true}
         ]);
         [
             serde_json::to_string("holder-object-id").unwrap(),
@@ -1158,7 +1350,7 @@ mod tests {
 
     #[test]
     fn create_argv_has_no_tcp_surface() {
-        let args = spec().create_args();
+        let args = spec().create_args("network-id", "holder-object-id");
         for forbidden in ["-p", "--publish", "--expose", "-P", "--publish-all"] {
             assert!(
                 !args.iter().any(|arg| arg == forbidden),
@@ -1178,7 +1370,7 @@ mod tests {
     #[test]
     fn create_argv_binds_no_host_socket() {
         let spec = spec();
-        let args = spec.create_args();
+        let args = spec.create_args("network-id", "holder-object-id");
         assert!(
             !args.iter().any(|arg| arg.contains("/var/run/docker.sock")),
             "{args:?}"
@@ -1206,7 +1398,9 @@ mod tests {
     #[test]
     fn dind_argv_mounts_workspace_and_tool_cache_coherently() {
         let spec = spec();
-        let args = spec.create_args().join("\n");
+        let args = spec
+            .create_args("network-id", "holder-object-id")
+            .join("\n");
         assert!(args.contains("--volumes-from"));
         assert!(args.contains(&spec.identity().volume_holder_container()));
         assert!(!args.contains(&format!("{WORK_DIR}")));
@@ -1267,7 +1461,9 @@ mod tests {
             ScriptRunner::ok(&valid_holder_projection(&spec, "created")),
         ]);
         assert_eq!(
-            ensure_volume_holder(&mut runner, spec.identity(), &runner_image).unwrap(),
+            ensure_volume_holder(&mut runner, spec.identity(), &runner_image)
+                .unwrap()
+                .0,
             VolumeHolderProvision::Created
         );
         assert_eq!(runner.seen.len(), 5);
@@ -1332,7 +1528,7 @@ mod tests {
 
     #[test]
     fn probe_targets_the_private_socket() {
-        let args = spec().probe_args();
+        let args = spec().probe_args("dind-object-id");
         assert_eq!(args[0], "exec");
         assert!(args.contains(&format!("unix://{DIND_SOCKET}")));
         assert!(!args.iter().any(|arg| arg.contains("tcp://")));
@@ -1620,7 +1816,7 @@ mod tests {
             ScriptRunner::ok("netid\n"),
         ]);
         assert_eq!(
-            ensure_network(&mut runner, &identity).unwrap(),
+            ensure_network(&mut runner, &identity).unwrap().0,
             NetworkProvision::Created
         );
         let mut runner = ScriptRunner::scripted(vec![
@@ -1628,7 +1824,7 @@ mod tests {
             ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
         ]);
         assert_eq!(
-            ensure_network(&mut runner, &identity).unwrap(),
+            ensure_network(&mut runner, &identity).unwrap().0,
             NetworkProvision::Adopted
         );
     }
@@ -1678,8 +1874,8 @@ mod tests {
     fn readiness_probe_failure_is_not_ready_not_error() {
         let spec = spec();
         let mut runner = ScriptRunner::scripted(vec![ScriptRunner::fail(1, "Cannot connect")]);
-        assert!(!dind_ready(&mut runner, &spec).unwrap());
+        assert!(!dind_ready(&mut runner, &spec, "dind-object-id").unwrap());
         let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("28.5.2\n")]);
-        assert!(dind_ready(&mut runner, &spec).unwrap());
+        assert!(dind_ready(&mut runner, &spec, "dind-object-id").unwrap());
     }
 }

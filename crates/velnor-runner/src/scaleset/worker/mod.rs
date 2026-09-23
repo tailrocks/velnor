@@ -31,6 +31,25 @@
 //! extension lands; the sink keeps the machine independent of the store).
 //! Supervision ([`supervise`]) reconciles observed Docker state against
 //! the recorded state at every boundary before advancing.
+//!
+//! Lifecycle repair invariants (2026-09-23):
+//! * A worker daemon exposes one private Unix listener. Reproduction: passing
+//!   only flags to docker-library's dockerd-entrypoint adds TCP 2375 when TLS
+//!   is disabled. The enabling condition was trusting image ENTRYPOINT defaults
+//!   instead of attesting the complete executable/argument contract.
+//! * The non-root runner must reach that socket. Its docker GID is independent
+//!   of the DinD image's group database; matching group *names* proves nothing.
+//! * Labels and VolumesFrom alone do not prove mount isolation: extra binds can
+//!   override inherited volumes. Attest actual mounts and volume ownership.
+//! * Docker names are discovery keys, never mutation authority. Replacing a
+//!   name between inspect/create and start/remove reproduced a TOCTOU class;
+//!   retain immutable create/inspect IDs through each operation instead.
+//! * Holder loss must never create a replacement volume set under surviving
+//!   workers. Cleanup must preserve the final volume reference until dependent
+//!   removal succeeds; otherwise Docker's rm -v can leave orphan volumes.
+//! * Image identity belongs to the recorded intent, not current configuration.
+//!   The caller in lane.rs currently rebuilds retry/restart profiles from
+//!   config; correcting that durable-intent boundary requires its own owner.
 
 pub mod dind;
 pub mod ownership;
@@ -97,13 +116,13 @@ pub(crate) fn attest_restart_worker_pair(
     identity: &WorkerIdentity,
     profile: &HomogeneousProfile,
 ) -> anyhow::Result<RestartWorkerPairAttestation> {
-    match dind::attest_volume_holder(runner, identity, profile.runner()) {
-        Ok(_) => {}
+    let holder = match dind::attest_volume_holder(runner, identity, profile.runner()) {
+        Ok(holder) => holder,
         Err(error) if error.downcast_ref::<RestartObjectMissing>().is_some() => {
             return Ok(RestartWorkerPairAttestation::Absent)
         }
         Err(error) => return Err(error),
-    }
+    };
     let network_id = match dind::attest_restart_network(runner, identity) {
         Ok(network_id) => network_id,
         Err(error) if error.downcast_ref::<RestartObjectMissing>().is_some() => {
@@ -118,8 +137,26 @@ pub(crate) fn attest_restart_worker_pair(
         }
         Err(error) => return Err(error),
     }
+    ownership::attest_isolation(
+        runner,
+        identity,
+        &identity.dind_container(),
+        ownership::ROLE_DIND,
+        &holder.mounts,
+        None,
+    )?;
     match runner::attest_restart_runner(runner, identity, profile.runner()) {
-        Ok(_) => Ok(RestartWorkerPairAttestation::Complete),
+        Ok(_) => {
+            ownership::attest_isolation(
+                runner,
+                identity,
+                &identity.runner_container(),
+                ownership::ROLE_RUNNER,
+                &holder.mounts,
+                None,
+            )?;
+            Ok(RestartWorkerPairAttestation::Complete)
+        }
         Err(error) if error.downcast_ref::<RestartObjectMissing>().is_some() => {
             Ok(RestartWorkerPairAttestation::Absent)
         }
@@ -430,18 +467,19 @@ pub fn provision_worker(
         runner::admit_tool_content(hook, runner, plan.profile.runner(), &runner_expectation)
             .context("admit runner tool content")?;
 
-    let network = dind::ensure_network(runner, &plan.identity)?;
-    let volume_holder = dind::ensure_volume_holder(runner, &plan.identity, plan.profile.runner())
-        .context("ensure anonymous-volume holder")?;
+    let (network, network_id) = dind::ensure_network(runner, &plan.identity)?;
+    let (volume_holder, holder) =
+        dind::ensure_volume_holder(runner, &plan.identity, plan.profile.runner())
+            .context("ensure anonymous-volume holder")?;
     let dind_spec = DindSpec::new(
         plan.identity.clone(),
         plan.profile.dind().clone(),
         &plan.state_dir,
     );
-    let dind = dind::ensure_dind(runner, &dind_spec)?;
+    let (dind, dind_id) = dind::ensure_dind(runner, &dind_spec, &network_id, &holder)?;
     let mut ready = false;
     for attempt in 0..plan.ready_attempts {
-        if dind::dind_ready(runner, &dind_spec)? {
+        if dind::dind_ready(runner, &dind_spec, &dind_id)? {
             ready = true;
             break;
         }
@@ -462,8 +500,28 @@ pub fn provision_worker(
         &plan.state_dir,
         &plan.jit_config,
     );
-    let provisioned = runner::ensure_runner(runner, &runner_spec, before_runner_start)?;
-    let connection = runner::runner_connection(runner, &plan.identity)?;
+    let (provisioned, runner_id) =
+        runner::ensure_runner(runner, &runner_spec, before_runner_start, &dind_id, &holder)?;
+    // A root probe inside DinD cannot prove the non-root official runner can
+    // access its socket. Use the image user and its configured supplementary
+    // group, in the runner's own mount namespace, before reporting readiness.
+    let socket_probe = runner.run(
+        "docker",
+        &[
+            "exec".into(),
+            runner_id.clone(),
+            "docker".into(),
+            "--host".into(),
+            format!("unix://{DIND_SOCKET}"),
+            "version".into(),
+            "--format".into(),
+            "{{.Server.Version}}".into(),
+        ],
+    )?;
+    if socket_probe.code != 0 || !dind::parse_probe_output(&socket_probe.stdout) {
+        anyhow::bail!("official runner cannot access its private DinD socket");
+    }
+    let connection = runner::runner_connection_at(runner, &runner_id)?;
     Ok(ProvisionOutcome {
         volume_holder,
         network,

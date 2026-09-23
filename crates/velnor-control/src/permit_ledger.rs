@@ -18,14 +18,19 @@
 //! * The ledger is a host-wide SQLite database. Every daemon on the host
 //!   must resolve to the same file; multi-process contention is bounded by
 //!   a busy timeout, and every mutation runs in an immediate transaction.
-//! * Grants and lifecycle mutations are generation-fenced:
+//! * Grants and lifecycle mutations are generation- and attempt-fenced:
 //!   [`PermitLedger::begin_epoch`] bumps the generation at daemon startup,
 //!   and acquire/transition/release calls carrying a stale generation are
-//!   rejected. The legacy release methods remain for non-worker cleanup;
-//!   worker lifecycle paths use the explicit `*_fenced` methods.
+//!   rejected. A permit also records the owning control-process PID; release
+//!   and uncertainty transitions require that PID, so a stale process cannot
+//!   mutate a row adopted by a newer attempt. Observed rows without an owner
+//!   PID remain retained until an explicit dead-attempt adoption establishes
+//!   a new owner.
 //! * Capacity is advertised only after reconciliation:
 //!   [`PermitLedger::advertised_free`] returns `None` until
 //!   [`PermitLedger::reconcile`] has run in the current epoch.
+//!   Admission has the same barrier: an unreconciled epoch cannot spend a
+//!   permit.
 //!   Reconciliation never deletes: observed-but-unrecorded work is adopted
 //!   as counted occupancy, and recorded-but-unobserved work is marked
 //!   [`PermitState::Uncertain`] (still counted). A cleanup failure retains
@@ -43,11 +48,6 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 /// SQLite busy timeout for multi-process ledger contention.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// An unrefreshed offer this old is no longer eligible to block another
-/// lane. Active queues refresh on redelivery; the original age remains in
-/// the row so a later redelivery keeps its place.
-pub const DEMAND_STALE_AFTER_SECS: u64 = 300;
 
 /// How long one guard acquisition keeps yielding to older eligible demand
 /// before departing for redelivery.
@@ -203,9 +203,9 @@ pub struct PermitHolder {
     pub acquired_unix: u64,
     pub updated_unix: u64,
     pub generation: u64,
-    /// Host pid of the acquiring process, when the lane records one.
-    /// Same-holder redelivery may adopt a dead attempt; startup never uses
-    /// local pid or root evidence alone to erase another daemon's row.
+    /// Host pid of the acquiring control process. Rows adopted from an
+    /// externally attested live set may remain without a pid until a dead
+    /// attempt is explicitly adopted.
     pub pid: Option<u32>,
 }
 
@@ -231,7 +231,8 @@ pub enum AcquireOutcome {
     /// The holder already holds a permit (duplicate delivery); no second
     /// permit was spent.
     AlreadyHeld,
-    /// `occupied >= max_jobs`; no permit was granted.
+    /// Admission is unavailable: either `occupied >= max_jobs` or the
+    /// current epoch has not reconciled yet. No permit was granted.
     Full,
     /// Capacity is available, but an older eligible demand must acquire
     /// first. The demand remains durable and keeps its original age.
@@ -264,6 +265,11 @@ pub enum LedgerError {
     UnknownState(String),
     UnknownDemandState(String),
     UnknownHolder(String),
+    /// A release/retention request did not prove ownership of the current
+    /// permit attempt. Fail closed rather than deleting by holder name.
+    UnfencedRelease {
+        holder: String,
+    },
     DemandLaneMismatch {
         holder: String,
         expected: PermitLane,
@@ -287,6 +293,10 @@ impl std::fmt::Display for LedgerError {
             Self::UnknownHolder(holder) => {
                 write!(f, "permit ledger holds no permit for {holder:?}")
             }
+            Self::UnfencedRelease { holder } => write!(
+                f,
+                "permit ledger release for {holder:?} lacks current attempt ownership"
+            ),
             Self::DemandLaneMismatch {
                 holder,
                 expected,
@@ -909,17 +919,30 @@ impl PermitLedger {
                 params![i64::try_from(now).unwrap_or(i64::MAX), holder],
             )?;
         }
+        // Reconciliation is an admission barrier, not merely an advertising
+        // hint. Persist the demand age above, but do not spend capacity until
+        // this epoch's durable rows have been compared with attested live
+        // work. Returning Full preserves the existing redelivery contract
+        // without inventing capacity while the daemon is recovering.
+        let reconciled_generation: i64 = tx.query_row(
+            "SELECT reconciled_generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if reconciled_generation < 0 || reconciled_generation as u64 != generation {
+            tx.commit()?;
+            return Ok(AcquireOutcome::Full);
+        }
+
         let occupied: i64 = tx.query_row("SELECT COUNT(*) FROM permits", [], |row| row.get(0))?;
         if occupied.max(0) as u64 >= u64::from(max) {
             tx.commit()?;
             return Ok(AcquireOutcome::Full);
         }
-        let fresh_after = now.saturating_sub(DEMAND_STALE_AFTER_SECS);
         let oldest: String = tx.query_row(
             "SELECT holder FROM permit_demands WHERE state = 'eligible'
-               AND updated_unix > ?1
              ORDER BY first_seen_unix, sequence LIMIT 1",
-            params![i64::try_from(fresh_after).unwrap_or(i64::MAX)],
+            [],
             |row| row.get(0),
         )?;
         if oldest != holder {
@@ -927,6 +950,12 @@ impl PermitLedger {
             return Ok(AcquireOutcome::Deferred);
         }
         let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+        // Every locally acquired row is owned by this control process unless
+        // the caller supplies an explicitly tracked attempt pid. `None` is
+        // not permission to create an unfenced row; it means the ledger
+        // process is the owner. Reconciled external rows remain pid-less and
+        // therefore cannot be released until an adoption establishes owner.
+        let owner_pid = pid.unwrap_or_else(std::process::id);
         tx.execute(
             "INSERT INTO permits (holder, lane, state, acquired_unix, updated_unix, generation, pid)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -937,7 +966,7 @@ impl PermitLedger {
                 now_i64,
                 now_i64,
                 i64::try_from(generation).unwrap_or(i64::MAX),
-                pid.map(i64::from),
+                i64::from(owner_pid),
             ],
         )?;
         tx.execute(
@@ -952,12 +981,13 @@ impl PermitLedger {
     /// Adopt one holder's row when its acquiring process is dead and the
     /// row belongs to `lane`, fenced on `generation`.
     ///
-    /// Crash-redelivery convergence: the attempt that acquired the permit
-    /// died, and the redelivered attempt takes over the same row (same
-    /// holder, new pid and state) instead of spending a second permit or
-    /// executing rowless. Occupancy is unchanged. A live pid, a missing
-    /// pid, a row in another lane, or a reused pid (which reads as alive)
-    /// all refuse the adoption: the error direction is retention.
+    /// Crash-redelivery convergence: a pre-execution attempt that acquired
+    /// the permit died, and the redelivered attempt takes over the same row
+    /// (same holder, new pid and state) instead of spending a second permit
+    /// or executing rowless. Occupancy is unchanged. A live pid, a missing
+    /// pid, a row in another lane, a running/cleaning/uncertain row, or a
+    /// reused pid (which reads as alive) all refuse adoption: the error
+    /// direction is retention until owned cleanup is proven.
     pub fn adopt_if_pid_dead(
         &mut self,
         holder: &str,
@@ -978,17 +1008,20 @@ impl PermitLedger {
         if current.max(0) as u64 != generation {
             return Ok(AdoptOutcome::StaleGeneration);
         }
-        let row: Option<(String, Option<i64>)> = tx
+        let row: Option<(String, String, Option<i64>)> = tx
             .query_row(
-                "SELECT lane, pid FROM permits WHERE holder = ?1",
+                "SELECT lane, state, pid FROM permits WHERE holder = ?1",
                 params![holder],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((row_lane, row_pid)) = row else {
+        let Some((row_lane, row_state, row_pid)) = row else {
             return Ok(AdoptOutcome::Missing);
         };
         if row_lane != lane.as_str() {
+            return Ok(AdoptOutcome::LiveHolder);
+        }
+        if !matches!(row_state.as_str(), "reserved" | "acquiring") {
             return Ok(AdoptOutcome::LiveHolder);
         }
         let Some(row_pid) = row_pid.and_then(|pid| u32::try_from(pid).ok()) else {
@@ -1043,20 +1076,25 @@ impl PermitLedger {
                 seen: generation,
             });
         }
-        let recorded: Option<i64> = tx
+        let recorded: Option<(i64, Option<i64>)> = tx
             .query_row(
-                "SELECT generation FROM permits WHERE holder = ?1",
+                "SELECT generation, pid FROM permits WHERE holder = ?1",
                 params![holder],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(recorded) = recorded else {
+        let Some((recorded, owner_pid)) = recorded else {
             return Err(LedgerError::UnknownHolder(holder.to_string()));
         };
         if recorded.max(0) as u64 != generation {
             return Err(LedgerError::StaleGeneration {
                 expected: recorded.max(0) as u64,
                 seen: generation,
+            });
+        }
+        if owner_pid.and_then(|pid| u32::try_from(pid).ok()) != Some(std::process::id()) {
+            return Err(LedgerError::UnfencedRelease {
+                holder: holder.to_owned(),
             });
         }
         let now = unix_now() as i64;
@@ -1078,20 +1116,22 @@ impl PermitLedger {
     }
 
     /// Confirm terminal owned cleanup, then atomically release the permit
-    /// and close its demand. Unfenced by design: a worker from an earlier
-    /// daemon epoch must be able to release its own completed hold.
+    /// and close its demand. This entry point is fail-closed: it succeeds
+    /// only for a row owned by this process in the current epoch.
     pub fn release(&mut self, holder: &str) -> Result<bool, LedgerError> {
         self.release_with_demand_state(holder, DemandState::Terminal)
     }
 
     /// Release a permit after confirmed handoff/retry cleanup and return
-    /// its demand to the queue without changing its original age.
+    /// its demand to the queue without changing its original age. Ownership
+    /// is checked exactly as in [`Self::release`].
     pub fn release_to_eligible(&mut self, holder: &str) -> Result<bool, LedgerError> {
         self.release_with_demand_state(holder, DemandState::Eligible)
     }
 
     /// Release a permit after confirmed upstream cancellation and ensure
-    /// the demand cannot block later work.
+    /// the demand cannot block later work. Ownership is checked exactly as
+    /// in [`Self::release`].
     pub fn release_cancelled(&mut self, holder: &str) -> Result<bool, LedgerError> {
         self.release_with_demand_state(holder, DemandState::Cancelled)
     }
@@ -1099,13 +1139,14 @@ impl PermitLedger {
     /// Confirm terminal owned cleanup, then release only the permit owned by
     /// `generation`. This is the worker-lifecycle release primitive: a stale
     /// worker cannot free a permit adopted by a newer epoch or close its
-    /// demand row.
+    /// demand row. The recorded owner PID must also match the caller.
     pub fn release_fenced(&mut self, holder: &str, generation: u64) -> Result<bool, LedgerError> {
         self.release_with_demand_state_fenced(holder, DemandState::Terminal, generation)
     }
 
     /// Fenced retry/handoff release. The demand is returned to the queue
-    /// only when the permit row belongs to the supplied epoch.
+    /// only when the permit row belongs to the supplied epoch and caller
+    /// attempt.
     pub fn release_to_eligible_fenced(
         &mut self,
         holder: &str,
@@ -1115,7 +1156,7 @@ impl PermitLedger {
     }
 
     /// Fenced cancellation release. A stale cancellation cannot close a new
-    /// epoch's demand row.
+    /// epoch's demand row or a different process attempt's row.
     pub fn release_cancelled_fenced(
         &mut self,
         holder: &str,
@@ -1132,8 +1173,44 @@ impl PermitLedger {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: i64 = tx.query_row(
+            "SELECT generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let current = current.max(0) as u64;
+        let recorded: Option<(i64, Option<i64>)> = tx
+            .query_row(
+                "SELECT generation, pid FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((recorded, owner_pid)) = recorded else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        let recorded = recorded.max(0) as u64;
+        if recorded != current {
+            return Err(LedgerError::StaleGeneration {
+                expected: current,
+                seen: recorded,
+            });
+        }
+        if owner_pid.and_then(|pid| u32::try_from(pid).ok()) != Some(std::process::id()) {
+            return Err(LedgerError::UnfencedRelease {
+                holder: holder.to_owned(),
+            });
+        }
         let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
-        let removed = tx.execute("DELETE FROM permits WHERE holder = ?1", params![holder])?;
+        let removed = tx.execute(
+            "DELETE FROM permits WHERE holder = ?1 AND generation = ?2 AND pid = ?3",
+            params![
+                holder,
+                i64::try_from(current).unwrap_or(i64::MAX),
+                i64::from(std::process::id()),
+            ],
+        )?;
         match next_demand_state {
             DemandState::Terminal | DemandState::Cancelled => {
                 tx.execute(
@@ -1180,14 +1257,14 @@ impl PermitLedger {
             });
         }
 
-        let recorded: Option<i64> = tx
+        let recorded: Option<(i64, Option<i64>)> = tx
             .query_row(
-                "SELECT generation FROM permits WHERE holder = ?1",
+                "SELECT generation, pid FROM permits WHERE holder = ?1",
                 params![holder],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(recorded) = recorded else {
+        let Some((recorded, owner_pid)) = recorded else {
             // Idempotent release. Crucially, do not mutate demand when the
             // permit is absent: a stale terminal event must not close a new
             // demand with the same holder string.
@@ -1201,11 +1278,20 @@ impl PermitLedger {
                 seen: generation,
             });
         }
+        if owner_pid.and_then(|pid| u32::try_from(pid).ok()) != Some(std::process::id()) {
+            return Err(LedgerError::UnfencedRelease {
+                holder: holder.to_owned(),
+            });
+        }
 
         let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
         let removed = tx.execute(
-            "DELETE FROM permits WHERE holder = ?1 AND generation = ?2",
-            params![holder, i64::try_from(generation).unwrap_or(i64::MAX)],
+            "DELETE FROM permits WHERE holder = ?1 AND generation = ?2 AND pid = ?3",
+            params![
+                holder,
+                i64::try_from(generation).unwrap_or(i64::MAX),
+                i64::from(std::process::id()),
+            ],
         )?;
         if removed == 0 {
             tx.commit()?;
@@ -1250,11 +1336,31 @@ impl PermitLedger {
                 seen: generation,
             });
         }
+        let owner_pid: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT pid FROM permits WHERE holder = ?1 AND generation = ?2",
+                params![holder, i64::try_from(generation).unwrap_or(i64::MAX)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(owner_pid) = owner_pid else {
+            return Err(LedgerError::UnknownHolder(holder.to_owned()));
+        };
+        if owner_pid.and_then(|pid| u32::try_from(pid).ok()) != Some(std::process::id()) {
+            return Err(LedgerError::UnfencedRelease {
+                holder: holder.to_owned(),
+            });
+        }
         let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
         let updated = tx.execute(
             "UPDATE permits SET state = 'uncertain', updated_unix = ?1, generation = ?2
-             WHERE holder = ?3",
-            params![now, i64::try_from(generation).unwrap_or(i64::MAX), holder],
+             WHERE holder = ?3 AND generation = ?2 AND pid = ?4",
+            params![
+                now,
+                i64::try_from(generation).unwrap_or(i64::MAX),
+                holder,
+                i64::from(std::process::id()),
+            ],
         )?;
         if updated == 0 {
             return Err(LedgerError::UnknownHolder(holder.to_owned()));
@@ -1289,6 +1395,7 @@ impl PermitLedger {
         )?;
         let mut report = ReconcileReport::default();
         let now = unix_now() as i64;
+        let owner_pid = i64::from(std::process::id());
         for (holder, lane, state) in alive {
             let held: Option<String> = tx
                 .query_row(
@@ -1299,16 +1406,32 @@ impl PermitLedger {
                 .optional()?;
             if held.is_none() {
                 tx.execute(
-                    "INSERT INTO permits (holder, lane, state, acquired_unix, updated_unix, generation)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![*holder, lane.as_str(), state.as_str(), now, now, generation],
+                    "INSERT INTO permits
+                     (holder, lane, state, acquired_unix, updated_unix, generation, pid)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        *holder,
+                        lane.as_str(),
+                        state.as_str(),
+                        now,
+                        now,
+                        generation,
+                        owner_pid,
+                    ],
                 )?;
                 report.adopted.push((*holder).to_string());
             } else {
                 tx.execute(
                     "UPDATE permits SET lane = ?1, state = ?2, updated_unix = ?3,
-                            generation = ?4 WHERE holder = ?5",
-                    params![lane.as_str(), state.as_str(), now, generation, *holder,],
+                            generation = ?4, pid = ?5 WHERE holder = ?6",
+                    params![
+                        lane.as_str(),
+                        state.as_str(),
+                        now,
+                        generation,
+                        owner_pid,
+                        *holder,
+                    ],
                 )?;
                 report.confirmed.push((*holder).to_string());
             }
@@ -1374,53 +1497,21 @@ impl PermitLedger {
         Ok(report)
     }
 
-    /// Release uncertain native permits whose acquiring process is dead.
+    /// Retain all uncertain permits until owned cleanup is explicitly
+    /// confirmed. PID death is not cleanup proof: the process may have left
+    /// containers, volumes, networks, or diagnostics behind, and deleting
+    /// the row would advertise capacity that is still occupied.
     ///
-    /// This is the only path that deletes without an explicit release, and
-    /// it is narrow on purpose: only `uncertain` rows in the native lane
-    /// with a recorded pid for which `is_alive` returns false, and never a
-    /// holder in `protected` (the caller's in-flight set — a cleanup
-    /// failure retains its visible reservation until lifecycle
-    /// reconciliation converges it, even across restarts).
-    ///
-    /// A reused pid reads as alive and skips the sweep: the error direction
-    /// is retention, never a double-spend. Returns the swept holders.
+    /// The arguments remain as an observation hook for the startup caller,
+    /// but this method intentionally performs no deletion. A later cleanup
+    /// owner must use an epoch/attempt-fenced release after attesting that
+    /// its owned resources are gone.
     pub fn sweep_dead_uncertain(
         &mut self,
-        is_alive: &dyn Fn(u32) -> bool,
-        protected: &std::collections::BTreeSet<String>,
+        _is_alive: &dyn Fn(u32) -> bool,
+        _protected: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<String>, LedgerError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let candidates: Vec<(String, i64)> = {
-            let mut select = tx.prepare(
-                "SELECT holder, pid FROM permits
-                 WHERE state = 'uncertain' AND lane = 'native' AND pid IS NOT NULL",
-            )?;
-            select
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })?
-                .collect::<Result<_, _>>()?
-        };
-        let mut swept = Vec::new();
-        for (holder, pid) in candidates {
-            if protected.contains(&holder) {
-                continue;
-            }
-            let Ok(pid) = u32::try_from(pid) else {
-                continue;
-            };
-            if is_alive(pid) {
-                continue;
-            }
-            tx.execute("DELETE FROM permits WHERE holder = ?1", params![holder])?;
-            swept.push(holder);
-        }
-        tx.commit()?;
-        swept.sort();
-        Ok(swept)
+        Ok(Vec::new())
     }
 
     /// Number of permits in `state` (observability; every state counts).
@@ -1458,11 +1549,16 @@ mod tests {
         (ledger, dir)
     }
 
+    fn ready_generation(ledger: &mut PermitLedger) -> u64 {
+        ledger.reconcile(&[]).unwrap();
+        ledger.generation().unwrap()
+    }
+
     #[test]
     fn acquire_grants_until_full_then_refuses() {
         let (mut ledger, dir) = temp_ledger("full");
         ledger.set_max_jobs(2).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
 
         assert_eq!(
             ledger
@@ -1567,7 +1663,7 @@ mod tests {
     fn parked_demand_yields_queue_and_revives_with_age() {
         let (mut ledger, dir) = temp_ledger("park");
         ledger.set_max_jobs(1).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
         let now = unix_now();
 
         // Older demand parks (its waiter departed): it keeps its ticket
@@ -1648,7 +1744,7 @@ mod tests {
     fn duplicate_delivery_holds_once() {
         let (mut ledger, dir) = temp_ledger("dup");
         ledger.set_max_jobs(1).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
 
         assert_eq!(
             ledger
@@ -1697,7 +1793,7 @@ mod tests {
     fn every_state_counts_and_transitions_keep_occupancy() {
         let (mut ledger, dir) = temp_ledger("states");
         ledger.set_max_jobs(8).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
         let states = [
             PermitState::Reserved,
             PermitState::Acquiring,
@@ -1730,10 +1826,10 @@ mod tests {
     }
 
     #[test]
-    fn stale_generations_are_rejected_but_release_is_not_fenced() {
+    fn stale_generations_and_unowned_release_are_rejected() {
         let (mut ledger, dir) = temp_ledger("generation");
         ledger.set_max_jobs(2).unwrap();
-        let stale = ledger.generation().unwrap();
+        let stale = ready_generation(&mut ledger);
         let current = ledger.begin_epoch().unwrap();
         assert!(current > stale);
 
@@ -1750,7 +1846,21 @@ mod tests {
                     PermitLane::Native,
                     PermitState::Acquiring,
                     current,
-                    None
+                    Some(4242)
+                )
+                .unwrap(),
+            AcquireOutcome::Full
+        );
+        // No permit may be allocated until the new epoch is reconciled.
+        ledger.reconcile(&[]).unwrap();
+        assert_eq!(
+            ledger
+                .acquire(
+                    "a",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    current,
+                    Some(4242)
                 )
                 .unwrap(),
             AcquireOutcome::Acquired
@@ -1759,9 +1869,38 @@ mod tests {
             ledger.transition("a", PermitState::Running, stale),
             Err(LedgerError::StaleGeneration { .. })
         ));
-        // Release always frees, whatever epoch the hold came from.
-        assert!(ledger.release("a").unwrap());
-        assert!(!ledger.release("a").unwrap());
+        assert!(matches!(
+            ledger.release("a"),
+            Err(LedgerError::UnfencedRelease { .. })
+        ));
+        assert_eq!(ledger.occupied().unwrap(), 1);
+
+        // The explicit current-generation path still requires the owner
+        // attempt to be adopted; a stale caller cannot free it by name.
+        assert!(matches!(
+            ledger.release_fenced("a", stale),
+            Err(LedgerError::StaleGeneration { .. })
+        ));
+        assert!(matches!(
+            ledger.release_fenced("a", current),
+            Err(LedgerError::UnfencedRelease { .. })
+        ));
+        assert_eq!(ledger.occupied().unwrap(), 1);
+
+        assert_eq!(
+            ledger
+                .adopt_if_pid_dead(
+                    "a",
+                    PermitLane::Native,
+                    PermitState::Cleaning,
+                    current,
+                    std::process::id(),
+                    &|_| false,
+                )
+                .unwrap(),
+            AdoptOutcome::Adopted
+        );
+        assert!(ledger.release_fenced("a", current).unwrap());
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1770,7 +1909,7 @@ mod tests {
     fn fenced_release_rejects_stale_epoch_and_preserves_new_owner() {
         let (mut ledger, dir) = temp_ledger("fenced-release");
         ledger.set_max_jobs(1).unwrap();
-        let stale = ledger.generation().unwrap();
+        let stale = ready_generation(&mut ledger);
         let holder = "scaleset/7/44";
         assert_eq!(
             ledger
@@ -1812,10 +1951,57 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_adopts_attested_rows_for_current_lifecycle_owner() {
+        let (mut ledger, dir) = temp_ledger("reconcile-owner");
+        ledger.set_max_jobs(2).unwrap();
+        let initial = ready_generation(&mut ledger);
+        assert_eq!(
+            ledger
+                .acquire(
+                    "existing",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    initial,
+                    Some(4242),
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+
+        let generation = ledger.begin_epoch().unwrap();
+        ledger
+            .reconcile(&[
+                ("existing", PermitLane::Native, PermitState::Running),
+                ("adopted", PermitLane::ScaleSet, PermitState::Running),
+            ])
+            .unwrap();
+
+        let holders = ledger.holders().unwrap();
+        assert_eq!(
+            holders
+                .iter()
+                .map(|holder| (holder.holder.as_str(), holder.pid))
+                .collect::<Vec<_>>(),
+            vec![
+                ("adopted", Some(std::process::id())),
+                ("existing", Some(std::process::id())),
+            ]
+        );
+        ledger
+            .transition("existing", PermitState::Cleaning, generation)
+            .unwrap();
+        assert!(ledger.release_fenced("existing", generation).unwrap());
+        assert!(ledger.release("adopted").unwrap());
+        assert_eq!(ledger.occupied().unwrap(), 0);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn oldest_eligible_is_granted_across_lanes_and_redelivery_keeps_age() {
         let (mut ledger, dir) = temp_ledger("global-order");
         ledger.set_max_jobs(2).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
         let now = unix_now();
         ledger
             .observe_demand("native/older", PermitLane::Native, "scope-a", now, now)
@@ -1898,7 +2084,7 @@ mod tests {
 
         let (mut ledger, dir) = temp_ledger("concurrent-order");
         ledger.set_max_jobs(1).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
         let now = unix_now();
         ledger
             .observe_demand("native/older", PermitLane::Native, "", now, now)
@@ -1959,7 +2145,7 @@ mod tests {
     fn retry_release_preserves_age_and_uncertain_cleanup_keeps_occupancy() {
         let (mut ledger, dir) = temp_ledger("release-order");
         ledger.set_max_jobs(2).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
         let now = unix_now();
         let original = ledger
             .observe_demand("native/first", PermitLane::Native, "", now, now)
@@ -2094,20 +2280,146 @@ mod tests {
     }
 
     #[test]
+    fn acquire_refuses_to_spend_capacity_until_epoch_reconciles() {
+        let (mut ledger, dir) = temp_ledger("admission-barrier");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.generation().unwrap();
+
+        assert_eq!(
+            ledger
+                .acquire(
+                    "unreconciled",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Full
+        );
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(
+            ledger.demand("unreconciled").unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+
+        ledger.reconcile(&[]).unwrap();
+        assert_eq!(
+            ledger
+                .acquire(
+                    "unreconciled",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn eligible_age_does_not_expire_without_terminal_observation() {
+        let (mut ledger, dir) = temp_ledger("fifo-age");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ready_generation(&mut ledger);
+        let now = unix_now();
+        let old = now.saturating_sub(301);
+
+        ledger
+            .observe_demand("old", PermitLane::Native, "", old, old)
+            .unwrap();
+        ledger
+            .observe_demand("young", PermitLane::ScaleSet, "", now, now)
+            .unwrap();
+
+        assert_eq!(
+            ledger
+                .acquire(
+                    "young",
+                    PermitLane::ScaleSet,
+                    PermitState::Reserved,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Deferred
+        );
+        assert_eq!(
+            ledger
+                .acquire(
+                    "old",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn foreign_attempt_cannot_release_or_mark_uncertain() {
+        let (mut ledger, dir) = temp_ledger("attempt-fence");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ready_generation(&mut ledger);
+        let holder = "native/foreign-attempt";
+        assert_eq!(
+            ledger
+                .acquire(
+                    holder,
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    Some(4242),
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+
+        assert!(matches!(
+            ledger.release(holder),
+            Err(LedgerError::UnfencedRelease { .. })
+        ));
+        assert!(matches!(
+            ledger.retain_uncertain(holder, generation),
+            Err(LedgerError::UnfencedRelease { .. })
+        ));
+        assert_eq!(ledger.occupied().unwrap(), 1);
+
+        assert_eq!(
+            ledger
+                .adopt_if_pid_dead(
+                    holder,
+                    PermitLane::Native,
+                    PermitState::Cleaning,
+                    generation,
+                    std::process::id(),
+                    &|_| false,
+                )
+                .unwrap(),
+            AdoptOutcome::Adopted
+        );
+        assert!(ledger.release_fenced(holder, generation).unwrap());
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn reconcile_adopts_marks_and_gates_advertisement() {
         let (mut ledger, dir) = temp_ledger("reconcile");
         ledger.set_max_jobs(4).unwrap();
-        let generation = ledger.generation().unwrap();
+        // Seed the durable ledger with an attested live holder, then start a
+        // new epoch. The new epoch is unreconciled until the second call.
         ledger
-            .acquire(
-                "old",
-                PermitLane::Native,
-                PermitState::Running,
-                generation,
-                None,
-            )
+            .reconcile(&[("old", PermitLane::Native, PermitState::Running)])
             .unwrap();
-        // Nothing advertised before the first reconcile.
+        ledger.begin_epoch().unwrap();
+        // Nothing advertised before the current epoch reconciles.
         assert_eq!(ledger.advertised_free().unwrap(), None);
 
         let report = ledger
@@ -2145,12 +2457,17 @@ mod tests {
     fn adopt_takes_over_dead_attempts_and_refuses_the_rest() {
         let (mut ledger, dir) = temp_ledger("adopt");
         ledger.set_max_jobs(4).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
+        // Reconciliation-adopted rows have no acquiring-process owner and
+        // therefore cannot be released or adopted by PID alone.
+        ledger
+            .reconcile(&[("noid", PermitLane::Native, PermitState::Running)])
+            .unwrap();
         ledger
             .acquire(
                 "dead",
                 PermitLane::Native,
-                PermitState::Running,
+                PermitState::Acquiring,
                 generation,
                 Some(101),
             )
@@ -2162,15 +2479,6 @@ mod tests {
                 PermitState::Running,
                 generation,
                 Some(102),
-            )
-            .unwrap();
-        ledger
-            .acquire(
-                "noid",
-                PermitLane::Native,
-                PermitState::Running,
-                generation,
-                None,
             )
             .unwrap();
         ledger
@@ -2269,11 +2577,11 @@ mod tests {
     }
 
     #[test]
-    fn sweep_releases_only_dead_unprotected_uncertain_natives() {
+    fn sweep_never_releases_uncertain_rows_from_pid_death() {
         use std::collections::BTreeSet;
         let (mut ledger, dir) = temp_ledger("sweep");
         ledger.set_max_jobs(8).unwrap();
-        let generation = ledger.generation().unwrap();
+        let generation = ready_generation(&mut ledger);
         // Dead pid does not prove owned teardown completed.
         ledger
             .acquire(
@@ -2337,12 +2645,17 @@ mod tests {
 
         let is_alive = |pid: u32| pid == 2;
         let protected: BTreeSet<String> = ["kept".to_string()].into_iter().collect();
+        assert!(ledger
+            .sweep_dead_uncertain(&is_alive, &protected)
+            .unwrap()
+            .is_empty());
+        // PID death alone is not owned-cleanup proof; every uncertain row
+        // remains counted, including the unprotected dead attempt.
+        assert_eq!(ledger.occupied().unwrap(), 6);
         assert_eq!(
-            ledger.sweep_dead_uncertain(&is_alive, &protected).unwrap(),
-            vec!["dead".to_string()]
+            ledger.holder_state("dead").unwrap(),
+            Some(PermitState::Uncertain)
         );
-        assert_eq!(ledger.occupied().unwrap(), 5);
-        assert!(ledger.holder_state("dead").unwrap().is_none());
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -2358,7 +2671,7 @@ mod tests {
         let generation = {
             let mut ledger = PermitLedger::open(&path).unwrap();
             ledger.set_max_jobs(3).unwrap();
-            let generation = ledger.generation().unwrap();
+            let generation = ready_generation(&mut ledger);
             ledger
                 .acquire(
                     "a",

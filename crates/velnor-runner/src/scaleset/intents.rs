@@ -24,6 +24,8 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
+use crate::scaleset::demand::{LocalCorrelationId, RunnerRequestId};
+
 /// Ledger holder for one scale-set acquisition. Deterministic: every retry
 /// and the post-cleanup release resolve to this exact string.
 ///
@@ -216,22 +218,155 @@ pub enum AcquireClaimOutcome {
     Contended(AcquireBatch),
 }
 
-/// Set-reconcile of one `acquirejobs` round: `acquired = returned ∩
-/// requested`, `missing = requested − returned`. Never assume the server
-/// granted everything; extras outside the request set are ignored (they
-/// address work this adapter never reserved for).
-#[must_use]
-pub fn reconcile_returned_ids(requested: &[i64], returned: &[i64]) -> (Vec<i64>, Vec<i64>) {
-    let mut acquired = Vec::new();
-    let mut missing = Vec::new();
-    for request in requested {
-        if returned.contains(request) {
-            acquired.push(*request);
-        } else {
-            missing.push(*request);
+/// Durable evidence from one `acquirejobs` response.
+///
+/// `returned` is retained byte-for-byte as the decoded ID sequence. The
+/// `unexpected` projection deliberately retains returned IDs that were not
+/// requested as well as duplicate returned IDs. They are protocol anomalies,
+/// not permission to mutate a different demand row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcquireResponseReconciliation {
+    pub requested: Vec<i64>,
+    pub returned: Vec<i64>,
+    pub acquired: Vec<i64>,
+    pub missing: Vec<i64>,
+    pub unexpected: Vec<i64>,
+}
+
+/// Reconcile one `AcquireJobs` response without inventing or dropping IDs.
+///
+/// This follows the upstream contract: the request body contains the exact
+/// `RunnerRequestID` values from `JobAvailable`; the response is authoritative
+/// only for the IDs it actually returns. Anomalies are returned to the caller
+/// so it can persist evidence and fail closed before touching permits.
+pub fn reconcile_returned_ids_checked(
+    requested: &[i64],
+    returned: &[i64],
+) -> Result<AcquireResponseReconciliation> {
+    let mut requested_set = HashSet::with_capacity(requested.len());
+    for request_id in requested {
+        if *request_id <= 0 || !requested_set.insert(*request_id) {
+            anyhow::bail!(
+                "acquire request contains a missing or duplicate RunnerRequestID: {request_id}"
+            );
         }
     }
-    (acquired, missing)
+
+    let mut returned_set = HashSet::with_capacity(returned.len());
+    let mut unexpected = Vec::new();
+    for returned_id in returned {
+        if !requested_set.contains(returned_id) || !returned_set.insert(*returned_id) {
+            // Preserve order and duplicates. Diagnostics must show the exact
+            // anomalous response rather than a lossy set projection.
+            unexpected.push(*returned_id);
+        }
+    }
+
+    let acquired = requested
+        .iter()
+        .copied()
+        .filter(|request_id| returned_set.contains(request_id))
+        .collect::<Vec<_>>();
+    let missing = requested
+        .iter()
+        .copied()
+        .filter(|request_id| !returned_set.contains(request_id))
+        .collect::<Vec<_>>();
+
+    Ok(AcquireResponseReconciliation {
+        requested: requested.to_vec(),
+        returned: returned.to_vec(),
+        acquired,
+        missing,
+        unexpected,
+    })
+}
+
+/// Set-reconcile projection retained for the current processor call sites.
+///
+/// New lifecycle code must use [`reconcile_returned_ids_checked`] so
+/// anomalies remain durable evidence. This projection is intentionally only
+/// the requested-ID state transition and never turns an unexpected server ID
+/// into a local request.
+#[must_use]
+pub fn reconcile_returned_ids(requested: &[i64], returned: &[i64]) -> (Vec<i64>, Vec<i64>) {
+    match reconcile_returned_ids_checked(requested, returned) {
+        Ok(reconciled) => (reconciled.acquired, reconciled.missing),
+        Err(error) => {
+            // The old tuple API cannot represent a malformed request. Keep
+            // it fail-closed for its existing callers: no ID is authorized,
+            // and every requested ID remains unresolved for redelivery.
+            tracing::error!(error = %error, "invalid AcquireJobs request identity");
+            (Vec::new(), requested.to_vec())
+        }
+    }
+}
+
+/// One terminal observation bound to one upstream request attempt.
+///
+/// `RunnerRequestId` and `LocalCorrelationId` are both required and remain
+/// separate in storage. A repeated observation for the same tuple is
+/// idempotent; a conflicting result is an error rather than an overwrite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalObservation {
+    pub scale_set_id: i32,
+    pub runner_request_id: RunnerRequestId,
+    pub job_id: LocalCorrelationId,
+    pub result: String,
+    pub runner_id: i32,
+    pub runner_name: String,
+    pub generation: u64,
+}
+
+impl TerminalObservation {
+    pub fn new(
+        scale_set_id: i32,
+        runner_request_id: i64,
+        job_id: &str,
+        result: &str,
+        runner_id: i32,
+        runner_name: &str,
+        generation: u64,
+    ) -> Result<Self> {
+        if scale_set_id <= 0 {
+            anyhow::bail!("terminal observation has invalid scale-set ID {scale_set_id}");
+        }
+        let runner_request_id = RunnerRequestId::new(runner_request_id)
+            .context("terminal observation has no positive RunnerRequestID")?;
+        let job_id = LocalCorrelationId::new(job_id)
+            .context("terminal observation has no valid local job correlation")?;
+        if result.is_empty() || result.chars().any(char::is_control) {
+            anyhow::bail!("terminal observation has no valid result");
+        }
+        if runner_name.chars().any(char::is_control) {
+            anyhow::bail!("terminal observation has an invalid runner name");
+        }
+        Ok(Self {
+            scale_set_id,
+            runner_request_id,
+            job_id,
+            result: result.to_owned(),
+            runner_id,
+            runner_name: runner_name.to_owned(),
+            generation,
+        })
+    }
+}
+
+/// Durable terminal observation row, including the first observation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedTerminalObservation {
+    pub observation: TerminalObservation,
+    pub observed_at: String,
+}
+
+/// Durable response evidence for one acquisition attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcquireResponseRecord {
+    pub batch_id: String,
+    pub attempt: u32,
+    pub reconciliation: AcquireResponseReconciliation,
+    pub observed_at: String,
 }
 
 /// Durable acquire-batch store over `scaleset_acquire_batches`.
@@ -247,6 +382,7 @@ impl AcquireBatchStore {
         let conn = Connection::open(path).context("open acquire-batch database")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .context("set acquire-batch store busy timeout")?;
+        Self::ensure_reconciliation_schema(&conn)?;
         let mut store = Self { conn };
         store.backfill_active_claims()?;
         Ok(store)
@@ -256,6 +392,39 @@ impl AcquireBatchStore {
         velnor_model::Timestamp::now()
             .to_rfc3339()
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+    }
+
+    fn ensure_reconciliation_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scaleset_acquire_responses (
+                 batch_id TEXT NOT NULL,
+                 attempt INTEGER NOT NULL,
+                 requested_ids_json TEXT NOT NULL,
+                 returned_ids_json TEXT NOT NULL,
+                 acquired_ids_json TEXT NOT NULL,
+                 missing_ids_json TEXT NOT NULL,
+                 unexpected_ids_json TEXT NOT NULL,
+                 observed_at TEXT NOT NULL,
+                 PRIMARY KEY (batch_id, attempt)
+             );
+             CREATE INDEX IF NOT EXISTS idx_scaleset_acquire_responses_batch
+                 ON scaleset_acquire_responses (batch_id, attempt);
+             CREATE TABLE IF NOT EXISTS scaleset_terminal_observations (
+                 scale_set_id INTEGER NOT NULL,
+                 runner_request_id INTEGER NOT NULL,
+                 job_id TEXT NOT NULL,
+                 result TEXT NOT NULL,
+                 runner_id INTEGER NOT NULL,
+                 runner_name TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 observed_at TEXT NOT NULL,
+                 PRIMARY KEY (scale_set_id, runner_request_id, job_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_scaleset_terminal_observations_request
+                 ON scaleset_terminal_observations
+                    (scale_set_id, runner_request_id, observed_at);",
+        )
+        .context("ensure scale-set reconciliation schema")
     }
 
     fn row_to_batch(row: &rusqlite::Row<'_>) -> rusqlite::Result<AcquireBatch> {
@@ -282,6 +451,33 @@ impl AcquireBatchStore {
             generation: generation_raw.max(0) as u64,
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
+        })
+    }
+
+    fn decode_ids(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Vec<i64>> {
+        let raw: String = row.get(index)?;
+        serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                error.into(),
+            )
+        })
+    }
+
+    fn row_to_response(row: &rusqlite::Row<'_>) -> rusqlite::Result<AcquireResponseRecord> {
+        let attempt_raw: i64 = row.get(1)?;
+        Ok(AcquireResponseRecord {
+            batch_id: row.get(0)?,
+            attempt: attempt_raw.max(0) as u32,
+            reconciliation: AcquireResponseReconciliation {
+                requested: Self::decode_ids(row, 2)?,
+                returned: Self::decode_ids(row, 3)?,
+                acquired: Self::decode_ids(row, 4)?,
+                missing: Self::decode_ids(row, 5)?,
+                unexpected: Self::decode_ids(row, 6)?,
+            },
+            observed_at: row.get(7)?,
         })
     }
 
@@ -572,6 +768,220 @@ impl AcquireBatchStore {
         }
         tx.commit().context("commit acquire batch resolution")?;
         Ok(())
+    }
+
+    /// Allocate the next durable response-attempt ordinal for one batch.
+    ///
+    /// A retry after an uncertain transport result is a new observation of
+    /// the same upstream request batch. Keeping the ordinal prevents a later
+    /// response from overwriting the first response evidence.
+    pub fn next_response_attempt(&self, batch_id: &str) -> Result<u32> {
+        if self.get(batch_id)?.is_none() {
+            anyhow::bail!("acquire batch {batch_id:?} does not exist");
+        }
+        let next: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(attempt), -1) + 1
+                 FROM scaleset_acquire_responses WHERE batch_id = ?1",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .context("read next acquire response attempt")?;
+        u32::try_from(next).context("acquire response attempt exceeds u32")
+    }
+
+    /// Persist the exact response projection before applying any permit
+    /// transition. Replaying the same `(batch, attempt)` is idempotent only
+    /// when the full response is identical; a conflicting replay fails
+    /// closed.
+    pub fn record_response(
+        &mut self,
+        batch_id: &str,
+        attempt: u32,
+        reconciliation: &AcquireResponseReconciliation,
+    ) -> Result<AcquireResponseRecord> {
+        let batch = self
+            .get(batch_id)?
+            .with_context(|| format!("acquire batch {batch_id:?} does not exist"))?;
+        if reconciliation.requested != batch.request_ids {
+            anyhow::bail!(
+                "acquire response {batch_id:?}/{attempt} request set differs from durable intent"
+            );
+        }
+        let requested_json = serde_json::to_string(&reconciliation.requested)
+            .context("encode acquire response requested IDs")?;
+        let returned_json = serde_json::to_string(&reconciliation.returned)
+            .context("encode acquire response returned IDs")?;
+        let acquired_json = serde_json::to_string(&reconciliation.acquired)
+            .context("encode acquire response acquired IDs")?;
+        let missing_json = serde_json::to_string(&reconciliation.missing)
+            .context("encode acquire response missing IDs")?;
+        let unexpected_json = serde_json::to_string(&reconciliation.unexpected)
+            .context("encode acquire response anomaly IDs")?;
+        let observed_at = Self::now_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin acquire response transaction")?;
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO scaleset_acquire_responses
+                 (batch_id, attempt, requested_ids_json, returned_ids_json,
+                  acquired_ids_json, missing_ids_json, unexpected_ids_json, observed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    batch_id,
+                    i64::from(attempt),
+                    requested_json,
+                    returned_json,
+                    acquired_json,
+                    missing_json,
+                    unexpected_json,
+                    observed_at,
+                ],
+            )
+            .context("persist acquire response")?;
+        let recorded = tx
+            .query_row(
+                "SELECT batch_id, attempt, requested_ids_json, returned_ids_json,
+                        acquired_ids_json, missing_ids_json, unexpected_ids_json, observed_at
+                 FROM scaleset_acquire_responses
+                 WHERE batch_id = ?1 AND attempt = ?2",
+                params![batch_id, i64::from(attempt)],
+                Self::row_to_response,
+            )
+            .context("read persisted acquire response")?;
+        if inserted == 0 && recorded.reconciliation != *reconciliation {
+            anyhow::bail!("acquire response {batch_id:?}/{attempt} changed during replay");
+        }
+        tx.commit().context("commit acquire response")?;
+        Ok(recorded)
+    }
+
+    /// Read all response attempts for one batch in wire-observation order.
+    pub fn responses(&self, batch_id: &str) -> Result<Vec<AcquireResponseRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT batch_id, attempt, requested_ids_json, returned_ids_json,
+                        acquired_ids_json, missing_ids_json, unexpected_ids_json, observed_at
+                 FROM scaleset_acquire_responses
+                 WHERE batch_id = ?1 ORDER BY attempt ASC",
+            )
+            .context("prepare acquire response history")?;
+        stmt.query_map(params![batch_id], Self::row_to_response)
+            .context("query acquire response history")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read acquire response history")
+    }
+
+    fn row_to_terminal(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordedTerminalObservation> {
+        let scale_set_id: i32 = row.get(0)?;
+        let runner_request_id: i64 = row.get(1)?;
+        let job_id: String = row.get(2)?;
+        let result: String = row.get(3)?;
+        let runner_id: i32 = row.get(4)?;
+        let runner_name: String = row.get(5)?;
+        let generation_raw: i64 = row.get(6)?;
+        let observation = TerminalObservation::new(
+            scale_set_id,
+            runner_request_id,
+            &job_id,
+            &result,
+            runner_id,
+            &runner_name,
+            generation_raw.max(0) as u64,
+        )
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error.into())
+        })?;
+        Ok(RecordedTerminalObservation {
+            observation,
+            observed_at: row.get(7)?,
+        })
+    }
+
+    /// Persist one terminal lifecycle observation under its exact
+    /// `(scale_set, RunnerRequestID, jobId)` attempt key.
+    ///
+    /// A duplicate identical observation returns `false`; a conflicting
+    /// result or runner identity is rejected and never overwrites evidence.
+    pub fn record_terminal_observation(
+        &mut self,
+        observation: &TerminalObservation,
+    ) -> Result<bool> {
+        let now = Self::now_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin terminal observation transaction")?;
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO scaleset_terminal_observations
+                 (scale_set_id, runner_request_id, job_id, result, runner_id,
+                  runner_name, generation, observed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    observation.scale_set_id,
+                    observation.runner_request_id.get(),
+                    observation.job_id.as_str(),
+                    observation.result,
+                    observation.runner_id,
+                    observation.runner_name,
+                    i64::try_from(observation.generation).unwrap_or(i64::MAX),
+                    now,
+                ],
+            )
+            .context("persist terminal observation")?;
+        let recorded = tx
+            .query_row(
+                "SELECT scale_set_id, runner_request_id, job_id, result, runner_id,
+                        runner_name, generation, observed_at
+                 FROM scaleset_terminal_observations
+                 WHERE scale_set_id = ?1 AND runner_request_id = ?2 AND job_id = ?3",
+                params![
+                    observation.scale_set_id,
+                    observation.runner_request_id.get(),
+                    observation.job_id.as_str(),
+                ],
+                Self::row_to_terminal,
+            )
+            .context("read persisted terminal observation")?;
+        if inserted == 0
+            && (recorded.observation.result != observation.result
+                || recorded.observation.runner_id != observation.runner_id
+                || recorded.observation.runner_name != observation.runner_name)
+        {
+            anyhow::bail!(
+                "terminal observation identity changed for scale-set {}/{} job {:?}",
+                observation.scale_set_id,
+                observation.runner_request_id.get(),
+                observation.job_id.as_str()
+            );
+        }
+        tx.commit().context("commit terminal observation")?;
+        Ok(inserted == 1)
+    }
+
+    /// Fetch one exact attempt-qualified terminal observation.
+    pub fn terminal_observation(
+        &self,
+        scale_set_id: i32,
+        runner_request_id: RunnerRequestId,
+        job_id: &LocalCorrelationId,
+    ) -> Result<Option<RecordedTerminalObservation>> {
+        self.conn
+            .query_row(
+                "SELECT scale_set_id, runner_request_id, job_id, result, runner_id,
+                        runner_name, generation, observed_at
+                 FROM scaleset_terminal_observations
+                 WHERE scale_set_id = ?1 AND runner_request_id = ?2 AND job_id = ?3",
+                params![scale_set_id, runner_request_id.get(), job_id.as_str()],
+                Self::row_to_terminal,
+            )
+            .optional()
+            .context("fetch terminal observation")
     }
 
     /// Batches still awaiting resolution (`intended` or `uncertain`), oldest
@@ -883,6 +1293,18 @@ mod tests {
     }
 
     #[test]
+    fn checked_response_preserves_anomalous_ids_without_authorizing_them() {
+        let response = reconcile_returned_ids_checked(&[1, 2, 3], &[2, 9, 2, 0]).unwrap();
+        assert_eq!(response.requested, vec![1, 2, 3]);
+        assert_eq!(response.returned, vec![2, 9, 2, 0]);
+        assert_eq!(response.acquired, vec![2]);
+        assert_eq!(response.missing, vec![1, 3]);
+        assert_eq!(response.unexpected, vec![9, 2, 0]);
+        assert!(reconcile_returned_ids_checked(&[1, 1], &[1]).is_err());
+        assert!(reconcile_returned_ids_checked(&[0], &[]).is_err());
+    }
+
+    #[test]
     fn acquire_intent_round_trips_and_resolves() {
         let path = temp_path("batch");
         let mut store = AcquireBatchStore::open(&path).unwrap();
@@ -1011,5 +1433,65 @@ mod tests {
             store.get_by_request(7, 9).unwrap().unwrap().operation_id,
             "prov-op-7-9-0"
         );
+    }
+
+    #[test]
+    fn response_evidence_is_durable_and_attempt_ordered() {
+        let path = temp_path("response-evidence");
+        let mut store = AcquireBatchStore::open(&path).unwrap();
+        store
+            .record_intended(
+                "acq-response",
+                7,
+                &[31, 32],
+                &["scaleset/7/31".to_owned(), "scaleset/7/32".to_owned()],
+                4,
+            )
+            .unwrap();
+        let first = reconcile_returned_ids_checked(&[31, 32], &[31, 999]).unwrap();
+        let recorded = store.record_response("acq-response", 0, &first).unwrap();
+        assert_eq!(recorded.attempt, 0);
+        assert_eq!(recorded.reconciliation.unexpected, vec![999]);
+        assert_eq!(store.next_response_attempt("acq-response").unwrap(), 1);
+
+        // The exact same response/attempt is idempotent.
+        assert_eq!(
+            store.record_response("acq-response", 0, &first).unwrap(),
+            recorded
+        );
+        let second = reconcile_returned_ids_checked(&[31, 32], &[32]).unwrap();
+        store.record_response("acq-response", 1, &second).unwrap();
+        let history = store.responses("acq-response").unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].reconciliation.returned, vec![31, 999]);
+        assert_eq!(history[1].reconciliation.acquired, vec![32]);
+        assert_eq!(history[1].reconciliation.missing, vec![31]);
+
+        // A replay with changed evidence cannot overwrite the first attempt.
+        let conflict = reconcile_returned_ids_checked(&[31, 32], &[32]).unwrap();
+        assert!(store.record_response("acq-response", 0, &conflict).is_err());
+    }
+
+    #[test]
+    fn terminal_observation_is_attempt_qualified_and_idempotent() {
+        let path = temp_path("terminal-observation");
+        let mut store = AcquireBatchStore::open(&path).unwrap();
+        let observation =
+            TerminalObservation::new(7, 77, "job-guid-77", "Canceled", 11, "velnor-7-77", 4)
+                .unwrap();
+        assert!(store.record_terminal_observation(&observation).unwrap());
+        assert!(!store.record_terminal_observation(&observation).unwrap());
+        let recorded = store
+            .terminal_observation(7, observation.runner_request_id, &observation.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.observation, observation);
+
+        let conflict =
+            TerminalObservation::new(7, 77, "job-guid-77", "Succeeded", 11, "velnor-7-77", 5)
+                .unwrap();
+        assert!(store.record_terminal_observation(&conflict).is_err());
+        assert!(TerminalObservation::new(7, 0, "job-guid-77", "Canceled", 11, "", 4).is_err());
+        assert!(TerminalObservation::new(7, 78, "", "Canceled", 11, "", 4).is_err());
     }
 }
