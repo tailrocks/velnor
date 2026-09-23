@@ -41,8 +41,10 @@ mod trust;
 mod tui;
 mod watchdog;
 
-pub(crate) use config::{mise_install_deps_for_root, mise_lock_backends_for_root};
-pub(crate) use primitives::close_mise_tool_subset;
+pub(crate) use config::{mise_install_deps_for_root, mise_lock_backends_for_root, MiseInstallDeps};
+pub(crate) use primitives::{
+    close_mise_tool_subset, member_backend_key, resolve_install_dep_names, unknown_backend_reason,
+};
 
 use crate::s2::primitives::prepared_tools::PreparedToolNeed;
 use crate::s2::primitives::{WorkflowIr, WorkflowKind};

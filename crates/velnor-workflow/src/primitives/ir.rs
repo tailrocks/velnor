@@ -18,6 +18,7 @@ use super::{
     MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::reuse::REQUIRED_CHECK;
+use crate::s2::MiseInstallDeps;
 use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
@@ -161,7 +162,7 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::process::Command;
 
     use super::{
@@ -171,6 +172,7 @@ mod tests {
         RunnerMode, ToolRequirement, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
         WorkflowIr, WorkflowKind,
     };
+    use crate::s2::MiseInstallDeps;
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
@@ -364,6 +366,8 @@ mod tests {
             units,
             pins: Pins::resolved(),
             mise_lock_keys: BTreeSet::new(),
+            mise_lock_backends: BTreeMap::new(),
+            mise_install_deps: MiseInstallDeps::default(),
             declared_ruleset_contexts: String::new(),
         }
     }
@@ -2883,8 +2887,16 @@ pub(crate) fn dependency_bundle_cache_save_if_for_step(
 /// provisions it from the repository's pin — and so is every tool a policy
 /// step installs through its own action. Each additional id widens the supply
 /// chain of every job that runs it. Detected ids resolve against the root lock
-/// keys; declared ids were already matched to the lock by validation.
-pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<String> {
+/// keys; declared ids were already matched to the lock by validation. The
+/// returned vector is the final hosted-lane renderer set: implicit roots,
+/// declarations, and the canonical S2 dependency closure are materialized
+/// before facts or steps consume it.
+pub(crate) fn mise_tool_ids(
+    unit: &Unit,
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &BTreeMap<String, String>,
+    install_deps: &MiseInstallDeps,
+) -> Vec<String> {
     let mut tools = Vec::new();
     if needs_nextest(unit) {
         push_mise_tool(&mut tools, nextest_tool_id(lock_keys).to_owned());
@@ -2892,6 +2904,7 @@ pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<St
     for declared in &unit.mise_tools {
         push_mise_tool(&mut tools, declared.clone());
     }
+    crate::s2::close_mise_tool_subset(&mut tools, lock_keys, lock_backends, install_deps);
     tools
 }
 
@@ -2925,13 +2938,16 @@ pub(crate) fn cargo_deny_tool_id(lock_keys: &BTreeSet<String>) -> Option<String>
 pub(crate) fn velnor_mise_install_tool_ids(
     unit: &Unit,
     lock_keys: &BTreeSet<String>,
+    lock_backends: &BTreeMap<String, String>,
+    install_deps: &MiseInstallDeps,
 ) -> Vec<String> {
-    let mut tools = mise_tool_ids(unit, lock_keys);
+    let mut tools = mise_tool_ids(unit, lock_keys, lock_backends, install_deps);
     if needs_cargo_deny(unit)
         && let Some(deny) = cargo_deny_tool_id(lock_keys)
     {
         push_mise_tool(&mut tools, deny);
     }
+    crate::s2::close_mise_tool_subset(&mut tools, lock_keys, lock_backends, install_deps);
     tools
 }
 
@@ -2941,8 +2957,14 @@ fn push_mise_tool(tools: &mut Vec<String>, tool: String) {
     }
 }
 
-fn render_velnor_mise_install(output: &mut String, unit: &Unit, lock_keys: &BTreeSet<String>) {
-    let tools = velnor_mise_install_tool_ids(unit, lock_keys);
+fn render_velnor_mise_install(
+    output: &mut String,
+    unit: &Unit,
+    lock_keys: &BTreeSet<String>,
+    lock_backends: &BTreeMap<String, String>,
+    install_deps: &MiseInstallDeps,
+) {
+    let tools = velnor_mise_install_tool_ids(unit, lock_keys, lock_backends, install_deps);
     if tools.is_empty() {
         return;
     }
@@ -3473,6 +3495,12 @@ pub(crate) struct WorkflowIr {
     /// Tool keys the root `mise.lock` pins. Detected `install_args` resolve
     /// their spelling from these; empty when the scan root has no lock.
     pub(crate) mise_lock_keys: BTreeSet<String>,
+    /// Recorded backends by tool key from the root `mise.lock`. Bare
+    /// `install_args` members attribute their backend through these.
+    pub(crate) mise_lock_backends: BTreeMap<String, String>,
+    /// Root `mise.toml` install dependencies used to close each lane's
+    /// rendered subset.
+    pub(crate) mise_install_deps: MiseInstallDeps,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -4354,6 +4382,8 @@ impl WorkflowIr {
             units: config.units.clone(),
             pins: Pins::resolved(),
             mise_lock_keys: config.mise_lock_keys.clone(),
+            mise_lock_backends: config.mise_lock_backends.clone(),
+            mise_install_deps: config.mise_install_deps.clone(),
         }
     }
 
@@ -5457,17 +5487,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     ) -> LaneStepFacts {
         let github_lane = lane == RunnerMode::Github;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        let mise_tools = if github_lane {
-            if tools.contains(&ToolRequirement::Mise) {
-                mise_tool_ids(unit, &self.mise_lock_keys)
-            } else {
-                Vec::new()
-            }
-        } else if tools.contains(&ToolRequirement::Mise) {
-            velnor_mise_install_tool_ids(unit, &self.mise_lock_keys)
-        } else {
-            Vec::new()
-        };
+        let mise_tools = self.mise_tool_ids_for_provider(github_lane, &tools, unit);
         let mise_runner = github_lane
             && tools.contains(&ToolRequirement::Mise)
             && mise_tools.is_empty()
@@ -5551,6 +5571,39 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             unit_admission: LaneAdmission::for_unit(lane, unit),
             prepared_tools: super::prepared_tools::need_records(&unit.prepared_tools),
             validation_phases: unit.runnable_phases(),
+        }
+    }
+
+    /// The final Mise tool vector for one rendered provider lane. Keep this
+    /// single helper as the boundary between the shared Unit declaration and
+    /// lane-specific implicit roots/closure so GitHub never inherits Velnor
+    /// policy dependencies.
+    fn mise_tool_ids_for_provider(
+        &self,
+        hosted: bool,
+        tools: &BTreeSet<ToolRequirement>,
+        unit: &Unit,
+    ) -> Vec<String> {
+        if hosted {
+            if tools.contains(&ToolRequirement::Mise) {
+                mise_tool_ids(
+                    unit,
+                    &self.mise_lock_keys,
+                    &self.mise_lock_backends,
+                    &self.mise_install_deps,
+                )
+            } else {
+                Vec::new()
+            }
+        } else if tools.contains(&ToolRequirement::Mise) {
+            velnor_mise_install_tool_ids(
+                unit,
+                &self.mise_lock_keys,
+                &self.mise_lock_backends,
+                &self.mise_install_deps,
+            )
+        } else {
+            Vec::new()
         }
     }
 
@@ -7211,7 +7264,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             // off on the checks step, so declared lockfile tools must be
             // installed explicitly or shims fail closed. Install only what
             // this unit's commands need — never the whole root manifest.
-            render_velnor_mise_install(output, unit, &self.mise_lock_keys);
+            render_velnor_mise_install(
+                output,
+                unit,
+                &self.mise_lock_keys,
+                &self.mise_lock_backends,
+                &self.mise_install_deps,
+            );
         }
         if !velnor_skips_pinned_rust_toolchain(lane)
             && let Some(toolchain) = &unit.toolchain
@@ -7223,7 +7282,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
             // the unit's own commands name or the repository declares.
-            let mise_tools = mise_tool_ids(unit, &self.mise_lock_keys);
+            let mise_tools = self.mise_tool_ids_for_provider(true, &tools, unit);
             let invokes_mise = commands_invoke_mise(unit);
             if !mise_tools.is_empty() {
                 let trusted = trusted_cache_save_expression(&self.default_branch);
