@@ -207,47 +207,79 @@ fn parse_tools_version(contents: &str) -> Option<String> {
 /// Whether `contents` calls `call` (`".testTarget"`) with only whitespace
 /// between the name and the argument list.
 fn call_present(contents: &str, call: &str) -> bool {
-    let mut rest = contents;
-    while let Some(found) = rest.find(call) {
-        rest = &rest[found + call.len()..];
-        if rest
-            .trim_start_matches([' ', '\t', '\n', '\r'])
-            .starts_with('(')
-        {
-            return true;
-        }
-    }
-    false
+    let calls = swift_call_groups(contents, call);
+    calls.malformed || !calls.groups.is_empty()
 }
 
 /// The index just past the string literal opening at `bytes[start]` (`"` or
 /// `"""`), or `None` when it never closes.
 fn skip_string(bytes: &[u8], start: usize) -> Option<usize> {
-    if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
-        let mut index = start + 3;
-        while index + 3 <= bytes.len() {
-            if bytes[index] == b'"' && bytes[index + 1] == b'"' && bytes[index + 2] == b'"' {
-                return Some(index + 3);
-            }
-            index += 1;
+    let (quote, hashes) = if bytes.get(start) == Some(&b'"') {
+        (start, 0)
+    } else if bytes.get(start) == Some(&b'#') {
+        let mut quote = start;
+        while bytes.get(quote) == Some(&b'#') {
+            quote += 1;
         }
+        if bytes.get(quote) != Some(&b'"') {
+            return None;
+        }
+        (quote, quote - start)
+    } else {
         return None;
-    }
-    let mut index = start + 1;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => {
-                index += 2;
-            }
-            b'"' => {
-                return Some(index + 1);
-            }
-            _ => {
-                index += 1;
-            }
+    };
+    let multiline = bytes.get(quote + 1) == Some(&b'"') && bytes.get(quote + 2) == Some(&b'"');
+    let opening_len = if multiline { 3 } else { 1 };
+    let closing_len = opening_len + hashes;
+    let mut index = quote + opening_len;
+    while index + closing_len <= bytes.len() {
+        let closes = if multiline {
+            bytes[index..].starts_with(b"\"\"\"")
+        } else {
+            bytes[index] == b'"'
+        };
+        if closes
+            && !string_delimiter_is_escaped(bytes, index, hashes)
+            && bytes[index + opening_len..index + closing_len]
+                .iter()
+                .all(|byte| *byte == b'#')
+        {
+            return Some(index + closing_len);
+        }
+        if hashes == 0 && !multiline && bytes[index] == b'\\' {
+            index += 2;
+        } else {
+            index += 1;
         }
     }
     None
+}
+
+fn is_raw_string_start(bytes: &[u8], start: usize) -> bool {
+    if bytes.get(start) != Some(&b'#') {
+        return false;
+    }
+    let mut quote = start;
+    while bytes.get(quote) == Some(&b'#') {
+        quote += 1;
+    }
+    bytes.get(quote) == Some(&b'"')
+}
+
+fn string_delimiter_is_escaped(bytes: &[u8], quote: usize, hashes: usize) -> bool {
+    let mut slash = quote;
+    while slash > 0 && bytes[slash - 1] == b'\\' {
+        slash -= 1;
+    }
+    if (quote - slash) % 2 == 1 {
+        return true;
+    }
+    hashes > 0
+        && quote > hashes
+        && bytes[quote - hashes..quote]
+            .iter()
+            .all(|byte| *byte == b'#')
+        && bytes[quote - hashes - 1] == b'\\'
 }
 
 /// The index just past the block comment opening at `bytes[start]` (`/*`,
@@ -299,6 +331,9 @@ fn balanced_group(text: &str) -> Option<(&str, &str)> {
             b'"' => {
                 index = skip_string(bytes, index)?;
             }
+            b'#' if is_raw_string_start(bytes, index) => {
+                index = skip_string(bytes, index)?;
+            }
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
                 while index < bytes.len() && bytes[index] != b'\n' {
                     index += 1;
@@ -325,11 +360,17 @@ fn read_quoted(literal: &str) -> Option<String> {
         match char {
             '\\' => {
                 let escaped = chars.next()?;
-                out.push(match escaped {
+                let decoded = match escaped {
                     'n' => '\n',
                     't' => '\t',
-                    other => other,
-                });
+                    'r' => '\r',
+                    '0' => '\0',
+                    '\\' => '\\',
+                    '"' => '"',
+                    '\'' => '\'',
+                    _ => return None,
+                };
+                out.push(decoded);
             }
             '"' => {
                 return Some(out);
@@ -338,34 +379,6 @@ fn read_quoted(literal: &str) -> Option<String> {
                 out.push(char);
             }
         }
-    }
-    None
-}
-
-/// The string literal passed as `key:` inside `group`, or `None` when the key
-/// is absent, non-literal, or multiline.
-fn string_arg(group: &str, key: &str) -> Option<String> {
-    let mut rest = group;
-    while let Some(found) = rest.find(key) {
-        let before = rest[..found].chars().next_back();
-        rest = &rest[found + key.len()..];
-        if before.is_some_and(|char| char.is_alphanumeric() || char == '_') {
-            continue;
-        }
-        let Some(value) = rest
-            .trim_start_matches([' ', '\t', '\n', '\r'])
-            .strip_prefix(':')
-        else {
-            continue;
-        };
-        let value = value.trim_start_matches([' ', '\t', '\n', '\r']);
-        let Some(literal) = value.strip_prefix('"') else {
-            continue;
-        };
-        if literal.starts_with("\"\"") {
-            return None;
-        }
-        return read_quoted(literal);
     }
     None
 }
@@ -393,6 +406,111 @@ fn identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn qualified_swift_call(call: &str) -> Option<&'static str> {
+    match call {
+        ".testTarget" => Some("Target.testTarget"),
+        ".binaryTarget" => Some("Target.binaryTarget"),
+        _ => None,
+    }
+}
+
+fn module_qualified_swift_call(call: &str) -> Option<&'static str> {
+    match call {
+        ".testTarget" => Some("PackageDescription.Target.testTarget"),
+        ".binaryTarget" => Some("PackageDescription.Target.binaryTarget"),
+        "Product.executable" => Some("PackageDescription.Product.executable"),
+        _ => None,
+    }
+}
+
+struct SwiftCallGroups<'a> {
+    groups: Vec<&'a str>,
+    malformed: bool,
+}
+
+fn swift_call_marker_end(contents: &str, bytes: &[u8], index: usize, call: &str) -> Option<usize> {
+    if !contents[index..].starts_with(call)
+        || (index != 0 && (identifier_byte(bytes[index - 1]) || bytes[index - 1] == b'.'))
+        || (index + call.len() != bytes.len() && identifier_byte(bytes[index + call.len()]))
+    {
+        return None;
+    }
+    Some(index + call.len())
+}
+
+fn swift_call_groups<'a>(contents: &'a str, call: &str) -> SwiftCallGroups<'a> {
+    let bytes = contents.as_bytes();
+    let qualified = qualified_swift_call(call);
+    let module_qualified = module_qualified_swift_call(call);
+    let mut groups = Vec::new();
+    let mut malformed = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let Some(next) = skip_string(bytes, index) else {
+                    malformed = true;
+                    break;
+                };
+                index = next;
+            }
+            b'#' if is_raw_string_start(bytes, index) => {
+                let Some(next) = skip_string(bytes, index) else {
+                    malformed = true;
+                    break;
+                };
+                index = next;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let Some(next) = skip_block_comment(bytes, index) else {
+                    malformed = true;
+                    break;
+                };
+                index = next;
+            }
+            _ => {
+                let marker_end = swift_call_marker_end(contents, bytes, index, call)
+                    .or_else(|| {
+                        qualified.and_then(|qualified| {
+                            swift_call_marker_end(contents, bytes, index, qualified)
+                        })
+                    })
+                    .or_else(|| {
+                        module_qualified.and_then(|qualified| {
+                            swift_call_marker_end(contents, bytes, index, qualified)
+                        })
+                    });
+                let Some(marker_end) = marker_end else {
+                    let width = contents[index..].chars().next().map_or(1, char::len_utf8);
+                    index += width;
+                    continue;
+                };
+                let Some(group_start) = skip_trivia(bytes, marker_end) else {
+                    malformed = true;
+                    break;
+                };
+                if bytes.get(group_start) != Some(&b'(') {
+                    index = marker_end;
+                    continue;
+                }
+                let group = &contents[group_start..];
+                let Some((inner, after)) = balanced_group(group) else {
+                    malformed = true;
+                    break;
+                };
+                groups.push(inner);
+                index = group_start + group.len() - after.len();
+            }
+        }
+    }
+    SwiftCallGroups { groups, malformed }
+}
+
 fn contains_interpolation(literal: &str) -> bool {
     let bytes = literal.as_bytes();
     let mut index = 0;
@@ -412,26 +530,6 @@ fn contains_interpolation(literal: &str) -> bool {
     false
 }
 
-fn executable_marker_end(contents: &str, bytes: &[u8], index: usize) -> Option<usize> {
-    const SHORTHAND: &str = ".executable";
-    const QUALIFIED: &str = "Product.executable";
-    if contents[index..].starts_with(SHORTHAND)
-        && (index == 0 || (!identifier_byte(bytes[index - 1]) && bytes[index - 1] != b'.'))
-        && (index + SHORTHAND.len() == bytes.len()
-            || !identifier_byte(bytes[index + SHORTHAND.len()]))
-    {
-        return Some(index + SHORTHAND.len());
-    }
-    if contents[index..].starts_with(QUALIFIED)
-        && (index == 0 || !identifier_byte(bytes[index - 1]))
-        && (index + QUALIFIED.len() == bytes.len()
-            || !identifier_byte(bytes[index + QUALIFIED.len()]))
-    {
-        return Some(index + QUALIFIED.len());
-    }
-    None
-}
-
 /// A top-level literal `key: "value"` argument in a Swift call. Nested
 /// target/dependency arguments, comments, interpolations, and expressions do
 /// not count: the scanner must never infer a product name from executable
@@ -443,6 +541,9 @@ fn literal_string_arg(group: &str, key: &str) -> Option<String> {
     while index < bytes.len() {
         match bytes[index] {
             b'"' => index = skip_string(bytes, index)?,
+            b'#' if is_raw_string_start(bytes, index) => {
+                index = skip_string(bytes, index)?;
+            }
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
                 while index < bytes.len() && bytes[index] != b'\n' {
                     index += 1;
@@ -477,8 +578,7 @@ fn literal_string_arg(group: &str, key: &str) -> Option<String> {
                 }
                 let value = skip_trivia(bytes, colon + 1)?;
                 if bytes.get(value) != Some(&b'"')
-                    || bytes.get(value + 1) == Some(&b'"')
-                    || bytes.get(value + 2) == Some(&b'"')
+                    || (bytes.get(value + 1) == Some(&b'"') && bytes.get(value + 2) == Some(&b'"'))
                 {
                     return None;
                 }
@@ -507,53 +607,19 @@ struct ExecutableProductFacts {
 /// Discover only literal `.executable(name: "...")` product declarations.
 /// This lexer skips Swift strings/comments and never evaluates the manifest.
 fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
-    let bytes = contents.as_bytes();
     let mut names = BTreeSet::new();
     let mut has_dynamic_name = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                let Some(next) = skip_string(bytes, index) else {
-                    break;
-                };
-                index = next;
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
+    for call in [".executable", "Product.executable"] {
+        let calls = swift_call_groups(contents, call);
+        has_dynamic_name |= calls.malformed;
+        for group in calls.groups {
+            match literal_string_arg(group, "name") {
+                Some(name) if !name.is_empty() => {
+                    names.insert(name);
                 }
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                let Some(next) = skip_block_comment(bytes, index) else {
-                    break;
-                };
-                index = next;
-            }
-            _ => {
-                let Some(marker_end) = executable_marker_end(contents, bytes, index) else {
-                    let width = contents[index..].chars().next().map_or(1, char::len_utf8);
-                    index += width;
-                    continue;
-                };
-                let Some(group_start) = skip_trivia(bytes, marker_end) else {
-                    break;
-                };
-                if bytes.get(group_start) != Some(&b'(') {
-                    index = marker_end;
-                    continue;
+                _ => {
+                    has_dynamic_name = true;
                 }
-                let group = &contents[group_start..];
-                let Some((inner, after)) = balanced_group(group) else {
-                    break;
-                };
-                match literal_string_arg(inner, "name") {
-                    Some(name) if !name.is_empty() => {
-                        names.insert(name);
-                    }
-                    _ => has_dynamic_name = true,
-                }
-                index = group_start + group.len() - after.len();
             }
         }
     }
@@ -564,25 +630,15 @@ fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
 }
 
 fn parse_binary_targets(contents: &str) -> Vec<BinaryTarget> {
-    let mut targets = Vec::new();
-    let mut rest = contents;
-    while let Some(found) = rest.find(".binaryTarget") {
-        rest = &rest[found + ".binaryTarget".len()..];
-        let group = rest.trim_start_matches([' ', '\t', '\n', '\r']);
-        if !group.starts_with('(') {
-            continue;
-        }
-        let Some((inner, after)) = balanced_group(group) else {
-            break;
-        };
-        targets.push(BinaryTarget {
-            name: string_arg(inner, "name"),
-            path: string_arg(inner, "path"),
-            url: string_arg(inner, "url"),
-        });
-        rest = after;
-    }
-    targets
+    swift_call_groups(contents, ".binaryTarget")
+        .groups
+        .into_iter()
+        .map(|inner| BinaryTarget {
+            name: literal_string_arg(inner, "name"),
+            path: literal_string_arg(inner, "path"),
+            url: literal_string_arg(inner, "url"),
+        })
+        .collect()
 }
 
 fn parse_package_facts(contents: &str) -> PackageFacts {
@@ -1716,8 +1772,22 @@ mod tests {
     fn test_targets_count_with_any_gap_before_parens() {
         assert!(parse_package_facts(".testTarget(name: \"App\")").has_tests);
         assert!(parse_package_facts(".testTarget (name: \"App\")").has_tests);
+        assert!(parse_package_facts(".testTarget /* comment */ (name: \"App\")").has_tests);
+        assert!(parse_package_facts("Target.testTarget(name: \"App\")").has_tests);
+        assert!(
+            parse_package_facts("PackageDescription.Target.testTarget(name: \"App\")").has_tests
+        );
         assert!(!parse_package_facts(".target(name: \"App\")").has_tests);
         assert!(!parse_package_facts("// see .testTarget docs").has_tests);
+        assert!(!parse_package_facts("let text = \".testTarget(name: \\\"Fake\\\")\"").has_tests);
+        assert!(!parse_package_facts("let text = #\".testTarget(name: \"Fake\")\"#").has_tests);
+        assert!(
+            !parse_package_facts(
+                ".not_testTarget(name: \"Fake\")\nOther.testTarget(name: \"Fake\")"
+            )
+            .has_tests
+        );
+        assert!(parse_package_facts(".testTarget(").has_tests);
     }
 
     #[test]
@@ -1764,6 +1834,31 @@ mod tests {
     }
 
     #[test]
+    fn one_character_literal_product_is_run() {
+        let facts = parse_package_facts(r#".executable(name: "A")"#);
+        assert_eq!(facts.executable_products, vec!["A".to_owned()]);
+        let unit = super::swift_package_unit("native", &facts);
+        assert_eq!(
+            unit.pr_commands,
+            vec![
+                "cd -- 'native' && swift build".to_owned(),
+                "cd -- 'native' && swift run --skip-build --product 'A'".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_literal_escapes_are_not_guessed() {
+        let facts = parse_package_facts(r#".executable(name: "App\u{1F600}")"#);
+        assert!(facts.executable_products.is_empty());
+        assert!(facts.has_dynamic_executable_products);
+        let binary = parse_package_facts(
+            r#".binaryTarget(name: "Bridge", path: "Build/\u{2F}Bridge.xcframework")"#,
+        );
+        assert_eq!(binary.binary_targets[0].path, None);
+    }
+
+    #[test]
     fn swift_package_units_run_products_without_rebuilding() {
         let facts = parse_package_facts(
             r#"
@@ -1782,6 +1877,10 @@ mod tests {
                 "cd -- 'native' && swift test --parallel".to_owned(),
             ]
         );
+        assert!(unit
+            .pr_commands
+            .iter()
+            .all(|command| !command.contains("swift run:")));
         assert_eq!(
             unit.phases,
             vec![
@@ -1816,6 +1915,32 @@ mod tests {
             limitation.contains("executable products without literal names")
         }));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn executable_markers_inside_raw_strings_are_not_run() {
+        let facts = parse_package_facts(
+            "let text = #\".executable(name: \"Fake\")\"#\n\
+             /* .executable(name: \"Comment\") */\n\
+             .executable(name: \"Real\")\n\
+             PackageDescription.Product.executable(name: \"ModuleQualified\")",
+        );
+        assert_eq!(
+            facts.executable_products,
+            vec!["ModuleQualified".to_owned(), "Real".to_owned()]
+        );
+        assert!(!facts.has_dynamic_executable_products);
+    }
+
+    #[test]
+    fn escaped_multiline_string_delimiters_are_not_executable_markers() {
+        let facts = parse_package_facts(
+            r#"let text = """
+escaped \""" .executable(name: "Fake")
+"""
+.executable(name: "Real")"#,
+        );
+        assert_eq!(facts.executable_products, vec!["Real".to_owned()]);
     }
 
     #[test]
@@ -1863,6 +1988,28 @@ mod tests {
             Some("../target/Bridge.xcframework")
         );
         assert_eq!(facts.binary_targets[0].url, None);
+    }
+
+    #[test]
+    fn binary_target_markers_inside_comments_and_strings_are_ignored() {
+        let facts = parse_package_facts(
+            "let text = \".binaryTarget(name: \\\"Fake\\\", path: \\\"Fake.xcframework\\\")\"\n\
+             // .binaryTarget(name: \"Comment\", path: \"Comment.xcframework\")\n\
+             .binaryTarget /* comment */ (name: \"Real\", path: \"Real.xcframework\")\n\
+             Target.binaryTarget(name: \"Qualified\", path: \"Qualified.xcframework\")\n\
+             PackageDescription.Target.binaryTarget(name: \"ModuleQualified\", path: \"ModuleQualified.xcframework\")",
+        );
+        assert_eq!(facts.binary_targets.len(), 3);
+        assert_eq!(facts.binary_targets[0].name.as_deref(), Some("Real"));
+        assert_eq!(
+            facts.binary_targets[0].path.as_deref(),
+            Some("Real.xcframework")
+        );
+        assert_eq!(facts.binary_targets[1].name.as_deref(), Some("Qualified"));
+        assert_eq!(
+            facts.binary_targets[2].name.as_deref(),
+            Some("ModuleQualified")
+        );
     }
 
     #[test]
