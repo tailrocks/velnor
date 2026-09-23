@@ -204,18 +204,19 @@ fn parse_tools_version(contents: &str) -> Option<String> {
     None
 }
 
-/// Whether `contents` calls `call` (`".testTarget"`) with only whitespace
-/// between the name and the argument list.
+/// Whether `contents` calls `call` (`".testTarget"`) with only trivia between
+/// the name and the argument list.
 fn call_present(contents: &str, call: &str) -> bool {
-    let mut rest = contents;
-    while let Some(found) = rest.find(call) {
-        rest = &rest[found + call.len()..];
-        if rest
-            .trim_start_matches([' ', '\t', '\n', '\r'])
-            .starts_with('(')
-        {
+    let bytes = contents.as_bytes();
+    let mut index = 0;
+    while let Some(marker_end) = next_code_marker(contents, call, &mut index) {
+        let Some(group_start) = skip_trivia(bytes, marker_end) else {
+            return false;
+        };
+        if bytes.get(group_start) == Some(&b'(') {
             return true;
         }
+        index = marker_end;
     }
     false
 }
@@ -342,34 +343,6 @@ fn read_quoted(literal: &str) -> Option<String> {
     None
 }
 
-/// The string literal passed as `key:` inside `group`, or `None` when the key
-/// is absent, non-literal, or multiline.
-fn string_arg(group: &str, key: &str) -> Option<String> {
-    let mut rest = group;
-    while let Some(found) = rest.find(key) {
-        let before = rest[..found].chars().next_back();
-        rest = &rest[found + key.len()..];
-        if before.is_some_and(|char| char.is_alphanumeric() || char == '_') {
-            continue;
-        }
-        let Some(value) = rest
-            .trim_start_matches([' ', '\t', '\n', '\r'])
-            .strip_prefix(':')
-        else {
-            continue;
-        };
-        let value = value.trim_start_matches([' ', '\t', '\n', '\r']);
-        let Some(literal) = value.strip_prefix('"') else {
-            continue;
-        };
-        if literal.starts_with("\"\"") {
-            return None;
-        }
-        return read_quoted(literal);
-    }
-    None
-}
-
 fn skip_trivia(bytes: &[u8], mut index: usize) -> Option<usize> {
     loop {
         while index < bytes.len() && bytes[index].is_ascii_whitespace() {
@@ -387,6 +360,36 @@ fn skip_trivia(bytes: &[u8], mut index: usize) -> Option<usize> {
         }
         return Some(index);
     }
+}
+
+/// Return the end of the next marker that appears in Swift code, skipping
+/// strings and line/block comments. The caller's cursor is always kept on a
+/// UTF-8 boundary so later slices remain valid.
+fn next_code_marker(contents: &str, marker: &str, index: &mut usize) -> Option<usize> {
+    let bytes = contents.as_bytes();
+    while *index < bytes.len() {
+        match bytes[*index] {
+            b'"' => {
+                *index = skip_string(bytes, *index)?;
+            }
+            b'/' if bytes.get(*index + 1) == Some(&b'/') => {
+                while *index < bytes.len() && bytes[*index] != b'\n' {
+                    *index += 1;
+                }
+            }
+            b'/' if bytes.get(*index + 1) == Some(&b'*') => {
+                *index = skip_block_comment(bytes, *index)?;
+            }
+            _ if contents[*index..].starts_with(marker) => {
+                *index += marker.len();
+                return Some(*index);
+            }
+            _ => {
+                *index += contents[*index..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+    }
+    None
 }
 
 fn identifier_byte(byte: u8) -> bool {
@@ -565,22 +568,26 @@ fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
 
 fn parse_binary_targets(contents: &str) -> Vec<BinaryTarget> {
     let mut targets = Vec::new();
-    let mut rest = contents;
-    while let Some(found) = rest.find(".binaryTarget") {
-        rest = &rest[found + ".binaryTarget".len()..];
-        let group = rest.trim_start_matches([' ', '\t', '\n', '\r']);
-        if !group.starts_with('(') {
+    let bytes = contents.as_bytes();
+    let mut index = 0;
+    while let Some(marker_end) = next_code_marker(contents, ".binaryTarget", &mut index) {
+        let Some(group_start) = skip_trivia(bytes, marker_end) else {
+            break;
+        };
+        if bytes.get(group_start) != Some(&b'(') {
+            index = marker_end;
             continue;
         }
+        let group = &contents[group_start..];
         let Some((inner, after)) = balanced_group(group) else {
             break;
         };
         targets.push(BinaryTarget {
-            name: string_arg(inner, "name"),
-            path: string_arg(inner, "path"),
-            url: string_arg(inner, "url"),
+            name: literal_string_arg(inner, "name"),
+            path: literal_string_arg(inner, "path"),
+            url: literal_string_arg(inner, "url"),
         });
-        rest = after;
+        index = group_start + group.len() - after.len();
     }
     targets
 }
@@ -1718,6 +1725,27 @@ mod tests {
         assert!(parse_package_facts(".testTarget (name: \"App\")").has_tests);
         assert!(!parse_package_facts(".target(name: \"App\")").has_tests);
         assert!(!parse_package_facts("// see .testTarget docs").has_tests);
+    }
+
+    #[test]
+    fn package_markers_ignore_comments_and_string_literals() {
+        let facts = parse_package_facts(
+            r#"
+            let documentation = ".testTarget(name: \"Fake\")"
+            let binaryDocumentation = ".binaryTarget(name: \"Fake\", path: \"fake.xcframework\")"
+            // .testTarget(name: "CommentedOut")
+            /* .binaryTarget(name: "CommentedOut", path: "commented.xcframework") */
+            .testTarget(name: "RealTests")
+            .binaryTarget(name: "RealBinary", path: "real.xcframework")
+            "#,
+        );
+        assert!(facts.has_tests);
+        assert_eq!(facts.binary_targets.len(), 1);
+        assert_eq!(facts.binary_targets[0].name.as_deref(), Some("RealBinary"));
+        assert_eq!(
+            facts.binary_targets[0].path.as_deref(),
+            Some("real.xcframework")
+        );
     }
 
     #[test]

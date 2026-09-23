@@ -613,42 +613,17 @@ fn collect_counts(
         total: declared_count(
             document,
             count_object,
-            &[
-                "totalTests",
-                "total",
-                "testCount",
-                "testsCount",
-                "testsTotal",
-            ],
+            &["totalTests", "total", "testCount"],
         )?,
-        passed: declared_count(
-            document,
-            count_object,
-            &["passedTests", "testsPassed", "passed"],
-        )?,
+        passed: declared_count(document, count_object, &["passedTests", "passed"])?,
         failed: declared_count(document, count_object, failed_fields)?,
-        skipped: declared_count(
-            document,
-            count_object,
-            &["skippedTests", "testsSkipped", "skipped"],
-        )?,
+        skipped: declared_count(document, count_object, &["skippedTests", "skipped"])?,
         cancelled: declared_count(
             document,
             count_object,
-            &[
-                "cancelledTests",
-                "canceledTests",
-                "testsCancelled",
-                "testsCanceled",
-                "cancelled",
-                "canceled",
-            ],
+            &["cancelledTests", "canceledTests", "cancelled", "canceled"],
         )?,
-        unknown: declared_count(
-            document,
-            count_object,
-            &["unknownTests", "testsUnknown", "unknown"],
-        )?,
+        unknown: declared_count(document, count_object, &["unknownTests", "unknown"])?,
     };
     declared.failed = add_declared_counts(
         declared.failed,
@@ -758,20 +733,7 @@ fn collect_record_counts(
         let status = record_status(record)?;
         let expected_failure = record_expected_failure(record)?;
         match (status.as_deref(), expected_failure) {
-            (_, true)
-            | (
-                Some(
-                    "failed"
-                    | "failure"
-                    | "error"
-                    | "errors"
-                    | "expectedfailure"
-                    | "expectedfailurepassed"
-                    | "xfailed"
-                    | "xfail",
-                ),
-                false,
-            ) => {
+            (_, true) | (Some("failed" | "failure" | "error" | "expectedfailure"), false) => {
                 counts.failed += 1;
                 if let Some(message) = record_message(record) {
                     diagnostics.push(TestDiagnostic {
@@ -781,16 +743,13 @@ fn collect_record_counts(
                     });
                 }
             }
-            (Some("passed" | "pass" | "success" | "succeeded" | "ok"), false) => {
+            (Some("passed" | "success" | "succeeded"), false) => {
                 counts.passed += 1;
             }
-            (
-                Some("skipped" | "skip" | "disabled" | "pending" | "notrun" | "notexecuted"),
-                false,
-            ) => {
+            (Some("skipped" | "disabled" | "pending"), false) => {
                 counts.skipped += 1;
             }
-            (Some("cancelled" | "canceled" | "cancel"), false) => counts.cancelled += 1,
+            (Some("cancelled" | "canceled"), false) => counts.cancelled += 1,
             _ => counts.unknown += 1,
         }
     }
@@ -929,15 +888,6 @@ fn record_status(record: &serde_json::Value) -> Result<Option<String>, TestResul
 fn expected_failure_value(value: &serde_json::Value) -> Result<bool, TestResultParseError> {
     match value {
         serde_json::Value::Bool(value) => Ok(*value),
-        serde_json::Value::Number(value) => value
-            .as_u64()
-            .map(|value| value != 0)
-            .ok_or(TestResultParseError::MalformedJson),
-        serde_json::Value::String(value) => match normalize_status(value).as_str() {
-            "true" | "yes" | "expected" | "expectedfailure" => Ok(true),
-            "false" | "no" | "none" => Ok(false),
-            _ => Err(TestResultParseError::MalformedJson),
-        },
         _ => Err(TestResultParseError::MalformedJson),
     }
 }
@@ -1006,20 +956,10 @@ fn top_level_status(
             return Err(TestResultParseError::MalformedJson);
         };
         let candidate = match normalize_status(value).as_str() {
-            "passed" | "pass" | "success" | "succeeded" | "ok" => TopLevelStatus::Passed,
-            "failed"
-            | "fail"
-            | "failure"
-            | "error"
-            | "errors"
-            | "expectedfailure"
-            | "expectedfailurepassed"
-            | "xfailed"
-            | "xfail" => TopLevelStatus::Failed,
-            "cancelled" | "canceled" | "cancel" => TopLevelStatus::Cancelled,
-            "skipped" | "skip" | "disabled" | "pending" | "notrun" | "notexecuted" => {
-                TopLevelStatus::Skipped
-            }
+            "passed" | "success" | "succeeded" => TopLevelStatus::Passed,
+            "failed" | "failure" | "error" | "expectedfailure" => TopLevelStatus::Failed,
+            "cancelled" | "canceled" => TopLevelStatus::Cancelled,
+            "skipped" | "disabled" | "pending" => TopLevelStatus::Skipped,
             _ => TopLevelStatus::Unknown,
         };
         if status.is_some_and(|previous| previous != candidate) {
@@ -1365,6 +1305,18 @@ mod tests {
                         && evidence.counts.failed == 1
             ));
         }
+
+        let error = parse_swift_testing_summary(&json(&serde_json::json!({
+            "source": "swift-testing",
+            "tests": [{"status": "ok"}],
+        })))
+        .expect_err("non-Apple status aliases must stay unknown");
+        assert!(matches!(
+            error,
+            TestResultParseError::Rejected { evidence }
+                if evidence.status == TestResultStatus::Incomplete
+                    && evidence.counts.unknown == 1
+        ));
     }
 
     #[test]
