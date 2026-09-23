@@ -23,7 +23,7 @@ use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::s2::provider::{
-    parse_provider_set, parse_selectors, ProviderId, ProviderMode, ProviderSelector,
+    parse_provider_set, parse_selectors, ProviderId, ProviderMode, ProviderSelector, RunnerTarget,
 };
 use crate::s2::{content_digest_bytes, GeneratorError};
 
@@ -3918,30 +3918,35 @@ fn validate_check_profile_row(
     if let Some(schedule) = row.schedule.as_deref() {
         validate_check_profile_cron(id, schedule)?;
     }
-    match row.runner.as_deref() {
-        None | Some("github" | "macos" | "velnor") => {}
-        Some(runner) => {
-            return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runner must be one of: github, macos, velnor; found `{runner}`"
-            )));
-        }
-    }
-    if row.runner.as_deref().unwrap_or("github") == "velnor" {
+    let runner = row
+        .runner
+        .as_deref()
+        .map(RunnerTarget::parse)
+        .transpose()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "[[check_profile]] {id} runner must be a canonical provider (github-hosted, github-self-hosted, velnor) or the explicit macos target: {error}"
+            ))
+        })?;
+    if let Some(runner) = runner {
         let universe = config
             .workflow
             .providers
             .as_deref()
             .map(|providers| parse_provider_set(providers, "[workflow] providers"))
             .transpose()?
-            .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
-        if !universe.contains(&ProviderId::Velnor) {
+            .unwrap_or_else(|| ProviderId::ALL.into_iter().collect());
+        let provider = runner.provider();
+        if !universe.contains(&provider) {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runs on velnor, but [workflow] providers has no velnor provider"
+                "[[check_profile]] {id} runner `{runner}` selects {provider}, but [workflow] providers does not include that lane"
             )));
         }
-        if !config.workflow.selectors.contains_key("velnor") {
+        if matches!(runner, RunnerTarget::Provider(_))
+            && !config.workflow.selectors.contains_key(provider.as_str())
+        {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runs on velnor, but [workflow.selectors.velnor] names no selector for the job"
+                "[[check_profile]] {id} runner `{runner}` selects {provider}, but [workflow.selectors.{provider}] names no selector for the job"
             )));
         }
     }
@@ -4586,19 +4591,19 @@ fn validate_release_jobs(
                 }
             }
         }
-        let runner = row.runner.as_deref().unwrap_or("github");
-        let (provider, needs_selector) = match runner {
-            "github" => (ProviderId::GithubHosted, true),
-            // macOS is a fixed GitHub-hosted label, so it needs the hosted
-            // provider but not its Linux selector.
-            "macos" => (ProviderId::GithubHosted, false),
-            "velnor" => (ProviderId::Velnor, true),
-            _ => {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} runner must be one of github, macos, velnor; found {runner}"
-                )));
-            }
-        };
+        let runner = row
+            .runner
+            .as_deref()
+            .map(RunnerTarget::parse)
+            .transpose()
+            .map_err(|error| {
+                GeneratorError::usage(format!(
+                    "[[release.job]] {id} runner must be a canonical provider (github-hosted, github-self-hosted, velnor) or the explicit macos target: {error}"
+                ))
+            })?
+            .unwrap_or_default();
+        let provider = runner.provider();
+        let needs_selector = matches!(runner, RunnerTarget::Provider(_));
         if !providers.contains(&provider) {
             return Err(GeneratorError::usage(format!(
                 "[[release.job]] {id} runner `{runner}` selects {provider}, but [workflow] providers does not include that lane"
@@ -4641,7 +4646,7 @@ fn validate_release_jobs(
                     )));
                 }
             }
-            if runner == "velnor"
+            if runner.is_local()
                 && (subjects.len() != 1
                     || !VELNOR_ATTESTATION_SUBJECTS.contains(&subjects[0].as_str()))
             {
@@ -5066,10 +5071,10 @@ mod tests {
     fn release_job_rejects_runner_outside_provider_universe() {
         let error = tasks_release_validation_error(
             "[workflow]\nproviders = [\"velnor\"]\n",
-            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nrunner = \"github\"\n",
+            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nrunner = \"github-hosted\"\n",
         );
         assert!(
-            error.contains("runner `github` selects github-hosted"),
+            error.contains("runner `github-hosted` selects github-hosted"),
             "{error}"
         );
         assert!(error.contains("does not include that lane"), "{error}");
@@ -7214,7 +7219,7 @@ mod tests {
             "a Velnor profile on a GitHub-only surface must fail",
         );
         assert!(
-            error.to_string().contains("has no velnor provider"),
+            error.to_string().contains("does not include that lane"),
             "{error}"
         );
 

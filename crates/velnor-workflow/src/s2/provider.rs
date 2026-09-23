@@ -17,9 +17,12 @@ use crate::s2::GeneratorError;
 
 /// The only provider vocabulary. Canonical order (sort/digest/display) is
 /// declaration order: hosted, self-hosted, native.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ProviderId {
+    #[default]
     GithubHosted,
     GithubSelfHosted,
     Velnor,
@@ -62,6 +65,69 @@ impl ProviderId {
     #[must_use]
     pub(crate) fn is_local(self) -> bool {
         !matches!(self, Self::GithubHosted)
+    }
+}
+
+/// Routing labels that make local placement explicit. A provider selector is
+/// not a host identity by itself: the same local provider can be deployed on
+/// both physical hosts, so every local selector carries exactly one host
+/// label in addition to its execution-engine label.
+pub(crate) const SELF_HOSTED_LABEL: &str = "self-hosted";
+pub(crate) const SCALE_SET_LABEL: &str = "velnor-scale-set";
+pub(crate) const NATIVE_LABEL: &str = "velnor-native";
+pub(crate) const LOCAL_MAC_HOST_LABEL: &str = "local-mac";
+pub(crate) const BASTION_HOST_LABEL: &str = "bastion";
+const LOCAL_HOST_LABELS: [&str; 2] = [LOCAL_MAC_HOST_LABEL, BASTION_HOST_LABEL];
+
+/// A named runner target used by scheduled and release jobs. `macos` is a
+/// platform target, not a provider alias; all provider targets use the
+/// canonical provider IDs above. In particular, `github` is intentionally not
+/// accepted.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum RunnerTarget {
+    Provider(ProviderId),
+    GithubHostedMacos,
+}
+
+impl Default for RunnerTarget {
+    fn default() -> Self {
+        Self::Provider(ProviderId::GithubHosted)
+    }
+}
+
+impl RunnerTarget {
+    pub(crate) fn parse(value: &str) -> Result<Self, GeneratorError> {
+        match value {
+            "macos" => Ok(Self::GithubHostedMacos),
+            _ => ProviderId::parse(value).map(Self::Provider),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn provider(self) -> ProviderId {
+        match self {
+            Self::Provider(provider) => provider,
+            Self::GithubHostedMacos => ProviderId::GithubHosted,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn is_local(self) -> bool {
+        self.provider().is_local()
+    }
+
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider(provider) => provider.as_str(),
+            Self::GithubHostedMacos => "macos",
+        }
+    }
+}
+
+impl std::fmt::Display for RunnerTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -272,12 +338,106 @@ pub(crate) fn validate_selector_disjointness(
             continue;
         };
         for label in &selector.runs_on {
+            // GitHub's conventional marker identifies a runner as
+            // self-hosted; it is intentionally shared by both local engines.
+            // Disjointness is about the dedicated engine/host labels that
+            // decide ownership, not this common class marker.
+            if label == SELF_HOSTED_LABEL || LOCAL_HOST_LABELS.contains(&label.as_str()) {
+                continue;
+            }
             if let Some(owner) = claimed.insert(label.as_str(), provider) {
                 return Err(GeneratorError::usage(format!(
                     "[workflow.selectors] label `{label}` is claimed by {owner} and {provider}; local providers need disjoint dedicated selectors"
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Validate the provider identity encoded by a selector. This is intentionally
+/// independent of visibility evidence so direct IR/render callers cannot turn
+/// a hosted logical lane into a local runner by supplying local labels.
+pub(crate) fn validate_selector_identity(
+    provider: ProviderId,
+    selector: &ProviderSelector,
+) -> Result<(), GeneratorError> {
+    if selector.runs_on.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "[workflow.selectors.{provider}] runs_on must name at least one label"
+        )));
+    }
+    match provider {
+        ProviderId::GithubHosted => {
+            for label in &selector.runs_on {
+                if !is_github_owned_label(label) {
+                    return Err(GeneratorError::usage(format!(
+                        "[workflow.selectors.github-hosted] runs_on carries {label:?}, which is not a GitHub-hosted label (ubuntu-*|macos-*|windows-*)"
+                    )));
+                }
+            }
+        }
+        ProviderId::GithubSelfHosted | ProviderId::Velnor => {
+            let required_engine = match provider {
+                ProviderId::GithubSelfHosted => SCALE_SET_LABEL,
+                ProviderId::Velnor => NATIVE_LABEL,
+                ProviderId::GithubHosted => unreachable!("hosted handled above"),
+            };
+            if !selector
+                .runs_on
+                .iter()
+                .any(|label| label == SELF_HOSTED_LABEL)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{provider}] runs_on must include `{SELF_HOSTED_LABEL}`"
+                )));
+            }
+            if !selector
+                .runs_on
+                .iter()
+                .any(|label| label == required_engine)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{provider}] runs_on must include its dedicated `{required_engine}` engine label"
+                )));
+            }
+            let hosts = selector
+                .runs_on
+                .iter()
+                .filter(|label| LOCAL_HOST_LABELS.contains(&label.as_str()))
+                .count();
+            if hosts != 1 {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{provider}] runs_on must include exactly one host label: `{LOCAL_MAC_HOST_LABEL}` or `{BASTION_HOST_LABEL}`"
+                )));
+            }
+            if let Some(label) = selector
+                .runs_on
+                .iter()
+                .find(|label| is_github_owned_label(label))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{provider}] runs_on cannot carry GitHub-hosted label {label:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate every selector used by a provider universe. This is called both
+/// after scanning and immediately before IR rendering because callers can
+/// construct `ProjectConfig` directly in tests and integrations.
+pub(crate) fn validate_selector_identities(
+    selectors: &SelectorMap,
+    universe: &ProviderSet,
+) -> Result<(), GeneratorError> {
+    require_selectors_for(selectors, universe)?;
+    for provider in universe {
+        let selector = selectors
+            .get(provider)
+            .expect("require_selectors_for checked the provider selector");
+        validate_selector_identity(*provider, selector)?;
     }
     Ok(())
 }
@@ -1091,6 +1251,91 @@ mod tests {
             "missing selector",
         );
         assert!(error.contains("[workflow.selectors.velnor]"), "{error}");
+    }
+
+    #[test]
+    fn selector_identity_is_provider_and_host_qualified() {
+        let selectors = SelectorMap::from([
+            (
+                ProviderId::GithubHosted,
+                ProviderSelector {
+                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                },
+            ),
+            (
+                ProviderId::GithubSelfHosted,
+                ProviderSelector {
+                    runs_on: vec![
+                        SELF_HOSTED_LABEL.to_owned(),
+                        SCALE_SET_LABEL.to_owned(),
+                        LOCAL_MAC_HOST_LABEL.to_owned(),
+                    ],
+                },
+            ),
+            (
+                ProviderId::Velnor,
+                ProviderSelector {
+                    runs_on: vec![
+                        SELF_HOSTED_LABEL.to_owned(),
+                        NATIVE_LABEL.to_owned(),
+                        LOCAL_MAC_HOST_LABEL.to_owned(),
+                    ],
+                },
+            ),
+        ]);
+        let universe = ProviderId::ALL.into_iter().collect();
+        assert!(validate_selector_identities(&selectors, &universe).is_ok());
+
+        let mut hosted_spoof = selectors.clone();
+        hosted_spoof
+            .get_mut(&ProviderId::GithubHosted)
+            .unwrap()
+            .runs_on = vec![SCALE_SET_LABEL.to_owned()];
+        let error = must_fail(
+            validate_selector_identities(&hosted_spoof, &universe),
+            "hosted selector spoof",
+        );
+        assert!(
+            error.contains("github-hosted") && error.contains("GitHub-hosted"),
+            "{error}"
+        );
+
+        let mut unqualified_native = selectors;
+        unqualified_native
+            .get_mut(&ProviderId::Velnor)
+            .unwrap()
+            .runs_on = vec![SELF_HOSTED_LABEL.to_owned(), NATIVE_LABEL.to_owned()];
+        let error = must_fail(
+            validate_selector_identities(&unqualified_native, &universe),
+            "unqualified native selector",
+        );
+        assert!(error.contains("exactly one host label"), "{error}");
+    }
+
+    #[test]
+    fn runner_targets_parse_only_canonical_providers_and_explicit_macos() {
+        assert_eq!(
+            RunnerTarget::parse("github-hosted").unwrap(),
+            RunnerTarget::Provider(ProviderId::GithubHosted)
+        );
+        assert_eq!(
+            RunnerTarget::parse("github-self-hosted").unwrap(),
+            RunnerTarget::Provider(ProviderId::GithubSelfHosted)
+        );
+        assert_eq!(
+            RunnerTarget::parse("velnor").unwrap(),
+            RunnerTarget::Provider(ProviderId::Velnor)
+        );
+        assert_eq!(
+            RunnerTarget::parse("macos").unwrap(),
+            RunnerTarget::GithubHostedMacos
+        );
+        for alias in ["github", "both", "native", "self-hosted"] {
+            assert!(
+                RunnerTarget::parse(alias).is_err(),
+                "alias accepted: {alias}"
+            );
+        }
     }
 
     #[test]

@@ -477,13 +477,21 @@ pub(crate) fn default_selectors() -> crate::s2::provider::SelectorMap {
         (
             ProviderId::GithubSelfHosted,
             ProviderSelector {
-                runs_on: vec!["bastion-scale-set".to_owned()],
+                runs_on: vec![
+                    crate::s2::provider::SELF_HOSTED_LABEL.to_owned(),
+                    crate::s2::provider::SCALE_SET_LABEL.to_owned(),
+                    crate::s2::provider::LOCAL_MAC_HOST_LABEL.to_owned(),
+                ],
             },
         ),
         (
             ProviderId::Velnor,
             ProviderSelector {
-                runs_on: vec!["velnor-native".to_owned()],
+                runs_on: vec![
+                    crate::s2::provider::SELF_HOSTED_LABEL.to_owned(),
+                    crate::s2::provider::NATIVE_LABEL.to_owned(),
+                    crate::s2::provider::LOCAL_MAC_HOST_LABEL.to_owned(),
+                ],
             },
         ),
     ]

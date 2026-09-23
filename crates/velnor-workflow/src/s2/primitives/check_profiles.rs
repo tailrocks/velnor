@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::{Args, Primitive, ProviderAdmission, RenderCtx, Rendered, WorkflowIr};
-use crate::s2::provider::{runs_on_for, ProviderId};
+use crate::s2::provider::{runs_on_for, ProviderId, RunnerTarget};
 use crate::s2::{
     runs_on_labels_yaml, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError, ProjectConfig,
     GENERATED_HEADER,
@@ -491,11 +491,13 @@ fn render_profile_job(
     if !profile.needs.is_empty() {
         let _ = writeln!(output, "    needs: [{}]", profile.needs.join(", "));
     }
-    // A Velnor profile mounts the checkout and runs named tasks, so it
-    // skips fork and bot pull requests exactly like any other local job.
-    if profile.runner.as_str() == "velnor" {
-        let admission = WorkflowIr::from_config(config)
-            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+    // Both local providers mount a caller-managed workspace, so both skip
+    // fork and bot pull requests. Hosted lanes remain available to untrusted
+    // events, including when they are rendered from the same provider plan.
+    if profile.runner.is_local() {
+        let admission = WorkflowIr::from_config(config).provider_admission_expression(
+            ProviderAdmission::ProviderTrusted(profile.runner.provider()),
+        );
         let _ = writeln!(output, "    if: ${{{{ ({admission}) }}}}");
     }
     let runs_on = profile_runs_on(config, profile)?;
@@ -544,15 +546,25 @@ fn profile_runs_on(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
 ) -> Result<String, GeneratorError> {
-    match profile.runner.as_str() {
-        "github" => runs_on_for(&config.selectors, ProviderId::GithubHosted)
-            .map(runs_on_labels_yaml),
-        "macos" => Ok(yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)),
-        "velnor" => runs_on_for(&config.selectors, ProviderId::Velnor).map(runs_on_labels_yaml),
-        runner => Err(GeneratorError::usage(format!(
-            "check profile `{}` runs on `{runner}`, which names no profile runner; use github, macos, or velnor",
-            profile.id
-        ))),
+    match profile.runner {
+        RunnerTarget::Provider(provider) => {
+            if !config.providers.contains(&provider) {
+                return Err(GeneratorError::usage(format!(
+                    "check profile `{}` selects provider `{provider}`, but it is absent from [workflow] providers",
+                    profile.id
+                )));
+            }
+            runs_on_for(&config.selectors, provider).map(runs_on_labels_yaml)
+        }
+        RunnerTarget::GithubHostedMacos => {
+            if !config.providers.contains(&ProviderId::GithubHosted) {
+                return Err(GeneratorError::usage(format!(
+                    "check profile `{}` selects hosted macOS, but github-hosted is absent from [workflow] providers",
+                    profile.id
+                )));
+            }
+            Ok(yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON))
+        }
     }
 }
 
@@ -637,7 +649,7 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
         &config.mise_lock_backends,
         &config.mise_install_deps,
     );
-    if profile.runner == "velnor" {
+    if profile.runner.is_local() {
         if !tools.is_empty() {
             let _ = writeln!(
                 output,
@@ -687,6 +699,7 @@ mod tests {
 
     use super::*;
     use crate::s2::config;
+    use crate::s2::provider::RunnerTarget;
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
         match result {
@@ -707,7 +720,7 @@ mod tests {
             id: id.to_owned(),
             name: format!("{id} check"),
             schedule: "23 2 * * *".to_owned(),
-            runner: "github".to_owned(),
+            runner: RunnerTarget::Provider(ProviderId::GithubHosted),
             tools: Vec::new(),
             tasks: vec![format!("check-{id}")],
             needs: Vec::new(),
@@ -1017,10 +1030,10 @@ mod tests {
         let mut hosted = profile("hosted");
         hosted.tools = vec!["ripgrep".to_owned(), "cargo:example-tool".to_owned()];
         let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
+        fleet.runner = RunnerTarget::Provider(ProviderId::Velnor);
         fleet.tools = vec!["ripgrep".to_owned()];
         let mut bare = profile("bare");
-        bare.runner = "velnor".to_owned();
+        bare.runner = RunnerTarget::Provider(ProviderId::Velnor);
         let config = profile_config(vec![hosted, fleet, bare]);
         let map = args_for("");
         let selected = must(
@@ -1139,7 +1152,7 @@ mod tests {
     #[test]
     fn velnor_profile_needs_a_selector_and_renders_it() {
         let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
+        fleet.runner = RunnerTarget::Provider(ProviderId::Velnor);
         let config = profile_config(vec![fleet.clone()]);
         let runs_on = must(
             profile_runs_on(&config, &fleet),
@@ -1159,7 +1172,7 @@ mod tests {
     #[test]
     fn velnor_profile_uses_canonical_provider_admission() {
         let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
+        fleet.runner = RunnerTarget::Provider(ProviderId::Velnor);
         let mut config = profile_config(vec![fleet.clone()]);
 
         let admission = WorkflowIr::from_config(&config)
@@ -1201,6 +1214,38 @@ mod tests {
     }
 
     #[test]
+    fn official_scale_set_profile_is_host_qualified_and_trusted_gated() {
+        let mut official = profile("official");
+        official.runner = RunnerTarget::Provider(ProviderId::GithubSelfHosted);
+        let mut config = profile_config(vec![official.clone()]);
+        config.providers.insert(ProviderId::GithubSelfHosted);
+        config.selectors.insert(
+            ProviderId::GithubSelfHosted,
+            crate::s2::provider::ProviderSelector {
+                runs_on: vec![
+                    "self-hosted".to_owned(),
+                    "velnor-scale-set".to_owned(),
+                    "local-mac".to_owned(),
+                ],
+            },
+        );
+
+        let mut job = String::new();
+        must(
+            render_profile_job(&mut job, &config, &official),
+            "render the official Scale Set profile job",
+        );
+        assert!(
+            job.contains("runs-on: [self-hosted, velnor-scale-set, local-mac]"),
+            "official Scale Set placement must carry its provider and host labels: {job}"
+        );
+        assert!(
+            job.contains("github.event.pull_request.head.repo.fork"),
+            "official Scale Set jobs must reject fork PRs before local admission: {job}"
+        );
+    }
+
+    #[test]
     fn runner_selection_covers_hosted_runners_and_refuses_unknown() {
         let config = profile_config(Vec::new());
         let hosted = profile("hosted");
@@ -1212,15 +1257,13 @@ mod tests {
             "ubuntu-24.04"
         );
         let mut apple = profile("apple");
-        apple.runner = "macos".to_owned();
+        apple.runner = RunnerTarget::GithubHostedMacos;
         assert_eq!(
             must(profile_runs_on(&config, &apple), "render the Apple runner"),
             "macos-26"
         );
-        let mut unknown = profile("unknown");
-        unknown.runner = "planetary".to_owned();
         let error = must_fail(
-            profile_runs_on(&config, &unknown),
+            RunnerTarget::parse("planetary"),
             "an unknown runner must fail",
         );
         assert!(error.to_string().contains("planetary"), "{error}");

@@ -17,7 +17,7 @@ use super::{
     WorkflowIr, D19_PIN_FETCH_COMMANDS, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
     RELEASE_SIGNER, STATIC_WORKFLOW,
 };
-use crate::s2::provider::{self, runs_on_for, ProviderId, ProviderSet};
+use crate::s2::provider::{self, runs_on_for, ProviderId, ProviderSet, RunnerTarget};
 use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, runs_on_labels_yaml,
     selector_runs_on_yaml, shell_quote, unit_display_label, workflow_runtime_setup,
@@ -3331,8 +3331,11 @@ fn render_versioned_tool_mise_setup(config: &ProjectConfig) -> String {
 /// Pinned Mise provisioning for one typed release job. The job's selected
 /// runner owns this decision: GitHub-hosted Linux and macOS lanes need the
 /// setup action, while Velnor lanes use the preinstalled binary.
-fn render_mise_setup_for_runner(runner: &str) -> String {
-    if matches!(runner, "github" | "macos") {
+fn render_mise_setup_for_runner(runner: RunnerTarget) -> String {
+    if matches!(
+        runner,
+        RunnerTarget::Provider(ProviderId::GithubHosted) | RunnerTarget::GithubHostedMacos
+    ) {
         render_mise_setup()
     } else {
         String::new()
@@ -3367,17 +3370,16 @@ fn render_versioned_tool_task_steps(tasks: &[String], gate: Option<&str>) -> Str
 }
 
 /// The runner selector for one typed tasks-release job. macOS is a fixed
-/// hosted lane in schema 2; the other aliases resolve through the explicit
-/// provider selectors that config validation requires.
+/// hosted platform target; provider lanes always resolve through their own
+/// explicit selector.
 fn tasks_job_runs_on(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
-    match job.runner.as_str() {
-        "macos" => yaml_scalar(MACOS_HOSTED_RUNS_ON),
-        "velnor" => config
+    match job.runner {
+        RunnerTarget::GithubHostedMacos => yaml_scalar(MACOS_HOSTED_RUNS_ON),
+        RunnerTarget::Provider(provider) => config
             .selectors
-            .get(&ProviderId::Velnor)
+            .get(&provider)
             .map(selector_runs_on_yaml)
             .unwrap_or_default(),
-        _ => selected_runner(config),
     }
 }
 
@@ -3416,7 +3418,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
     // the policy audit admits the local job. Hosted jobs keep the bare
     // functional condition.
     if let Some(condition) = tasks_job_gate(job) {
-        let gate = if job.runner.as_str() == "velnor" {
+        let gate = if job.runner.is_local() {
             format!(
                 "({condition}) && ({})",
                 super::ir::WorkflowIr::trusted_event_expression()
@@ -3425,7 +3427,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
             condition.to_owned()
         };
         let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
-    } else if job.runner.as_str() == "velnor" {
+    } else if job.runner.is_local() {
         let _ = writeln!(
             output,
             "    if: ${{{{ {} }}}}",
@@ -3470,7 +3472,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         output,
         "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
         ActionPin::Checkout.reference(),
-        render_mise_setup_for_runner(&job.runner),
+        render_mise_setup_for_runner(job.runner),
     );
     output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
     if !job.attest_subjects.is_empty() {
@@ -6364,11 +6366,9 @@ cp "$record" "$out"
     }
 
     /// A scanned throwaway repository: the only way to obtain a real shape.
-    /// The fleet-identity label for Velnor selectors in scan-path configs.
-    /// Spelled once in the estate module; interpolated here so the generic
-    /// engine never names it.
-    fn fleet_label() -> &'static str {
-        crate::s2::estate::VELNOR_FLEET_RUNS_ON[1]
+    /// A host-qualified native selector for scan-path configs.
+    fn native_selector_labels() -> &'static str {
+        "\"self-hosted\", \"velnor-native\", \"bastion\""
     }
 
     /// Write visibility evidence for a release test repository: the
@@ -6614,7 +6614,11 @@ cp "$record" "$out"
         selectors.insert(
             crate::s2::provider::ProviderId::Velnor,
             crate::s2::provider::ProviderSelector {
-                runs_on: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+                runs_on: vec![
+                    crate::s2::provider::SELF_HOSTED_LABEL.to_owned(),
+                    crate::s2::provider::NATIVE_LABEL.to_owned(),
+                    crate::s2::provider::BASTION_HOST_LABEL.to_owned(),
+                ],
             },
         );
         crate::s2::ProjectConfig {
@@ -6737,11 +6741,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "ccb41bed96febf991764dcf752169bc5e56d2f8a83593199b96e16d24df9ea9f",
+                "86dca0c8c9fe464d89bbb46b2e26edc7ee48f3ae9c377238ab96192b71534d5f",
             ),
             (
                 "preview.yml",
-                "9a860863d29563a89c267e04b9eb0b2f95e6f17ffbf02042feedfbef55a09a94",
+                "31039d3574795ff14077723db49602b08d607679c7d83064fa3be8efde9a51b8",
             ),
             (
                 "maintenance.yml",
@@ -6868,11 +6872,11 @@ cp "$record" "$out"
             // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "d41173c905e9d6b2627f21da8f3f9a7e1fed164720b5c928e76030b39dd2b2a2",
+                "7be978d997b15d5a45810e893ceeaae5bfa32c5397422b6c84ab832ec8876157",
             ),
             (
                 "preview.yml",
-                "b462ebf6c21ec929e45a99b108689011f2ae079dbcac21d45cc9f0c8df043a27",
+                "db7a290719ffd7e0985e3383f760138881bbc0f9505f6fe9f4c092a042fdfcf4",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7187,7 +7191,7 @@ cp "$record" "$out"
         let preview = super::render_preview(&config, Some(release));
         let identity = yaml_job(&preview, "identity");
         assert!(
-            identity.contains("runs-on: [self-hosted, example-runner]"),
+            identity.contains("runs-on: [self-hosted, velnor-native, bastion]"),
             "the identity job follows a Velnor-only universe onto Velnor: {identity}"
         );
         assert!(
@@ -7249,7 +7253,7 @@ cp "$record" "$out"
         ];
 
         for workflow in rendered {
-            assert!(workflow.contains("runs-on: [self-hosted, example-runner]"));
+            assert!(workflow.contains("runs-on: [self-hosted, velnor-native, bastion]"));
             assert!(!workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
             assert!(!workflow.contains("github-hosted"), "{workflow}");
         }
@@ -7384,7 +7388,7 @@ cp "$record" "$out"
         assert!(
             preview.contains("provider: github-hosted")
                 && !preview.contains("provider: velnor")
-                && !preview.contains("runs-on: [self-hosted, example-runner]"),
+                && !preview.contains("runs-on: [self-hosted, velnor-native, bastion]"),
             "preview publisher must stay hosted while release verification is explicit: {preview}"
         );
         let preview_unit = yaml_job(&preview, "release-github-hosted-rust-example");
@@ -7521,8 +7525,8 @@ cp "$record" "$out"
         // explicit verification list selects lanes, and an omission falls
         // back to the visibility universe on either side of it.
         let velnor_selector = format!(
-            "[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n",
-            fleet_label()
+            "[workflow.selectors.velnor]\nruns_on = [{}]\n",
+            native_selector_labels()
         );
         for (visibility, universe, selector, verification, expect_hosted, expect_velnor) in [
             (
@@ -7787,7 +7791,7 @@ cp "$record" "$out"
         must(
             fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
-                "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"velnor\"]\nautomatic_providers = [\"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"velnor\"]\nautomatic_providers = [\"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-native\", \"bastion\"]\n",
             ),
             "write audited generation config",
         );
@@ -8006,7 +8010,7 @@ verification_providers = ["github-hosted"]
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github-hosted\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github-hosted\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
             ),
             "write tasks release config",
         );
@@ -8059,12 +8063,16 @@ verification_providers = ["github-hosted"]
         let mut config = config(&["release.yml"], None);
         config.providers = [ProviderId::Velnor].into_iter().collect();
 
-        for (runner, needs_setup) in [("github", true), ("macos", true), ("velnor", false)] {
+        for (runner, needs_setup) in [
+            (RunnerTarget::Provider(ProviderId::GithubHosted), true),
+            (RunnerTarget::GithubHostedMacos, true),
+            (RunnerTarget::Provider(ProviderId::Velnor), false),
+        ] {
             let job = ReleaseJobSpec {
                 id: "job".to_owned(),
                 name: "Job".to_owned(),
                 tasks: vec!["desktop-build".to_owned()],
-                runner: runner.to_owned(),
+                runner,
                 timeout_minutes: 10,
                 ..ReleaseJobSpec::default()
             };
@@ -12190,7 +12198,7 @@ verification_providers = ["github-hosted"]
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "ecfe5139ad9f64a1ea7936abcfcdf72e853dc4bdb9fbc45ac06a19414178369b",
+            "09de94a71195ddb72e04e126fd9feb270190e497ceb1a343b1dae2f510ac4a39",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));

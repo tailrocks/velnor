@@ -997,8 +997,9 @@ pub(crate) struct CheckProfileSpec {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) schedule: String,
-    /// The lane the job runs on: `github`, `macos`, or `velnor`.
-    pub(crate) runner: String,
+    /// The canonical provider lane, or the explicit GitHub-hosted macOS
+    /// platform target.
+    pub(crate) runner: provider::RunnerTarget,
     pub(crate) tools: Vec<String>,
     pub(crate) tasks: Vec<String>,
     pub(crate) needs: Vec<String>,
@@ -1190,7 +1191,7 @@ pub(crate) struct ReleaseJobSpec {
     pub(crate) name: String,
     pub(crate) tasks: Vec<String>,
     pub(crate) needs: Vec<String>,
-    pub(crate) runner: String,
+    pub(crate) runner: provider::RunnerTarget,
     pub(crate) modes: Vec<String>,
     pub(crate) timeout_minutes: u32,
     pub(crate) environment: String,
@@ -1746,7 +1747,7 @@ fn enforce_visibility_policy(
             }
         }
     }
-    validate_visibility_selector_identities(config, visibility_expected.as_ref(), &evidence_note)?;
+    validate_visibility_selector_identities(config, &evidence_note)?;
     Ok(())
 }
 
@@ -1760,8 +1761,9 @@ fn enforce_visibility_job_routing(
     evidence_note: &str,
 ) -> Result<(), GeneratorError> {
     for profile in &config.check_profiles {
-        let is_velnor = profile.runner.as_str() == "velnor";
-        if is_velnor == visibility.is_public() {
+        let provider = profile.runner.provider();
+        let expected_provider = expected.iter().next().copied();
+        if Some(provider) != expected_provider {
             return Err(GeneratorError::usage(format!(
                 "contradictory runner selection: [[check_profile]] `{}` runs on `{}` (macOS counts as GitHub-hosted), but {evidence_note}",
                 profile.id, profile.runner
@@ -1793,8 +1795,9 @@ fn enforce_visibility_job_routing(
         }
     }
     for job in &release.jobs {
-        let is_velnor = job.runner.as_str() == "velnor";
-        if is_velnor == visibility.is_public() {
+        let provider = job.runner.provider();
+        let expected_provider = expected.iter().next().copied();
+        if Some(provider) != expected_provider {
             return Err(GeneratorError::usage(format!(
                 "contradictory runner selection: [[release.job]] `{}` runs on `{}` (macOS counts as GitHub-hosted), but {evidence_note}",
                 job.id, job.runner
@@ -1804,38 +1807,15 @@ fn enforce_visibility_job_routing(
     Ok(())
 }
 
-/// Validate the provider identity of selectors. The default visibility lane
-/// additionally requires the exact Velnor fleet identity; typed mode keeps
-/// the generic local selectors because its provider universe is explicit.
+/// Validate provider identity before any workflow bytes render. Visibility
+/// evidence supplies the diagnostic context; selector identity itself is a
+/// generic provider invariant and does not depend on repository names.
 fn validate_visibility_selector_identities(
     config: &ProjectConfig,
-    expected: Option<&provider::ProviderSet>,
     evidence_note: &str,
 ) -> Result<(), GeneratorError> {
-    if expected.is_some_and(|expected| expected.contains(&provider::ProviderId::Velnor))
-        && let Some(selector) = config.selectors.get(&provider::ProviderId::Velnor)
-        && !crate::s2::estate::is_velnor_fleet_identity(&selector.runs_on)
-    {
-        return Err(GeneratorError::usage(format!(
-            "contradictory runner selection: [workflow.selectors.velnor] runs_on [{}] is not the Velnor fleet identity — a bare `self-hosted` label proves nothing; the selector must be exactly [{}], but {evidence_note}",
-            selector.runs_on.join(", "),
-            crate::s2::estate::VELNOR_FLEET_RUNS_ON.join(", ")
-        )));
-    }
-    if config
-        .providers
-        .contains(&provider::ProviderId::GithubHosted)
-        && let Some(selector) = config.selectors.get(&provider::ProviderId::GithubHosted)
-    {
-        for label in &selector.runs_on {
-            if !provider::is_github_owned_label(label) {
-                return Err(GeneratorError::usage(format!(
-                    "[workflow.selectors.github-hosted] runs_on carries {label:?}, which is not a GitHub-owned label (ubuntu-*|macos-*|windows-*); hosted recovery must stay GitHub-owned, but {evidence_note}"
-                )));
-            }
-        }
-    }
-    Ok(())
+    provider::validate_selector_identities(&config.selectors, &config.providers)
+        .map_err(|error| GeneratorError::usage(format!("{error}; {evidence_note}")))
 }
 
 fn scan_target(
@@ -2806,11 +2786,17 @@ fn apply_check_profiles(
                 )));
             }
         }
+        let runner = provider::RunnerTarget::parse(row.runner().unwrap_or("github-hosted"))
+            .map_err(|error| {
+                GeneratorError::usage(format!(
+                    "[[check_profile]] {id} runner must be a canonical provider (github-hosted, github-self-hosted, velnor) or the explicit macos target: {error}"
+                ))
+            })?;
         profiles.push(CheckProfileSpec {
             id: id.to_owned(),
             name: row.name().unwrap_or(id).to_owned(),
             schedule: row.schedule().unwrap_or_default().to_owned(),
-            runner: row.runner().unwrap_or("github").to_owned(),
+            runner,
             tools: row.tools().unwrap_or_default().to_vec(),
             tasks: row.tasks().unwrap_or_default().to_vec(),
             needs: row.needs().unwrap_or_default().to_vec(),
@@ -3059,12 +3045,18 @@ fn apply_release(
                     )));
                 }
             }
+            let runner = provider::RunnerTarget::parse(row.runner().unwrap_or("github-hosted"))
+                .map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "[[release.job]] {id} runner must be a canonical provider (github-hosted, github-self-hosted, velnor) or the explicit macos target: {error}"
+                    ))
+                })?;
             jobs.push(ReleaseJobSpec {
                 id: id.to_owned(),
                 name: row.name().unwrap_or(id).to_owned(),
                 tasks: row.tasks().unwrap_or_default().to_vec(),
                 needs: row.needs().unwrap_or_default().to_vec(),
-                runner: row.runner().unwrap_or("github").to_owned(),
+                runner,
                 modes: row.modes().unwrap_or_default().to_vec(),
                 timeout_minutes: row
                     .timeout_minutes()
@@ -3755,10 +3747,7 @@ fn package_update_owner_blocks(config: &ProjectConfig) -> Vec<String> {
 /// local providers need disjoint dedicated selectors. Selectors are a
 /// declared input, never a generator default.
 fn validate_provider_selectors(config: &ProjectConfig) -> Result<(), GeneratorError> {
-    if config.units.is_empty() && config.docs.is_none() {
-        return Ok(());
-    }
-    provider::require_selectors_for(&config.selectors, &config.providers)?;
+    provider::validate_selector_identities(&config.selectors, &config.providers)?;
     provider::validate_selector_disjointness(&config.selectors)?;
     Ok(())
 }
@@ -6618,7 +6607,7 @@ fn generated_files_with_surface(
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     let mut config = config.clone();
     add_owner_runtime_products_file(&mut config);
-    provider::require_selectors_for(&config.selectors, &config.providers)?;
+    provider::validate_selector_identities(&config.selectors, &config.providers)?;
     provider::validate_selector_disjointness(&config.selectors)?;
     let workflow = WorkflowIr::from_config(&config);
     primitives::validate_cache_transports(&workflow)?;
@@ -10291,15 +10280,17 @@ mod tests {
         );
     }
 
-    /// The self-hosted labels a scanned fixture renders. A repository without
-    /// a generation config declares none, so every fixture lane names its own.
-    const FIXTURE_LABELS: &[&str] = &["self-hosted", "example-runner-label"];
+    /// The host-qualified native labels a renamed scanned fixture renders.
+    /// Repository names never participate in placement.
+    const FIXTURE_LABELS: &[&str] = &[
+        provider::SELF_HOSTED_LABEL,
+        provider::NATIVE_LABEL,
+        provider::LOCAL_MAC_HOST_LABEL,
+    ];
 
-    /// The fleet-identity label for Velnor selectors in scan-path configs.
-    /// Spelled once in the estate module; interpolated here so the generic
-    /// engine never names it.
-    fn fleet_label() -> &'static str {
-        crate::s2::estate::VELNOR_FLEET_RUNS_ON[1]
+    /// A host-qualified native selector for scan-path config fixtures.
+    fn native_selector_labels() -> &'static str {
+        "\"self-hosted\", \"velnor-native\", \"local-mac\""
     }
 
     /// The `runs-on:` selector the fixture's Velnor lane renders.
@@ -12999,8 +12990,8 @@ mod tests {
         // selector: a private repository routes Velnor jobs onto exactly
         // the fleet identity.
         let config = format!(
-            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n",
-            fleet_label()
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n\n[workflow.selectors.velnor]\nruns_on = [{}]\n",
+            native_selector_labels()
         );
         let root = configured_repository("selector-config", Some(&config));
         rebind_visibility_evidence(&root, "private");
@@ -13014,7 +13005,13 @@ mod tests {
                 .selectors
                 .get(&ProviderId::Velnor)
                 .map(|selector| selector.runs_on.as_slice()),
-            Some(&["self-hosted".to_owned(), fleet_label().to_owned()][..])
+            Some(
+                &[
+                    "self-hosted".to_owned(),
+                    "velnor-native".to_owned(),
+                    "local-mac".to_owned(),
+                ][..],
+            )
         );
         assert!(
             !scanned.config.toml().contains("runs_on"),
@@ -13167,8 +13164,8 @@ mod tests {
         must(fs::create_dir_all(&directory), "create config directory");
         // A private repository renders the trusted collapsed job on Velnor.
         let config_text = format!(
-            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n",
-            fleet_label()
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n\n[workflow.selectors.velnor]\nruns_on = [{}]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n",
+            native_selector_labels()
         );
         must(
             fs::write(directory.join("velnor-workflow.toml"), &config_text),
@@ -13198,7 +13195,7 @@ mod tests {
             "gated unit renders the trusted collapsed job: {kind}"
         );
         assert!(
-            kind.contains(fleet_label()),
+            kind.contains(provider::NATIVE_LABEL),
             "trusted job keeps the Velnor fleet identity: {kind}"
         );
         assert!(
@@ -14594,7 +14591,11 @@ const INCLUDED: &str = include_str!("fixture.txt");
         config.selectors.insert(
             ProviderId::Velnor,
             provider::ProviderSelector {
-                runs_on: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+                runs_on: vec![
+                    provider::SELF_HOSTED_LABEL.to_owned(),
+                    provider::NATIVE_LABEL.to_owned(),
+                    provider::LOCAL_MAC_HOST_LABEL.to_owned(),
+                ],
             },
         );
         let files = must(generated_files(&config), "generate the nextest surface");
@@ -14682,7 +14683,11 @@ const INCLUDED: &str = include_str!("fixture.txt");
         config.selectors.insert(
             ProviderId::Velnor,
             provider::ProviderSelector {
-                runs_on: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+                runs_on: vec![
+                    provider::SELF_HOSTED_LABEL.to_owned(),
+                    provider::NATIVE_LABEL.to_owned(),
+                    provider::LOCAL_MAC_HOST_LABEL.to_owned(),
+                ],
             },
         );
         let files = must(generated_files(&config), "generate the velnor surface");
@@ -17474,7 +17479,11 @@ lockfile = true
         config.selectors.insert(
             ProviderId::Velnor,
             provider::ProviderSelector {
-                runs_on: vec!["self-hosted".to_owned(), "pool".to_owned()],
+                runs_on: vec![
+                    provider::SELF_HOSTED_LABEL.to_owned(),
+                    provider::NATIVE_LABEL.to_owned(),
+                    provider::BASTION_HOST_LABEL.to_owned(),
+                ],
             },
         );
         config.providers = all_providers();
@@ -18624,7 +18633,8 @@ lockfile = true
         assert!(actionlint.contains("self-hosted-runner:\n  labels:\n"));
         assert!(actionlint.contains("    - self-hosted\n"));
         assert!(actionlint.contains("    - ubuntu-24.04\n"));
-        assert!(actionlint.contains("    - example-runner-label\n"));
+        assert!(actionlint.contains("    - velnor-native\n"));
+        assert!(actionlint.contains("    - local-mac\n"));
     }
 
     #[test]
@@ -18781,7 +18791,8 @@ lockfile = true
         let actionlint = render_actionlint_config(&config);
         assert!(
             actionlint.contains("    - self-hosted\n")
-                && actionlint.contains("    - example-runner-label\n"),
+                && actionlint.contains("    - velnor-native\n")
+                && actionlint.contains("    - local-mac\n"),
             "{actionlint}"
         );
     }
@@ -24643,7 +24654,7 @@ lockfile = true
              automatic_providers = [\"velnor\"]\n\
              files = [\"ci-pr.yml\", \"ci-policy.yml\", \"ci-main.yml\", \"nightly.yml\", \"maintenance.yml\", \"renovate.yml\", \"renovate-validate.yml\"]\n\n\
              [workflow.selectors.velnor]\n\
-             runs_on = [\"self-hosted\", \"{}\"]\n\n\
+             runs_on = [{}]\n\n\
              [renovate]\n\
              enabled = true\n\
              reason = \"Self-hosted Renovate for repository dependencies.\"\n\n\
@@ -24653,7 +24664,7 @@ lockfile = true
              [[declare]]\n\
              primitive = \"renovate-validate\"\n\
              file = \"renovate-validate.yml\"\n",
-            fleet_label()
+            native_selector_labels()
         )
     }
 
@@ -24732,7 +24743,7 @@ lockfile = true
         assert!(renovate.contains(ActionPin::Renovate.reference()));
         // Trust is a typed event gate, never a label: the job runs on the
         // plain Velnor selector and only on trusted events.
-        assert!(renovate.contains(&format!("runs-on: [self-hosted, {}]", fleet_label())));
+        assert!(renovate.contains("runs-on: [self-hosted, velnor-native, local-mac]"));
         assert!(!renovate.contains("example-trusted"));
         assert!(renovate.contains(
             "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
@@ -24986,9 +24997,9 @@ lockfile = true
         // demanded this selector, the visibility policy forbids it, and
         // the fixed validator must not resurrect the demand.
         let config = format!(
-            "{}\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n",
+            "{}\n[workflow.selectors.velnor]\nruns_on = [{}]\n",
             public_hosted_renovate_config(),
-            fleet_label()
+            native_selector_labels()
         );
         let root = renovate_repository("renovate-public-selector", Some(&config));
         let error = must_some(
@@ -25104,7 +25115,13 @@ lockfile = true
                 .selectors
                 .get(&ProviderId::Velnor)
                 .map(|selector| selector.runs_on.as_slice()),
-            Some(&["velnor-native".to_owned()][..]),
+            Some(
+                &[
+                    "self-hosted".to_owned(),
+                    "velnor-native".to_owned(),
+                    "local-mac".to_owned(),
+                ][..],
+            ),
             "an undeclared selector keeps the scan default"
         );
         assert_eq!(scanned.config.default_branch, "trunk");

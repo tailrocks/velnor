@@ -69,10 +69,14 @@ fn write_rust_fixture(root: &Path, crates: usize) {
 }
 
 fn write_workflow_config(root: &Path, workflow: &str) {
+    write_workflow_config_for(root, "example/monorepo", workflow);
+}
+
+fn write_workflow_config_for(root: &Path, repository: &str, workflow: &str) {
     fs::write(
         root.join(".github-gen/velnor-workflow.toml"),
         format!(
-            "schema = 2\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\n{workflow}"
+            "schema = 2\n\n[generator]\nrepository = \"{repository}\"\n\n[workflow]\n{workflow}"
         ),
     )
     .unwrap();
@@ -81,32 +85,23 @@ fn write_workflow_config(root: &Path, workflow: &str) {
 /// Write visibility evidence bound to the fixture slug: the scan path
 /// requires it, but provider placement remains explicit config.
 fn write_visibility(root: &Path, visibility: &str) {
+    write_visibility_for(root, "example/monorepo", visibility);
+}
+
+fn write_visibility_for(root: &Path, repository: &str, visibility: &str) {
     fs::write(
         root.join(".github-gen/visibility.toml"),
-        format!("repository = \"example/monorepo\"\nvisibility = \"{visibility}\"\n"),
+        format!("repository = \"{repository}\"\nvisibility = \"{visibility}\"\n"),
     )
     .unwrap();
 }
 
-/// The Velnor fleet-identity selector, transplanted from the admitted
-/// estate boundary: the crate must never spell the estate's labels itself
-/// (see `generic_surface_literals`), so the values flow from the estate
-/// module at test time. The labels live spelled once at the schema-1
-/// boundary (`APPROVED_VELNOR_RUNNER_LABELS`); the s2 name is an alias.
+/// The renamed fixture's native selector is explicit and host-qualified. The
+/// fixture deliberately does not borrow an estate/repository name: placement
+/// is a provider contract, not repository-name inference.
 fn estate_velnor_selector() -> String {
-    let estate =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/estate.rs")).unwrap();
-    for line in estate.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("pub(crate) const APPROVED_VELNOR_RUNNER_LABELS") {
-            let labels = trimmed
-                .split_once(" = &[")
-                .map(|(_, tail)| tail.trim_end_matches("];"))
-                .expect("the estate labels read as a Rust array");
-            return format!("[workflow.selectors.velnor]\nruns_on = [{labels}]\n");
-        }
-    }
-    panic!("the estate declares approved velnor labels");
+    "[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-native\", \"local-mac\"]\n"
+        .to_owned()
 }
 
 const HOSTED_SELECTOR: &str = "[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n";
@@ -180,6 +175,18 @@ fn job_if(job: &Value) -> String {
         .to_owned()
 }
 
+fn job_runs_on(job: &Value) -> String {
+    match job.get("runs-on").expect("job runs-on") {
+        Value::String(value) => value.clone(),
+        Value::Sequence(values) => values
+            .iter()
+            .map(|value| value.as_str().expect("runs-on label").to_owned())
+            .collect::<Vec<_>>()
+            .join(","),
+        value => panic!("unexpected runs-on value: {value:?}"),
+    }
+}
+
 fn aggregate_provider_caller_id(job_id: &str) -> Option<(&str, &str)> {
     job_id
         .strip_prefix("github-self-hosted-")
@@ -214,6 +221,57 @@ fn exact_three_provider_universe_emits_all_three_callers() {
             "three-provider surface must emit {provider} verify job: {kind:?}"
         );
     }
+}
+
+#[test]
+fn renamed_fixture_keeps_explicit_provider_host_and_trust_boundaries() {
+    let original = unique_dir("renamed-original");
+    let renamed = unique_dir("renamed-copy");
+    for (root, repository) in [
+        (&original, "example/original"),
+        (&renamed, "example/renamed-copy"),
+    ] {
+        write_rust_fixture(root, 1);
+        write_workflow_config_for(root, repository, &all_providers_config());
+        write_visibility_for(root, repository, "public");
+    }
+
+    let original_jobs = parse_jobs(&generate(&original).workflow("ci-unit-rust.yml"));
+    let renamed_jobs = parse_jobs(&generate(&renamed).workflow("ci-unit-rust.yml"));
+    for jobs in [&original_jobs, &renamed_jobs] {
+        assert_eq!(job_runs_on(&jobs["verify-github-hosted"]), "ubuntu-24.04");
+        assert!(!job_runs_on(&jobs["verify-github-hosted"]).contains("velnor-scale-set"));
+        assert_eq!(
+            job_runs_on(&jobs["verify-github-self-hosted"]),
+            "self-hosted,velnor-scale-set,local-mac"
+        );
+        assert_eq!(
+            job_runs_on(&jobs["verify-velnor"]),
+            "self-hosted,velnor-native,local-mac"
+        );
+        for provider in ["github-self-hosted", "velnor"] {
+            let gate = job_if(&jobs[&format!("verify-{provider}")]);
+            assert!(
+                gate.contains("github.event.pull_request.head.repo.fork"),
+                "{provider} must be excluded before local admission: {gate}"
+            );
+        }
+    }
+    assert_eq!(
+        job_runs_on(&original_jobs["verify-github-hosted"]),
+        job_runs_on(&renamed_jobs["verify-github-hosted"])
+    );
+    assert_eq!(
+        job_runs_on(&original_jobs["verify-github-self-hosted"]),
+        job_runs_on(&renamed_jobs["verify-github-self-hosted"])
+    );
+    assert_eq!(
+        job_runs_on(&original_jobs["verify-velnor"]),
+        job_runs_on(&renamed_jobs["verify-velnor"])
+    );
+
+    let _ = fs::remove_dir_all(original);
+    let _ = fs::remove_dir_all(renamed);
 }
 
 #[test]
