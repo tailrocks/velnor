@@ -31,7 +31,7 @@
 //! [`Processor`]: crate::scaleset::scale::Processor
 //! [wl]: crate::scaleset::converge::WorkerLane
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -50,9 +50,9 @@ use crate::scaleset::intents::{
 use crate::scaleset::shared_ledger::SharedLedger;
 use crate::scaleset::worker::runner::RUNNER_WORK_DIR;
 use crate::scaleset::worker::{
-    provision_worker, EdgeSink, HomogeneousProfile, OwnershipId, ProvisionPlan, RunnerConnection,
-    ScaleSetWorker, Supervision, SupervisionOutcome, ToolContentHook, VecEdgeSink, WorkerEdge,
-    WorkerIdentity, WorkerRunner,
+    provision_worker, EdgeSink, HomogeneousProfile, OwnershipId, ProvisionPlan,
+    RestartWorkerPairAttestation, RunnerConnection, ScaleSetWorker, Supervision,
+    SupervisionOutcome, ToolContentHook, VecEdgeSink, WorkerEdge, WorkerIdentity, WorkerRunner,
 };
 use crate::scaleset::{CapacityLedger, LedgerPermitState, ScaleSetClient};
 
@@ -1146,33 +1146,54 @@ impl DaemonWorkerLane {
 
     /// Adopt-or-fail every recorded worker (startup + crash recovery).
     ///
-    /// For each provision intent: a live container pair is adopted into the
-    /// live map (permits + demand rows keep their states, so the restarted
-    /// loop resumes supervision without re-provisioning); a dead or
-    /// missing pair is failed explicitly through the terminal path. Fully
-    /// released workers are skipped. Never deletes the scale set, never
-    /// writes demand, never fabricates a completion.
+    /// The worker registry is the adoption source of truth: a live container
+    /// pair is adopted into the live map (permits + demand rows keep their
+    /// states, so the restarted loop resumes supervision without
+    /// re-provisioning); a dead or missing pair is failed explicitly through
+    /// the terminal path. A pre-provision row with no matching intent is an
+    /// orphan and is terminalized instead of waiting for a scheduler replay.
+    /// Intent rows without worker rows remain pending for the normal
+    /// provision pass. Fully released workers are skipped. Never deletes the
+    /// scale set, never writes demand, never fabricates a completion.
     pub fn adopt_live_workers(&mut self) -> Result<AdoptReport> {
         self.refresh_generation()
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         let mut report = AdoptReport::default();
         let intents = self.intents.list_for_set(self.config.scale_set_id)?;
-        for intent in &intents {
-            let key = Self::ownership_key(intent);
-            let row = self.registry.get(&key)?;
-            let Some(row) = row else {
-                // Intent without a worker row: the crash landed between
-                // intent and provision. The loop's step 5 re-drives
-                // provisioning from the intent; adoption skips it here.
-                // (Demand still `acquired` keeps the permit attested.)
-                report.awaiting_provision += 1;
-                continue;
-            };
-            if row.worker_state == ScaleSetWorkerState::PermitReleased {
-                report.skipped_released += 1;
+        let intent_operations: HashMap<String, String> = intents
+            .iter()
+            .map(|intent| (Self::ownership_key(intent), intent.operation_id.clone()))
+            .collect();
+        let mut seen_workers = HashSet::new();
+
+        for row in self.registry.list_live()? {
+            let expected_key = OwnershipId::bind(self.config.scale_set_id, &row.runner_name);
+            if row.ownership_id != expected_key.as_str() {
+                // The state database is shared by scale-set daemons. A lane
+                // must never adopt another set's worker row.
                 continue;
             }
+            let key = row.ownership_id.clone();
+            seen_workers.insert(key.clone());
             if provision_pending(row.worker_state) {
+                let has_matching_intent = intent_operations
+                    .get(&key)
+                    .is_some_and(|operation_id| operation_id == &row.operation_id);
+                if !has_matching_intent {
+                    // The row proves that provisioning had started, but no
+                    // durable intent can replay it. Cleanup is the only
+                    // safe recovery: do not invoke the scheduler or invent
+                    // a second provision operation.
+                    report.failed += 1;
+                    if let Err(error) = self.drive_terminal(&key) {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = format!("{error:#}"),
+                            "scale-set orphan worker terminal recovery will retry"
+                        );
+                    }
+                    continue;
+                }
                 if row.generation > self.generation {
                     anyhow::bail!(
                         "worker {key:?} belongs to newer generation {}, current lane is {}",
@@ -1207,6 +1228,30 @@ impl DaemonWorkerLane {
                 continue;
             }
             self.ensure_live(&key)?;
+            let identity = self
+                .workers
+                .get(&key)
+                .with_context(|| format!("live worker {key:?} vanished after adoption"))?
+                .worker
+                .identity()
+                .clone();
+            let attestation = crate::scaleset::worker::attest_restart_worker_pair(
+                &mut *self.runner,
+                &identity,
+                &self.config.profile,
+            )
+            .with_context(|| format!("attest restart worker pair {key:?}"))?;
+            if attestation == RestartWorkerPairAttestation::Absent {
+                report.failed += 1;
+                if let Err(error) = self.drive_terminal(&key) {
+                    tracing::warn!(
+                        worker = key.as_str(),
+                        error = format!("{error:#}"),
+                        "scale-set restart adoption found an absent Docker object; terminal recovery will retry"
+                    );
+                }
+                continue;
+            }
             match self.tick_worker(&key) {
                 Ok(SupervisionOutcome::Healthy | SupervisionOutcome::DindRestarted { .. }) => {
                     report.adopted += 1;
@@ -1241,6 +1286,29 @@ impl DaemonWorkerLane {
                         );
                         report.adopted += 1;
                     }
+                }
+            }
+        }
+
+        for intent in &intents {
+            let key = Self::ownership_key(intent);
+            if seen_workers.contains(&key) {
+                continue;
+            }
+            match self.registry.get(&key)? {
+                Some(row) if row.worker_state == ScaleSetWorkerState::PermitReleased => {
+                    report.skipped_released += 1;
+                }
+                Some(_) => {
+                    // A concurrent lifecycle writer owns the row observed
+                    // outside list_live; leave it to that epoch's retry.
+                }
+                None => {
+                    // Intent without a worker row: the crash landed between
+                    // intent and provision. The loop's step 5 re-drives
+                    // provisioning from the intent; adoption skips it here.
+                    // (Demand still `acquired` keeps the permit attested.)
+                    report.awaiting_provision += 1;
                 }
             }
         }
@@ -1857,6 +1925,13 @@ mod tests {
                 });
             }
             if args.first().is_some_and(|arg| arg == "inspect") {
+                if args.iter().any(|arg| arg == "--format={{.State.Status}}") {
+                    return Ok(crate::scaleset::worker::WorkerOutput {
+                        code: 0,
+                        stdout: "exited\n".to_owned(),
+                        stderr: String::new(),
+                    });
+                }
                 return Ok(crate::scaleset::worker::WorkerOutput {
                     code: 0,
                     stdout: r#"[{"Id":"id","Name":"/worker","State":{"Status":"exited"},"NetworkSettings":{},"Config":{"Env":["JIT_SECRET=sentinel"],"Labels":{"owner":"test"}}}]"#.to_owned(),
@@ -2025,6 +2100,99 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
         assert_eq!(lane.ledger.occupied().unwrap(), 0);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adoption_terminalizes_worker_row_without_provision_intent() {
+        let dir = unique_test_dir("adopt-worker-without-intent");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4251");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let state_dir = state_root.join(ownership.slug());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let holder = permit_holder(7, 4251);
+
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            let generation = global.begin_epoch().unwrap();
+            let now = velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp()
+                .max(0) as u64;
+            global
+                .observe_demand(
+                    &holder,
+                    velnor_control::permit_ledger::PermitLane::ScaleSet,
+                    "scaleset/7",
+                    now,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                global
+                    .acquire(
+                        &holder,
+                        velnor_control::permit_ledger::PermitLane::ScaleSet,
+                        velnor_control::permit_ledger::PermitState::Provisioning,
+                        generation,
+                        None,
+                    )
+                    .unwrap(),
+                velnor_control::permit_ledger::AcquireOutcome::Acquired
+            );
+
+            let mut registry = WorkerRegistry::open(&db).unwrap();
+            registry.set_generation(generation);
+            registry
+                .upsert(
+                    &key,
+                    "op-orphan",
+                    4251,
+                    "velnor-7-4251",
+                    &identity.network(),
+                    state_dir.join("workspace").to_string_lossy().as_ref(),
+                    state_dir.join("dind-data").to_string_lossy().as_ref(),
+                    "sha256:runner",
+                    "sha256:dind",
+                )
+                .unwrap();
+            registry
+                .set_state(&key, ScaleSetWorkerState::ProvisionIntent)
+                .unwrap();
+        }
+
+        // No provision intent exists. Startup must recover the durable
+        // worker row directly; it must not wait for or mint a scheduler job.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut lane = test_lane(
+            &db,
+            &ledger,
+            &state_root,
+            Box::new(CleanupRunner::missing(
+                identity.runner_container(),
+                seen.clone(),
+            )),
+        );
+        let report = lane.adopt_live_workers().unwrap();
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.adopted, 0);
+        assert_eq!(report.awaiting_provision, 0);
+        assert_eq!(
+            lane.registry.get(&key).unwrap().unwrap().worker_state,
+            ScaleSetWorkerState::PermitReleased
+        );
+        assert_eq!(lane.ledger.holder_state(&holder).unwrap(), None);
+        assert_eq!(lane.ledger.occupied().unwrap(), 0);
+        assert_eq!(lane.live_workers(), 0);
+        assert!(seen.lock().unwrap().iter().all(|args| {
+            args.first()
+                .is_none_or(|command| command != "create" && command != "start")
+        }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

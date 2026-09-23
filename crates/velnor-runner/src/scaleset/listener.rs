@@ -3,8 +3,9 @@
 //! Mirrors upstream `Listener.Run`: feed the synthetic initial message
 //! ([`INITIAL_MESSAGE_ID`], session statistics) to `Scale` first, then loop
 //! `GetMessage(lastMessageID, maxCapacity)` → `Scale(msg)` (nil included)
-//! → on success advance the cursor and ACK via `DeleteMessage`. Any step
-//! failure skips the ACK so the message is redelivered.
+//! → on successful `Scale`, ACK via `DeleteMessage`, then persist the cursor.
+//! Failures before the ACK leave the message unacked; cursor-persistence
+//! failures are retried with the durable cursor still behind the ACK.
 //!
 //! Daemon deviations from upstream (all deliberate, all documented):
 //!

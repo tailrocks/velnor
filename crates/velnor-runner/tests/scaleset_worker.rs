@@ -19,7 +19,7 @@
 )]
 #![cfg(feature = "test-support")]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use velnor_control::permit_ledger::{PermitLedger, PermitState};
 use velnor_model::ScaleSetWorkerState;
@@ -139,6 +139,45 @@ impl ToolContentHook for CompleteTestHook {
     }
 }
 
+fn identity_labels(identity: &WorkerIdentity, role: &str) -> BTreeMap<String, String> {
+    let mut labels = identity.labels();
+    labels.insert("velnor.scaleset.role".to_owned(), role.to_owned());
+    labels
+}
+
+fn owned_container_projection(identity: &WorkerIdentity, role: &str, id: &str) -> String {
+    format!(
+        "{}\t{}\n",
+        serde_json::to_string(id).unwrap(),
+        serde_json::to_string(&identity_labels(identity, role)).unwrap()
+    )
+}
+
+fn owned_network_projection(identity: &WorkerIdentity, id: &str) -> String {
+    format!(
+        "{}\t{}\n",
+        serde_json::to_string(id).unwrap(),
+        serde_json::to_string(&identity.labels()).unwrap()
+    )
+}
+
+fn holder_projection(identity: &WorkerIdentity) -> String {
+    let mounts = serde_json::json!([
+        {"Type":"volume","Name":"anonymous-work","Destination":"/home/runner/_work","Driver":"local","RW":true},
+        {"Type":"volume","Name":"anonymous-tools","Destination":"/opt/hostedtoolcache","Driver":"local","RW":true},
+        {"Type":"volume","Name":"anonymous-docker","Destination":"/var/lib/docker","Driver":"local","RW":true}
+    ]);
+    format!(
+        "{}\t{}\t{}\tnull\t{}\t{}\t{}\n",
+        serde_json::to_string("holder-id").unwrap(),
+        serde_json::to_string(&format!("{RUNNER_REPOSITORY}@{RUNNER_INDEX_DIGEST}")).unwrap(),
+        serde_json::to_string(&identity_labels(identity, "volume-holder")).unwrap(),
+        serde_json::to_string(&vec!["/bin/true"]).unwrap(),
+        serde_json::to_string("created").unwrap(),
+        mounts
+    )
+}
+
 #[test]
 fn recorded_profile_matches_compiled_pins() {
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
@@ -232,36 +271,74 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         ),
         ScriptRunner::ok("sha256:feed\n"),
         // Network + DinD + ready + runner + connected.
-        ScriptRunner::ok(""),
+        ScriptRunner::fail(
+            1,
+            "Error: No such network: velnor-scaleset-net-s7-velnor-set-0007-2ad92676",
+        ),
         ScriptRunner::ok("netid\n"),
-        ScriptRunner::ok(""),
+        ScriptRunner::fail(
+            1,
+            "Error: No such container: velnor-scaleset-volume-holder-s7-velnor-set-0007-2ad92676",
+        ),
+        ScriptRunner::fail(
+            1,
+            "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+        ),
+        ScriptRunner::fail(
+            1,
+            "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+        ),
+        ScriptRunner::ok("holderid\n"),
+        ScriptRunner::ok(&holder_projection(&identity)),
+        ScriptRunner::fail(
+            1,
+            "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+        ),
         ScriptRunner::ok("dindid\n"),
         ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
         ScriptRunner::ok("28.5.2\n"),
-        ScriptRunner::ok(""),
+        ScriptRunner::fail(
+            1,
+            "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+        ),
         ScriptRunner::ok("runnerid\n"),
         ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
-        ScriptRunner::ok("true\n"),
+        ScriptRunner::ok("running\n"),
         ScriptRunner::ok("Connected to GitHub\n"),
         // Supervision tick: healthy.
-        ScriptRunner::ok("true\n"),
-        ScriptRunner::ok("true\n"),
+        ScriptRunner::ok("running\n"),
+        ScriptRunner::ok("running\n"),
         ScriptRunner::ok("Connected to GitHub\n"),
         // Supervision tick: runner died mid-job → fail (no restart).
-        ScriptRunner::ok("true\n"),
-        ScriptRunner::ok("false\n"),
-        // Owned cleanup: stop, export ×4, rm ×2, network, volumes ×2.
+        ScriptRunner::ok("running\n"),
+        ScriptRunner::ok("exited\n"),
+        // Owned cleanup: preflight, stop, export ×4, preflight, then remove.
+        ScriptRunner::ok(&owned_container_projection(
+            &identity,
+            "runner",
+            "runner-id",
+        )),
+        ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
+        ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
+        ScriptRunner::ok(&holder_projection(&identity)),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("RUNNER-LOGS\n"),
         ScriptRunner::ok("DIND-LOGS\n"),
         ScriptRunner::ok("[{}]\n"),
         ScriptRunner::ok("[{}]\n"),
+        ScriptRunner::ok(&owned_container_projection(
+            &identity,
+            "runner",
+            "runner-id",
+        )),
+        ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
+        ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
+        ScriptRunner::ok(&holder_projection(&identity)),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("dind\n"),
         ScriptRunner::ok("dind\n"),
+        ScriptRunner::ok("holder\n"),
         ScriptRunner::ok("net\n"),
-        ScriptRunner::ok("work\n"),
-        ScriptRunner::ok("dindata\n"),
     ]);
     let outcome = provision_worker(&mut script, &CompleteTestHook, &plan, &|_| {}, &mut || {
         Ok(())
@@ -347,19 +424,34 @@ fn cleanup_failure_retains_permit_uncertain() {
     let identity = WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007"));
     let state_dir = root.join("worker");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let supervision = Supervision::new(identity, &state_dir);
+    let supervision = Supervision::new(identity.clone(), &state_dir);
     let mut script = ScriptRunner::scripted(vec![
+        ScriptRunner::ok(&owned_container_projection(
+            &identity,
+            "runner",
+            "runner-id",
+        )),
+        ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
+        ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
+        ScriptRunner::ok(&holder_projection(&identity)),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("RUNNER-LOGS\n"),
         ScriptRunner::ok("DIND-LOGS\n"),
         ScriptRunner::ok("[{}]\n"),
         ScriptRunner::ok("[{}]\n"),
+        ScriptRunner::ok(&owned_container_projection(
+            &identity,
+            "runner",
+            "runner-id",
+        )),
+        ScriptRunner::ok(&owned_container_projection(&identity, "dind", "dind-id")),
+        ScriptRunner::ok(&owned_network_projection(&identity, "network-id")),
+        ScriptRunner::ok(&holder_projection(&identity)),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("dind\n"),
         ScriptRunner::fail(1, "device or resource busy"), // rm dind fails
+        ScriptRunner::ok("holder\n"),
         ScriptRunner::ok("net\n"),
-        ScriptRunner::ok("work\n"),
-        ScriptRunner::ok("dindata\n"),
     ]);
     let report = supervision.cleanup(&mut script).unwrap();
     assert!(!report.confirmed());

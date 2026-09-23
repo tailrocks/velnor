@@ -1,8 +1,8 @@
 //! Recorded ownership identity for one homogeneous scale-set worker.
 //!
-//! Every Docker object a worker creates — DinD container, runner container,
-//! per-worker network, workspace volume, DinD data volume — carries the
-//! ownership labels below, and every object name derives deterministically
+//! Every Docker object a worker creates — volume holder, DinD container,
+//! runner container, and per-worker network — carries the ownership labels
+//! below, and every object name derives deterministically
 //! from the stable [`OwnershipId`]. There is no random suffix anywhere on
 //! the provision path: a retried provision converges on the same names and
 //! adopts matching objects instead of leaking duplicates.
@@ -21,12 +21,14 @@ pub const OWNERSHIP_LABEL: &str = "velnor.scaleset.ownership";
 pub const RUNNER_LABEL: &str = "velnor.scaleset.runner";
 /// Label carrying the scale-set id on every worker-owned object.
 pub const SCALE_SET_LABEL: &str = "velnor.scaleset.set";
-/// Label distinguishing the two containers of a worker pair.
+/// Label distinguishing the worker-owned container roles.
 pub const WORKER_ROLE_LABEL: &str = "velnor.scaleset.role";
 /// Role value for the private DinD daemon container.
 pub const ROLE_DIND: &str = "dind";
 /// Role value for the official runner container.
 pub const ROLE_RUNNER: &str = "runner";
+/// Role value for the never-started anonymous-volume holder container.
+pub const ROLE_VOLUME_HOLDER: &str = "volume-holder";
 
 /// Outer-name prefix for every Docker object the adapter owns.
 pub const OBJECT_PREFIX: &str = "velnor-scaleset";
@@ -125,6 +127,12 @@ impl WorkerIdentity {
         &self.ownership
     }
 
+    /// Never-started holder container name for the worker's anonymous volumes.
+    #[must_use]
+    pub fn volume_holder_container(&self) -> String {
+        format!("{OBJECT_PREFIX}-volume-holder-{}", self.ownership.slug())
+    }
+
     /// Private DinD daemon container name.
     #[must_use]
     pub fn dind_container(&self) -> String {
@@ -142,24 +150,6 @@ impl WorkerIdentity {
     #[must_use]
     pub fn network(&self) -> String {
         format!("{OBJECT_PREFIX}-net-{}", self.ownership.slug())
-    }
-
-    /// Workspace volume name (`_work`, tool cache, file-command dirs).
-    #[must_use]
-    pub fn workspace_volume(&self) -> String {
-        format!("{OBJECT_PREFIX}-work-{}", self.ownership.slug())
-    }
-
-    /// Tool cache volume name (shares the worker's workspace volume).
-    #[must_use]
-    pub fn tool_cache_volume(&self) -> String {
-        self.workspace_volume()
-    }
-
-    /// DinD data volume name (`/var/lib/docker` inside the daemon).
-    #[must_use]
-    pub fn dind_data_volume(&self) -> String {
-        format!("{OBJECT_PREFIX}-dindata-{}", self.ownership.slug())
     }
 
     /// Host directory holding this worker's socket + diagnostics.
@@ -182,7 +172,7 @@ impl WorkerIdentity {
         ])
     }
 
-    /// `--label` argv pairs for one object of `role` (`dind`|`runner`).
+    /// `--label` argv pairs for one object of `role`.
     #[must_use]
     pub fn label_args(&self, role: &str) -> Vec<String> {
         let mut args = Vec::new();
@@ -238,16 +228,8 @@ mod tests {
             "velnor-scaleset-net-s7-velnor-set-0007-2ad92676"
         );
         assert_eq!(
-            first.workspace_volume(),
-            "velnor-scaleset-work-s7-velnor-set-0007-2ad92676"
-        );
-        assert_eq!(
-            first.tool_cache_volume(),
-            "velnor-scaleset-work-s7-velnor-set-0007-2ad92676"
-        );
-        assert_eq!(
-            first.dind_data_volume(),
-            "velnor-scaleset-dindata-s7-velnor-set-0007-2ad92676"
+            first.volume_holder_container(),
+            "velnor-scaleset-volume-holder-s7-velnor-set-0007-2ad92676"
         );
     }
 
@@ -260,9 +242,7 @@ mod tests {
             assert_ne!(a.dind_container(), other.dind_container());
             assert_ne!(a.runner_container(), other.runner_container());
             assert_ne!(a.network(), other.network());
-            assert_ne!(a.workspace_volume(), other.workspace_volume());
-            assert_ne!(a.tool_cache_volume(), other.tool_cache_volume());
-            assert_ne!(a.dind_data_volume(), other.dind_data_volume());
+            assert_ne!(a.volume_holder_container(), other.volume_holder_container());
         }
     }
 
@@ -292,8 +272,8 @@ mod tests {
         );
         assert_ne!(slash_identity.network(), space_identity.network());
         assert_ne!(
-            slash_identity.workspace_volume(),
-            space_identity.workspace_volume()
+            slash_identity.volume_holder_container(),
+            space_identity.volume_holder_container()
         );
         // And derivation is stable: the same id re-derives the same slug
         // on every call, so retries converge instead of leaking.
@@ -325,6 +305,8 @@ mod tests {
         assert!(args.contains(&format!("{WORKER_ROLE_LABEL}={ROLE_DIND}")));
         let runner_args = identity().label_args(ROLE_RUNNER);
         assert!(runner_args.contains(&format!("{WORKER_ROLE_LABEL}={ROLE_RUNNER}")));
+        let holder_args = identity().label_args(ROLE_VOLUME_HOLDER);
+        assert!(holder_args.contains(&format!("{WORKER_ROLE_LABEL}={ROLE_VOLUME_HOLDER}")));
     }
 
     #[test]

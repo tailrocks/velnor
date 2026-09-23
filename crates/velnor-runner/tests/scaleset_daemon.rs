@@ -26,20 +26,24 @@
 )]
 #![cfg(feature = "test-support")]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use velnor_control::permit_ledger::{PermitLane, PermitLedger, PermitState};
+use velnor_runner::scaleset::worker::dind::DIND_DATA_ROOT;
+use velnor_runner::scaleset::worker::ownership::{
+    ROLE_RUNNER, ROLE_VOLUME_HOLDER, WORKER_ROLE_LABEL,
+};
 use velnor_runner::scaleset::worker::{
     HomogeneousProfile, OwnershipId, PinnedImage, ToolContentAttestation, ToolContentExpectation,
-    ToolContentHook, WorkerIdentity, WorkerOutput, WorkerRunner,
+    ToolContentHook, WorkerIdentity, WorkerOutput, WorkerRunner, TOOL_CACHE_DIR, WORK_DIR,
 };
 use velnor_runner::scaleset::{
     runner_name, AcquireBatchStore, CapacityLedger, ClientSession, DaemonDefaults,
     DaemonWorkerLane, DemandState, DemandStore, IdlePolicy, LaneConfig, Listener, LoopConfig,
-    MessageSessionClient, Metrics, Processor, ProcessorConfig, ProvisionImages,
+    MessageSessionClient, Metrics, OfferAdmission, Processor, ProcessorConfig, ProvisionImages,
     ProvisionIntentStore, RegistrationPlan, RetryPolicy, ScaleSetClient, ScaleSetDaemon,
     SessionStore, SharedLedger, SystemInfo, WorkerRegistry, MAX_ACQUIRE_BATCH,
 };
@@ -345,9 +349,11 @@ fn offer_message(request_id: i64) -> serde_json::Value {
         "messageType": "JobAvailable",
         "runnerRequestId": request_id,
         "repositoryName": "velnor",
-        "ownerName": "tailrocks",
+        "ownerName": OWNER,
         "jobId": format!("job-{request_id}"),
-        "jobWorkflowRef": "tailrocks/velnor/.github/workflows/ci.yml@refs/heads/main",
+        "jobWorkflowRef": format!(
+            "{OWNER}/velnor/.github/workflows/ci.yml@refs/heads/main"
+        ),
         "jobDisplayName": format!("job-{request_id}"),
         "workflowRunId": 99,
         "eventName": "push",
@@ -460,18 +466,41 @@ async fn mount_jit(server: &MockServer, blob: &str) {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+struct FakeMount {
+    name: String,
+    destination: String,
+    driver: String,
+    read_write: bool,
+}
+
+#[derive(Debug, Clone)]
 struct FakeContainer {
     id: String,
-    running: bool,
+    image: String,
+    entrypoint: Option<Vec<String>>,
+    command: Option<Vec<String>>,
+    network_mode: String,
+    /// Network ID captured when the container joined its network. A later
+    /// same-name network replacement must not rewrite this attachment.
+    network_attachment_id: Option<String>,
+    status: String,
     labels: Vec<(String, String)>,
+    mounts: Vec<FakeMount>,
+    volumes_from: Vec<String>,
     connected_marker: bool,
     logs_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct FakeNetwork {
+    id: String,
+    labels: Vec<(String, String)>,
 }
 
 #[derive(Debug, Default)]
 struct FakeEngine {
     containers: HashMap<String, FakeContainer>,
-    networks: HashMap<String, Vec<(String, String)>>,
+    networks: HashMap<String, FakeNetwork>,
     seen: Vec<Vec<String>>,
     /// `--env-file` bytes captured at `create` time, by container name.
     /// The blob's disk lifetime ends right after create, so
@@ -482,7 +511,11 @@ struct FakeEngine {
     probe_ready: bool,
     /// `rm` of these containers exits 1 (cleanup-failure injection).
     fail_rm: Vec<String>,
+    /// Anonymous volumes created by holder `--mount type=volume` entries.
+    volumes: HashSet<String>,
     next_id: u64,
+    next_volume_id: u64,
+    next_network_id: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -524,9 +557,64 @@ impl FakeDocker {
             .collect()
     }
 
+    fn commands_since(&self, offset: usize) -> Vec<Vec<String>> {
+        self.lock().seen.iter().skip(offset).cloned().collect()
+    }
+
+    fn seen_len(&self) -> usize {
+        self.lock().seen.len()
+    }
+
+    fn rm_commands(&self) -> Vec<Vec<String>> {
+        self.lock()
+            .seen
+            .iter()
+            .filter(|argv| argv.first().is_some_and(|head| head == "rm"))
+            .cloned()
+            .collect()
+    }
+
+    fn volume_commands(&self) -> Vec<Vec<String>> {
+        self.lock()
+            .seen
+            .iter()
+            .filter(|argv| argv.first().is_some_and(|head| head == "volume"))
+            .cloned()
+            .collect()
+    }
+
+    fn container_id(&self, container: &str) -> Option<String> {
+        self.lock()
+            .containers
+            .get(container)
+            .map(|entry| entry.id.clone())
+    }
+
+    fn mounts_for(&self, container: &str) -> Vec<FakeMount> {
+        self.lock()
+            .containers
+            .get(container)
+            .unwrap_or_else(|| panic!("container {container} must exist"))
+            .mounts
+            .clone()
+    }
+
+    fn volumes_from_for(&self, container: &str) -> Vec<String> {
+        self.lock()
+            .containers
+            .get(container)
+            .unwrap_or_else(|| panic!("container {container} must exist"))
+            .volumes_from
+            .clone()
+    }
+
+    fn anonymous_volume_count(&self) -> usize {
+        self.lock().volumes.len()
+    }
+
     fn stop_container(&self, container: &str) {
         if let Some(entry) = self.lock().containers.get_mut(container) {
-            entry.running = false;
+            entry.status = "exited".to_owned();
         }
     }
 
@@ -545,6 +633,33 @@ impl FakeDocker {
     /// `--env-file` bytes captured when `container` was created.
     fn env_file_for(&self, container: &str) -> Option<String> {
         self.lock().env_files.get(container).cloned()
+    }
+
+    /// Recreate a network under the same name with a new Engine identity.
+    /// Existing container attachments retain the old ID, matching Docker's
+    /// object identity semantics and making restart-attestation drift real.
+    fn recreate_network(&self, name: &str) {
+        let mut engine = self.lock();
+        let labels = engine
+            .networks
+            .get(name)
+            .unwrap_or_else(|| panic!("network {name} must exist before recreation"))
+            .labels
+            .clone();
+        let id = allocate_network_id(&mut engine);
+        engine
+            .networks
+            .insert(name.to_owned(), FakeNetwork { id, labels });
+    }
+}
+
+fn allocate_network_id(engine: &mut FakeEngine) -> String {
+    engine.next_network_id += 1;
+    if engine.next_network_id == 1 {
+        // Preserve the original fixture's first-network output.
+        "fake-net-id".to_owned()
+    } else {
+        format!("fake-net-id-{:04}", engine.next_network_id)
     }
 }
 
@@ -573,6 +688,93 @@ fn target_name(args: &[String]) -> String {
         .unwrap_or_default()
 }
 
+fn resolve_container_name(engine: &FakeEngine, target: &str) -> Option<String> {
+    if engine.containers.contains_key(target) {
+        return Some(target.to_owned());
+    }
+    engine
+        .containers
+        .iter()
+        .find(|(_, entry)| entry.id == target)
+        .map(|(name, _)| name.clone())
+}
+
+fn resolve_network_name(engine: &FakeEngine, target: &str) -> Option<String> {
+    if engine.networks.contains_key(target) {
+        return Some(target.to_owned());
+    }
+    engine
+        .networks
+        .iter()
+        .find(|(_, network)| network.id == target)
+        .map(|(name, _)| name.clone())
+}
+
+fn container_role(labels: &[(String, String)]) -> Option<&str> {
+    labels
+        .iter()
+        .find(|(key, _)| key == WORKER_ROLE_LABEL)
+        .map(|(_, value)| value.as_str())
+}
+
+fn anonymous_mount(engine: &mut FakeEngine, spec: &str) -> FakeMount {
+    let fields: HashMap<_, _> = spec
+        .split(',')
+        .filter_map(|field| field.split_once('='))
+        .collect();
+    assert_eq!(fields.get("type").copied(), Some("volume"), "{spec}");
+    assert!(
+        fields.get("target").is_some(),
+        "anonymous mount has no target: {spec}"
+    );
+    assert!(
+        !fields.contains_key("source")
+            && !fields.contains_key("src")
+            && !fields.contains_key("volume"),
+        "holder mount must be anonymous: {spec}"
+    );
+    let destination = fields.get("target").unwrap().to_string();
+    engine.next_volume_id += 1;
+    let name = format!("fake-anonymous-volume-{:04}", engine.next_volume_id);
+    assert!(
+        engine.volumes.insert(name.clone()),
+        "duplicate fake volume {name}"
+    );
+    FakeMount {
+        name,
+        destination,
+        driver: "local".to_owned(),
+        read_write: true,
+    }
+}
+
+fn bind_mount(spec: &str) -> FakeMount {
+    let (source, destination) = spec
+        .rsplit_once(':')
+        .unwrap_or_else(|| panic!("bind mount has no destination: {spec}"));
+    FakeMount {
+        name: source.to_owned(),
+        destination: destination.to_owned(),
+        driver: "local".to_owned(),
+        read_write: true,
+    }
+}
+
+fn mounts_json(mounts: &[FakeMount]) -> serde_json::Value {
+    serde_json::json!(mounts
+        .iter()
+        .map(|mount| {
+            serde_json::json!({
+                "Type": "volume",
+                "Name": mount.name,
+                "Destination": mount.destination,
+                "Driver": mount.driver,
+                "RW": mount.read_write,
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
 impl WorkerRunner for FakeDocker {
     fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<WorkerOutput> {
         assert_eq!(program, "docker");
@@ -599,6 +801,79 @@ impl WorkerRunner for FakeDocker {
                 }
                 engine.next_id += 1;
                 let id = format!("fake-id-{:04}", engine.next_id);
+                let separator = args
+                    .iter()
+                    .position(|arg| arg == "--")
+                    .expect("container create has an image separator");
+                let image = args
+                    .get(separator + 1)
+                    .cloned()
+                    .expect("container create has an image");
+                let command = match args.get(separator + 2..) {
+                    Some(command) if !command.is_empty() => Some(command.to_vec()),
+                    _ => None,
+                };
+                let network_mode = args
+                    .iter()
+                    .position(|arg| arg == "--network")
+                    .and_then(|at| args.get(at + 1))
+                    .cloned()
+                    .unwrap_or_default();
+                let network_attachment_id = engine
+                    .networks
+                    .get(&network_mode)
+                    .map(|network| network.id.clone());
+                let volumes_from = args
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, arg)| {
+                        (arg == "--volumes-from")
+                            .then(|| args.get(at + 1).cloned())
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>();
+                let mut mounts = Vec::new();
+                for source in &volumes_from {
+                    let source_name = resolve_container_name(&engine, source)
+                        .unwrap_or_else(|| panic!("--volumes-from target {source} is absent"));
+                    let source_entry = engine
+                        .containers
+                        .get(&source_name)
+                        .expect("resolved --volumes-from source");
+                    assert_eq!(
+                        container_role(&source_entry.labels),
+                        Some(ROLE_VOLUME_HOLDER),
+                        "worker containers inherit only the holder's volumes"
+                    );
+                    mounts.extend(source_entry.mounts.clone());
+                }
+                for (at, arg) in args.iter().enumerate() {
+                    if arg == "--mount" {
+                        let spec = args.get(at + 1).expect("--mount has a mount specification");
+                        mounts.push(anonymous_mount(&mut engine, spec));
+                    }
+                    if arg == "--volume" {
+                        let spec = args
+                            .get(at + 1)
+                            .expect("--volume has a volume specification");
+                        mounts.push(bind_mount(spec));
+                    }
+                }
+                if container_role(&labels) == Some(ROLE_VOLUME_HOLDER) {
+                    assert_eq!(
+                        mounts.len(),
+                        3,
+                        "holder must create exactly three anonymous mounts"
+                    );
+                    assert_eq!(
+                        mounts
+                            .iter()
+                            .map(|mount| mount.destination.as_str())
+                            .collect::<HashSet<_>>(),
+                        HashSet::from([WORK_DIR, TOOL_CACHE_DIR, DIND_DATA_ROOT]),
+                        "holder mount destinations"
+                    );
+                }
                 // Capture `--env-file` bytes now: production deletes the
                 // file right after create.
                 if let Some(at) = args.iter().position(|arg| arg == "--env-file")
@@ -611,8 +886,15 @@ impl WorkerRunner for FakeDocker {
                     name,
                     FakeContainer {
                         id,
-                        running: false,
+                        image,
+                        entrypoint: None,
+                        command,
+                        network_mode,
+                        network_attachment_id,
+                        status: "created".to_owned(),
                         labels,
+                        mounts,
+                        volumes_from,
                         connected_marker: false,
                         logs_text: "runner starting\n".to_owned(),
                     },
@@ -620,20 +902,48 @@ impl WorkerRunner for FakeDocker {
                 Ok(ok(&format!("fake-id-{:04}\n", engine.next_id)))
             }
             "start" => {
-                let name = target_name(args);
+                let target = target_name(args);
+                let name =
+                    resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                 match engine.containers.get_mut(&name) {
-                    Some(entry) => {
-                        entry.running = true;
+                    Some(entry)
+                        if matches!(entry.status.as_str(), "created" | "exited" | "dead") =>
+                    {
+                        entry.status = "running".to_owned();
+                        if container_role(&entry.labels) == Some(ROLE_RUNNER) {
+                            entry.connected_marker = true;
+                        }
                         Ok(ok(&format!("{}\n", entry.id)))
                     }
+                    Some(entry) => Ok(WorkerOutput {
+                        code: 1,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Error: cannot start container {name} in state {}",
+                            entry.status
+                        ),
+                    }),
                     None => Ok(missing("container", &name)),
                 }
             }
             "exec" => {
                 // Readiness probe: `exec <dind> docker -H unix://... version`.
-                let name = args.get(1).cloned().unwrap_or_default();
+                let target = args.get(1).cloned().unwrap_or_default();
+                let name =
+                    resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                 if !engine.containers.contains_key(&name) {
                     return Ok(missing("container", &name));
+                }
+                if engine
+                    .containers
+                    .get(&name)
+                    .is_some_and(|entry| entry.status != "running")
+                {
+                    return Ok(WorkerOutput {
+                        code: 1,
+                        stdout: String::new(),
+                        stderr: format!("Error: container {name} is not running"),
+                    });
                 }
                 if engine.probe_ready {
                     Ok(ok("28.5.2\n"))
@@ -647,15 +957,29 @@ impl WorkerRunner for FakeDocker {
             }
             "inspect" => {
                 // `--format=` (running check) vs `--format <id|labels>`.
-                if args.iter().any(|arg| arg.starts_with("--format=")) {
-                    let name = target_name(args);
+                if let Some(format) = args.iter().find_map(|arg| arg.strip_prefix("--format=")) {
+                    let target = target_name(args);
+                    let name =
+                        resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                     return match engine.containers.get(&name) {
-                        Some(entry) => Ok(ok(if entry.running { "true\n" } else { "false\n" })),
+                        Some(entry) if format.contains(".State.Status") => {
+                            Ok(ok(&format!("{}\n", entry.status)))
+                        }
+                        Some(entry) if format.contains(".State.Running") => {
+                            Ok(ok(if entry.status == "running" {
+                                "true\n"
+                            } else {
+                                "false\n"
+                            }))
+                        }
+                        Some(_) => Ok(ok("")),
                         None => Ok(missing("container", &name)),
                     };
                 }
                 if args.iter().any(|arg| arg.contains("range")) {
-                    let name = target_name(args);
+                    let target = target_name(args);
+                    let name =
+                        resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                     return match engine.containers.get(&name) {
                         Some(entry) => {
                             let lines = entry
@@ -669,9 +993,125 @@ impl WorkerRunner for FakeDocker {
                         None => Ok(missing("container", &name)),
                     };
                 }
+                if let Some(format) = args
+                    .iter()
+                    .position(|arg| arg == "--format")
+                    .and_then(|at| args.get(at + 1))
+                {
+                    let target = target_name(args);
+                    let name =
+                        resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
+                    return match engine.containers.get(&name) {
+                        Some(entry) if format.contains(".Mounts") => {
+                            let entrypoint = serde_json::to_string(&entry.entrypoint)
+                                .expect("entrypoint serializes");
+                            let command =
+                                serde_json::to_string(&entry.command).expect("command serializes");
+                            let labels = entry
+                                .labels
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect::<HashMap<_, _>>();
+                            Ok(ok(&format!(
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                                serde_json::to_string(&entry.id).expect("id serializes"),
+                                serde_json::to_string(&entry.image).expect("image serializes"),
+                                serde_json::to_string(&labels).expect("labels serialize"),
+                                entrypoint,
+                                command,
+                                serde_json::to_string(&entry.status).expect("status serializes"),
+                                mounts_json(&entry.mounts),
+                            )))
+                        }
+                        Some(entry) if format.contains(".HostConfig.NetworkMode") => {
+                            let entrypoint = serde_json::to_string(&entry.entrypoint)
+                                .expect("entrypoint serializes");
+                            let command =
+                                serde_json::to_string(&entry.command).expect("command serializes");
+                            let labels = entry
+                                .labels
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect::<HashMap<_, _>>();
+                            if format.contains(".NetworkSettings.Networks") {
+                                let mut networks = serde_json::Map::new();
+                                if let Some(network_id) = &entry.network_attachment_id {
+                                    networks.insert(
+                                        entry.network_mode.clone(),
+                                        serde_json::json!({"NetworkID": network_id}),
+                                    );
+                                }
+                                Ok(ok(&format!(
+                                    "{}\t{}\t{}\t{}\t{}\t{}\n",
+                                    serde_json::to_string(&entry.image).expect("image serializes"),
+                                    serde_json::to_string(&labels).expect("labels serialize"),
+                                    serde_json::to_string(&entry.network_mode)
+                                        .expect("network mode serializes"),
+                                    serde_json::to_string(&entry.volumes_from)
+                                        .expect("volumes-from serializes"),
+                                    serde_json::to_string(&networks).expect("networks serialize"),
+                                    serde_json::to_string(&entry.status)
+                                        .expect("status serializes")
+                                )))
+                            } else {
+                                Ok(ok(&format!(
+                                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                                    serde_json::to_string(&entry.image).expect("image serializes"),
+                                    serde_json::to_string(&labels).expect("labels serialize"),
+                                    serde_json::to_string(&entry.network_mode)
+                                        .expect("network mode serializes"),
+                                    serde_json::to_string(&entry.volumes_from)
+                                        .expect("volumes-from serializes"),
+                                    entrypoint,
+                                    command,
+                                    serde_json::to_string(&entry.status)
+                                        .expect("status serializes")
+                                )))
+                            }
+                        }
+                        Some(entry)
+                            if format.contains(".Id") && format.contains(".Config.Labels") =>
+                        {
+                            let labels = entry
+                                .labels
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect::<HashMap<_, _>>();
+                            Ok(ok(&format!(
+                                "{}\t{}\n",
+                                serde_json::to_string(&entry.id).expect("id serializes"),
+                                serde_json::to_string(&labels).expect("labels serialize"),
+                            )))
+                        }
+                        Some(entry) if format.contains(".Id") => Ok(ok(&format!("{}\n", entry.id))),
+                        Some(entry) if format.contains(".Config.Image") => {
+                            // Deliberately mirror only the production's
+                            // non-secret projection. Never expose Config.Env:
+                            // it may contain the one-shot JIT credential.
+                            let entrypoint = serde_json::to_string(&entry.entrypoint)
+                                .expect("entrypoint serializes");
+                            let command =
+                                serde_json::to_string(&entry.command).expect("command serializes");
+                            Ok(ok(&format!(
+                                "{}\t{}\t{}\t{}\n",
+                                serde_json::to_string(&entry.image).expect("image serializes"),
+                                entrypoint,
+                                command,
+                                serde_json::to_string(&entry.status).expect("status serializes")
+                            )))
+                        }
+                        Some(entry) if format.contains(".State.Status") => {
+                            Ok(ok(&format!("{}\n", entry.status)))
+                        }
+                        Some(_) => Ok(ok("")),
+                        None => Ok(missing("container", &name)),
+                    };
+                }
                 if args.len() == 3 {
                     // Bare `inspect -- <name>` (diagnostic capture).
-                    let name = target_name(args);
+                    let target = target_name(args);
+                    let name =
+                        resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                     return match engine.containers.get(&name) {
                         Some(entry) => Ok(ok(&format!(
                             "[{{\"Id\":\"{}\",\"Name\":\"{name}\"}}]",
@@ -681,15 +1121,18 @@ impl WorkerRunner for FakeDocker {
                     };
                 }
                 // `inspect --format {{.Id}} -- <name>` (adoption lookup).
-                let name = target_name(args);
+                let target = target_name(args);
+                let name =
+                    resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                 match engine.containers.get(&name) {
                     Some(entry) => Ok(ok(&format!("{}\n", entry.id))),
-                    // Missing reads as empty stdout (adoption: create).
-                    None => Ok(ok("")),
+                    None => Ok(missing("container", &name)),
                 }
             }
             "logs" => {
-                let name = target_name(args);
+                let target = target_name(args);
+                let name =
+                    resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                 match engine.containers.get(&name) {
                     Some(entry) => {
                         let mut text = entry.logs_text.clone();
@@ -702,23 +1145,74 @@ impl WorkerRunner for FakeDocker {
                 }
             }
             "stop" => {
-                let name = target_name(args);
+                let target = target_name(args);
+                let name =
+                    resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
                 match engine.containers.get_mut(&name) {
                     Some(entry) => {
-                        entry.running = false;
+                        entry.status = "exited".to_owned();
                         Ok(ok(&format!("{}\n", entry.id)))
                     }
                     None => Ok(missing("container", &name)),
                 }
             }
             "rm" => {
-                let name = target_name(args);
-                if engine.fail_rm.contains(&name) {
+                let target = target_name(args);
+                let name =
+                    resolve_container_name(&engine, &target).unwrap_or_else(|| target.clone());
+                if engine
+                    .fail_rm
+                    .iter()
+                    .any(|failed| failed == &target || failed == &name)
+                {
                     return Ok(WorkerOutput {
                         code: 1,
                         stdout: String::new(),
                         stderr: "Error: removal failed: device busy".to_owned(),
                     });
+                }
+                let force = args.iter().any(|arg| arg == "--force" || arg == "-f");
+                if let Some(entry) = engine.containers.get(&name)
+                    && matches!(entry.status.as_str(), "running" | "paused" | "restarting")
+                    && !force
+                {
+                    return Ok(WorkerOutput {
+                        code: 1,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Error: cannot remove running container {name} without --force"
+                        ),
+                    });
+                }
+                let volumes = args.iter().any(|arg| arg == "--volumes");
+                if volumes {
+                    let entry = engine
+                        .containers
+                        .get(&name)
+                        .unwrap_or_else(|| panic!("volume cleanup target {name} is absent"));
+                    assert_eq!(
+                        container_role(&entry.labels),
+                        Some(ROLE_VOLUME_HOLDER),
+                        "only the holder may receive --volumes"
+                    );
+                    if engine.containers.values().any(|container| {
+                        container.volumes_from.iter().any(|source| source == &name)
+                    }) {
+                        return Ok(WorkerOutput {
+                            code: 1,
+                            stdout: String::new(),
+                            stderr: "Error: volume is still in use by a worker container"
+                                .to_owned(),
+                        });
+                    }
+                    let mount_names = entry
+                        .mounts
+                        .iter()
+                        .map(|mount| mount.name.clone())
+                        .collect::<Vec<_>>();
+                    for mount in mount_names {
+                        engine.volumes.remove(&mount);
+                    }
                 }
                 match engine.containers.remove(&name) {
                     Some(entry) => Ok(ok(&format!("{}\n", entry.id))),
@@ -729,11 +1223,42 @@ impl WorkerRunner for FakeDocker {
                 let verb = args.get(1).cloned().unwrap_or_default();
                 match verb.as_str() {
                     "inspect" => {
-                        let name = target_name(args);
+                        let target = target_name(args);
+                        let name = resolve_network_name(&engine, &target)
+                            .unwrap_or_else(|| target.clone());
+                        if let Some(format) = args
+                            .iter()
+                            .position(|arg| arg == "--format")
+                            .and_then(|at| args.get(at + 1))
+                        {
+                            return match engine.networks.get(&name) {
+                                Some(network) if format.contains(".Driver") => {
+                                    let labels = network
+                                        .labels
+                                        .iter()
+                                        .map(|(key, value)| (key.clone(), value.clone()))
+                                        .collect::<HashMap<_, _>>();
+                                    Ok(ok(&format!(
+                                        "{}\t{}\t{}\n",
+                                        serde_json::to_string(&network.id)
+                                            .expect("network id serializes"),
+                                        serde_json::to_string("bridge").expect("driver serializes"),
+                                        serde_json::to_string(&labels)
+                                            .expect("network labels serialize")
+                                    )))
+                                }
+                                Some(network) if format.contains(".Id") => {
+                                    Ok(ok(&format!("{}\n", network.id)))
+                                }
+                                Some(_) => Ok(ok("")),
+                                None => Ok(missing("network", &name)),
+                            };
+                        }
                         if args.iter().any(|arg| arg.contains("range")) {
                             return match engine.networks.get(&name) {
-                                Some(labels) => {
-                                    let lines = labels
+                                Some(network) => {
+                                    let lines = network
+                                        .labels
                                         .iter()
                                         .map(|(key, value)| format!("{key}={value}"))
                                         .collect::<Vec<_>>()
@@ -744,8 +1269,8 @@ impl WorkerRunner for FakeDocker {
                             };
                         }
                         match engine.networks.get(&name) {
-                            Some(_) => Ok(ok("fake-net-id\n")),
-                            None => Ok(ok("")),
+                            Some(network) => Ok(ok(&format!("{}\n", network.id))),
+                            None => Ok(missing("network", &name)),
                         }
                     }
                     "create" => {
@@ -760,21 +1285,228 @@ impl WorkerRunner for FakeDocker {
                             }
                             rest = &rest[at + 1..];
                         }
-                        engine.networks.insert(name, labels);
-                        Ok(ok("fake-net-id\n"))
+                        let id = allocate_network_id(&mut engine);
+                        engine.networks.insert(
+                            name,
+                            FakeNetwork {
+                                id: id.clone(),
+                                labels,
+                            },
+                        );
+                        Ok(ok(&format!("{id}\n")))
                     }
                     "rm" => {
-                        let name = target_name(args);
+                        let target = target_name(args);
+                        let name = resolve_network_name(&engine, &target)
+                            .unwrap_or_else(|| target.clone());
                         engine.networks.remove(&name);
                         Ok(ok(&format!("{name}\n")))
                     }
                     other => panic!("fake docker: unexpected network verb {other}"),
                 }
             }
-            "volume" => Ok(ok("")),
+            "volume" => panic!("fake docker forbids name-based volume commands: {args:?}"),
             other => panic!("fake docker: unexpected verb {other} in {args:?}"),
         }
     }
+}
+
+fn assert_holder_contract(docker: &FakeDocker, identity: &WorkerIdentity) {
+    let holder = identity.volume_holder_container();
+    let dind = identity.dind_container();
+    let runner = identity.runner_container();
+    let creates = docker.creates();
+    let holder_at = creates
+        .iter()
+        .position(|argv| argv.iter().any(|arg| arg == &holder))
+        .expect("holder create recorded");
+    let dind_at = creates
+        .iter()
+        .position(|argv| argv.iter().any(|arg| arg == &dind))
+        .expect("DinD create recorded");
+    let runner_at = creates
+        .iter()
+        .position(|argv| argv.iter().any(|arg| arg == &runner))
+        .expect("runner create recorded");
+    assert!(holder_at < dind_at && holder_at < runner_at);
+
+    let holder_create = &creates[holder_at];
+    let mount_specs = holder_create
+        .iter()
+        .enumerate()
+        .filter_map(|(at, arg)| (arg == "--mount").then(|| holder_create.get(at + 1)))
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mount_specs.len(),
+        3,
+        "holder create must declare three mounts"
+    );
+    assert!(mount_specs.iter().all(|spec| {
+        spec.starts_with("type=volume,target=")
+            && !spec.contains("source=")
+            && !spec.contains("src=")
+            && !spec.contains("volume=")
+    }));
+
+    for (child, child_at) in [(&dind, dind_at), (&runner, runner_at)] {
+        let child_create = &creates[child_at];
+        let volumes_from_at = child_create
+            .iter()
+            .position(|arg| arg == "--volumes-from")
+            .expect("worker create uses --volumes-from");
+        assert_eq!(child_create.get(volumes_from_at + 1), Some(&holder));
+    }
+
+    let holder_mounts = docker.mounts_for(&holder);
+    assert_eq!(holder_mounts.len(), 3);
+    assert!(holder_mounts.iter().all(|mount| {
+        mount.driver == "local" && mount.read_write && mount.name.starts_with("fake-anonymous-")
+    }));
+    assert_eq!(
+        holder_mounts
+            .iter()
+            .map(|mount| mount.destination.clone())
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            WORK_DIR.to_owned(),
+            TOOL_CACHE_DIR.to_owned(),
+            DIND_DATA_ROOT.to_owned(),
+        ])
+    );
+    for child in [&dind, &runner] {
+        assert_eq!(docker.volumes_from_for(child), vec![holder.clone()]);
+        let mounts = docker.mounts_for(child);
+        for destination in [WORK_DIR, TOOL_CACHE_DIR, DIND_DATA_ROOT] {
+            assert!(
+                mounts.iter().any(|mount| mount.destination == destination),
+                "{child} did not inherit {destination}"
+            );
+        }
+    }
+}
+
+fn assert_holder_cleanup_uses_immutable_id(docker: &FakeDocker, identity: &WorkerIdentity) {
+    let holder = identity.volume_holder_container();
+    let holder_rms = docker
+        .rm_commands()
+        .into_iter()
+        .filter(|argv| argv.iter().any(|arg| arg == "--volumes"))
+        .collect::<Vec<_>>();
+    assert!(!holder_rms.is_empty(), "holder cleanup was not attempted");
+    assert!(holder_rms.iter().all(|argv| {
+        let target = target_name(argv);
+        argv.iter().any(|arg| arg == "--force")
+            && target != holder
+            && target.starts_with("fake-id-")
+    }));
+    assert!(
+        docker.volume_commands().is_empty(),
+        "worker cleanup must not use docker volume rm"
+    );
+}
+
+#[test]
+fn fake_docker_models_missing_inspects_and_lifecycle_gates() {
+    let mut docker = FakeDocker::new();
+    let call = |docker: &mut FakeDocker, args: &[&str]| {
+        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        docker.run("docker", &args).unwrap()
+    };
+    let container = "fake-container";
+
+    assert_eq!(
+        call(
+            &mut docker,
+            &["create", "--name", container, "--", "runner:image"]
+        )
+        .code,
+        0
+    );
+    let present = call(
+        &mut docker,
+        &["inspect", "--format", "{{.Id}}", "--", container],
+    );
+    assert_eq!(present.code, 0);
+    assert_eq!(present.stdout, "fake-id-0001\n");
+
+    let absent = call(
+        &mut docker,
+        &["inspect", "--format", "{{.Id}}", "--", "missing-container"],
+    );
+    assert_eq!(absent.code, 1);
+    assert!(absent.stderr.contains("No such container"));
+
+    let not_ready = call(&mut docker, &["exec", container, "docker", "version"]);
+    assert_eq!(not_ready.code, 1);
+    assert!(not_ready.stderr.contains("not running"));
+
+    assert_eq!(
+        call(&mut docker, &["start", "--", container]).code,
+        0,
+        "created containers can start"
+    );
+    assert_eq!(
+        call(&mut docker, &["exec", container, "docker", "version"],).code,
+        0,
+        "readiness succeeds only while running"
+    );
+    let start_running = call(&mut docker, &["start", "--", container]);
+    assert_eq!(start_running.code, 1);
+    assert!(start_running.stderr.contains("cannot start"));
+
+    assert_eq!(call(&mut docker, &["stop", "--", container]).code, 0);
+    assert_eq!(
+        call(&mut docker, &["start", "--", container]).code,
+        0,
+        "exited containers can restart"
+    );
+    docker.lock().containers.get_mut(container).unwrap().status = "dead".to_owned();
+    assert_eq!(
+        call(&mut docker, &["start", "--", container]).code,
+        0,
+        "dead containers can restart"
+    );
+
+    let non_force_rm = call(&mut docker, &["rm", "--", container]);
+    assert_eq!(non_force_rm.code, 1);
+    assert!(non_force_rm.stderr.contains("--force"));
+    assert_eq!(
+        call(&mut docker, &["rm", "--force", "--", container]).code,
+        0,
+        "force removal is allowed for running containers"
+    );
+
+    let mut network = call(
+        &mut docker,
+        &[
+            "network",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "--",
+            "missing-network",
+        ],
+    );
+    assert_eq!(network.code, 1);
+    assert!(network.stderr.contains("No such network"));
+    assert_eq!(
+        call(&mut docker, &["network", "create", "--", "fake-network"]).code,
+        0
+    );
+    network = call(
+        &mut docker,
+        &[
+            "network",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "--",
+            "fake-network",
+        ],
+    );
+    assert_eq!(network.code, 0);
+    assert_eq!(network.stdout, "fake-net-id\n");
 }
 
 /// Tool-content hook double: attests every image (content proof is the
@@ -787,14 +1519,43 @@ impl ToolContentHook for ScriptHook {
         &self,
         _runner: &mut dyn WorkerRunner,
         image: &PinnedImage,
-        _expected: &ToolContentExpectation,
+        expected: &ToolContentExpectation,
     ) -> anyhow::Result<ToolContentAttestation> {
         Ok(ToolContentAttestation {
             reference: image.reference(),
             image_id: "sha256:fake".to_owned(),
-            content_version: "test".to_owned(),
-            source: None,
+            content_version: expected.content_version.clone(),
+            source: expected.source.clone(),
         })
+    }
+
+    fn verify_platform(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        _image: &PinnedImage,
+        _expected: &velnor_runner::scaleset::worker::ImagePlatform,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn verify_attestation(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        _image: &PinnedImage,
+        _expected: &ToolContentExpectation,
+        _attestation: &ToolContentAttestation,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn verify_signature(
+        &self,
+        _runner: &mut dyn WorkerRunner,
+        _image: &PinnedImage,
+        _expected: &ToolContentExpectation,
+        _attestation: &ToolContentAttestation,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -815,6 +1576,10 @@ fn write_config(
          group_name = \"{GROUP_NAME}\"\n\
          set_name = \"{SET_NAME}\"\n\
          labels = [\"velnor\", \"linux\"]\n\
+         ready_attempts = 2\n\
+         sweep_interval_secs = 3600\n\
+         poll_timeout_secs = 5\n\
+         nil_delay_secs = 0\n\
          [admission]\n\
          owner = [\"{OWNER}\"]\n\
          repository = [\"{OWNER}/velnor\"]\n\
@@ -822,10 +1587,6 @@ fn write_config(
          source = [\"{OWNER}/velnor\"]\n\
          workflow = [\".github/workflows/ci.yml\"]\n\
          event = [\"push\"]\n\
-         ready_attempts = 2\n\
-         sweep_interval_secs = 3600\n\
-         poll_timeout_secs = 5\n\
-         nil_delay_secs = 0\n\
          {extra}\n\
          [auth.pat]\n\
          token_env = \"{pat_env}\"\n",
@@ -1147,11 +1908,15 @@ async fn daemon_serves_one_job_end_to_end() {
         23
     );
 
-    // Exactly one worker pair was created; the JIT blob reached the
+    // Exactly one worker pair plus its holder were created; the JIT blob reached the
     // runner via its one-shot `--env-file` (deleted right after create)
     // and never appeared in any argv; no host socket ever entered an argv.
     let creates = docker.creates();
-    assert_eq!(creates.len(), 2, "one dind + one runner: {creates:?}");
+    assert_eq!(
+        creates.len(),
+        3,
+        "one holder + one dind + one runner: {creates:?}"
+    );
     let runner = runner_container_for(REQUEST_ID);
     let runner_create = creates
         .iter()
@@ -1160,6 +1925,19 @@ async fn daemon_serves_one_job_end_to_end() {
     assert!(
         runner_create.iter().any(|arg| arg == "--env-file"),
         "JIT travels via --env-file, never argv: {runner_create:?}"
+    );
+    let runner_image = HomogeneousProfile::host().unwrap().runner().reference();
+    assert_eq!(
+        runner_create
+            .get(runner_create.len().saturating_sub(2))
+            .map(String::as_str),
+        Some(runner_image.as_str()),
+        "the pinned runner image precedes the final command: {runner_create:?}"
+    );
+    assert_eq!(
+        runner_create.last().map(String::as_str),
+        Some("/home/runner/run.sh"),
+        "the official runner launcher is the final command: {runner_create:?}"
     );
     assert_eq!(
         docker.env_file_for(&runner).as_deref(),
@@ -1193,9 +1971,12 @@ async fn daemon_serves_one_job_end_to_end() {
     );
     assert!(
         !docker.has_container(&runner_container_for(REQUEST_ID))
-            && !docker.has_container(&dind_container_for(REQUEST_ID)),
-        "owned cleanup removed both containers"
+            && !docker.has_container(&dind_container_for(REQUEST_ID))
+            && !docker.has_container(&identity_for(REQUEST_ID).volume_holder_container()),
+        "owned cleanup removed the holder and both worker containers"
     );
+    assert_eq!(docker.anonymous_volume_count(), 0);
+    assert_holder_cleanup_uses_immutable_id(&docker, &identity_for(REQUEST_ID));
 
     // Single JIT fetch, clean session close, set never deleted.
     assert_eq!(jit_calls(&server).await, 1);
@@ -1284,7 +2065,9 @@ async fn restart_adopts_live_worker_without_reprovision() {
     )
     .await;
     let creates_phase1 = docker.creates().len();
-    assert_eq!(creates_phase1, 2);
+    assert_eq!(creates_phase1, 3);
+    let identity = identity_for(REQUEST_ID);
+    assert_holder_contract(&docker, &identity);
     let first_seen = DemandStore::open(&defaults.state_db)
         .unwrap()
         .get(SCALE_SET_ID, REQUEST_ID)
@@ -1328,6 +2111,7 @@ async fn restart_adopts_live_worker_without_reprovision() {
         .steps
         .push_back(message_step(23, &[completed_message(REQUEST_ID)]));
 
+    let docker_before_restart = docker.seen_len();
     let mut daemon2 = ScaleSetDaemon::open(
         &config,
         &defaults,
@@ -1342,6 +2126,25 @@ async fn restart_adopts_live_worker_without_reprovision() {
         docker.creates().len(),
         creates_phase1,
         "adoption must not re-create containers"
+    );
+    let restart_commands = docker.commands_since(docker_before_restart);
+    let holder_attest = restart_commands
+        .iter()
+        .position(|argv| {
+            argv.first().is_some_and(|head| head == "inspect")
+                && argv.iter().any(|arg| arg.contains(".Mounts"))
+        })
+        .expect("restart attests holder");
+    let network_attest = restart_commands
+        .iter()
+        .position(|argv| {
+            argv.first().is_some_and(|head| head == "network")
+                && argv.get(1).is_some_and(|verb| verb == "inspect")
+        })
+        .expect("restart attests network");
+    assert!(
+        holder_attest < network_attest,
+        "restart must attest holder before network/worker pair: {restart_commands:?}"
     );
     let shutdown2 = Arc::new(AtomicBool::new(false));
     let flag2 = shutdown2.clone();
@@ -1387,6 +2190,7 @@ async fn restart_adopts_live_worker_without_reprovision() {
         creates_phase1,
         "completion must not re-provision either"
     );
+    assert_holder_cleanup_uses_immutable_id(&docker, &identity);
     assert_eq!(jit_calls(&server).await, 1);
     // Three session DELETEs: phase-1 shutdown closes its session, phase-2
     // startup best-effort reaps the stored prior session id before creating
@@ -1420,6 +2224,95 @@ async fn restart_adopts_live_worker_without_reprovision() {
         reap_before_recreate,
         "phase-2 startup must reap the prior session before creating its own"
     );
+    assert_eq!(set_delete_calls(&server).await, 0);
+
+    unsafe { std::env::remove_var(&pat_env) };
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_rejects_recreated_network_attachment() {
+    let server = MockServer::start().await;
+    mount_token_chain(&server).await;
+    mount_group_lookup(&server).await;
+    mount_set_get_or_create(&server).await;
+    mount_session_create(&server, "queue-token-1").await;
+    mount_session_close(&server, 204).await;
+    mount_acks(&server).await;
+    mount_acquire(&server, &[REQUEST_ID]).await;
+    mount_jit(&server, "jit-blob-network-mismatch").await;
+
+    let script: SharedScript = Arc::new(Mutex::new(PollScript {
+        steps: VecDeque::from([message_step(20, &[offer_message(REQUEST_ID)])]),
+        seen: Vec::new(),
+    }));
+    mount_poll_script(&server, script).await;
+
+    let dir = temp_root("network-mismatch");
+    let pat_env = test_pat_env("network-mismatch");
+    unsafe { std::env::set_var(&pat_env, "test-pat") };
+    let config = write_config(&dir, &server, &pat_env, "");
+    let (defaults, ledger_path) = daemon_defaults(&dir);
+    configure_ledger(&ledger_path, 4);
+    let docker = FakeDocker::new();
+
+    let mut daemon = ScaleSetDaemon::open(
+        &config,
+        &defaults,
+        Box::new(docker.clone()),
+        Box::new(ScriptHook),
+    )
+    .unwrap();
+    daemon.start().await.unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flag = shutdown.clone();
+    let task = tokio::spawn(async move { daemon.run(&flag).await });
+
+    wait_for(
+        &defaults.state_db,
+        &ledger_path,
+        "provision before network replacement",
+        |demand, _| {
+            demand
+                .get(SCALE_SET_ID, REQUEST_ID)
+                .unwrap()
+                .is_some_and(|row| row.state == DemandState::ProvisionIntent)
+        },
+    )
+    .await;
+    shutdown.store(true, Ordering::SeqCst);
+    let report = task.await.unwrap().unwrap();
+    assert_eq!(report.shutdown_report.adopted_across_restart, 1);
+    assert_eq!(docker.creates().len(), 3);
+    assert_holder_contract(&docker, &identity_for(REQUEST_ID));
+
+    let network_name = identity_for(REQUEST_ID).network();
+    docker.recreate_network(&network_name);
+    PermitLedger::open(&ledger_path)
+        .unwrap()
+        .begin_epoch()
+        .unwrap();
+
+    let mut daemon2 = ScaleSetDaemon::open(
+        &config,
+        &defaults,
+        Box::new(docker.clone()),
+        Box::new(ScriptHook),
+    )
+    .unwrap();
+    let error = daemon2.start().await.unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("network attachment mismatch"),
+        "replacement must fail restart attestation: {rendered}"
+    );
+    assert_eq!(
+        docker.creates().len(),
+        3,
+        "attestation mismatch must not re-create either container"
+    );
+    assert!(docker.has_container(&runner_container_for(REQUEST_ID)));
+    assert!(docker.has_container(&dind_container_for(REQUEST_ID)));
+    assert_eq!(jit_calls(&server).await, 1);
     assert_eq!(set_delete_calls(&server).await, 0);
 
     unsafe { std::env::remove_var(&pat_env) };
@@ -1519,9 +2412,11 @@ async fn crash_with_dead_workers_fails_explicitly() {
         &defaults.state_db,
         &ledger_path,
         "two provisions",
-        |_, ledger| ledger.occupied().unwrap() == 2 && docker.creates().len() == 4,
+        |_, ledger| ledger.occupied().unwrap() == 2 && docker.creates().len() == 6,
     )
     .await;
+    assert_holder_contract(&docker, &identity_for(REQUEST_ID));
+    assert_holder_contract(&docker, &identity_for(REQUEST_B));
     // A reached `running` (assigned + started observations applied).
     wait_for(&defaults.state_db, &ledger_path, "job started", |_, _| {
         WorkerRegistry::open(&defaults.state_db)
@@ -1545,6 +2440,26 @@ async fn crash_with_dead_workers_fails_explicitly() {
         .unwrap()
         .begin_epoch()
         .unwrap();
+    let prior_holders = PermitLedger::open(&ledger_path).unwrap().holders().unwrap();
+    let scaleset_alive: Vec<(&str, PermitState)> = prior_holders
+        .iter()
+        .filter(|holder| holder.lane == PermitLane::ScaleSet)
+        .map(|holder| (holder.holder.as_str(), holder.state))
+        .collect();
+    assert_eq!(
+        scaleset_alive.len(),
+        2,
+        "phase-1 scale-set permits are reattested"
+    );
+    let (reconcile, swept) = velnor_runner::scaleset::allocator::startup_reconcile(
+        &ledger_path,
+        &scaleset_alive,
+        &[],
+        &|_| false,
+    )
+    .unwrap();
+    assert_eq!(reconcile.confirmed.len(), 2);
+    assert!(swept.is_empty());
     let mut daemon2 = ScaleSetDaemon::open(
         &config,
         &defaults,
@@ -1650,6 +2565,8 @@ async fn crash_with_dead_workers_fails_explicitly() {
         "only B still occupies"
     );
     assert_eq!(set_delete_calls(&server).await, 0);
+    assert_holder_cleanup_uses_immutable_id(&docker, &identity_for(REQUEST_ID));
+    assert_holder_cleanup_uses_immutable_id(&docker, &identity_for(REQUEST_B));
 
     unsafe { std::env::remove_var(&pat_env) };
 }
@@ -1780,6 +2697,9 @@ async fn cleanup_failure_retains_permit_uncertain() {
     );
     assert!(docker.has_container(&runner_container_for(REQUEST_ID)));
     assert!(!docker.has_container(&dind_container_for(REQUEST_ID)));
+    assert!(docker.has_container(&identity_for(REQUEST_ID).volume_holder_container()));
+    assert_eq!(docker.anonymous_volume_count(), 3);
+    assert_holder_cleanup_uses_immutable_id(&docker, &identity_for(REQUEST_ID));
     assert_eq!(set_delete_calls(&server).await, 0);
 
     unsafe { std::env::remove_var(&pat_env) };
@@ -1857,7 +2777,18 @@ async fn capacity_shares_one_ledger_across_lanes() {
         queue.clone(),
         SharedLedger::open(&ledger_path).unwrap(),
         lane,
-        DemandStore::open(&db).unwrap(),
+        DemandStore::open_with_admission(
+            &db,
+            OfferAdmission::exact(
+                OWNER,
+                &format!("{OWNER}/velnor"),
+                "main",
+                &format!("{OWNER}/velnor"),
+                ".github/workflows/ci.yml",
+                "push",
+            ),
+        )
+        .unwrap(),
         AcquireBatchStore::open(&db).unwrap(),
         ProvisionIntentStore::open(&db).unwrap(),
         metrics.clone(),
@@ -1932,7 +2863,8 @@ async fn capacity_shares_one_ledger_across_lanes() {
             .is_some(),
         "scale-set holder uses the unified slash namespace"
     );
-    assert_eq!(docker.creates().len(), 2);
+    assert_eq!(docker.creates().len(), 3);
+    assert_holder_contract(&docker, &identity_for(REQUEST_ID));
     assert_eq!(metrics.snapshot().acks, 2);
     assert_eq!(set_delete_calls(&server).await, 0);
 }
@@ -1975,6 +2907,17 @@ async fn key_file_permissions_fail_daemon_open() {
              owner = \"{OWNER}\"\n\
              group_name = \"{GROUP_NAME}\"\n\
              set_name = \"{SET_NAME}\"\n\
+             ready_attempts = 2\n\
+             sweep_interval_secs = 3600\n\
+             poll_timeout_secs = 5\n\
+             nil_delay_secs = 0\n\
+             [admission]\n\
+             owner = [\"{OWNER}\"]\n\
+             repository = [\"{OWNER}/velnor\"]\n\
+             ref = [\"main\"]\n\
+             source = [\"{OWNER}/velnor\"]\n\
+             workflow = [\".github/workflows/ci.yml\"]\n\
+             event = [\"push\"]\n\
              [auth.app]\n\
              client_id = \"Iv1.abc\"\n\
              installation_id = 42\n\
@@ -2012,6 +2955,17 @@ async fn key_file_permissions_fail_daemon_open() {
              owner = \"{OWNER}\"\n\
              group_name = \"{GROUP_NAME}\"\n\
              set_name = \"{SET_NAME}\"\n\
+             ready_attempts = 2\n\
+             sweep_interval_secs = 3600\n\
+             poll_timeout_secs = 5\n\
+             nil_delay_secs = 0\n\
+             [admission]\n\
+             owner = [\"{OWNER}\"]\n\
+             repository = [\"{OWNER}/velnor\"]\n\
+             ref = [\"main\"]\n\
+             source = [\"{OWNER}/velnor\"]\n\
+             workflow = [\".github/workflows/ci.yml\"]\n\
+             event = [\"push\"]\n\
              [auth.app]\n\
              client_id = \"Iv1.abc\"\n\
              installation_id = 42\n\

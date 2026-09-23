@@ -288,13 +288,50 @@ pub(crate) fn is_buildkit_builder_not_found(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<BuildkitBuilderNotFound>().is_some())
 }
 
-/// The daemon's missing-object vocabulary, both generations: modern Engines
-/// answer `No such container|object|image|volume`, older ones `no such ...`.
-/// Deliberately narrow: the cancellation ladder treats any other failure as
-/// "still alive", so a loose match here would stop the ladder early. Shared
-/// by every maintenance tolerant path so the vocabulary stays single-sourced.
+/// The daemon's missing-object vocabulary, including the current CLI's
+/// `network <name> not found` and `get <name>: no such volume` forms. Match
+/// only a complete Docker error prefix and an explicit object kind. Deliberately
+/// narrow: the cancellation ladder treats any other failure as "still alive",
+/// so matching transport errors or arbitrary prose here would stop the ladder
+/// early. Shared by every maintenance tolerant path so the vocabulary stays
+/// single-sourced.
 pub(crate) fn daemon_reports_missing(stderr: &str) -> bool {
-    stderr.contains("No such") || stderr.contains("no such")
+    const OBJECT_KINDS: [&str; 5] = ["container", "object", "image", "volume", "network"];
+
+    stderr.lines().any(|line| {
+        let normalized = line.trim().to_ascii_lowercase();
+        let message = normalized
+            .strip_prefix("docker: error response from daemon:")
+            .or_else(|| normalized.strip_prefix("error response from daemon:"))
+            .or_else(|| normalized.strip_prefix("error:"))
+            .unwrap_or(normalized.as_str())
+            .trim_start();
+        if let Some(remainder) = message.strip_prefix("no such ") {
+            if OBJECT_KINDS.iter().any(|kind| {
+                remainder
+                    .strip_prefix(kind)
+                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(':'))
+            }) {
+                return true;
+            }
+        }
+
+        if let Some(name) = message
+            .strip_prefix("network ")
+            .and_then(|remainder| remainder.strip_suffix(" not found"))
+        {
+            return !name.trim().is_empty();
+        }
+
+        if let Some(name) = message
+            .strip_prefix("get ")
+            .and_then(|remainder| remainder.strip_suffix(": no such volume"))
+        {
+            return !name.trim().is_empty();
+        }
+
+        false
+    })
 }
 
 /// Retry category of a failed `docker` invocation, decided once at the
@@ -486,6 +523,7 @@ impl DockerErrorCategory {
 const CONTAINER_READINESS_FORMAT: &str =
     "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}";
 const CONTAINER_RUNNING_FORMAT: &str = "{{.State.Running}}";
+const CONTAINER_STATUS_FORMAT: &str = "{{.State.Status}}";
 const CONTAINER_ID_FORMAT: &str = "{{.Id}}";
 const CONTAINER_EXIT_FORMAT: &str = "{{.State.Status}} {{.State.FinishedAt}}";
 const IMAGE_ID_FORMAT: &str = "{{.Id}}";
@@ -507,6 +545,18 @@ pub(crate) fn running_args(name: &str) -> Vec<String> {
     vec![
         "inspect".to_string(),
         format!("--format={CONTAINER_RUNNING_FORMAT}"),
+        "--".to_string(),
+        name.to_string(),
+    ]
+}
+
+/// Return the Engine's exact lifecycle state word. Callers that need to
+/// distinguish paused/restarting/removing from a stopped container must use
+/// this projection instead of the lossy `.State.Running` boolean.
+pub(crate) fn status_args(name: &str) -> Vec<String> {
+    vec![
+        "inspect".to_string(),
+        format!("--format={CONTAINER_STATUS_FORMAT}"),
         "--".to_string(),
         name.to_string(),
     ]
@@ -2371,21 +2421,38 @@ mod tests {
     }
 
     #[test]
-    fn missing_vocabulary_covers_both_generations_and_stays_narrow() {
-        // Modern Engine: `Error: No such object: <name>` on stdout `[]`.
-        assert!(daemon_reports_missing("Error: No such object: velnor-x"));
-        assert!(daemon_reports_missing("Error: No such container: velnor-x"));
-        // Older generation.
-        assert!(daemon_reports_missing("error: no such object: velnor-x"));
-        assert!(daemon_reports_missing("no such container"));
-        // Narrow on purpose: the cancel ladder reads anything else as alive.
-        assert!(!daemon_reports_missing(""));
-        assert!(!daemon_reports_missing(
-            "Error response from daemon: network velnor-net-1 not found"
-        ));
-        assert!(!daemon_reports_missing(
-            "Cannot connect to the Docker daemon"
-        ));
+    fn missing_vocabulary_requires_explicit_docker_object_form() {
+        for stderr in [
+            "Error: No such container: velnor-x",
+            "Error response from daemon: No such object: velnor-x",
+            "docker: error response from daemon: NO SUCH IMAGE: alpine",
+            "Error: No Such Volume: velnor-volume",
+            "no such network: velnor-network",
+            "no such container",
+            // Docker Engine 29.4.0 CLI output for network and volume inspect.
+            "Error response from daemon: network velnor-network not found",
+            "Error response from daemon: get velnor-volume: no such volume",
+            "error: no such object: velnor-object",
+        ] {
+            assert!(daemon_reports_missing(stderr), "{stderr:?}");
+        }
+
+        for stderr in [
+            "",
+            "no such file or directory",
+            "Error response from daemon: no such file or directory",
+            "some arbitrary no such container text",
+            "no such container text",
+            "Error response from daemon: a note about no such network",
+            "not-docker: no such image: alpine",
+            "Error response from daemon: network not found",
+            "Error response from daemon: network velnor-net-1 not found in another sentence",
+            "Error response from daemon: get : no such volume",
+            "Error response from daemon: get velnor-volume: no such volume later",
+            "Cannot connect to the Docker daemon",
+        ] {
+            assert!(!daemon_reports_missing(stderr), "{stderr:?}");
+        }
     }
 
     #[test]
@@ -2484,6 +2551,7 @@ mod tests {
         let mut queries: Vec<Vec<String>> = vec![
             readiness_args("velnor-service-postgres"),
             running_args("velnor-job-1"),
+            status_args("velnor-job-1"),
             container_id_args("velnor-service-postgres"),
             daemon_cgroup_args(),
             mapped_ports_args("velnor-service-postgres"),

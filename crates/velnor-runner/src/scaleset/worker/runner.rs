@@ -36,9 +36,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::dind::{BUILDKIT_CACHE_DIR, DIND_SOCKET, STATE_MOUNT};
-use super::ownership::{WorkerIdentity, ROLE_RUNNER};
+use super::dind::{verify_volume_holder_reference, BUILDKIT_CACHE_DIR, DIND_SOCKET, STATE_MOUNT};
+use super::ownership::{
+    WorkerIdentity, OWNERSHIP_LABEL, ROLE_RUNNER, RUNNER_LABEL, SCALE_SET_LABEL, WORKER_ROLE_LABEL,
+};
 use super::WorkerRunner;
+use crate::docker::client::ContainerState;
 
 /// Official runner image repository.
 pub const RUNNER_REPOSITORY: &str = "ghcr.io/actions/actions-runner";
@@ -141,6 +144,11 @@ impl ImagePlatform {
 pub const JIT_CONFIG_ENV: &str = "ACTIONS_RUNNER_INPUT_JITCONFIG";
 /// Runner name env var (the image's own input contract).
 pub const RUNNER_NAME_ENV: &str = "ACTIONS_RUNNER_INPUT_NAME";
+/// Explicit command for the official runner image.
+///
+/// `actions/runner:2.337.0` has no entrypoint and its image default command
+/// is `/bin/bash`; the JIT runner must be started explicitly instead.
+pub const RUNNER_START_COMMAND: &str = "/home/runner/run.sh";
 /// Work folder inside the runner container (guest-absolute).
 pub const RUNNER_WORK_DIR: &str = "/home/runner/_work";
 /// Tool cache dir, identical absolute path in both containers of a pair.
@@ -1028,10 +1036,8 @@ impl RunnerSpec {
             "RUNNER_WORK_FOLDER=".to_string() + RUNNER_WORK_DIR,
             "--volume".to_string(),
             format!("{}:{STATE_MOUNT}", self.state_dir.display()),
-            "--volume".to_string(),
-            format!("{}:{RUNNER_WORK_DIR}", self.identity.workspace_volume()),
-            "--volume".to_string(),
-            format!("{}:{TOOL_CACHE_DIR}", self.identity.workspace_volume()),
+            "--volumes-from".to_string(),
+            self.identity.volume_holder_container(),
             "--volume".to_string(),
             format!(
                 "{}:{BUILDKIT_CACHE_DIR}",
@@ -1045,10 +1051,11 @@ impl RunnerSpec {
         args.extend(self.identity.label_args(ROLE_RUNNER));
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
-        // Do not override the official image entrypoint/command. Toolchain
-        // installation, curl, and floating `latest` resolution are forbidden
-        // on the normal worker path; the image is admitted and run exactly as
-        // published.
+        // The official image has no ENTRYPOINT and defaults to /bin/bash.
+        // Invoke its JIT runner explicitly. Toolchain installation, curl, and
+        // floating `latest` resolution remain forbidden on the worker path;
+        // only the pinned image's published runner script is invoked.
+        args.push(RUNNER_START_COMMAND.to_string());
         args
     }
 }
@@ -1096,12 +1103,360 @@ pub enum RunnerProvision {
     Created,
 }
 
+/// Non-secret persisted command state for an existing runner container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerContainerConfig {
+    image: String,
+    labels: BTreeMap<String, String>,
+    network_mode: String,
+    volumes_from: Option<Vec<String>>,
+    entrypoint: Vec<String>,
+    command: Option<Vec<String>>,
+    /// Exact Docker lifecycle word. Unknown words remain `Some` here and are
+    /// rejected by the lifecycle policy below; the projection never falls
+    /// back to the lossy `.State.Running` boolean.
+    status: String,
+}
+
+/// Parse the deliberately narrow `docker inspect --format` projection used
+/// by [`ensure_runner`]. Never inspect `.Config.Env`: it can contain JIT data.
+fn parse_runner_container_config(output: &str) -> Result<RunnerContainerConfig> {
+    let mut fields = output.trim().split('\t');
+    let image: String = serde_json::from_str(
+        fields
+            .next()
+            .context("runner container inspect omitted image")?,
+    )
+    .context("parse runner container image")?;
+    let labels: BTreeMap<String, String> = serde_json::from_str(
+        fields
+            .next()
+            .context("runner container inspect omitted labels")?,
+    )
+    .context("parse runner container labels")?;
+    let network_mode: String = serde_json::from_str(
+        fields
+            .next()
+            .context("runner container inspect omitted network mode")?,
+    )
+    .context("parse runner container network mode")?;
+    let volumes_from: Option<Vec<String>> = serde_json::from_str(
+        fields
+            .next()
+            .context("runner container inspect omitted volume holder references")?,
+    )
+    .context("parse runner container volume holder references")?;
+    let entrypoint: Option<Vec<String>> = serde_json::from_str(
+        fields
+            .next()
+            .context("runner container inspect omitted entrypoint")?,
+    )
+    .context("parse runner container entrypoint")?;
+    let command: Option<Vec<String>> = serde_json::from_str(
+        fields
+            .next()
+            .context("runner container inspect omitted command")?,
+    )
+    .context("parse runner container command")?;
+    let status: String = serde_json::from_str(
+        fields
+            .next()
+            .context("runner container inspect omitted lifecycle status")?,
+    )
+    .context("parse runner container lifecycle status")?;
+    if status.trim().is_empty() {
+        anyhow::bail!("runner container inspect returned empty lifecycle status");
+    }
+    if fields.next().is_some() {
+        anyhow::bail!("runner container inspect returned extra fields");
+    }
+    Ok(RunnerContainerConfig {
+        image,
+        labels,
+        network_mode,
+        volumes_from,
+        entrypoint: entrypoint.unwrap_or_default(),
+        command,
+        status,
+    })
+}
+
+fn runner_status_is_running(status: &str) -> bool {
+    matches!(
+        crate::docker::client::ContainerState::parse(status),
+        Some(crate::docker::client::ContainerState::Running)
+    )
+}
+
+fn runner_status_is_safe_to_recreate(status: &str) -> bool {
+    matches!(
+        crate::docker::client::ContainerState::parse(status),
+        Some(
+            crate::docker::client::ContainerState::Created
+                | crate::docker::client::ContainerState::Exited
+                | crate::docker::client::ContainerState::Dead
+        )
+    )
+}
+
+fn runner_status_error(status: &str) -> anyhow::Error {
+    if crate::docker::client::ContainerState::parse(status).is_some() {
+        anyhow::anyhow!("refusing runner container in unsafe lifecycle status {status:?}")
+    } else {
+        anyhow::anyhow!("refusing runner container with unknown lifecycle status {status:?}")
+    }
+}
+
+fn runner_container_config_matches(config: &RunnerContainerConfig, image: &str) -> bool {
+    config.image == image
+        && config.entrypoint.is_empty()
+        && config
+            .command
+            .as_deref()
+            .is_some_and(|command| command == [RUNNER_START_COMMAND])
+}
+
+fn validate_runner_identity(
+    object_name: &str,
+    identity: &WorkerIdentity,
+    labels: &BTreeMap<String, String>,
+    network_mode: &str,
+) -> Result<()> {
+    let expected_labels = [
+        (OWNERSHIP_LABEL, identity.ownership().as_str()),
+        (RUNNER_LABEL, identity.ownership().runner_name().to_string()),
+        (
+            SCALE_SET_LABEL,
+            identity.ownership().scale_set_id().to_string(),
+        ),
+        (WORKER_ROLE_LABEL, ROLE_RUNNER.to_string()),
+    ];
+    for (key, expected) in expected_labels {
+        match labels.get(key) {
+            Some(found) if found == &expected => {}
+            Some(found) => {
+                anyhow::bail!("{object_name} has {key}={found:?}, expected {expected:?}")
+            }
+            None => anyhow::bail!("{object_name} is missing label {key}"),
+        }
+    }
+
+    let expected_network = format!("container:{}", identity.dind_container());
+    if network_mode != expected_network {
+        anyhow::bail!(
+            "{object_name} has network mode {network_mode:?}, expected {expected_network:?}"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestartRunnerProjection {
+    image: String,
+    labels: BTreeMap<String, String>,
+    network_mode: String,
+    volumes_from: Option<Vec<String>>,
+    entrypoint: Option<Vec<String>>,
+    command: Option<Vec<String>>,
+    status: String,
+}
+
+fn parse_restart_runner_projection(output: &str) -> Result<RestartRunnerProjection> {
+    let mut fields = output.trim().split('\t');
+    let image = serde_json::from_str(
+        fields
+            .next()
+            .context("restart runner inspect omitted image")?,
+    )
+    .context("parse restart runner image")?;
+    let labels = serde_json::from_str(
+        fields
+            .next()
+            .context("restart runner inspect omitted labels")?,
+    )
+    .context("parse restart runner labels")?;
+    let network_mode = serde_json::from_str(
+        fields
+            .next()
+            .context("restart runner inspect omitted network mode")?,
+    )
+    .context("parse restart runner network mode")?;
+    let volumes_from = serde_json::from_str(
+        fields
+            .next()
+            .context("restart runner inspect omitted volume holder references")?,
+    )
+    .context("parse restart runner volume holder references")?;
+    let entrypoint = serde_json::from_str(
+        fields
+            .next()
+            .context("restart runner inspect omitted entrypoint")?,
+    )
+    .context("parse restart runner entrypoint")?;
+    let command = serde_json::from_str(
+        fields
+            .next()
+            .context("restart runner inspect omitted command")?,
+    )
+    .context("parse restart runner command")?;
+    let status = serde_json::from_str(
+        fields
+            .next()
+            .context("restart runner inspect omitted lifecycle status")?,
+    )
+    .context("parse restart runner lifecycle status")?;
+    if fields.next().is_some() {
+        anyhow::bail!("restart runner inspect returned extra fields");
+    }
+    Ok(RestartRunnerProjection {
+        image,
+        labels,
+        network_mode,
+        volumes_from,
+        entrypoint,
+        command,
+        status,
+    })
+}
+
+/// Attest an existing runner during restart reconciliation.
+///
+/// This is deliberately inspect-only: it never consumes JIT credentials and
+/// never creates, starts, or removes a container. Every field is a narrow
+/// projection; in particular, `.Config.Env` is excluded because it can hold
+/// the runner's JIT configuration.
+pub(crate) fn attest_restart_runner(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    expected_image: &PinnedImage,
+) -> Result<ContainerState> {
+    let name = identity.runner_container();
+    let inspected = runner
+        .run(
+            "docker",
+            &[
+                "inspect".to_string(),
+                "--format".to_string(),
+                r#"{{json .Config.Image}}{{"\t"}}{{json .Config.Labels}}{{"\t"}}{{json .HostConfig.NetworkMode}}{{"\t"}}{{json .HostConfig.VolumesFrom}}{{"\t"}}{{json .Config.Entrypoint}}{{"\t"}}{{json .Config.Cmd}}{{"\t"}}{{json .State.Status}}"#.to_string(),
+                "--".to_string(),
+                name.clone(),
+            ],
+        )
+        .with_context(|| format!("attest restart runner {name}"))?;
+    if inspected.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&inspected.stderr) {
+            return Err(super::RestartObjectMissing.into());
+        }
+        anyhow::bail!(
+            "attest restart runner {name} exited {}: {}",
+            inspected.code,
+            inspected.stderr.trim()
+        );
+    }
+
+    let projection = parse_restart_runner_projection(&inspected.stdout)
+        .with_context(|| format!("attest restart runner {name}"))?;
+    validate_runner_identity(
+        &format!("restart runner {name}"),
+        identity,
+        &projection.labels,
+        &projection.network_mode,
+    )?;
+    verify_volume_holder_reference(
+        "restart runner",
+        &name,
+        projection.volumes_from.as_deref(),
+        identity,
+    )?;
+
+    let expected_image = expected_image.reference();
+    if projection.image != expected_image {
+        anyhow::bail!(
+            "restart runner {name} has image {:?}, expected {:?}",
+            projection.image,
+            expected_image
+        );
+    }
+
+    if projection.entrypoint.unwrap_or_default() != Vec::<String>::new() {
+        anyhow::bail!("restart runner {name} has a non-empty entrypoint");
+    }
+    if projection.command != Some(vec![RUNNER_START_COMMAND.to_string()]) {
+        anyhow::bail!(
+            "restart runner {name} has command {:?}, expected {:?}",
+            projection.command,
+            [RUNNER_START_COMMAND]
+        );
+    }
+
+    match projection.status.as_str() {
+        "running" => Ok(ContainerState::Running),
+        "exited" => Ok(ContainerState::Exited),
+        "dead" => Ok(ContainerState::Dead),
+        status => {
+            anyhow::bail!("restart runner {name} has unsafe or unknown lifecycle status {status:?}")
+        }
+    }
+}
+
+fn create_and_start_runner(
+    runner: &mut dyn WorkerRunner,
+    spec: &RunnerSpec,
+    name: &str,
+    before_start: &mut dyn FnMut() -> Result<()>,
+) -> Result<RunnerProvision> {
+    let env_file = spec.write_env_file()?;
+    let created = runner.run("docker", &spec.create_args_with_env_file(&env_file));
+    // Scrubbing is part of the create boundary. Never start/adopt the
+    // runner if the secret file could not be removed.
+    let scrubbed = spec.scrub_jit_env_files();
+    let created = match (created, scrubbed) {
+        (Ok(output), Ok(())) => output,
+        (Err(create_error), Ok(())) => {
+            return Err(create_error).with_context(|| format!("create runner container {name}"));
+        }
+        (Ok(_), Err(scrub_error)) => {
+            anyhow::bail!("scrub JIT env file after create of runner {name}: {scrub_error:#}");
+        }
+        (Err(create_error), Err(scrub_error)) => {
+            anyhow::bail!(
+                "create runner container {name} failed: {create_error:#}; JIT env cleanup failed: {scrub_error:#}"
+            );
+        }
+    };
+    if created.code != 0 {
+        anyhow::bail!(
+            "create runner container {name} exited {}: {}",
+            created.code,
+            created.stderr.trim()
+        );
+    }
+    before_start().context("persist runner startup deadline")?;
+    let started = runner
+        .run(
+            "docker",
+            &["start".to_string(), "--".to_string(), name.to_string()],
+        )
+        .with_context(|| format!("start runner container {name}"))?;
+    if started.code != 0 {
+        anyhow::bail!(
+            "start runner container {name} exited {}: {}",
+            started.code,
+            started.stderr.trim()
+        );
+    }
+    Ok(RunnerProvision::Created)
+}
+
 /// Ensure the runner container exists and is started, adopting on retry.
 ///
 /// Same contract as [`super::dind::ensure_dind`]: missing → write the
 /// `0600` JIT env file, create from
-/// [`RunnerSpec::create_args_with_env_file`], delete the env file, +
-/// start; present → ownership labels must match, then idempotent start.
+/// [`RunnerSpec::create_args_with_env_file`], delete the env file, then
+/// start; present → complete identity labels, exact DinD network mode, and
+/// persisted image/command must match before adoption or removal. A stopped
+/// owned container is always removed and recreated so it receives a fresh
+/// one-shot JIT environment. A running mismatch fails closed.
 /// Call only after the DinD daemon is ready: the runner joins the
 /// daemon's network namespace, so creating it first would fail against a
 /// missing namespace.
@@ -1127,67 +1482,84 @@ pub(crate) fn ensure_runner(
             ],
         )
         .with_context(|| format!("inspect runner container {name}"))?;
+    if inspect.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&inspect.stderr) {
+            return create_and_start_runner(runner, spec, &name, before_start);
+        }
+        anyhow::bail!(
+            "inspect runner container {name} exited {}: {}",
+            inspect.code,
+            inspect.stderr.trim()
+        );
+    }
     if inspect.stdout.trim().is_empty() {
-        let env_file = spec.write_env_file()?;
-        let created = runner.run("docker", &spec.create_args_with_env_file(&env_file));
-        // Scrubbing is part of the create boundary. Never start/adopt the
-        // runner if the secret file could not be removed.
-        let scrubbed = spec.scrub_jit_env_files();
-        let created = match (created, scrubbed) {
-            (Ok(output), Ok(())) => output,
-            (Err(create_error), Ok(())) => {
-                return Err(create_error)
-                    .with_context(|| format!("create runner container {name}"));
-            }
-            (Ok(_), Err(scrub_error)) => {
-                anyhow::bail!("scrub JIT env file after create of runner {name}: {scrub_error:#}");
-            }
-            (Err(create_error), Err(scrub_error)) => {
-                anyhow::bail!(
-                    "create runner container {name} failed: {create_error:#}; JIT env cleanup failed: {scrub_error:#}"
-                );
-            }
-        };
-        if created.code != 0 {
-            anyhow::bail!(
-                "create runner container {name} exited {}: {}",
-                created.code,
-                created.stderr.trim()
-            );
-        }
-        before_start().context("persist runner startup deadline")?;
-        let started = runner
-            .run(
-                "docker",
-                &["start".to_string(), "--".to_string(), name.clone()],
-            )
-            .with_context(|| format!("start runner container {name}"))?;
-        if started.code != 0 {
-            anyhow::bail!(
-                "start runner container {name} exited {}: {}",
-                started.code,
-                started.stderr.trim()
-            );
-        }
-        return Ok(RunnerProvision::Created);
+        anyhow::bail!("inspect runner container {name} returned empty id");
     }
 
     super::dind::verify_container_ownership(runner, &name, &spec.identity().ownership().as_str())?;
-    before_start().context("persist runner startup deadline")?;
-    let started = runner
+    let config = runner
         .run(
             "docker",
-            &["start".to_string(), "--".to_string(), name.clone()],
+            &[
+                "inspect".to_string(),
+                "--format".to_string(),
+                r#"{{json .Config.Image}}{{"\t"}}{{json .Config.Labels}}{{"\t"}}{{json .HostConfig.NetworkMode}}{{"\t"}}{{json .HostConfig.VolumesFrom}}{{"\t"}}{{json .Config.Entrypoint}}{{"\t"}}{{json .Config.Cmd}}{{"\t"}}{{json .State.Status}}"#.to_string(),
+                "--".to_string(),
+                name.clone(),
+            ],
         )
-        .with_context(|| format!("start runner container {name}"))?;
-    if started.code != 0 {
+        .with_context(|| format!("inspect runner command {name}"))?;
+    if config.code != 0 {
         anyhow::bail!(
-            "start runner container {name} exited {}: {}",
-            started.code,
-            started.stderr.trim()
+            "inspect runner command {name} exited {}: {}",
+            config.code,
+            config.stderr.trim()
         );
     }
-    Ok(RunnerProvision::Adopted)
+    let config = parse_runner_container_config(&config.stdout)
+        .with_context(|| format!("inspect runner command {name}"))?;
+    validate_runner_identity(
+        &format!("runner container {name}"),
+        spec.identity(),
+        &config.labels,
+        &config.network_mode,
+    )?;
+    verify_volume_holder_reference(
+        "runner container",
+        &name,
+        config.volumes_from.as_deref(),
+        spec.identity(),
+    )?;
+    let image = spec.image.reference();
+    if runner_status_is_running(&config.status) {
+        if !runner_container_config_matches(&config, &image) {
+            anyhow::bail!(
+                "refusing to replace running runner container {name} with mismatched image or command"
+            );
+        }
+        // The container is already running. Do not call `docker start`: a
+        // race between inspect and start could restart a one-shot JIT
+        // container after it exits and reuse its persisted secret.
+        before_start().context("persist runner startup deadline")?;
+        return Ok(RunnerProvision::Adopted);
+    }
+    if runner_status_is_safe_to_recreate(&config.status) {
+        let removed = runner
+            .run(
+                "docker",
+                &crate::docker::client::container_remove_args(&name, false, false),
+            )
+            .with_context(|| format!("remove stopped runner container {name}"))?;
+        if removed.code != 0 {
+            anyhow::bail!(
+                "remove stopped runner container {name} exited {}: {}",
+                removed.code,
+                removed.stderr.trim()
+            );
+        }
+        return create_and_start_runner(runner, spec, &name, before_start);
+    }
+    Err(runner_status_error(&config.status))
 }
 
 /// Runner connectivity: what the supervisor observed.
@@ -1226,20 +1598,23 @@ pub(crate) fn runner_connection(
     // Raw calls (not the `Docker` facade): connectivity needs inspect +
     // logs back-to-back on one runner borrow, and the facade owns its
     // borrow for its whole lifetime.
-    let running = runner
-        .run("docker", &crate::docker::client::running_args(&name))
+    let status = runner
+        .run("docker", &crate::docker::client::status_args(&name))
         .with_context(|| format!("inspect runner container {name}"))?;
-    if running.code != 0 {
-        if crate::docker::client::daemon_reports_missing(&running.stderr) {
+    if status.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&status.stderr) {
             return Ok(RunnerConnection::Down);
         }
         anyhow::bail!(
             "inspect runner container {name} exited {}: {}",
-            running.code,
-            running.stderr.trim()
+            status.code,
+            status.stderr.trim()
         );
     }
-    if running.stdout.trim() != "true" {
+    if !matches!(
+        crate::docker::client::ContainerState::parse(status.stdout.trim()),
+        Some(crate::docker::client::ContainerState::Running)
+    ) {
         return Ok(RunnerConnection::Down);
     }
     let logs = runner
@@ -1282,9 +1657,10 @@ mod tests {
     use super::super::ownership::OwnershipId;
     use super::super::WorkerOutput;
     use super::*;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
 
     const RUNNER_REF: &str = "ghcr.io/actions/actions-runner@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4";
+    const WRONG_RUNNER_REF: &str = "ghcr.io/actions/actions-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
     struct ScriptRunner {
         results: VecDeque<WorkerOutput>,
@@ -1340,6 +1716,119 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("velnor-runner-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn container_config_parts(
+        image: &str,
+        entrypoint: Option<&[&str]>,
+        command: Option<&[&str]>,
+        status: &str,
+    ) -> String {
+        let mut labels = identity().labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
+        let network_mode = format!("container:{}", identity().dind_container());
+        container_config_parts_with(image, &labels, &network_mode, entrypoint, command, status)
+    }
+
+    fn container_config_parts_with(
+        image: &str,
+        labels: &BTreeMap<String, String>,
+        network_mode: &str,
+        entrypoint: Option<&[&str]>,
+        command: Option<&[&str]>,
+        status: &str,
+    ) -> String {
+        let volumes_from = Some(vec![identity().volume_holder_container()]);
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            serde_json::to_string(image).unwrap(),
+            serde_json::to_string(labels).unwrap(),
+            serde_json::to_string(network_mode).unwrap(),
+            serde_json::to_string(&volumes_from).unwrap(),
+            serde_json::to_string(&entrypoint).unwrap(),
+            serde_json::to_string(&command).unwrap(),
+            serde_json::to_string(status).unwrap(),
+        )
+    }
+
+    fn container_config(image: &str, command: &str, status: &str) -> String {
+        container_config_parts(image, None, Some(&[command]), status)
+    }
+
+    fn restart_runner_projection(labels: &BTreeMap<String, String>, status: &str) -> String {
+        restart_runner_projection_with(
+            labels,
+            Some(vec![identity().volume_holder_container()]),
+            status,
+        )
+    }
+
+    fn restart_runner_projection_with(
+        labels: &BTreeMap<String, String>,
+        volumes_from: Option<Vec<String>>,
+        status: &str,
+    ) -> String {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            serde_json::to_string(RUNNER_REF).unwrap(),
+            serde_json::to_string(labels).unwrap(),
+            serde_json::to_string(&format!("container:{}", identity().dind_container())).unwrap(),
+            serde_json::to_string(&volumes_from).unwrap(),
+            serde_json::to_string(&Some(Vec::<String>::new())).unwrap(),
+            serde_json::to_string(&Some(vec![RUNNER_START_COMMAND.to_string()])).unwrap(),
+            serde_json::to_string(status).unwrap(),
+        )
+    }
+
+    #[test]
+    fn restart_runner_attestation_requires_scale_set_label() {
+        let expected_image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let mut labels = identity().labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
+
+        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok(
+            &restart_runner_projection(&labels, "running"),
+        )]);
+        assert_eq!(
+            attest_restart_runner(&mut runner, &identity(), &expected_image).unwrap(),
+            ContainerState::Running
+        );
+
+        labels.remove(SCALE_SET_LABEL);
+        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok(
+            &restart_runner_projection(&labels, "running"),
+        )]);
+        let error = attest_restart_runner(&mut runner, &identity(), &expected_image).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing label velnor.scaleset.set"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn restart_runner_attestation_requires_exact_volume_holder() {
+        let expected_image = PinnedImage::parse(RUNNER_REF).unwrap();
+        let mut labels = identity().labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
+        let holder = identity().volume_holder_container();
+        for volumes_from in [
+            None,
+            Some(Vec::new()),
+            Some(vec!["legacy-named-holder".to_string()]),
+            Some(vec![holder.clone(), "unexpected-second-holder".to_string()]),
+        ] {
+            let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok(
+                &restart_runner_projection_with(&labels, volumes_from, "running"),
+            )]);
+            let error =
+                attest_restart_runner(&mut runner, &identity(), &expected_image).unwrap_err();
+            assert!(
+                error.to_string().contains("HostConfig.VolumesFrom"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]
@@ -1546,21 +2035,27 @@ mod tests {
         let args = spec
             .create_args_with_env_file(&spec.jit_env_file_path().unwrap())
             .join("\n");
-        // Same guest paths the DinD side mounts (dind.rs STATE_MOUNT etc.).
+        // The holder supplies the shared absolute workspace, tool-cache, and
+        // DinD data mounts to both containers; runner argv must reference the
+        // holder rather than a named volume source.
         for guest in [
             STATE_MOUNT,
-            RUNNER_WORK_DIR,
-            TOOL_CACHE_DIR,
             BUILDKIT_CACHE_DIR,
             "/home/runner/.cargo/registry",
             "/home/runner/.cargo/git",
         ] {
             assert!(args.contains(guest), "missing guest path {guest}:\n{args}");
         }
+        assert!(args.contains(&format!(
+            "--volumes-from\n{}",
+            spec.identity().volume_holder_container()
+        )));
+        assert!(!args.contains(&format!(":{RUNNER_WORK_DIR}")));
+        assert!(!args.contains(&format!(":{TOOL_CACHE_DIR}")));
     }
 
     #[test]
-    fn runner_argv_keeps_the_official_image_entrypoint_immutable() {
+    fn runner_argv_explicitly_invokes_the_official_run_script() {
         let spec = RunnerSpec::new(
             identity(),
             PinnedImage::parse(RUNNER_REF).unwrap(),
@@ -1586,12 +2081,357 @@ mod tests {
                 "worker create argv contains floating install path {forbidden}: {args}"
             );
         }
+        let create_args = spec.create_args_with_env_file(&spec.jit_env_file_path().unwrap());
         assert_eq!(
-            spec.create_args_with_env_file(&spec.jit_env_file_path().unwrap())
-                .last()
-                .map(String::as_str),
-            Some(RUNNER_REF)
+            create_args.get(create_args.len() - 2),
+            Some(&RUNNER_REF.to_string())
         );
+        assert_eq!(
+            create_args.last().map(String::as_str),
+            Some(RUNNER_START_COMMAND)
+        );
+    }
+
+    #[test]
+    fn runner_container_config_parser_is_non_secret_and_exact() {
+        let config = parse_runner_container_config(&container_config(
+            RUNNER_REF,
+            RUNNER_START_COMMAND,
+            "exited",
+        ))
+        .unwrap();
+        assert_eq!(config.image, RUNNER_REF);
+        assert_eq!(
+            config.volumes_from,
+            Some(vec![identity().volume_holder_container()])
+        );
+        assert_eq!(config.entrypoint, Vec::<String>::new());
+        assert_eq!(config.command, Some(vec![RUNNER_START_COMMAND.to_string()]));
+        assert_eq!(config.status, "exited");
+        assert!(runner_container_config_matches(&config, RUNNER_REF));
+        assert!(!runner_container_config_matches(&config, WRONG_RUNNER_REF));
+        assert!(parse_runner_container_config(
+            "\"image\"\t{}\t\"container:dind\"\t[]\tnull\tnull\t\"created\"\n"
+        )
+        .unwrap()
+        .command
+        .is_none());
+    }
+
+    #[test]
+    fn runner_container_config_parser_rejects_malformed_lifecycle_projection() {
+        for projection in [
+            "\"image\"\t{}\t\"bridge\"\tnull\t[]\n",
+            "\"image\"\t{}\t\"bridge\"\tnull\t[]\ttrue\t\"running\"\n",
+            "\"image\"\t{}\t\"bridge\"\tnull\t[]\t[]\t\"\"\n",
+            "\"image\"\t{}\t\"bridge\"\tnull\t[]\t[]\t\"running\"\textra\n",
+            "not-json\t{}\t\"bridge\"\tnull\t[]\t[]\t\"running\"\n",
+        ] {
+            assert!(
+                parse_runner_container_config(projection).is_err(),
+                "projection must fail closed: {projection:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runner_provision_rejects_identity_or_network_mismatch_before_remove() {
+        let mut missing_scale_set = identity().labels();
+        missing_scale_set.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
+        missing_scale_set.remove(SCALE_SET_LABEL);
+        let mut complete = identity().labels();
+        complete.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
+        let cases = vec![
+            (
+                "missing-scale-set",
+                missing_scale_set,
+                format!("container:{}", identity().dind_container()),
+                format!("missing label {SCALE_SET_LABEL}"),
+            ),
+            (
+                "wrong-network",
+                complete,
+                "bridge".to_string(),
+                "network mode".to_string(),
+            ),
+        ];
+
+        for (case, labels, network_mode, expected_error) in cases {
+            let spec = RunnerSpec::new(
+                identity(),
+                PinnedImage::parse(RUNNER_REF).unwrap(),
+                Path::new("/tmp/velnor-test-runner-state-identity-boundary"),
+                "redacted-jit",
+            );
+            let projection = container_config_parts_with(
+                RUNNER_REF,
+                &labels,
+                &network_mode,
+                None,
+                Some(&[RUNNER_START_COMMAND][..]),
+                "exited",
+            );
+            let mut runner = ScriptRunner::scripted(vec![
+                ScriptRunner::ok("cafe\n"),
+                ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+                ScriptRunner::ok(&projection),
+            ]);
+            let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+            assert!(
+                error.to_string().contains(&expected_error),
+                "{case}: {error:#}"
+            );
+            assert_eq!(runner.seen.len(), 3, "{case}");
+            assert!(
+                !runner
+                    .seen
+                    .iter()
+                    .any(|args| matches!(args.first().map(String::as_str), Some("rm" | "start"))),
+                "{case}: mismatch must block mutation"
+            );
+        }
+    }
+
+    #[test]
+    fn runner_provision_recreates_stopped_mismatched_container() {
+        let state = temp_state("provision-recreate-mismatch");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "redacted-jit",
+        );
+        let name = spec.identity().runner_container();
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("cafe\n"),
+            ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+            ScriptRunner::ok(&container_config(RUNNER_REF, "/bin/bash", "exited")),
+            ScriptRunner::ok(&format!("{name}\n")),
+            ScriptRunner::ok("new-container\n"),
+            ScriptRunner::ok(&format!("{name}\n")),
+        ]);
+        assert_eq!(
+            ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
+            RunnerProvision::Created
+        );
+        assert_eq!(
+            runner.seen[3],
+            vec!["rm".to_string(), "--".to_string(), name.clone()]
+        );
+        let command_inspect = &runner.seen[2][2];
+        assert!(command_inspect.contains(".Config.Labels"));
+        assert!(command_inspect.contains(".HostConfig.NetworkMode"));
+        assert!(command_inspect.contains(".Config.Entrypoint"));
+        assert!(command_inspect.contains(".Config.Cmd"));
+        assert!(command_inspect.contains(".State.Status"));
+        assert!(!command_inspect.contains(".Config.Env"));
+        assert_eq!(
+            runner.seen[4].last().map(String::as_str),
+            Some(RUNNER_START_COMMAND)
+        );
+        assert_eq!(
+            runner.seen[5],
+            vec!["start".to_string(), "--".to_string(), name.clone()]
+        );
+        assert!(!runner.seen[3].iter().any(|arg| arg == "--force"));
+        assert!(!spec.jit_env_file_path().unwrap().exists());
+        assert!(!state.join(JIT_ENV_FILE).exists());
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn runner_provision_rejects_running_mismatched_container() {
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            Path::new("/tmp/velnor-test-runner-state-running-mismatch"),
+            "redacted-jit",
+        );
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("cafe\n"),
+            ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+            ScriptRunner::ok(&container_config(
+                WRONG_RUNNER_REF,
+                RUNNER_START_COMMAND,
+                "running",
+            )),
+        ]);
+        let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+        assert!(
+            error.to_string().contains("running runner container"),
+            "{error}"
+        );
+        assert_eq!(runner.seen.len(), 3);
+        assert!(!runner
+            .seen
+            .iter()
+            .any(|args| args.first().map(String::as_str) == Some("rm")));
+        assert!(!runner
+            .seen
+            .iter()
+            .any(|args| args.first().map(String::as_str) == Some("start")));
+    }
+
+    #[test]
+    fn runner_provision_adopts_matching_persisted_command() {
+        let state = temp_state("provision-adopt-matching-command");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "redacted-jit",
+        );
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("cafe\n"),
+            ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+            ScriptRunner::ok(&container_config(
+                RUNNER_REF,
+                RUNNER_START_COMMAND,
+                "running",
+            )),
+        ]);
+        assert_eq!(
+            ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
+            RunnerProvision::Adopted
+        );
+        assert_eq!(runner.seen.len(), 3);
+        assert!(!runner
+            .seen
+            .iter()
+            .any(|args| args.first().map(String::as_str) == Some("start")));
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn runner_provision_recreates_stopped_wrong_image() {
+        let state = temp_state("provision-recreate-wrong-image");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "redacted-jit",
+        );
+        let name = spec.identity().runner_container();
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("cafe\n"),
+            ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+            ScriptRunner::ok(&container_config(
+                WRONG_RUNNER_REF,
+                RUNNER_START_COMMAND,
+                "exited",
+            )),
+            ScriptRunner::ok(""),
+            ScriptRunner::ok("new-container\n"),
+            ScriptRunner::ok(""),
+        ]);
+        assert_eq!(
+            ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
+            RunnerProvision::Created
+        );
+        assert_eq!(
+            runner.seen[3],
+            vec!["rm".to_string(), "--".to_string(), name.clone()]
+        );
+        assert_eq!(
+            runner.seen[5],
+            vec!["start".to_string(), "--".to_string(), name]
+        );
+        assert!(!runner.seen[2][2].contains(".Config.Env"));
+        assert!(runner.seen[4].contains(&RUNNER_REF.to_string()));
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn runner_provision_recreates_created_exited_and_dead_containers() {
+        for status in ["created", "exited", "dead"] {
+            let state = temp_state(&format!("provision-recreate-{status}"));
+            let spec = RunnerSpec::new(
+                identity(),
+                PinnedImage::parse(RUNNER_REF).unwrap(),
+                &state,
+                "redacted-jit",
+            );
+            let name = spec.identity().runner_container();
+            let mut runner = ScriptRunner::scripted(vec![
+                ScriptRunner::ok("cafe\n"),
+                ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+                ScriptRunner::ok(&container_config(RUNNER_REF, RUNNER_START_COMMAND, status)),
+                ScriptRunner::ok(""),
+                ScriptRunner::ok("new-container\n"),
+                ScriptRunner::ok(""),
+            ]);
+            assert_eq!(
+                ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
+                RunnerProvision::Created,
+                "status {status}"
+            );
+            assert_eq!(
+                runner.seen[3],
+                vec!["rm".to_string(), "--".to_string(), name.clone()]
+            );
+            assert_eq!(
+                runner.seen[5],
+                vec!["start".to_string(), "--".to_string(), name]
+            );
+            assert!(!runner.seen[3].iter().any(|arg| arg == "--force"));
+            std::fs::remove_dir_all(&state).unwrap();
+        }
+    }
+
+    #[test]
+    fn runner_provision_rejects_transitional_and_unknown_statuses() {
+        for status in ["paused", "restarting", "removing", "mystery"] {
+            let state = temp_state(&format!("provision-reject-{status}"));
+            let spec = RunnerSpec::new(
+                identity(),
+                PinnedImage::parse(RUNNER_REF).unwrap(),
+                &state,
+                "redacted-jit",
+            );
+            let mut runner = ScriptRunner::scripted(vec![
+                ScriptRunner::ok("cafe\n"),
+                ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+                ScriptRunner::ok(&container_config(RUNNER_REF, RUNNER_START_COMMAND, status)),
+            ]);
+            let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+            assert!(error.to_string().contains(status), "{error:#}");
+            assert_eq!(runner.seen.len(), 3);
+            assert!(!runner
+                .seen
+                .iter()
+                .any(|args| matches!(args.first().map(String::as_str), Some("rm" | "start"))));
+            std::fs::remove_dir_all(&state).unwrap();
+        }
+    }
+
+    #[test]
+    fn runner_provision_rejects_running_wrong_command_or_entrypoint() {
+        for (entrypoint, command) in [
+            (None, Some(&["/bin/bash"][..])),
+            (Some(&["/bin/sh"][..]), Some(&[RUNNER_START_COMMAND][..])),
+        ] {
+            let state = temp_state("provision-running-contract-mismatch");
+            let spec = RunnerSpec::new(
+                identity(),
+                PinnedImage::parse(RUNNER_REF).unwrap(),
+                &state,
+                "redacted-jit",
+            );
+            let projection = container_config_parts(RUNNER_REF, entrypoint, command, "running");
+            let mut runner = ScriptRunner::scripted(vec![
+                ScriptRunner::ok("cafe\n"),
+                ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+                ScriptRunner::ok(&projection),
+            ]);
+            let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+            assert!(error.to_string().contains("mismatched image or command"));
+            assert_eq!(runner.seen.len(), 3);
+            assert!(!runner
+                .seen
+                .iter()
+                .any(|args| matches!(args.first().map(String::as_str), Some("rm" | "start"))));
+            std::fs::remove_dir_all(&state).unwrap();
+        }
     }
 
     #[test]
@@ -1900,14 +2740,24 @@ mod tests {
             RunnerConnection::Down
         );
         // Stopped container reads as Down.
-        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("false\n")]);
+        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("exited\n")]);
         assert_eq!(
             runner_connection(&mut runner, &identity()).unwrap(),
             RunnerConnection::Down
         );
+        // Transitional states are never treated as healthy, even when logs
+        // might contain a stale connected marker.
+        for status in ["paused", "restarting", "removing"] {
+            let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok(&format!("{status}\n"))]);
+            assert_eq!(
+                runner_connection(&mut runner, &identity()).unwrap(),
+                RunnerConnection::Down,
+                "status {status}"
+            );
+        }
         // Running without the marker reads as Starting.
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok("true\n"),
+            ScriptRunner::ok("running\n"),
             ScriptRunner::ok("Listening for Jobs\n"),
         ]);
         assert_eq!(
@@ -1916,7 +2766,7 @@ mod tests {
         );
         // Running with the marker reads as Connected.
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok("true\n"),
+            ScriptRunner::ok("running\n"),
             ScriptRunner::ok("Connected to GitHub\nListening for Jobs\n"),
         ]);
         assert_eq!(
@@ -1941,7 +2791,10 @@ mod tests {
             "jit-blob",
         );
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok(""),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("cafe\n"),
             ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
         ]);
@@ -1974,15 +2827,79 @@ mod tests {
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok("cafe\n"),
             ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
+            ScriptRunner::ok(&container_config(
+                RUNNER_REF,
+                RUNNER_START_COMMAND,
+                "exited",
+            )),
+            ScriptRunner::ok(""),
             ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
+            ScriptRunner::ok(""),
         ]);
         assert_eq!(
             ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
-            RunnerProvision::Adopted
+            RunnerProvision::Created
         );
-        // Adoption writes no env file at all.
+        // A stopped container is never adopted: remove/create writes a fresh
+        // JIT env file, then scrubs it before start.
+        assert_eq!(
+            runner.seen[3],
+            vec![
+                "rm".to_string(),
+                "--".to_string(),
+                spec.identity().runner_container()
+            ]
+        );
+        assert!(runner.seen[4].contains(&"--env-file".to_string()));
         assert!(!env_file.exists());
         assert!(!state.join("jit.env").exists());
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn runner_provision_rejects_non_missing_adoption_lookup_errors() {
+        for (case, stderr) in [
+            (
+                "transport",
+                "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+            ),
+            (
+                "permission",
+                "permission denied while trying to connect to the Docker daemon",
+            ),
+            (
+                "other",
+                "Error response from daemon: context deadline exceeded",
+            ),
+        ] {
+            let state = temp_state(&format!("provision-lookup-error-{case}"));
+            let spec = RunnerSpec::new(
+                identity(),
+                PinnedImage::parse(RUNNER_REF).unwrap(),
+                &state,
+                "redacted-jit",
+            );
+            let mut runner = ScriptRunner::scripted(vec![ScriptRunner::fail(1, stderr)]);
+            let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+            assert!(error.to_string().contains(stderr), "{error:#}");
+            assert_eq!(runner.seen.len(), 1, "lookup error must fail closed");
+            std::fs::remove_dir_all(&state).unwrap();
+        }
+    }
+
+    #[test]
+    fn runner_provision_rejects_empty_successful_adoption_lookup() {
+        let state = temp_state("provision-empty-successful-lookup");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "redacted-jit",
+        );
+        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("")]);
+        let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("returned empty id"), "{error:#}");
+        assert_eq!(runner.seen.len(), 1, "empty success must fail closed");
         std::fs::remove_dir_all(&state).unwrap();
     }
 

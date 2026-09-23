@@ -27,19 +27,51 @@
 //! [`CleanupReport`] and the caller retains the permit as uncertain
 //! instead of releasing fictitious capacity.
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
-use super::ownership::WorkerIdentity;
+use super::ownership::{WorkerIdentity, ROLE_DIND, ROLE_RUNNER, WORKER_ROLE_LABEL};
 use super::runner::{runner_connection, RunnerConnection};
 use super::WorkerRunner;
+use crate::docker::client::ContainerState;
 
 /// How many DinD restarts one worker tolerates before failing.
 pub const MAX_DIND_RESTARTS: u32 = 3;
 /// JIT runner startup deadline, persisted as an absolute epoch time.
 pub const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DindStatusError {
+    Unknown {
+        container: String,
+        status: String,
+    },
+    Unsafe {
+        container: String,
+        state: ContainerState,
+    },
+}
+
+impl fmt::Display for DindStatusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown { container, status } => write!(
+                formatter,
+                "DinD container {container} returned unknown lifecycle state {status:?}"
+            ),
+            Self::Unsafe { container, state } => write!(
+                formatter,
+                "DinD container {container} returned unsafe lifecycle state {state:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DindStatusError {}
 
 /// Per-worker DinD restart budget (persisted with the worker record once
 /// the journal extension lands; until then owned by the tick caller).
@@ -97,21 +129,38 @@ pub(crate) fn observe_pair(
     identity: &WorkerIdentity,
 ) -> Result<ObservedPair> {
     let dind = identity.dind_container();
-    let running = runner
-        .run("docker", &crate::docker::client::running_args(&dind))
+    let status = runner
+        .run("docker", &crate::docker::client::status_args(&dind))
         .with_context(|| format!("inspect DinD container {dind}"))?;
-    let dind_running = if running.code != 0 {
-        if crate::docker::client::daemon_reports_missing(&running.stderr) {
+    let dind_running = if status.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&status.stderr) {
             false
         } else {
             anyhow::bail!(
                 "inspect DinD container {dind} exited {}: {}",
-                running.code,
-                running.stderr.trim()
+                status.code,
+                status.stderr.trim()
             );
         }
     } else {
-        running.stdout.trim() == "true"
+        match ContainerState::parse(status.stdout.trim()) {
+            Some(ContainerState::Running) => true,
+            Some(ContainerState::Created | ContainerState::Exited | ContainerState::Dead) => false,
+            Some(state) => {
+                return Err(DindStatusError::Unsafe {
+                    container: dind,
+                    state,
+                }
+                .into());
+            }
+            None => {
+                return Err(DindStatusError::Unknown {
+                    container: dind,
+                    status: status.stdout.trim().to_string(),
+                }
+                .into());
+            }
+        }
     };
     let connection = runner_connection(runner, identity)?;
     Ok(ObservedPair {
@@ -195,9 +244,6 @@ pub(crate) fn supervise_tick_with_runtime(
             ),
         });
     }
-    if not_yet_connected && observed.runner == RunnerConnection::Connected {
-        return Ok(SupervisionOutcome::RunnerConnected);
-    }
     // Runner death decides first: a dead runner is never restarted.
     if matches!(recorded, S::RunnerConnected | S::Running)
         && observed.runner == RunnerConnection::Down
@@ -210,7 +256,9 @@ pub(crate) fn supervise_tick_with_runtime(
             ),
         });
     }
-    // DinD death is repairable within budget.
+    // DinD death must win over a stale runner-connected log marker. It is
+    // repairable within budget; advancing the runner state while its daemon
+    // is down would record a false-ready worker.
     if !observed.dind_running {
         let next_restart = restarts.used().saturating_add(1);
         if next_restart <= MAX_DIND_RESTARTS && next_restart <= restarts.max {
@@ -242,6 +290,9 @@ pub(crate) fn supervise_tick_with_runtime(
             ),
         });
     }
+    if not_yet_connected && observed.runner == RunnerConnection::Connected {
+        return Ok(SupervisionOutcome::RunnerConnected);
+    }
     Ok(SupervisionOutcome::Healthy)
 }
 
@@ -269,6 +320,66 @@ pub struct DiagnosticExport {
     pub failures: Vec<String>,
 }
 
+/// Immutable cleanup handles captured by one pair-level ownership preflight.
+///
+/// Names are retained only for diagnostics and error context. Every Docker
+/// operation after preflight uses the immutable ID. This prevents a same-name
+/// replacement from being read, stopped, or removed by cleanup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanupContainer {
+    name: String,
+    id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanupNetwork {
+    name: String,
+    id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CleanupTargets {
+    runner: Option<CleanupContainer>,
+    dind: Option<CleanupContainer>,
+    holder: Option<CleanupContainer>,
+    network: Option<CleanupNetwork>,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticPaths {
+    dir: PathBuf,
+    runner_log: PathBuf,
+    dind_log: PathBuf,
+    runner_inspect: PathBuf,
+    dind_inspect: PathBuf,
+    complete: PathBuf,
+}
+
+impl DiagnosticPaths {
+    fn new(state_dir: &Path) -> Self {
+        let dir = state_dir.join("diagnostics");
+        Self {
+            runner_log: dir.join("runner.log"),
+            dind_log: dir.join("dind.log"),
+            runner_inspect: dir.join("runner.inspect.json"),
+            dind_inspect: dir.join("dind.inspect.json"),
+            complete: dir.join("capture.complete"),
+            dir,
+        }
+    }
+
+    fn export(self, failures: Vec<String>) -> DiagnosticExport {
+        DiagnosticExport {
+            dir: self.dir,
+            runner_log: self.runner_log,
+            dind_log: self.dind_log,
+            runner_inspect: self.runner_inspect,
+            dind_inspect: self.dind_inspect,
+            failures,
+        }
+    }
+}
+
 /// Capture logs + inspect of both containers into `state_dir/diagnostics`.
 ///
 /// Runs AFTER the runner stops (logs are complete) and BEFORE any
@@ -288,41 +399,41 @@ pub(crate) fn export_diagnostics(
     identity: &WorkerIdentity,
     state_dir: &Path,
 ) -> Result<DiagnosticExport> {
-    let dir = state_dir.join("diagnostics");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create diagnostics dir {}", dir.display()))?;
-    restrict_diagnostic_dir(&dir)
-        .with_context(|| format!("restrict diagnostics dir {}", dir.display()))?;
-    let mut failures = Vec::new();
-
-    let runner_log = dir.join("runner.log");
-    let dind_log = dir.join("dind.log");
-    let runner_inspect = dir.join("runner.inspect.json");
-    let dind_inspect = dir.join("dind.inspect.json");
-    let complete = dir.join("capture.complete");
-    if complete.exists() {
-        let marker = std::fs::read(&complete)
-            .with_context(|| format!("read diagnostic marker {}", complete.display()))?;
-        if marker != b"velnor-diagnostics-v1\n" {
-            anyhow::bail!(
-                "invalid diagnostic completion marker {}",
-                complete.display()
-            );
-        }
-        return Ok(DiagnosticExport {
-            dir,
-            runner_log,
-            dind_log,
-            runner_inspect,
-            dind_inspect,
-            failures,
-        });
+    let paths = DiagnosticPaths::new(state_dir);
+    std::fs::create_dir_all(&paths.dir)
+        .with_context(|| format!("create diagnostics dir {}", paths.dir.display()))?;
+    restrict_diagnostic_dir(&paths.dir)
+        .with_context(|| format!("restrict diagnostics dir {}", paths.dir.display()))?;
+    if let Some(export) = completed_diagnostics(&paths)? {
+        return Ok(export);
     }
+    let targets = preflight_cleanup_targets(runner, identity)?;
+    export_diagnostics_with_targets(runner, paths, &targets)
+}
+
+fn export_diagnostics_with_targets(
+    runner: &mut dyn WorkerRunner,
+    paths: DiagnosticPaths,
+    targets: &CleanupTargets,
+) -> Result<DiagnosticExport> {
+    std::fs::create_dir_all(&paths.dir)
+        .with_context(|| format!("create diagnostics dir {}", paths.dir.display()))?;
+    restrict_diagnostic_dir(&paths.dir)
+        .with_context(|| format!("restrict diagnostics dir {}", paths.dir.display()))?;
+    if let Some(export) = completed_diagnostics(&paths)? {
+        return Ok(export);
+    }
+    let mut failures = Vec::new();
 
     // No completion marker means a prior capture was interrupted. The
     // cleanup phase never removes containers before the marker lands, so
     // incomplete artifacts can be discarded and captured again safely.
-    for artifact in [&runner_log, &dind_log, &runner_inspect, &dind_inspect] {
+    for artifact in [
+        &paths.runner_log,
+        &paths.dind_log,
+        &paths.runner_inspect,
+        &paths.dind_inspect,
+    ] {
         match std::fs::remove_file(artifact) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -332,59 +443,53 @@ pub(crate) fn export_diagnostics(
         }
     }
     if !failures.is_empty() {
-        return Ok(DiagnosticExport {
-            dir,
-            runner_log,
-            dind_log,
-            runner_inspect,
-            dind_inspect,
-            failures,
-        });
+        return Ok(paths.export(failures));
     }
-    capture_logs(
-        runner,
-        &identity.runner_container(),
-        &runner_log,
-        &mut failures,
-    );
-    capture_logs(runner, &identity.dind_container(), &dind_log, &mut failures);
-    capture_inspect(
-        runner,
-        &identity.runner_container(),
-        &runner_inspect,
-        &mut failures,
-    );
-    capture_inspect(
-        runner,
-        &identity.dind_container(),
-        &dind_inspect,
-        &mut failures,
-    );
+    if let Some(target) = targets.runner.as_ref() {
+        capture_logs(runner, target, &paths.runner_log, &mut failures);
+    }
+    if let Some(target) = targets.dind.as_ref() {
+        capture_logs(runner, target, &paths.dind_log, &mut failures);
+    }
+    if let Some(target) = targets.runner.as_ref() {
+        capture_inspect(runner, target, &paths.runner_inspect, &mut failures);
+    }
+    if let Some(target) = targets.dind.as_ref() {
+        capture_inspect(runner, target, &paths.dind_inspect, &mut failures);
+    }
     if failures.is_empty()
-        && let Err(error) = write_diagnostic(&complete, b"velnor-diagnostics-v1\n")
+        && let Err(error) = write_diagnostic(&paths.complete, b"velnor-diagnostics-v1\n")
     {
-        failures.push(format!("write {}: {error}", complete.display()));
+        failures.push(format!("write {}: {error}", paths.complete.display()));
     }
 
-    Ok(DiagnosticExport {
-        dir,
-        runner_log,
-        dind_log,
-        runner_inspect,
-        dind_inspect,
-        failures,
-    })
+    Ok(paths.export(failures))
+}
+
+fn completed_diagnostics(paths: &DiagnosticPaths) -> Result<Option<DiagnosticExport>> {
+    if !paths.complete.exists() {
+        return Ok(None);
+    }
+    let marker = std::fs::read(&paths.complete)
+        .with_context(|| format!("read diagnostic marker {}", paths.complete.display()))?;
+    if marker != b"velnor-diagnostics-v1\n" {
+        anyhow::bail!(
+            "invalid diagnostic completion marker {}",
+            paths.complete.display()
+        );
+    }
+    Ok(Some(paths.clone().export(Vec::new())))
 }
 
 fn capture_logs(
     runner: &mut dyn WorkerRunner,
-    container: &str,
+    target: &CleanupContainer,
     dest: &Path,
     failures: &mut Vec<String>,
 ) {
     let logs = runner.run(
         "docker",
-        &["logs".to_string(), "--".to_string(), container.to_string()],
+        &["logs".to_string(), "--".to_string(), target.id.clone()],
     );
     match logs {
         Ok(output) if output.code == 0 => {
@@ -395,27 +500,25 @@ fn capture_logs(
             }
         }
         Ok(output) => failures.push(format!(
-            "logs {container} exited {}: {}",
+            "logs {} ({}) exited {}: {}",
+            target.name,
+            target.id,
             output.code,
             output.stderr.trim()
         )),
-        Err(error) => failures.push(format!("logs {container}: {error:#}")),
+        Err(error) => failures.push(format!("logs {} ({}): {error:#}", target.name, target.id)),
     }
 }
 
 fn capture_inspect(
     runner: &mut dyn WorkerRunner,
-    container: &str,
+    target: &CleanupContainer,
     dest: &Path,
     failures: &mut Vec<String>,
 ) {
     let inspect = runner.run(
         "docker",
-        &[
-            "inspect".to_string(),
-            "--".to_string(),
-            container.to_string(),
-        ],
+        &["inspect".to_string(), "--".to_string(), target.id.clone()],
     );
     match inspect {
         Ok(output) if output.code == 0 => match redact_inspect(&output.stdout) {
@@ -427,15 +530,21 @@ fn capture_inspect(
             // Fail closed: unparseable inspect output is withheld, never
             // persisted raw — raw bytes may carry `Config.Env`.
             None => failures.push(format!(
-                "inspect {container}: output withheld (unparseable; refusing to persist unredacted bytes)"
+                "inspect {} ({}): output withheld (unparseable; refusing to persist unredacted bytes)",
+                target.name, target.id
             )),
         },
         Ok(output) => failures.push(format!(
-            "inspect {container} exited {}: {}",
+            "inspect {} ({}) exited {}: {}",
+            target.name,
+            target.id,
             output.code,
             output.stderr.trim()
         )),
-        Err(error) => failures.push(format!("inspect {container}: {error:#}")),
+        Err(error) => failures.push(format!(
+            "inspect {} ({}): {error:#}",
+            target.name, target.id
+        )),
     }
 }
 
@@ -562,9 +671,13 @@ pub(crate) fn prepare_cleanup(
     identity: &WorkerIdentity,
     state_dir: &Path,
 ) -> Result<DiagnosticExport> {
+    let targets = preflight_cleanup_targets(runner, identity)?;
     let mut stop_failures = Vec::new();
-    stop_container(runner, &identity.runner_container(), &mut stop_failures);
-    let mut export = export_diagnostics(runner, identity, state_dir)?;
+    if let Some(target) = targets.runner.as_ref() {
+        stop_container(runner, target, &mut stop_failures);
+    }
+    let paths = DiagnosticPaths::new(state_dir);
+    let mut export = export_diagnostics_with_targets(runner, paths, &targets)?;
     export.failures.extend(stop_failures);
     Ok(export)
 }
@@ -585,13 +698,24 @@ pub(crate) fn teardown_owned_resources(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
 ) -> Vec<String> {
+    let targets = match preflight_cleanup_targets(runner, identity) {
+        Ok(targets) => targets,
+        Err(error) => return vec![format!("cleanup preflight: {error:#}")],
+    };
     let mut failures = Vec::new();
-    remove_container(runner, &identity.runner_container(), &mut failures);
-    stop_container(runner, &identity.dind_container(), &mut failures);
-    remove_container(runner, &identity.dind_container(), &mut failures);
-    remove_network(runner, &identity.network(), &mut failures);
-    remove_volume(runner, &identity.workspace_volume(), &mut failures);
-    remove_volume(runner, &identity.dind_data_volume(), &mut failures);
+    if let Some(target) = targets.runner.as_ref() {
+        remove_container(runner, target, false, &mut failures);
+    }
+    if let Some(target) = targets.dind.as_ref() {
+        stop_container(runner, target, &mut failures);
+        remove_container(runner, target, false, &mut failures);
+    }
+    if let Some(target) = targets.holder.as_ref() {
+        remove_container(runner, target, true, &mut failures);
+    }
+    if let Some(target) = targets.network.as_ref() {
+        remove_network(runner, target, &mut failures);
+    }
     failures
 }
 
@@ -612,84 +736,299 @@ pub(crate) fn owned_cleanup(
     Ok(finish_cleanup(runner, identity, export))
 }
 
-fn stop_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut Vec<String>) {
+fn stop_container(
+    runner: &mut dyn WorkerRunner,
+    target: &CleanupContainer,
+    failures: &mut Vec<String>,
+) {
     match runner.run(
         "docker",
-        &crate::docker::client::container_stop_args(container, Some(30)),
+        &crate::docker::client::container_stop_args(&target.id, Some(30)),
     ) {
         Ok(output) if output.code == 0 => {}
         Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
         Ok(output) => failures.push(format!(
-            "stop {container} exited {}: {}",
+            "stop {} ({}) exited {}: {}",
+            target.name,
+            target.id,
             output.code,
             output.stderr.trim()
         )),
-        Err(error) => failures.push(format!("stop {container}: {error:#}")),
+        Err(error) => failures.push(format!("stop {} ({}): {error:#}", target.name, target.id)),
     }
 }
 
-fn remove_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut Vec<String>) {
+fn remove_container(
+    runner: &mut dyn WorkerRunner,
+    target: &CleanupContainer,
+    volumes: bool,
+    failures: &mut Vec<String>,
+) {
     match runner.run(
         "docker",
-        &crate::docker::client::container_remove_args(container, true, false),
+        &crate::docker::client::container_remove_args(&target.id, true, volumes),
     ) {
         Ok(output) if output.code == 0 => {}
         Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
         Ok(output) => failures.push(format!(
-            "remove {container} exited {}: {}",
+            "remove {} ({}) exited {}: {}",
+            target.name,
+            target.id,
             output.code,
             output.stderr.trim()
         )),
-        Err(error) => failures.push(format!("remove {container}: {error:#}")),
+        Err(error) => failures.push(format!("remove {} ({}): {error:#}", target.name, target.id)),
     }
 }
 
-fn remove_network(runner: &mut dyn WorkerRunner, network: &str, failures: &mut Vec<String>) {
+fn remove_network(
+    runner: &mut dyn WorkerRunner,
+    target: &CleanupNetwork,
+    failures: &mut Vec<String>,
+) {
     match runner.run(
         "docker",
         &[
             "network".to_string(),
             "rm".to_string(),
             "--".to_string(),
-            network.to_string(),
+            target.id.clone(),
         ],
     ) {
         Ok(output) if output.code == 0 => {}
-        Ok(output)
-            if crate::docker::client::daemon_reports_missing(&output.stderr)
-                || output.stderr.contains("not found")
-                || output.stderr.contains("Not found") => {}
+        Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
         Ok(output) => failures.push(format!(
-            "remove network {network} exited {}: {}",
+            "remove network {} ({}) exited {}: {}",
+            target.name,
+            target.id,
             output.code,
             output.stderr.trim()
         )),
-        Err(error) => failures.push(format!("remove network {network}: {error:#}")),
+        Err(error) => failures.push(format!(
+            "remove network {} ({}): {error:#}",
+            target.name, target.id
+        )),
     }
 }
 
-fn remove_volume(runner: &mut dyn WorkerRunner, volume: &str, failures: &mut Vec<String>) {
-    match runner.run(
-        "docker",
-        &[
-            "volume".to_string(),
-            "rm".to_string(),
-            "--".to_string(),
-            volume.to_string(),
-        ],
-    ) {
-        Ok(output) if output.code == 0 => {}
-        Ok(output)
-            if crate::docker::client::daemon_reports_missing(&output.stderr)
-                || output.stderr.contains("not found")
-                || output.stderr.contains("Not found") => {}
-        Ok(output) => failures.push(format!(
-            "remove volume {volume} exited {}: {}",
-            output.code,
-            output.stderr.trim()
-        )),
-        Err(error) => failures.push(format!("remove volume {volume}: {error:#}")),
+/// Inspect a named container before mutating it. Return its immutable Docker
+/// ID so a same-name replacement cannot be stopped or removed after the
+/// attestation. Missing is an idempotent cleanup success; every other inspect
+/// failure, malformed projection, or label mismatch retains uncertainty.
+fn inspect_owned_container(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    container: &str,
+    role: &str,
+) -> Result<Option<String>> {
+    let inspect = runner
+        .run(
+            "docker",
+            &[
+                "inspect".to_string(),
+                "--format".to_string(),
+                r#"{{json .Id}}{{"\t"}}{{json .Config.Labels}}"#.to_string(),
+                "--".to_string(),
+                container.to_string(),
+            ],
+        )
+        .with_context(|| format!("inspect container ownership {container}"))?;
+    if inspect.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&inspect.stderr) {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "inspect container ownership {container} exited {}: {}",
+            inspect.code,
+            inspect.stderr.trim()
+        );
     }
+    let fields: Vec<_> = inspect.stdout.trim().split('\t').collect();
+    if fields.len() != 2 || fields.iter().any(|field| field.is_empty()) {
+        anyhow::bail!("inspect container ownership {container} returned malformed projection");
+    }
+    let object_id: String = serde_json::from_str(fields[0])
+        .with_context(|| format!("parse container ownership {container} id"))?;
+    let labels: BTreeMap<String, String> = serde_json::from_str(fields[1])
+        .with_context(|| format!("parse container ownership {container} labels"))?;
+    verify_cleanup_labels("container", container, &labels, identity, Some(role))?;
+    if object_id.is_empty() {
+        anyhow::bail!("inspect container ownership {container} returned an empty id");
+    }
+    Ok(Some(object_id))
+}
+
+/// Inspect a named network before removing it and return its immutable ID.
+/// This closes the name-replacement race for the network teardown path.
+fn inspect_owned_network(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    network: &str,
+) -> Result<Option<String>> {
+    let inspect = runner
+        .run(
+            "docker",
+            &[
+                "network".to_string(),
+                "inspect".to_string(),
+                "--format".to_string(),
+                r#"{{json .Id}}{{"\t"}}{{json .Labels}}"#.to_string(),
+                "--".to_string(),
+                network.to_string(),
+            ],
+        )
+        .with_context(|| format!("inspect network ownership {network}"))?;
+    if inspect.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&inspect.stderr) {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "inspect network ownership {network} exited {}: {}",
+            inspect.code,
+            inspect.stderr.trim()
+        );
+    }
+    let fields: Vec<_> = inspect.stdout.trim().split('\t').collect();
+    if fields.len() != 2 || fields.iter().any(|field| field.is_empty()) {
+        anyhow::bail!("inspect network ownership {network} returned malformed projection");
+    }
+    let object_id: String = serde_json::from_str(fields[0])
+        .with_context(|| format!("parse network ownership {network} id"))?;
+    let labels: BTreeMap<String, String> = serde_json::from_str(fields[1])
+        .with_context(|| format!("parse network ownership {network} labels"))?;
+    verify_cleanup_labels("network", network, &labels, identity, None)?;
+    if object_id.is_empty() {
+        anyhow::bail!("inspect network ownership {network} returned an empty id");
+    }
+    Ok(Some(object_id))
+}
+
+/// Inspect and fully attest the deterministic volume holder before cleanup.
+/// The holder's immutable ID is the only operand used for removal; its
+/// anonymous volumes are removed by Docker as part of `rm --volumes`.
+fn inspect_owned_volume_holder(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+) -> Result<Option<CleanupContainer>> {
+    let name = identity.volume_holder_container();
+    let expected_image = super::dind::admitted_runner_image()?;
+    match super::dind::attest_volume_holder(runner, identity, &expected_image) {
+        Ok(attestation) => Ok(Some(CleanupContainer {
+            name,
+            id: attestation.id,
+        })),
+        Err(error)
+            if error
+                .downcast_ref::<super::RestartObjectMissing>()
+                .is_some() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error).with_context(|| "attest volume holder before cleanup"),
+    }
+}
+
+/// Attest the complete cleanup pair before any Docker mutation.
+///
+/// Every present container and the network is inspected, even after one
+/// inspection fails, so the result is a complete read-only preflight. Any
+/// foreign, malformed, or transport-failed inspection aborts the whole
+/// cleanup sequence. Explicit object absence is the only idempotent outcome,
+/// except that a missing holder with surviving worker containers is an
+/// uncertainty that fails closed. Do not remove those containers here merely
+/// to scrub Config.Env: without the holder there is no attested immutable
+/// volume set or durable cleanup result for a later retry to use.
+fn preflight_cleanup_targets(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+) -> Result<CleanupTargets> {
+    let runner_name = identity.runner_container();
+    let dind_name = identity.dind_container();
+    let holder_name = identity.volume_holder_container();
+    let network_name = identity.network();
+    let mut failures = Vec::new();
+
+    let runner_target = match inspect_owned_container(runner, identity, &runner_name, ROLE_RUNNER) {
+        Ok(Some(id)) => Some(CleanupContainer {
+            name: runner_name.clone(),
+            id,
+        }),
+        Ok(None) => None,
+        Err(error) => {
+            failures.push(format!("container {runner_name}: {error:#}"));
+            None
+        }
+    };
+    let dind_target = match inspect_owned_container(runner, identity, &dind_name, ROLE_DIND) {
+        Ok(Some(id)) => Some(CleanupContainer {
+            name: dind_name.clone(),
+            id,
+        }),
+        Ok(None) => None,
+        Err(error) => {
+            failures.push(format!("container {dind_name}: {error:#}"));
+            None
+        }
+    };
+    let network_target = match inspect_owned_network(runner, identity, &network_name) {
+        Ok(Some(id)) => Some(CleanupNetwork {
+            name: network_name.clone(),
+            id,
+        }),
+        Ok(None) => None,
+        Err(error) => {
+            failures.push(format!("network {network_name}: {error:#}"));
+            None
+        }
+    };
+    let holder_target = match inspect_owned_volume_holder(runner, identity) {
+        Ok(Some(target)) => Some(target),
+        Ok(None) => None,
+        Err(error) => {
+            failures.push(format!("container {holder_name}: {error:#}"));
+            None
+        }
+    };
+    if holder_target.is_none() && (runner_target.is_some() || dind_target.is_some()) {
+        failures.push(format!(
+            "volume holder {holder_name} is absent while worker containers remain"
+        ));
+    }
+    if !failures.is_empty() {
+        anyhow::bail!("cleanup preflight failed: {}", failures.join("; "));
+    }
+    Ok(CleanupTargets {
+        runner: runner_target,
+        dind: dind_target,
+        holder: holder_target,
+        network: network_target,
+    })
+}
+
+fn verify_cleanup_labels(
+    kind: &str,
+    name: &str,
+    labels: &BTreeMap<String, String>,
+    identity: &WorkerIdentity,
+    role: Option<&str>,
+) -> Result<()> {
+    for (key, expected) in identity.labels() {
+        if labels.get(&key) != Some(&expected) {
+            anyhow::bail!(
+                "{kind} {name} label {key} mismatch: expected {expected:?}, found {:?}",
+                labels.get(&key)
+            );
+        }
+    }
+    if let Some(expected) = role
+        && labels.get(WORKER_ROLE_LABEL).map(String::as_str) != Some(expected)
+    {
+        anyhow::bail!(
+            "{kind} {name} role label mismatch: expected {expected:?}, found {:?}",
+            labels.get(WORKER_ROLE_LABEL)
+        );
+    }
+    Ok(())
 }
 
 /// Supervision handle: identity + state dir + durable runtime counters.
@@ -879,6 +1218,7 @@ impl Supervision {
     reason = "tests may panic"
 )]
 mod tests {
+    use super::super::ownership::{ROLE_DIND, ROLE_RUNNER, WORKER_ROLE_LABEL};
     use super::super::WorkerOutput;
     use super::*;
     use std::collections::VecDeque;
@@ -938,11 +1278,93 @@ mod tests {
         dir
     }
 
+    fn owned_container_inspect_as(
+        object_id: &str,
+        labels: BTreeMap<String, String>,
+    ) -> WorkerOutput {
+        ScriptRunner::ok(&format!(
+            "\"{object_id}\"\t{}\n",
+            serde_json::to_string(&labels).unwrap()
+        ))
+    }
+
+    fn owned_container_inspect(container: &str, role: &str) -> WorkerOutput {
+        let mut labels = identity().labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), role.to_string());
+        owned_container_inspect_as(container, labels)
+    }
+
+    fn owned_container_inspect_with_id(
+        _container: &str,
+        object_id: &str,
+        role: &str,
+    ) -> WorkerOutput {
+        let mut labels = identity().labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), role.to_string());
+        owned_container_inspect_as(object_id, labels)
+    }
+
+    fn owned_network_inspect(network_id: &str) -> WorkerOutput {
+        ScriptRunner::ok(&format!(
+            "\"{network_id}\"\t{}\n",
+            serde_json::to_string(&identity().labels()).unwrap()
+        ))
+    }
+
+    fn owned_holder_inspect(holder_id: &str) -> WorkerOutput {
+        let mut labels = identity().labels();
+        labels.insert(
+            super::super::ownership::WORKER_ROLE_LABEL.to_string(),
+            super::super::ownership::ROLE_VOLUME_HOLDER.to_string(),
+        );
+        let image = super::super::dind::admitted_runner_image()
+            .unwrap()
+            .reference();
+        let mounts = serde_json::json!([
+            {"Type":"volume","Name":"anonymous-work","Destination":super::super::dind::WORK_DIR,"Driver":"local","RW":true},
+            {"Type":"volume","Name":"anonymous-tools","Destination":super::super::dind::TOOL_CACHE_DIR,"Driver":"local","RW":true},
+            {"Type":"volume","Name":"anonymous-docker","Destination":super::super::dind::DIND_DATA_ROOT,"Driver":"local","RW":true}
+        ]);
+        ScriptRunner::ok(&format!(
+            "{}\t{}\t{}\tnull\t{}\t\"created\"\t{}\n",
+            serde_json::to_string(holder_id).unwrap(),
+            serde_json::to_string(&image).unwrap(),
+            serde_json::to_string(&labels).unwrap(),
+            serde_json::to_string(&vec![super::super::dind::VOLUME_HOLDER_COMMAND]).unwrap(),
+            mounts
+        ))
+    }
+
+    fn foreign_container_inspect(container: &str, role: &str) -> WorkerOutput {
+        let mut labels = identity().labels();
+        labels.insert(
+            super::super::ownership::OWNERSHIP_LABEL.to_string(),
+            "foreign/worker".to_string(),
+        );
+        labels.insert(WORKER_ROLE_LABEL.to_string(), role.to_string());
+        ScriptRunner::ok(&format!(
+            "\"{container}\"\t{}\n",
+            serde_json::to_string(&labels).unwrap()
+        ))
+    }
+
+    fn foreign_network_inspect(network_id: &str) -> WorkerOutput {
+        let mut labels = identity().labels();
+        labels.insert(
+            super::super::ownership::OWNERSHIP_LABEL.to_string(),
+            "foreign/worker".to_string(),
+        );
+        ScriptRunner::ok(&format!(
+            "\"{network_id}\"\t{}\n",
+            serde_json::to_string(&labels).unwrap()
+        ))
+    }
+
     #[test]
     fn healthy_pair_ticks_healthy() {
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok("true\n"),                // dind running
-            ScriptRunner::ok("true\n"),                // runner running
+            ScriptRunner::ok("running\n"),             // dind running
+            ScriptRunner::ok("running\n"),             // runner running
             ScriptRunner::ok("Connected to GitHub\n"), // runner logs
         ]);
         let mut supervision = Supervision::new(identity(), Path::new("/tmp/velnor-test-sup"));
@@ -953,8 +1375,8 @@ mod tests {
     #[test]
     fn dind_death_restarts_within_budget() {
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok("false\n"),               // dind stopped
-            ScriptRunner::ok("true\n"),                // runner running
+            ScriptRunner::ok("exited\n"),              // dind stopped
+            ScriptRunner::ok("running\n"),             // runner running
             ScriptRunner::ok("Connected to GitHub\n"), // runner logs
             ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"), // start dind
         ]);
@@ -964,6 +1386,45 @@ mod tests {
             outcome,
             SupervisionOutcome::DindRestarted { restarts_used: 1 }
         );
+    }
+
+    #[test]
+    fn transitional_dind_status_is_unsafe_and_never_restarted() {
+        for status in ["paused", "restarting", "removing"] {
+            let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok(&format!("{status}\n"))]);
+            let error = observe_pair(&mut runner, &identity()).unwrap_err();
+            assert!(
+                error.downcast_ref::<DindStatusError>().is_some(),
+                "{status}: {error:#}"
+            );
+            assert!(
+                error.to_string().to_lowercase().contains(status),
+                "{error:#}"
+            );
+            assert_eq!(
+                runner.seen.len(),
+                1,
+                "{status}: runner must not be observed"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_dind_status_fails_closed_before_runner_observation() {
+        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("migrating\n")]);
+        let error = observe_pair(&mut runner, &identity()).unwrap_err();
+        assert!(
+            error.downcast_ref::<DindStatusError>().is_some(),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("unknown lifecycle state"),
+            "{error:#}"
+        );
+        assert_eq!(runner.seen.len(), 1);
+        assert!(runner.seen[0]
+            .iter()
+            .any(|arg| arg.contains("State.Status")));
     }
 
     #[test]
@@ -986,6 +1447,36 @@ mod tests {
         assert!(matches!(outcome, SupervisionOutcome::WorkerFailed { .. }));
         // No restart attempted: the script is empty and nothing ran.
         assert!(runner.seen.is_empty());
+    }
+
+    #[test]
+    fn dind_down_precedes_stale_runner_connected_marker() {
+        let observed = ObservedPair {
+            dind_running: false,
+            runner: RunnerConnection::Connected,
+        };
+        let dind_name = identity().dind_container();
+        let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("started\n")]);
+        let mut restarts = RestartBudget::new(MAX_DIND_RESTARTS);
+
+        let outcome = supervise_tick(
+            &mut runner,
+            &identity(),
+            S::DindReady,
+            &observed,
+            &mut restarts,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            SupervisionOutcome::DindRestarted { restarts_used: 1 }
+        );
+        assert_eq!(
+            runner.seen,
+            vec![vec!["start".to_string(), "--".to_string(), dind_name]],
+            "stale runner logs must not advance the worker state"
+        );
     }
 
     #[test]
@@ -1134,36 +1625,55 @@ mod tests {
     #[test]
     fn cleanup_exports_before_first_deletion_in_order() {
         let state = temp_state("order");
+        let identity = identity();
+        let runner_name = identity.runner_container();
+        let dind_name = identity.dind_container();
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok("runner\n"),  // stop runner
-            ScriptRunner::ok("LOGS-R\n"),  // logs runner
-            ScriptRunner::ok("LOGS-D\n"),  // logs dind
-            ScriptRunner::ok("[{}]\n"),    // inspect runner
-            ScriptRunner::ok("[{}]\n"),    // inspect dind
-            ScriptRunner::ok("runner\n"),  // rm runner
-            ScriptRunner::ok("dind\n"),    // stop dind
-            ScriptRunner::ok("dind\n"),    // rm dind
-            ScriptRunner::ok("net\n"),     // rm network
-            ScriptRunner::ok("work\n"),    // rm workspace volume
-            ScriptRunner::ok("dindata\n"), // rm dind data volume
+            owned_container_inspect_with_id(&runner_name, "runner-object-id", ROLE_RUNNER),
+            owned_container_inspect_with_id(&dind_name, "dind-object-id", ROLE_DIND),
+            owned_network_inspect("net-id"),
+            owned_holder_inspect("holder-object-id"),
+            ScriptRunner::ok("runner\n"), // stop runner
+            ScriptRunner::ok("LOGS-R\n"), // logs runner
+            ScriptRunner::ok("LOGS-D\n"), // logs dind
+            ScriptRunner::ok("[{}]\n"),   // inspect runner
+            ScriptRunner::ok("[{}]\n"),   // inspect dind
+            owned_container_inspect_with_id(&runner_name, "runner-object-id", ROLE_RUNNER),
+            owned_container_inspect_with_id(&dind_name, "dind-object-id", ROLE_DIND),
+            owned_network_inspect("net-id"),
+            owned_holder_inspect("holder-object-id"),
+            ScriptRunner::ok("runner\n"), // rm runner
+            ScriptRunner::ok("dind\n"),   // stop dind
+            ScriptRunner::ok("dind\n"),   // rm dind
+            ScriptRunner::ok("holder\n"), // rm holder + anonymous volumes
+            ScriptRunner::ok("net\n"),    // rm network
         ]);
-        let report = owned_cleanup(&mut runner, &identity(), &state).unwrap();
+        let report = owned_cleanup(&mut runner, &identity, &state).unwrap();
         assert!(report.confirmed(), "{report:?}");
         let verbs: Vec<String> = runner.seen.iter().map(|argv| argv.join(" ")).collect();
         let position = |needle: &str| verbs.iter().position(|v| v.contains(needle)).unwrap();
-        // Order: stop runner < logs < rm runner < stop dind < rm dind < network < volumes.
-        assert!(position("stop -t 30 -- velnor-scaleset-runner") < position("logs --"));
-        assert!(position("logs --") < position("rm --force -- velnor-scaleset-runner"));
+        // Order: stop runner < logs < rm runner < stop dind < rm dind < network.
+        assert!(position("stop -t 30 -- runner-object-id") < position("logs --"));
+        assert!(position("logs --") < position("rm --force -- runner-object-id"));
         assert!(
-            position("rm --force -- velnor-scaleset-runner")
-                < position("stop -t 30 -- velnor-scaleset-dind")
+            position("rm --force -- runner-object-id") < position("stop -t 30 -- dind-object-id")
         );
         assert!(
-            position("stop -t 30 -- velnor-scaleset-dind")
-                < position("rm --force -- velnor-scaleset-dind")
+            position("stop -t 30 -- dind-object-id") < position("rm --force -- dind-object-id")
         );
-        assert!(position("rm --force -- velnor-scaleset-dind") < position("network rm"));
-        assert!(position("network rm") < position("volume rm"));
+        assert!(position("rm --force --volumes -- holder-object-id") < position("network rm"));
+        assert!(position("rm --force -- dind-object-id") < position("network rm"));
+        assert!(!verbs.iter().any(|verb| verb.contains("volume rm")));
+        assert!(position("logs -- runner-object-id") < position("rm --force -- runner-object-id"));
+        assert!(
+            position("inspect -- runner-object-id") < position("rm --force -- runner-object-id")
+        );
+        assert!(!verbs
+            .iter()
+            .any(|verb| verb == &format!("logs -- {runner_name}")));
+        assert!(!verbs
+            .iter()
+            .any(|verb| verb == &format!("inspect -- {runner_name}")));
         // Evidence landed on disk.
         assert_eq!(
             std::fs::read_to_string(&report.export.runner_log).unwrap(),
@@ -1177,28 +1687,140 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_skips_same_name_foreign_containers_and_networks() {
+        let identity = identity();
+        let runner_name = identity.runner_container();
+        let dind_name = identity.dind_container();
+        let mut runner = ScriptRunner::scripted(vec![
+            foreign_container_inspect(&runner_name, ROLE_RUNNER),
+            owned_container_inspect(&dind_name, ROLE_DIND),
+            foreign_network_inspect("foreign-network-id"),
+            owned_holder_inspect("holder-object-id"),
+        ]);
+        let failures = teardown_owned_resources(&mut runner, &identity);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let commands: Vec<String> = runner.seen.iter().map(|args| args.join(" ")).collect();
+        assert_eq!(commands.len(), 4, "preflight must finish before mutation");
+        assert!(!commands.iter().any(|command| command.contains("stop -t")));
+        assert!(!commands.iter().any(|command| command.contains("logs --")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.contains("rm --force -- ") && command.contains(&runner_name)));
+        assert!(!commands
+            .iter()
+            .any(|command| command.contains("network rm")));
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("foreign/worker")));
+    }
+
+    #[test]
+    fn missing_holder_with_owned_containers_fails_closed_without_mutation() {
+        let identity = identity();
+        let runner_name = identity.runner_container();
+        let dind_name = identity.dind_container();
+        let mut runner = ScriptRunner::scripted(vec![
+            owned_container_inspect_with_id(&runner_name, "runner-object-id", ROLE_RUNNER),
+            owned_container_inspect_with_id(&dind_name, "dind-object-id", ROLE_DIND),
+            owned_network_inspect("net-id"),
+            ScriptRunner::fail(1, "Error: No such container"),
+        ]);
+
+        let failures = teardown_owned_resources(&mut runner, &identity);
+
+        assert_eq!(failures.len(), 1, "holder loss must retain uncertainty");
+        assert!(failures[0].contains("volume holder"), "{failures:?}");
+        assert!(failures[0].contains("absent"), "{failures:?}");
+        assert_eq!(
+            runner.seen.len(),
+            4,
+            "preflight must finish before mutation"
+        );
+        assert!(runner.seen.iter().all(|args| {
+            args.first()
+                .is_some_and(|arg| arg == "inspect" || arg == "network")
+        }));
+        assert!(!runner.seen.iter().any(|args| {
+            args.iter()
+                .any(|arg| matches!(arg.as_str(), "stop" | "logs" | "rm"))
+        }));
+    }
+
+    #[test]
+    fn cleanup_preflight_foreign_target_blocks_diagnostics_and_all_mutations() {
+        let state = temp_state("foreign-preflight");
+        let identity = identity();
+        let runner_name = identity.runner_container();
+        let dind_name = identity.dind_container();
+        let mut runner = ScriptRunner::scripted(vec![
+            owned_container_inspect(&runner_name, ROLE_RUNNER),
+            foreign_container_inspect(&dind_name, ROLE_DIND),
+            owned_network_inspect("network-object-id"),
+            owned_holder_inspect("holder-object-id"),
+        ]);
+        let error = prepare_cleanup(&mut runner, &identity, &state).unwrap_err();
+        assert!(error.to_string().contains("foreign/worker"), "{error:#}");
+        assert_eq!(
+            runner.seen.len(),
+            4,
+            "preflight must inspect the full worker"
+        );
+        assert!(runner.seen.iter().all(|args| {
+            args.first()
+                .is_some_and(|arg| arg == "inspect" || arg == "network")
+        }));
+        assert!(!runner.seen.iter().any(|args| args
+            .iter()
+            .any(|arg| { matches!(arg.as_str(), "stop" | "logs" | "rm" | "volume") })));
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn cleanup_transport_failure_skips_container_mutation() {
+        let identity = identity();
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::fail(1, "Cannot connect to the Docker daemon"),
+            ScriptRunner::fail(1, "Error: No such container"),
+            ScriptRunner::fail(1, "Error: No such network"),
+            ScriptRunner::fail(1, "Error: No such container"),
+        ]);
+        let failures = teardown_owned_resources(&mut runner, &identity);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(runner.seen.len(), 4);
+        assert!(runner
+            .seen
+            .iter()
+            .all(|args| args.iter().any(|arg| arg == "inspect")));
+        assert!(!runner
+            .seen
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "stop" || arg == "rm")));
+    }
+
+    #[test]
     fn cleanup_collects_failures_without_aborting() {
         let state = temp_state("failures");
+        let identity = identity();
+        let runner_name = identity.runner_container();
+        let dind_name = identity.dind_container();
         let mut runner = ScriptRunner::scripted(vec![
+            owned_container_inspect(&runner_name, ROLE_RUNNER),
+            owned_container_inspect(&dind_name, ROLE_DIND),
+            owned_network_inspect("net-id"),
+            owned_holder_inspect("holder-object-id"),
             ScriptRunner::fail(1, "boom"), // stop runner fails
             ScriptRunner::ok("LOGS-R\n"),
             ScriptRunner::fail(1, "gone"), // logs dind fails
             ScriptRunner::ok("[{}]\n"),
             ScriptRunner::ok("[{}]\n"),
-            ScriptRunner::ok("runner\n"),
-            ScriptRunner::ok("dind\n"),
-            ScriptRunner::fail(1, "boom"), // rm dind fails
-            ScriptRunner::ok("net\n"),
-            ScriptRunner::ok("work\n"),
-            ScriptRunner::ok("dindata\n"),
         ]);
-        let report = owned_cleanup(&mut runner, &identity(), &state).unwrap();
+        let report = owned_cleanup(&mut runner, &identity, &state).unwrap();
         assert!(!report.confirmed());
         assert_eq!(report.export.failures.len(), 2);
         assert!(report.failures.is_empty());
         // Every export step ran, but no deletion ran because evidence was
-        // incomplete: stop + four captures only.
-        assert_eq!(runner.seen.len(), 5);
+        // incomplete: worker preflight + stop + four captures.
+        assert_eq!(runner.seen.len(), 9);
         assert!(!runner
             .seen
             .iter()
@@ -1220,6 +1842,10 @@ mod tests {
             "HostConfig": {"Binds": []}
         }]"#;
         let mut runner = ScriptRunner::scripted(vec![
+            owned_container_inspect(&identity().runner_container(), ROLE_RUNNER),
+            owned_container_inspect(&identity().dind_container(), ROLE_DIND),
+            owned_network_inspect("net-id"),
+            owned_holder_inspect("holder-object-id"),
             ScriptRunner::ok("LOGS-R\n"),
             ScriptRunner::ok("LOGS-D\n"),
             ScriptRunner::ok(inspect),
@@ -1249,6 +1875,10 @@ mod tests {
     fn completed_diagnostics_replay_without_recapturing() {
         let state = temp_state("diagnostics-replay");
         let mut first = ScriptRunner::scripted(vec![
+            owned_container_inspect(&identity().runner_container(), ROLE_RUNNER),
+            owned_container_inspect(&identity().dind_container(), ROLE_DIND),
+            owned_network_inspect("net-id"),
+            owned_holder_inspect("holder-object-id"),
             ScriptRunner::ok("LOGS-R\n"),
             ScriptRunner::ok("LOGS-D\n"),
             ScriptRunner::ok("[{}]\n"),
@@ -1274,6 +1904,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let state = temp_state("perms");
         let mut runner = ScriptRunner::scripted(vec![
+            owned_container_inspect(&identity().runner_container(), ROLE_RUNNER),
+            owned_container_inspect(&identity().dind_container(), ROLE_DIND),
+            owned_network_inspect("net-id"),
+            owned_holder_inspect("holder-object-id"),
             ScriptRunner::ok("LOGS-R\n"),
             ScriptRunner::ok("LOGS-D\n"),
             ScriptRunner::ok("[{}]\n"),
@@ -1299,6 +1933,10 @@ mod tests {
     fn unparseable_inspect_is_withheld_never_persisted_raw() {
         let state = temp_state("withhold");
         let mut runner = ScriptRunner::scripted(vec![
+            owned_container_inspect(&identity().runner_container(), ROLE_RUNNER),
+            owned_container_inspect(&identity().dind_container(), ROLE_DIND),
+            owned_network_inspect("net-id"),
+            owned_holder_inspect("holder-object-id"),
             ScriptRunner::ok("LOGS-R\n"),
             ScriptRunner::ok("LOGS-D\n"),
             ScriptRunner::ok("NOT-JSON ACTIONS_RUNNER_INPUT_JITCONFIG=live-jit-blob-bytes\n"),
@@ -1337,24 +1975,26 @@ mod tests {
     fn missing_objects_read_as_already_cleaned() {
         let state = temp_state("missing");
         let missing = || ScriptRunner::fail(1, "Error: No such container");
+        let missing_network = || ScriptRunner::fail(1, "Error: No such network");
         let mut runner = ScriptRunner::scripted(vec![
-            missing(), // stop runner: already gone
-            missing(), // logs runner: gone → export failure (evidence gap is real)
-            ScriptRunner::ok("LOGS-D\n"),
-            missing(), // inspect runner: gone → export failure
-            ScriptRunner::ok("[{}]\n"),
-            missing(), // rm runner: already gone → fine
-            ScriptRunner::ok("dind\n"),
-            ScriptRunner::ok("dind\n"),
-            ScriptRunner::fail(1, "Error: No such network"),
-            ScriptRunner::fail(1, "Error: No such volume"),
-            ScriptRunner::fail(1, "Error: No such volume"),
+            missing(),
+            missing(),
+            missing_network(),
+            missing(),
+            missing(),
+            missing(),
+            missing_network(),
+            missing(),
         ]);
         let report = owned_cleanup(&mut runner, &identity(), &state).unwrap();
-        // Removals of missing objects are clean; missing EVIDENCE is a gap.
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert_eq!(report.export.failures.len(), 2);
-        assert!(!report.confirmed());
+        // Explicitly absent objects are idempotent: no diagnostics or
+        // container/network mutations are required, and anonymous volumes
+        // are already gone with the absent holder.
+        assert!(report.confirmed(), "{report:?}");
+        assert!(runner.seen.iter().all(|args| {
+            args.first()
+                .is_some_and(|arg| arg == "inspect" || arg == "network")
+        }));
         std::fs::remove_dir_all(&state).unwrap();
     }
 }

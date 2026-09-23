@@ -38,8 +38,8 @@ pub mod runner;
 pub mod supervise;
 
 pub use dind::{
-    DindProvision, DindSpec, NetworkProvision, BUILDKIT_CACHE_DIR, DIND_READY_POLL_INTERVAL,
-    DIND_READY_TIMEOUT, DIND_SOCKET, STATE_MOUNT, WORK_DIR,
+    DindProvision, DindSpec, NetworkProvision, VolumeHolderProvision, BUILDKIT_CACHE_DIR,
+    DIND_READY_POLL_INTERVAL, DIND_READY_TIMEOUT, DIND_SOCKET, STATE_MOUNT, WORK_DIR,
 };
 pub use ownership::{OwnershipId, WorkerIdentity};
 pub use runner::{
@@ -52,6 +52,80 @@ pub use runner::{
 pub use supervise::{CleanupReport, DiagnosticExport, Supervision, SupervisionOutcome};
 
 use velnor_model::ScaleSetWorkerState;
+
+/// Marker for an explicitly absent Docker object during restart attestation.
+///
+/// Absence is reported separately from malformed, foreign, or transport-failed
+/// inspection, all of which fail closed before any Docker mutation.
+#[derive(Debug)]
+pub(crate) struct RestartObjectMissing;
+
+impl std::fmt::Display for RestartObjectMissing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("restart-attested Docker object is absent")
+    }
+}
+
+impl std::error::Error for RestartObjectMissing {}
+
+/// Result of inspect-only restart attestation for one worker pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "the caller must route Absent through crash recovery; it is not a healthy pair"]
+pub(crate) enum RestartWorkerPairAttestation {
+    /// Volume holder, network, DinD, and official runner all exist and satisfy
+    /// their exact ownership, image, topology, command, mount, and lifecycle
+    /// invariants.
+    Complete,
+    /// At least one required Docker object explicitly does not exist.
+    ///
+    /// This is not adoption success. The caller must hand the worker to its
+    /// crash-recovery/uncertain path and must not count it as healthy solely
+    /// because the deterministic names were found in the journal.
+    Absent,
+}
+
+/// Inspect-only restart gate for one worker pair.
+///
+/// A complete pair must pass all image, label, mode, command, attachment, and
+/// lifecycle checks in the worker modules. If Docker explicitly reports one
+/// object missing, return [`RestartWorkerPairAttestation::Absent`]; do not
+/// treat that outcome as a healthy/adopted pair. Malformed, foreign, and
+/// transport-failed inspections remain errors. No mutating Docker call is made
+/// here.
+pub(crate) fn attest_restart_worker_pair(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    profile: &HomogeneousProfile,
+) -> anyhow::Result<RestartWorkerPairAttestation> {
+    match dind::attest_volume_holder(runner, identity, profile.runner()) {
+        Ok(_) => {}
+        Err(error) if error.downcast_ref::<RestartObjectMissing>().is_some() => {
+            return Ok(RestartWorkerPairAttestation::Absent)
+        }
+        Err(error) => return Err(error),
+    }
+    let network_id = match dind::attest_restart_network(runner, identity) {
+        Ok(network_id) => network_id,
+        Err(error) if error.downcast_ref::<RestartObjectMissing>().is_some() => {
+            return Ok(RestartWorkerPairAttestation::Absent)
+        }
+        Err(error) => return Err(error),
+    };
+    match dind::attest_restart_dind(runner, identity, profile.dind(), &network_id) {
+        Ok(_) => {}
+        Err(error) if error.downcast_ref::<RestartObjectMissing>().is_some() => {
+            return Ok(RestartWorkerPairAttestation::Absent)
+        }
+        Err(error) => return Err(error),
+    }
+    match runner::attest_restart_runner(runner, identity, profile.runner()) {
+        Ok(_) => Ok(RestartWorkerPairAttestation::Complete),
+        Err(error) if error.downcast_ref::<RestartObjectMissing>().is_some() => {
+            Ok(RestartWorkerPairAttestation::Absent)
+        }
+        Err(error) => Err(error),
+    }
+}
 
 /// One finished process: exit code + captured streams.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +388,7 @@ impl std::fmt::Debug for ProvisionPlan {
 /// What provisioning produced.
 #[derive(Debug, Clone)]
 pub struct ProvisionOutcome {
+    pub volume_holder: VolumeHolderProvision,
     pub network: NetworkProvision,
     pub dind: DindProvision,
     pub runner: RunnerProvision,
@@ -325,7 +400,8 @@ pub struct ProvisionOutcome {
 /// Provision one worker pair end to end (the listener's provision call).
 ///
 /// Order: verify both images (tool-content hook) → ensure network →
-/// ensure DinD → readiness loop → ensure runner → observe connection.
+/// ensure the never-started volume holder → ensure DinD → readiness loop →
+/// ensure runner → observe connection.
 /// Every step is idempotent on the recorded identity, so a retried
 /// provision converges instead of duplicating. Any failure aborts with
 /// the worker still in `provision_intent`: the caller drives the retry
@@ -355,6 +431,8 @@ pub fn provision_worker(
             .context("admit runner tool content")?;
 
     let network = dind::ensure_network(runner, &plan.identity)?;
+    let volume_holder = dind::ensure_volume_holder(runner, &plan.identity, plan.profile.runner())
+        .context("ensure anonymous-volume holder")?;
     let dind_spec = DindSpec::new(
         plan.identity.clone(),
         plan.profile.dind().clone(),
@@ -387,6 +465,7 @@ pub fn provision_worker(
     let provisioned = runner::ensure_runner(runner, &runner_spec, before_runner_start)?;
     let connection = runner::runner_connection(runner, &plan.identity)?;
     Ok(ProvisionOutcome {
+        volume_holder,
         network,
         dind,
         runner: provisioned,
@@ -585,6 +664,141 @@ mod tests {
         }
     }
 
+    fn restart_pair_identity() -> WorkerIdentity {
+        WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007"))
+    }
+
+    fn restart_pair_projections(
+        identity: &WorkerIdentity,
+        profile: &HomogeneousProfile,
+    ) -> Vec<WorkerOutput> {
+        let mut holder_labels = identity.labels();
+        holder_labels.insert(
+            ownership::WORKER_ROLE_LABEL.to_string(),
+            ownership::ROLE_VOLUME_HOLDER.to_string(),
+        );
+        let holder_mounts = serde_json::json!([
+            {"Type":"volume","Name":"anonymous-work","Destination":dind::WORK_DIR,"Driver":"local","RW":true},
+            {"Type":"volume","Name":"anonymous-tools","Destination":dind::TOOL_CACHE_DIR,"Driver":"local","RW":true},
+            {"Type":"volume","Name":"anonymous-docker","Destination":dind::DIND_DATA_ROOT,"Driver":"local","RW":true}
+        ]);
+        let holder = format!(
+            "{}\t{}\t{}\tnull\t{}\t{}\t{}\n",
+            serde_json::to_string("holder-object-id").unwrap(),
+            serde_json::to_string(&profile.runner().reference()).unwrap(),
+            serde_json::to_string(&holder_labels).unwrap(),
+            serde_json::to_string(&vec![dind::VOLUME_HOLDER_COMMAND]).unwrap(),
+            serde_json::to_string("created").unwrap(),
+            holder_mounts,
+        );
+        let network_id = "restart-network-id";
+        let network = format!(
+            "{}\t{}\t{}\n",
+            serde_json::to_string(network_id).unwrap(),
+            serde_json::to_string("bridge").unwrap(),
+            serde_json::to_string(&identity.labels()).unwrap(),
+        );
+
+        let mut dind_labels = identity.labels();
+        dind_labels.insert(
+            ownership::WORKER_ROLE_LABEL.to_string(),
+            ownership::ROLE_DIND.to_string(),
+        );
+        let mut dind_networks = std::collections::BTreeMap::new();
+        dind_networks.insert(
+            identity.network(),
+            serde_json::json!({"NetworkID": network_id}),
+        );
+        let dind = format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            serde_json::to_string(&profile.dind().reference()).unwrap(),
+            serde_json::to_string(&dind_labels).unwrap(),
+            serde_json::to_string(&identity.network()).unwrap(),
+            serde_json::to_string(&Some(vec![identity.volume_holder_container()])).unwrap(),
+            serde_json::to_string(&dind_networks).unwrap(),
+            serde_json::to_string("running").unwrap(),
+        );
+
+        let mut runner_labels = identity.labels();
+        runner_labels.insert(
+            ownership::WORKER_ROLE_LABEL.to_string(),
+            ownership::ROLE_RUNNER.to_string(),
+        );
+        let runner = format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            serde_json::to_string(&profile.runner().reference()).unwrap(),
+            serde_json::to_string(&runner_labels).unwrap(),
+            serde_json::to_string(&format!("container:{}", identity.dind_container())).unwrap(),
+            serde_json::to_string(&Some(vec![identity.volume_holder_container()])).unwrap(),
+            serde_json::to_string(&Some(Vec::<String>::new())).unwrap(),
+            serde_json::to_string(&Some(vec![runner::RUNNER_START_COMMAND.to_string()])).unwrap(),
+            serde_json::to_string("running").unwrap(),
+        );
+
+        vec![
+            ScriptRunner::ok(&holder),
+            ScriptRunner::ok(&network),
+            ScriptRunner::ok(&dind),
+            ScriptRunner::ok(&runner),
+        ]
+    }
+
+    #[test]
+    fn restart_pair_attestation_distinguishes_complete_from_absent_network() {
+        let identity = restart_pair_identity();
+        let profile = HomogeneousProfile::for_arch("x86_64").unwrap();
+        let mut complete = ScriptRunner::scripted(restart_pair_projections(&identity, &profile));
+        assert_eq!(
+            attest_restart_worker_pair(&mut complete, &identity, &profile).unwrap(),
+            RestartWorkerPairAttestation::Complete
+        );
+        assert_eq!(complete.seen.len(), 4);
+
+        let complete_holder = restart_pair_projections(&identity, &profile)
+            .into_iter()
+            .next()
+            .unwrap();
+        let mut absent = ScriptRunner::scripted(vec![
+            complete_holder,
+            ScriptRunner::fail(
+                1,
+                &format!("Error: No such network: {}", identity.network()),
+            ),
+        ]);
+        assert_eq!(
+            attest_restart_worker_pair(&mut absent, &identity, &profile).unwrap(),
+            RestartWorkerPairAttestation::Absent
+        );
+        // Absence stops the attestation gate before it can inspect or mutate
+        // the containers. The caller must route this outcome to recovery.
+        assert_eq!(absent.seen.len(), 2);
+    }
+
+    #[test]
+    fn restart_pair_attestation_preserves_transport_fail_closed() {
+        let identity = restart_pair_identity();
+        let profile = HomogeneousProfile::for_arch("x86_64").unwrap();
+        let holder = restart_pair_projections(&identity, &profile)
+            .into_iter()
+            .next()
+            .unwrap();
+        let mut runner = ScriptRunner::scripted(vec![
+            holder,
+            ScriptRunner::fail(1, "permission denied while contacting Docker"),
+        ]);
+        let error = attest_restart_worker_pair(&mut runner, &identity, &profile).unwrap_err();
+        assert!(
+            error.chain().any(|cause| cause
+                .to_string()
+                .contains("permission denied while contacting Docker")),
+            "{error:#}"
+        );
+        assert!(error.downcast_ref::<RestartObjectMissing>().is_none());
+        assert_eq!(runner.seen.len(), 2);
+        assert_eq!(runner.seen[1].first().map(String::as_str), Some("network"));
+        assert_eq!(runner.seen[1].get(1).map(String::as_str), Some("inspect"));
+    }
+
     /// The provision-order test supplies all admission proofs explicitly;
     /// the production Docker hook performs the real runner provenance check.
     struct CompleteTestHook;
@@ -655,21 +869,48 @@ mod tests {
             ),
             ScriptRunner::ok("sha256:feed\n"),
             // Network: missing → create.
-            ScriptRunner::ok(""),
+            ScriptRunner::fail(
+                1,
+                "Error: No such network: velnor-scaleset-net-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("netid\n"),
+            // Volume holder: missing → create → exact created-state attestation.
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-volume-holder-s7-velnor-set-0007-2ad92676",
+            ),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+            ),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+            ),
+            ScriptRunner::ok("holderid\n"),
+            restart_pair_projections(&plan.identity, &plan.profile)
+                .into_iter()
+                .next()
+                .unwrap(),
             // DinD: missing → create → start.
-            ScriptRunner::ok(""),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("dindid\n"),
             ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
             // Readiness: one miss, then ready.
             ScriptRunner::fail(1, "Cannot connect"),
             ScriptRunner::ok("28.5.2\n"),
             // Runner: missing → create → start.
-            ScriptRunner::ok(""),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("runnerid\n"),
             ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
             // Connection: running + marker.
-            ScriptRunner::ok("true\n"),
+            ScriptRunner::ok("running\n"),
             ScriptRunner::ok("Connected to GitHub\n"),
         ]);
         let sleeps = std::cell::Cell::new(0u32);
@@ -683,6 +924,7 @@ mod tests {
             &mut || Ok(()),
         )
         .unwrap();
+        assert_eq!(outcome.volume_holder, VolumeHolderProvision::Created);
         assert_eq!(outcome.network, NetworkProvision::Created);
         assert_eq!(outcome.dind, DindProvision::Created);
         assert_eq!(outcome.runner, RunnerProvision::Created);
@@ -725,9 +967,32 @@ mod tests {
                 r#"{"org.opencontainers.image.source":"https://github.com/actions/runner"}"#,
             ),
             ScriptRunner::ok("sha256:feed\n"),
-            ScriptRunner::ok(""),
+            ScriptRunner::fail(
+                1,
+                "Error: No such network: velnor-scaleset-net-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("netid\n"),
-            ScriptRunner::ok(""),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-volume-holder-s7-velnor-set-0007-2ad92676",
+            ),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+            ),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+            ),
+            ScriptRunner::ok("holderid\n"),
+            restart_pair_projections(&plan.identity, &plan.profile)
+                .into_iter()
+                .next()
+                .unwrap(),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("dindid\n"),
             ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
             ScriptRunner::fail(1, "Cannot connect"),
@@ -741,8 +1006,8 @@ mod tests {
         // The runner was never created: no runner argv ran.
         assert!(
             !script.seen.iter().any(|argv| argv
-                .iter()
-                .any(|arg| arg.contains("velnor-scaleset-runner"))),
+                .windows(2)
+                .any(|pair| pair[0] == "--name" && pair[1].contains("velnor-scaleset-runner"))),
             "{:?}",
             script.seen
         );
