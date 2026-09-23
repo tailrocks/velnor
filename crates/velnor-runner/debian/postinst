@@ -238,15 +238,16 @@ case "$1" in
       # stale drop-in removal. A quota here means an operator override outside
       # the package, and upgrades must never silently keep one.
       ceiling=$(systemctl show \
-        --property=CPUQuotaPerSecUSec --property=MemoryMax --property=MemoryHigh \
+        --property=CPUQuotaPerSecUSec --property=MemoryHigh --property=MemoryMax \
+        --property=MemorySwapMax --property=TasksMax \
         --value velnor-jobs.slice 2>/dev/null) \
         || fail "could not read effective velnor-jobs.slice resource properties after daemon-reload"
       # `systemctl show --value` prints one line per property in request
       # order. Every line must read `infinity` (any case): any finite value
       # is a surviving ceiling.
       printf '%s\n' "$ceiling" | grep -qiE -v '^(infinity)?$' \
-        && fail "velnor-jobs.slice carries a CPU/RAM ceiling after the quota drop-in removal: $ceiling"
-      [ "$(printf '%s' "$ceiling" | grep -ci infinity)" -eq 3 ] \
+        && fail "velnor-jobs.slice carries a resource ceiling after the quota drop-in removal: $ceiling"
+      [ "$(printf '%s' "$ceiling" | grep -ci infinity)" -eq 5 ] \
         || fail "velnor-jobs.slice resource properties are not all infinity after the quota drop-in removal: $ceiling"
       # Fleet unit enablement, masking, and activation belong to the operator.
       # Package upgrades preserve systemd's existing state for them; fresh

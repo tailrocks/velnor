@@ -66,10 +66,20 @@ fn postinst_removes_the_stale_quota_dropin_and_never_writes_one() {
     assert!(postinst.contains("rm -f \"$JOBS_SLICE_DROPIN\""));
     assert!(postinst.contains("systemctl daemon-reload"));
     // After reload, every effective ceiling property must read infinity.
-    assert!(postinst.contains("CPUQuotaPerSecUSec"));
-    assert!(postinst.contains("MemoryMax"));
-    assert!(postinst.contains("MemoryHigh"));
+    for property in [
+        "CPUQuotaPerSecUSec",
+        "MemoryHigh",
+        "MemoryMax",
+        "MemorySwapMax",
+        "TasksMax",
+    ] {
+        assert!(
+            postinst.contains(&format!("--property={property}")),
+            "postinst must prove the effective {property} ceiling is absent"
+        );
+    }
     assert!(postinst.contains("infinity"));
+    assert!(postinst.contains("-eq 5"));
 
     // No quota is ever derived or written.
     assert!(!postinst.contains("write_host_scaled_jobs_cpu_quota"));
