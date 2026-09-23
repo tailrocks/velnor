@@ -90,12 +90,59 @@ pub fn requested(globals: &GlobalArgs) -> Option<String> {
 
 /// Every packaged instance on this host.
 pub fn instances() -> Result<Vec<DaemonInstance>, CommandError> {
+    #[cfg(target_os = "macos")]
+    {
+        let service = crate::darwin::discover().map_err(darwin_error)?;
+        return Ok(service
+            .map(|service| vec![service.into_daemon_instance()])
+            .unwrap_or_default());
+    }
+
     daemon_instance::enumerate().map_err(|error| {
         CommandError::operation(format!(
             "enumerate packaged daemon instances under {}: {error:#}",
             daemon_instance::ETC_DIR
         ))
     })
+}
+
+/// Enter the package-owned environment for a Darwin installed service.
+/// Linux/systemd and development selections remain no-ops here.
+pub fn enter_installed_operation(
+    selected: &Selected,
+    require_docker: bool,
+) -> Result<crate::darwin::EnvironmentGuard, CommandError> {
+    match selected.packaged() {
+        Some(instance) if instance.unit == crate::darwin::SERVICE_LABEL => {
+            crate::darwin::enter(instance, require_docker).map_err(darwin_error)
+        }
+        _ => Ok(crate::darwin::EnvironmentGuard::noop()),
+    }
+}
+
+/// Whether the selection came from the Darwin installed-service boundary.
+#[must_use]
+pub fn is_darwin_installed(selected: &Selected) -> bool {
+    selected
+        .packaged()
+        .is_some_and(|instance| instance.unit == crate::darwin::SERVICE_LABEL)
+}
+
+fn darwin_error(error: crate::darwin::Error) -> CommandError {
+    let (class, reason) = match error.kind {
+        crate::darwin::ErrorKind::Metadata => (ExitClass::Operation, "darwin.service_metadata"),
+        crate::darwin::ErrorKind::DockerConfiguration => {
+            (ExitClass::Condition, "darwin.docker_config_missing")
+        }
+        crate::darwin::ErrorKind::EndpointDrift => {
+            (ExitClass::Conflict, "darwin.docker_endpoint_drift")
+        }
+        crate::darwin::ErrorKind::DaemonIdentityDrift => {
+            (ExitClass::Conflict, "darwin.docker_identity_drift")
+        }
+        crate::darwin::ErrorKind::PathDrift => (ExitClass::Conflict, "darwin.path_drift"),
+    };
+    CommandError::new(class, reason, error.message)
 }
 
 /// Select the daemon for `globals` against this host's packaged instances.

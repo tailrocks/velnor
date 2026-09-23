@@ -23,6 +23,7 @@ use velnor_render::{ColorPolicy, OutputFormat};
 
 pub mod commands;
 pub mod completion;
+pub mod darwin;
 pub mod diagnostics;
 pub mod host;
 pub mod http;
@@ -591,6 +592,8 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Preflight(args) => {
             #[cfg(target_os = "macos")]
             {
+                let selected = packaged::select(&globals)?;
+                let _installed = packaged::enter_installed_operation(&selected, true)?;
                 local_diagnostics::preflight(&globals, &args)
             }
             #[cfg(not(target_os = "macos"))]
@@ -601,6 +604,8 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Docker(args) => {
             #[cfg(target_os = "macos")]
             {
+                let selected = packaged::select(&globals)?;
+                let _installed = packaged::enter_installed_operation(&selected, true)?;
                 local_diagnostics::docker_report(&globals, &args)
             }
             #[cfg(not(target_os = "macos"))]
@@ -622,6 +627,8 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             // Same selection as `get`: the daemon's own directory, from its
             // unit environment on a packaged host.
             let selected = packaged::select(&globals)?;
+            #[cfg(target_os = "macos")]
+            let _installed = packaged::enter_installed_operation(&selected, true)?;
             if args.json || globals.output_format().is_machine() {
                 return status_health_json(&args, &selected);
             }
@@ -656,6 +663,8 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Storage(args) => {
             #[cfg(target_os = "macos")]
             if matches!(&args.command, runtime::StorageCommand::Paths) {
+                let selected = packaged::select(&globals)?;
+                let _installed = packaged::enter_installed_operation(&selected, false)?;
                 return local_diagnostics::paths(&globals, &args);
             }
             if matches!(

@@ -38,6 +38,7 @@ pub fn preflight(globals: &GlobalArgs, args: &runtime::PreflightArgs) -> Result<
     let work_dir = args
         .work_dir
         .clone()
+        .or_else(|| env::var_os("VELNOR_WORK_DIR").map(PathBuf::from))
         .unwrap_or_else(|| current_work_dir().join(DEFAULT_WORK_DIR_NAME));
     let paths = resolve_paths(Some(&config_dir), Some(&work_dir))?;
     let (backend, config_file) = match load_execution(&config_dir, false) {
@@ -221,6 +222,7 @@ pub fn docker_report(
     let work_dir = args
         .work_dir
         .clone()
+        .or_else(|| env::var_os("VELNOR_WORK_DIR").map(PathBuf::from))
         .unwrap_or_else(|| current_work_dir().join(DEFAULT_WORK_DIR_NAME));
     let paths = resolve_paths(None, Some(&work_dir))?;
     let report = collect_docker_report(
@@ -998,62 +1000,80 @@ fn resolve_paths(
     let storage_root = env::var_os("VELNOR_STORAGE_ROOT")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let (mode, cache, lib, run, log, config) = if let Some(prefix) = storage_root {
-        let run = if prefix == Path::new("/var") {
-            PathBuf::from("/run/velnor")
-        } else {
-            prefix.join("run/velnor")
-        };
-        (
-            "storage-root".to_owned(),
-            prefix.join("cache/velnor/v1"),
-            prefix.join("lib/velnor"),
-            run,
-            prefix.join("log/velnor"),
-            prefix.join("lib/velnor/runner"),
-        )
-    } else if let Some(config) = explicit_config {
-        (
-            "explicit-config".to_owned(),
-            config.join("cache"),
-            config.to_path_buf(),
-            config.join("run"),
-            config.join("log"),
-            config.to_path_buf(),
-        )
-    } else {
-        let home = env::var_os("HOME").ok_or_else(|| {
-            CommandError::new(
-                ExitClass::Usage,
-                "config.home_missing",
-                "HOME is not set; pass --config-dir to resolve local paths",
+    let configured_service_dir = env::var_os("VELNOR_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let (mode, cache, lib, run, log, config) =
+        if let (Some(prefix), Some(config_dir)) = (storage_root.clone(), configured_service_dir) {
+            let log = env::var_os("VELNOR_LOG_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| prefix.join("log/velnor"));
+            (
+                "installed-service".to_owned(),
+                prefix.join("cache/velnor/v1"),
+                prefix.join("lib/velnor"),
+                prefix.join("run/velnor"),
+                log,
+                config_dir,
             )
-        })?;
-        let home = PathBuf::from(home);
-        let state = env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("Library/Application Support"));
-        let cache = env::var_os("XDG_CACHE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("Library/Caches"));
-        let runtime = env::var_os("XDG_RUNTIME_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| env::temp_dir().join("velnor-run"));
-        let lib = state.join("velnor");
-        (
-            "xdg-user".to_owned(),
-            cache.join("velnor"),
-            lib.clone(),
-            runtime.join("velnor"),
-            lib.join("log"),
-            lib.join("runner"),
-        )
-    };
+        } else if let Some(prefix) = storage_root {
+            let run = if prefix == Path::new("/var") {
+                PathBuf::from("/run/velnor")
+            } else {
+                prefix.join("run/velnor")
+            };
+            (
+                "storage-root".to_owned(),
+                prefix.join("cache/velnor/v1"),
+                prefix.join("lib/velnor"),
+                run,
+                prefix.join("log/velnor"),
+                prefix.join("lib/velnor/runner"),
+            )
+        } else if let Some(config) = explicit_config {
+            (
+                "explicit-config".to_owned(),
+                config.join("cache"),
+                config.to_path_buf(),
+                config.join("run"),
+                config.join("log"),
+                config.to_path_buf(),
+            )
+        } else {
+            let home = env::var_os("HOME").ok_or_else(|| {
+                CommandError::new(
+                    ExitClass::Usage,
+                    "config.home_missing",
+                    "HOME is not set; pass --config-dir to resolve local paths",
+                )
+            })?;
+            let home = PathBuf::from(home);
+            let state = env::var_os("XDG_STATE_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("Library/Application Support"));
+            let cache = env::var_os("XDG_CACHE_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("Library/Caches"));
+            let runtime = env::var_os("XDG_RUNTIME_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| env::temp_dir().join("velnor-run"));
+            let lib = state.join("velnor");
+            (
+                "xdg-user".to_owned(),
+                cache.join("velnor"),
+                lib.clone(),
+                runtime.join("velnor"),
+                lib.join("log"),
+                lib.join("runner"),
+            )
+        };
     let work = explicit_work
         .map(Path::to_path_buf)
+        .or_else(|| env::var_os("VELNOR_WORK_DIR").map(PathBuf::from))
         .unwrap_or_else(|| config.join("_work"));
     let artifact_root = daemon_shared_root(work.clone()).join("_velnor_artifacts");
     Ok(PathsReport {
