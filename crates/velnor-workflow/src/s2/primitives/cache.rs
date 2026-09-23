@@ -12,7 +12,7 @@ use crate::s2::{CacheSpec, GeneratorError, Unit, WorkflowIr};
 /// Schema for the exact native-product cache namespace. The complete typed
 /// product identity is hashed into every key; compatibility-prefix restores
 /// are deliberately not part of this cache contract.
-pub(crate) const NATIVE_PRODUCT_CACHE_KEY_SCHEMA: &str = "velnor-native-product-cache/1";
+pub(crate) const NATIVE_PRODUCT_CACHE_KEY_SCHEMA: &str = "velnor-native-product-cache/3";
 
 /// Derive the exact native-product cache key from the complete typed identity.
 /// Incomplete or malformed identities return an error, so callers cannot
@@ -237,8 +237,8 @@ mod tests {
     fn native_product_cache_key_is_canonical_and_identity_complete() {
         let identity = native_identity();
         let key = native_product_cache_key(&identity).expect("complete identity");
-        assert!(key.starts_with("velnor-native-product-cache/1-"), "{key}");
-        assert_eq!(key.len(), "velnor-native-product-cache/1-".len() + 64);
+        assert!(key.starts_with("velnor-native-product-cache/3-"), "{key}");
+        assert_eq!(key.len(), "velnor-native-product-cache/3-".len() + 64);
 
         let mut profile = identity.clone();
         profile.profile = "fixture-other-profile".to_owned();
