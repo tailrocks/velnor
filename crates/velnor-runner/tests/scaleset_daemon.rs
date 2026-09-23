@@ -2853,11 +2853,14 @@ async fn cleanup_failure_retains_permit_uncertain() {
         },
     )
     .await;
+    let runner_id = docker
+        .container_id(&runner_container_for(REQUEST_ID))
+        .expect("runner id captured before cleanup retry");
     // Let at least one redelivery retry the terminal path before stopping.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let rms = docker
-            .seen_matching(&runner_container_for(REQUEST_ID))
+            .seen_matching(&runner_id)
             .iter()
             .filter(|argv| argv.first().is_some_and(|head| head == "rm"))
             .count();
@@ -2885,7 +2888,7 @@ async fn cleanup_failure_retains_permit_uncertain() {
         "failed cleanup vetoes the ACK"
     );
     let runner_rms = docker
-        .seen_matching(&runner_container_for(REQUEST_ID))
+        .seen_matching(&runner_id)
         .iter()
         .filter(|argv| argv.first().is_some_and(|head| head == "rm"))
         .count();
@@ -2908,7 +2911,13 @@ async fn cleanup_failure_retains_permit_uncertain() {
     assert!(!docker.has_container(&dind_container_for(REQUEST_ID)));
     assert!(docker.has_container(&identity_for(REQUEST_ID).volume_holder_container()));
     assert_eq!(docker.anonymous_volume_count(), 3);
-    assert_holder_cleanup_uses_immutable_id(&docker, &identity_for(REQUEST_ID));
+    assert!(
+        docker
+            .volume_commands()
+            .iter()
+            .all(|argv| argv.get(1).is_some_and(|verb| verb == "inspect")),
+        "cleanup must not mutate volumes by name"
+    );
     assert_eq!(set_delete_calls(&server).await, 0);
 
     unsafe { std::env::remove_var(&pat_env) };
