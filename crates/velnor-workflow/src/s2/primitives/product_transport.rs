@@ -1735,7 +1735,13 @@ mod tests {
                 "run_id" => request.provenance.run_id = "54321".to_owned(),
                 "run_attempt" => request.provenance.run_attempt = "2".to_owned(),
                 "platform" => request.provenance.platform = "MacOS-ARM64".to_owned(),
-                _ => unreachable!("test case is exhaustive"),
+                _ => assert!(
+                    matches!(
+                        field,
+                        "source" | "builder" | "run_id" | "run_attempt" | "platform"
+                    ),
+                    "test case is exhaustive: {field}"
+                ),
             }
             let message = format!(
                 "{}",
@@ -1768,13 +1774,14 @@ mod tests {
         assert!(message.contains("native-cache"), "{message}");
         assert!(message.contains("typed product identity"), "{message}");
 
-        let digest = "digest-1";
+        let digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let typed_stage = producer.join("typed-stage");
         stage_product(
             &producer,
             &StageRequest {
                 mode: TransportMode::NativeCache,
                 identity: Some(identity("xcframework-foo", digest)),
+                inputs_digest: digest.to_owned(),
                 stage: typed_stage.clone(),
                 ..stage_request(&typed_stage)
             },
@@ -1787,6 +1794,7 @@ mod tests {
             &consumer,
             &VerifyRequest {
                 mode: TransportMode::NativeCache,
+                inputs_digest: digest.to_owned(),
                 stage: typed_stage,
                 ..verify_request(&stage, &env_file)
             },
