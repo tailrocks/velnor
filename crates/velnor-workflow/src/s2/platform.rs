@@ -49,85 +49,6 @@ pub(crate) struct ProductIdentity {
 }
 
 impl ProductIdentity {
-    /// Derive the identity available without executing an Apple toolchain.
-    ///
-    /// The source intentionally does not invent an adapter version, SDK build,
-    /// or Cargo pack profile. Those dimensions stay empty and therefore keep
-    /// exact cross-run cache admission disabled.
-    pub(crate) fn for_product(producer: &Unit, product: &NamedProduct) -> Option<Self> {
-        if !is_native_product(product) {
-            return None;
-        }
-
-        let architectures = product_architectures(product);
-        let target_triple = if architectures.len() == 1 {
-            match architectures[0].as_str() {
-                "macos-arm64" => "aarch64-apple-darwin".to_owned(),
-                "macos-x86_64" => "x86_64-apple-darwin".to_owned(),
-                _ => String::new(),
-            }
-        } else {
-            String::new()
-        };
-        let mut toolchain = BTreeMap::new();
-        if let Some(pin) = producer.toolchain.as_ref() {
-            toolchain.insert("rust.channel".to_owned(), pin.channel().to_owned());
-            if let Some(profile) = pin.profile() {
-                toolchain.insert("rust.profile".to_owned(), profile.to_owned());
-            }
-            if !pin.components().is_empty() {
-                toolchain.insert("rust.components".to_owned(), pin.components().join(","));
-            }
-            if !pin.targets().is_empty() {
-                toolchain.insert("rust.targets".to_owned(), pin.targets().join(","));
-            }
-        }
-        if let Some(pin) = producer.xcode.as_ref() {
-            toolchain.insert("xcode.version".to_owned(), pin.version().to_owned());
-        }
-
-        let mut generation = BTreeMap::new();
-        generation.insert("outputs".to_owned(), product.outputs.join("\0"));
-        generation.insert("output_files".to_owned(), product.output_files.join("\0"));
-        if !product.bindings_dir.is_empty() {
-            generation.insert("bindings_dir".to_owned(), product.bindings_dir.clone());
-        }
-        if !product.bindings_file.is_empty() {
-            generation.insert("bindings_file".to_owned(), product.bindings_file.clone());
-        }
-        if !product.rebuild.is_empty() {
-            generation.insert("rebuild".to_owned(), product.rebuild.join("\0"));
-        }
-
-        Some(Self {
-            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
-            producer: producer.id.clone(),
-            product: product.name.clone(),
-            adapter: String::new(),
-            source: product.bindings_dir.clone(),
-            inputs_digest: product.inputs_digest.clone(),
-            host_abi: producer.platform.as_str().to_owned(),
-            target: if product
-                .outputs
-                .iter()
-                .any(|output| output.ends_with(".xcframework"))
-            {
-                "apple-xcframework".to_owned()
-            } else {
-                String::new()
-            },
-            target_triple,
-            architectures,
-            sdk: String::new(),
-            deployment_target: product.deployment_target.clone(),
-            toolchain,
-            profile: String::new(),
-            features: Vec::new(),
-            flags: Vec::new(),
-            generation,
-        })
-    }
-
     /// Validate syntax and canonical ordering without requiring every
     /// identity dimension to be known.
     pub(crate) fn validate(&self, context: &str) -> Result<(), GeneratorError> {
@@ -152,6 +73,23 @@ impl ProductIdentity {
             if value.chars().any(char::is_control) {
                 return Err(GeneratorError::usage(format!(
                     "{context} product identity field `{field}` contains control characters"
+                )));
+            }
+            if value.contains("${{") {
+                return Err(GeneratorError::usage(format!(
+                    "{context} product identity field `{field}` contains a GitHub expression opener"
+                )));
+            }
+        }
+        for (field, value) in [
+            ("producer", self.producer.as_str()),
+            ("product", self.product.as_str()),
+            ("adapter", self.adapter.as_str()),
+            ("source", self.source.as_str()),
+        ] {
+            if value.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "{context} product identity field `{field}` is empty"
                 )));
             }
         }
@@ -251,13 +189,12 @@ fn validate_identity_list(
     field: &str,
     values: &[String],
 ) -> Result<(), GeneratorError> {
-    if values
-        .iter()
-        .any(|value| value.is_empty() || value.chars().any(char::is_control))
-        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    if values.iter().any(|value| {
+        value.is_empty() || value.chars().any(char::is_control) || value.contains("${{")
+    }) || values.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(GeneratorError::usage(format!(
-            "{context} product identity `{field}` must be non-empty, unique, and sorted"
+            "{context} product identity `{field}` must be non-empty, printable, expression-free, unique, and sorted"
         )));
     }
     Ok(())
@@ -269,43 +206,17 @@ fn validate_identity_map(
     values: &BTreeMap<String, String>,
 ) -> Result<(), GeneratorError> {
     if values.iter().any(|(key, value)| {
-        key.is_empty() || key.chars().any(char::is_control) || value.chars().any(char::is_control)
+        key.is_empty()
+            || key.chars().any(char::is_control)
+            || value.chars().any(char::is_control)
+            || key.contains("${{")
+            || value.contains("${{")
     }) {
         return Err(GeneratorError::usage(format!(
-            "{context} product identity `{field}` contains an empty or non-printable entry"
+            "{context} product identity `{field}` contains an empty, non-printable, or expression entry"
         )));
     }
     Ok(())
-}
-
-fn is_native_product(product: &NamedProduct) -> bool {
-    !product.bindings_dir.is_empty()
-        || !product.deployment_target.is_empty()
-        || product
-            .outputs
-            .iter()
-            .any(|output| output.ends_with(".xcframework"))
-}
-
-fn product_architectures(product: &NamedProduct) -> Vec<String> {
-    let Some(root) = product
-        .outputs
-        .iter()
-        .find(|output| output.ends_with(".xcframework"))
-    else {
-        return Vec::new();
-    };
-    let mut architectures = product
-        .output_files
-        .iter()
-        .filter_map(|file| file.strip_prefix(&format!("{root}/")))
-        .filter_map(|relative| relative.split('/').next())
-        .filter(|segment| *segment != "Info.plist")
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    architectures.sort();
-    architectures.dedup();
-    architectures
 }
 
 /// A named build product one unit produces for others: an `XCFramework`
@@ -356,6 +267,11 @@ pub(crate) struct NamedProduct {
     pub(crate) inputs_unknown: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) inputs_digest: Option<String>,
+    /// Scanner-proven identity for a native product. Generic declared
+    /// products leave this absent; absence keeps same-run transport possible
+    /// without inventing cross-run identity facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<ProductIdentity>,
     /// Shell commands that rebuild the product from a clean checkout, in
     /// order. The scanner records the producer recipe here so a consumer
     /// whose producer did not run in this workflow can still materialize
@@ -657,6 +573,86 @@ fn validate_bindings(unit: &Unit, product: &NamedProduct) -> Result<(), Generato
     Ok(())
 }
 
+/// Validate the typed plan facts required by an Apple `XCFramework`
+/// contract. Runtime plist and `lipo` facts remain in the rendered validator;
+/// generation must still declare every structural file and slice.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "XCFramework output paths are an exact, case-sensitive contract"
+)]
+fn validate_apple_xcframework_contract(
+    unit: &Unit,
+    product: &NamedProduct,
+) -> Result<(), GeneratorError> {
+    let Some(identity) = product.identity.as_ref() else {
+        return Ok(());
+    };
+    if identity.target != "apple-xcframework" {
+        return Ok(());
+    }
+    let frameworks = product
+        .outputs
+        .iter()
+        .filter(|output| output.ends_with(".xcframework"))
+        .collect::<Vec<_>>();
+    if frameworks.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} has apple-xcframework identity but no .xcframework output root",
+            unit.id, product.name
+        )));
+    }
+    if identity.architectures.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} has apple-xcframework identity but no declared slice architectures",
+            unit.id, product.name
+        )));
+    }
+    if !super::scan::rust::valid_deployment_floor(&identity.deployment_target) {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} declares apple-xcframework deployment target {} that is not a valid Apple deployment version",
+            unit.id, product.name, identity.deployment_target
+        )));
+    }
+    if !product.deployment_target.is_empty()
+        && product.deployment_target != identity.deployment_target
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} deployment target {} disagrees with typed identity {}",
+            unit.id, product.name, product.deployment_target, identity.deployment_target
+        )));
+    }
+    for framework in frameworks {
+        let info = format!("{framework}/Info.plist");
+        if !product.output_files.iter().any(|file| file == &info) {
+            return Err(GeneratorError::usage(format!(
+                "unit {} product {} XCFramework output {} must declare {}",
+                unit.id, product.name, framework, info
+            )));
+        }
+        for slice in &identity.architectures {
+            let prefix = format!("{framework}/{slice}/");
+            if !product
+                .output_files
+                .iter()
+                .any(|file| file.starts_with(&prefix) && file.ends_with(".a"))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "unit {} product {} XCFramework slice {} declares no static library under {}",
+                    unit.id, product.name, slice, prefix
+                )));
+            }
+            let modulemap = format!("{prefix}Headers/module.modulemap");
+            if !product.output_files.iter().any(|file| file == &modulemap) {
+                return Err(GeneratorError::usage(format!(
+                    "unit {} product {} XCFramework slice {} must declare {}",
+                    unit.id, product.name, slice, modulemap
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate one product's local rebuild: every command is non-empty
 /// printable shell without NUL bytes, so the guarded compound the consumer
 /// prepends cannot silently collapse or inject a second command.
@@ -688,6 +684,10 @@ fn validate_rebuild(unit: &Unit, product: &NamedProduct) -> Result<(), Generator
 /// consumer-to-producer edges are acyclic. Unknown producers and products
 /// stay `materialize_prerequisites` errors, which already name the known
 /// units and offered products.
+#[expect(
+    clippy::too_many_lines,
+    reason = "product graph validation keeps all cross-field contracts in one fail-closed pass"
+)]
 fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> {
     let mut owners: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
     for unit in &config.units {
@@ -753,6 +753,20 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
             }
             validate_output_files(unit, product)?;
             validate_bindings(unit, product)?;
+            if let Some(identity) = &product.identity {
+                identity.validate_for(
+                    &format!("unit `{}` product `{}`", unit.id, product.name),
+                    &unit.id,
+                    &product.name,
+                )?;
+                if identity.inputs_digest != product.inputs_digest {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` product `{}` identity inputs_digest disagrees with product inputs_digest",
+                        unit.id, product.name
+                    )));
+                }
+            }
+            validate_apple_xcframework_contract(unit, product)?;
             validate_rebuild(unit, product)?;
         }
         for prerequisite in &unit.prerequisites {
@@ -762,6 +776,11 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
                     unit.id, prerequisite.product,
                 )));
             }
+            let Some(product) = find_product(config, &prerequisite.producer, &prerequisite.product)
+            else {
+                continue;
+            };
+            validate_prerequisite_task_ownership(unit, prerequisite, product)?;
         }
     }
     if let Some(cycle) = find_product_cycle(config) {
@@ -771,6 +790,41 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
         )));
     }
     Ok(())
+}
+
+/// A scanner-owned native product has one rebuild authority: its typed task,
+/// or its recorded adapter recipe when it is taskless. A consumer may not
+/// replace that authority with an arbitrary task name.
+fn validate_prerequisite_task_ownership(
+    unit: &Unit,
+    prerequisite: &Prerequisite,
+    product: &NamedProduct,
+) -> Result<(), GeneratorError> {
+    let Some(requested) = prerequisite.task.as_deref() else {
+        return Ok(());
+    };
+    let Some(_identity) = product.identity.as_ref() else {
+        return Ok(());
+    };
+    if let Some(owner) = product.task.as_deref() {
+        if requested == owner {
+            return Ok(());
+        }
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` prerequisite `{}:{}` overrides native product task `{owner}` with `{requested}`; only the producer-owned task may rebuild an identified product",
+            unit.id, prerequisite.producer, prerequisite.product
+        )));
+    }
+    if !product.rebuild.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` prerequisite `{}:{}` overrides the producer-owned native rebuild recipe with task `{requested}`; identified taskless products must use their recorded recipe",
+            unit.id, prerequisite.producer, prerequisite.product
+        )));
+    }
+    Err(GeneratorError::usage(format!(
+        "unit `{}` prerequisite `{}:{}` names task `{requested}` for an identified native product with no producer-owned task or rebuild recipe",
+        unit.id, prerequisite.producer, prerequisite.product
+    )))
 }
 
 /// The first consumer-to-producer cycle, as a closed id path, if one exists.
@@ -1044,6 +1098,7 @@ mod tests {
         agreed_env, guarded_rebuild_command, is_ffi_crate_type, prepare_command, resolve,
         transport_marker, valid_env_name, valid_env_value, valid_product_input, valid_product_name,
         valid_product_output, valid_task_name, NamedProduct, Prerequisite, ProductIdentity,
+        PRODUCT_IDENTITY_SCHEMA,
     };
     use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
     use crate::s2::scan::default_selectors;
@@ -1137,36 +1192,33 @@ mod tests {
     }
 
     #[test]
-    fn derived_native_identity_stays_incomplete_without_runtime_facts() {
-        let mut producer = unit("rust-ffi", UnitKind::Rust);
-        producer.platform = Platform::MacosArm64;
-        producer.toolchain = Some(crate::s2::RustToolchain {
-            channel: "fixture-rust".to_owned(),
-            ..Default::default()
-        });
-        let mut native = product("xcframework", &["native/Foo.xcframework"]);
-        native.output_files = vec![
-            "native/Foo.xcframework/macos-arm64/libfoo.a".to_owned(),
-            "native/Foo.xcframework/Info.plist".to_owned(),
-        ];
-        native.bindings_dir = "native/Sources/Foo".to_owned();
-        native.deployment_target = "1.0".to_owned();
-        native.inputs_digest = Some("a".repeat(64));
+    fn generic_products_do_not_receive_native_identity() {
+        let native_looking = product("xcframework", &["native/Foo.xcframework"]);
+        assert!(
+            native_looking.identity.is_none(),
+            "identity belongs to the scanner-owned native edge"
+        );
+    }
 
-        let identity = ProductIdentity::for_product(&producer, &native).expect("native identity");
-        assert_eq!(identity.producer, "rust-ffi");
-        assert_eq!(identity.architectures, vec!["macos-arm64"]);
-        assert!(
-            identity.adapter.is_empty(),
-            "adapter is not statically proven"
+    #[test]
+    fn product_identity_rejects_nested_github_expressions() {
+        let mut nested_list = identity("rust-ffi", "xcframework");
+        nested_list.flags = vec!["${{ github.repository }}".to_owned()];
+        let error = must_err(
+            nested_list.validate("fixture"),
+            "nested identity expression must fail",
         );
-        assert!(
-            identity.sdk.is_empty(),
-            "SDK build is not statically proven"
+        assert!(error.to_string().contains("expression-free"), "{error}");
+
+        let mut nested_map = identity("rust-ffi", "xcframework");
+        nested_map
+            .generation
+            .insert("recipe".to_owned(), "${{ github.sha }}".to_owned());
+        let error = must_err(
+            nested_map.validate("fixture"),
+            "nested identity expression must fail",
         );
-        assert!(!identity.exact_reuse_allowed());
-        assert!(identity.missing_dimensions().contains(&"adapter"));
-        assert!(identity.missing_dimensions().contains(&"sdk"));
+        assert!(error.to_string().contains("expression entry"), "{error}");
     }
 
     #[test]
@@ -1207,6 +1259,7 @@ mod tests {
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
             inputs_digest: None,
+            identity: None,
             rebuild: Vec::new(),
         };
         let plain = Prerequisite {
@@ -1253,6 +1306,7 @@ mod tests {
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
             inputs_digest: None,
+            identity: None,
             name: name.to_owned(),
             task: Some(format!("build-{name}")),
             env: BTreeMap::new(),
@@ -1262,6 +1316,17 @@ mod tests {
             bindings_file: String::new(),
             deployment_target: String::new(),
             rebuild: Vec::new(),
+        }
+    }
+
+    fn identity(producer: &str, product: &str) -> ProductIdentity {
+        ProductIdentity {
+            schema: PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            adapter: "fixture-adapter@1".to_owned(),
+            source: "fixture/native".to_owned(),
+            ..ProductIdentity::default()
         }
     }
 
@@ -1460,6 +1525,48 @@ mod tests {
     }
 
     #[test]
+    fn resolve_rejects_identity_owned_by_another_unit() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.identity = Some(identity("other-ffi", "xcframework"));
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "identity producer ownership fails closed",
+        );
+        let message = error.to_string();
+        assert!(message.contains("owner mismatch"), "{message}");
+        assert!(message.contains("other-ffi"), "{message}");
+    }
+
+    #[test]
+    fn resolve_rejects_consumer_task_override_for_identified_native_product() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.identity = Some(identity("rust-ffi", "xcframework"));
+        ffi.task = None;
+        ffi.rebuild = vec!["boltffi pack apple".to_owned()];
+        producer.products = vec![ffi];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![Prerequisite {
+            producer: "rust-ffi".to_owned(),
+            product: "xcframework".to_owned(),
+            task: Some("arbitrary-rebuild".to_owned()),
+            env: BTreeMap::new(),
+        }];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer, consumer])),
+            "native task ownership fails closed",
+        );
+        let message = error.to_string();
+        assert!(message.contains("overrides"), "{message}");
+        assert!(
+            message.contains("producer-owned native rebuild"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn resolve_rejects_unprintable_closure_gap() {
         let mut producer = unit("rust-ffi", UnitKind::Rust);
         let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
@@ -1568,6 +1675,34 @@ mod tests {
         must_ok(
             resolve(&mut project_config(vec![producer])),
             "files under roots resolve",
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_incomplete_identified_xcframework_structure() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        let mut native = identity("rust-ffi", "xcframework");
+        native.target = "apple-xcframework".to_owned();
+        native.target_triple = "aarch64-apple-darwin".to_owned();
+        native.architectures = vec!["macos-arm64".to_owned()];
+        native.deployment_target = "15.0".to_owned();
+        ffi.deployment_target = "15.0".to_owned();
+        ffi.bindings_dir = "native/Sources/Bindings".to_owned();
+        ffi.bindings_file = "native/Sources/Bindings/BridgeCoreBoltFFI.swift".to_owned();
+        ffi.identity = Some(native);
+        ffi.output_files = vec![
+            "native/out/lib.xcframework/Info.plist".to_owned(),
+            "native/out/lib.xcframework/macos-arm64/libffi.a".to_owned(),
+        ];
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "incomplete XCFramework structure fails closed",
+        );
+        assert!(
+            error.to_string().contains("module.modulemap"),
+            "unexpected error: {error}"
         );
     }
 

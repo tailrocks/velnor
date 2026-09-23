@@ -218,6 +218,13 @@ fn wire_native_edge(
         // manifest — so resolution carries it into the consumer's job env
         // for `swift build`. The producer unit's own env stays untouched:
         // declared rows overwrite it wholesale after the scan.
+        // The pack runs Apple tooling, so the producing unit inherits the
+        // macOS requirement before its identity is built. Deriving the host
+        // ABI from this typed routing fact keeps identity and placement on
+        // one source of truth.
+        shape.units[producer_index].platform = Platform::MacosArm64;
+        shape.units[producer_index].capabilities.native_macos_arm64 = true;
+        let identity = native_product_identity(shape, producer_index, producer, &product_name);
         let mut product_env = std::collections::BTreeMap::new();
         product_env.insert(
             rust::MACOSX_DEPLOYMENT_TARGET.to_owned(),
@@ -233,15 +240,14 @@ fn wire_native_edge(
                 output_files: producer.output_files.clone(),
                 bindings_dir: producer.bindings_dir.clone(),
                 bindings_file: producer.bindings_file.clone(),
-                deployment_target: producer.deployment_target.clone(),
+                deployment_target: producer.effective_deployment_target().to_owned(),
                 inputs: producer.inputs.clone(),
                 inputs_unknown: producer.inputs_unknown.clone(),
                 inputs_digest: producer.inputs_digest.clone(),
+                identity: Some(identity),
                 rebuild: recipe_commands.clone(),
             });
         let unit = &mut shape.units[producer_index];
-        unit.platform = crate::s2::provider::Platform::MacosArm64;
-        unit.capabilities.native_macos_arm64 = true;
         unit.pr_commands.extend(recipe_commands.clone());
         unit.full_commands.extend(recipe_commands);
         // Recipe commands carry no phase tag; the unit keeps every command
@@ -261,6 +267,101 @@ fn wire_native_edge(
         "{manifest} {} consumes {reference} `{name}` from BoltFFI manifest {} (crate `{}`); the producer step must materialize `{}` {materialization}.",
         consumer.manifest, producer.manifest, producer.crate_name, producer.output,
     ));
+}
+
+/// Build the product identity from facts proven by static scanning. Runtime
+/// SDK resolution is intentionally not guessed: an unpinned Xcode/SDK leaves
+/// `sdk` empty, which permits safe same-run transport but disables exact
+/// cross-run reuse.
+fn native_product_identity(
+    shape: &RepositoryShape,
+    producer_index: usize,
+    producer: &rust::BoltffiProducer,
+    product_name: &str,
+) -> crate::s2::platform::ProductIdentity {
+    let mut toolchain = BTreeMap::new();
+    if let Some(rust) = shape.units[producer_index].toolchain.as_ref() {
+        toolchain.insert("rust.channel".to_owned(), rust.channel().to_owned());
+        if let Some(profile) = rust.profile() {
+            toolchain.insert("rust.profile".to_owned(), profile.to_owned());
+        }
+        if !rust.components().is_empty() {
+            toolchain.insert("rust.components".to_owned(), rust.components().join(","));
+        }
+        if !rust.targets().is_empty() {
+            toolchain.insert("rust.targets".to_owned(), rust.targets().join(","));
+        }
+    }
+    if let Some(xcode) = shape.units[producer_index].xcode.as_ref() {
+        toolchain.insert("xcode.version".to_owned(), xcode.version().to_owned());
+    }
+
+    let mut architectures = producer
+        .output_files
+        .iter()
+        .filter_map(|file| {
+            let relative = file.strip_prefix(&format!("{}/", producer.output))?;
+            let slice = relative.split('/').next()?;
+            (slice != "Info.plist").then_some(slice.to_owned())
+        })
+        .collect::<Vec<_>>();
+    architectures.sort();
+    architectures.dedup();
+
+    let target_triple = if architectures.iter().any(|slice| slice == "macos-arm64") {
+        "aarch64-apple-darwin".to_owned()
+    } else if architectures.iter().any(|slice| slice == "macos-x86_64") {
+        "x86_64-apple-darwin".to_owned()
+    } else {
+        // A universal slice is named `macos-arm64_x86_64`; it is an
+        // XCFramework slice, not one host target triple.
+        "apple-xcframework".to_owned()
+    };
+
+    let mut generation = BTreeMap::new();
+    generation.insert("framework".to_owned(), producer.framework.clone());
+    generation.insert("bindings_dir".to_owned(), producer.bindings_dir.clone());
+    generation.insert("bindings_file".to_owned(), producer.bindings_file.clone());
+    generation.insert("output".to_owned(), producer.output.clone());
+    generation.insert("recipe".to_owned(), producer.recipe.digest_identity());
+    if let Some(package_swift) = producer.package_swift.as_ref() {
+        generation.insert("package_swift".to_owned(), package_swift.clone());
+    }
+
+    let host_abi = shape.units[producer_index].platform.as_str().to_owned();
+    let adapter = producer.tool_version.as_deref().map_or_else(
+        || "boltffi".to_owned(),
+        |version| format!("boltffi@{version}"),
+    );
+
+    crate::s2::platform::ProductIdentity {
+        schema: crate::s2::platform::PRODUCT_IDENTITY_SCHEMA.to_owned(),
+        producer: producer.unit.clone().unwrap_or_default(),
+        product: product_name.to_owned(),
+        adapter,
+        source: format!(
+            "{};crate={};framework={}",
+            producer.manifest, producer.crate_name, producer.framework
+        ),
+        inputs_digest: producer.inputs_digest.clone(),
+        host_abi,
+        target: "apple-xcframework".to_owned(),
+        target_triple,
+        architectures,
+        sdk: String::new(),
+        deployment_target: producer.effective_deployment_target().to_owned(),
+        toolchain,
+        profile: producer.recipe.profile.as_ref().map_or_else(
+            || "default".to_owned(),
+            |profile| profile.as_str().to_owned(),
+        ),
+        features: Vec::new(),
+        flags: [producer.recipe.locked.then_some("--locked".to_owned())]
+            .into_iter()
+            .flatten()
+            .collect(),
+        generation,
+    }
 }
 
 /// The product name for a framework: lowercase, shell-safe, within the
@@ -625,14 +726,15 @@ mod tests {
             output: "native/out/BridgeCore.xcframework".to_owned(),
             bindings_dir: "native/Sources/BridgeCore".to_owned(),
             bindings_file: "FfiBoltFFI.swift".to_owned(),
-            deployment_target: "26.0".to_owned(),
+            manifest_deployment_target: "16.0".to_owned(),
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: Some(super::rust::CargoProfile("ci-release".to_owned())),
-                deployment: super::rust::DeploymentFloor("26.1".to_owned()),
+                deployment: super::rust::DeploymentFloor("26.0".to_owned()),
                 locked: true,
                 verbose: false,
             },
+            tool_version: Some("0.30.1".to_owned()),
             unit: Some(producer_id.clone()),
             output_files: vec!["Info.plist".to_owned()],
             inputs: vec!["crates/ffi/src/**".to_owned()],
@@ -655,16 +757,37 @@ mod tests {
         assert_eq!(vec!["native/out/BridgeCore.xcframework"], product.outputs);
         assert_eq!(
             product.deployment_target, "26.0",
-            "the product keeps the manifest scan fact"
+            "the product uses the effective recipe floor"
         );
         assert_eq!(
             product
                 .env
                 .get(super::rust::MACOSX_DEPLOYMENT_TARGET)
                 .map(String::as_str),
-            Some("26.1"),
+            Some("26.0"),
             "the product exports the recipe's resolved floor: {:?}",
             product.env
+        );
+        assert_eq!(
+            product
+                .identity
+                .as_ref()
+                .map(|identity| identity.adapter.as_str()),
+            Some("boltffi@0.30.1")
+        );
+        assert_eq!(
+            product
+                .identity
+                .as_ref()
+                .map(|identity| identity.deployment_target.as_str()),
+            Some("26.0")
+        );
+        assert_eq!(
+            product
+                .identity
+                .as_ref()
+                .map(|identity| identity.host_abi.as_str()),
+            Some(unit.platform.as_str())
         );
         assert!(
             unit.env.is_empty(),
@@ -747,7 +870,7 @@ mod tests {
             output: "native/out/BridgeCore.xcframework".to_owned(),
             bindings_dir: "native/Sources/BridgeCore".to_owned(),
             bindings_file: "FfiBoltFFI.swift".to_owned(),
-            deployment_target: "26.0".to_owned(),
+            manifest_deployment_target: "16.0".to_owned(),
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: None,
@@ -755,6 +878,7 @@ mod tests {
                 locked: true,
                 verbose: false,
             },
+            tool_version: Some("0.30.1".to_owned()),
             unit: Some(shape.units[0].id.clone()),
             output_files: Vec::new(),
             inputs: Vec::new(),

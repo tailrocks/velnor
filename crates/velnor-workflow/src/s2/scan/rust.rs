@@ -1185,14 +1185,19 @@ pub(crate) struct BoltffiProducer {
     /// The expected generated binding file under `bindings_dir`:
     /// `{PascalCase(crate)}BoltFFI.swift`.
     pub(crate) bindings_file: String,
-    /// The Apple deployment target that shapes generated manifests.
-    pub(crate) deployment_target: String,
+    /// The manifest's declared/default deployment target. The effective
+    /// target used by the pack recipe is `recipe.deployment` and may be
+    /// overridden by `[native.apple] deployment_floor`.
+    pub(crate) manifest_deployment_target: String,
     /// The generated `Package.swift` the drift check snapshots, if the
     /// manifest does not skip it. Render-local: the recipe consumes it at
     /// join time, so it stays off the product until transport needs it.
     pub(crate) package_swift: Option<String>,
     /// The typed pack recipe: profile, lock enforcement, verbosity.
     pub(crate) recipe: BoltffiRecipe,
+    /// The locked `BoltFFI` CLI version, when the root `mise.lock` exposes
+    /// it. Absence stays unknown and cannot make exact reuse eligible.
+    pub(crate) tool_version: Option<String>,
     /// The Rust unit owning the producing crate, resolved at detect time.
     pub(crate) unit: Option<String>,
     /// The expected structural output files: the framework manifest plus,
@@ -1207,6 +1212,15 @@ pub(crate) struct BoltffiProducer {
     /// when `inputs_unknown` is nonempty: exact reuse without a complete
     /// contract would be a false identity.
     pub(crate) inputs_digest: Option<String>,
+}
+
+impl BoltffiProducer {
+    /// Return the deployment target that shapes the built product. Product
+    /// metadata and identity use this resolved recipe value, never the
+    /// manifest fallback retained as scan evidence.
+    pub(crate) fn effective_deployment_target(&self) -> &str {
+        self.recipe.deployment.as_str()
+    }
 }
 
 /// The `boltffi.toml` fields the producer join reads. SPM layout and debug
@@ -1362,11 +1376,52 @@ const BOLTFFI_DEFAULT_MULTI_ARCHITECTURES: [&str; 2] = ["arm64", "x86_64"];
 /// (`default_apple_output`, `default_apple_deployment_target`).
 const BOLTFFI_DEFAULT_APPLE_OUTPUT: &str = "dist/apple";
 const BOLTFFI_DEFAULT_DEPLOYMENT_TARGET: &str = "16.0";
+const BOLTFFI_TOOL_KEY: &str = "cargo:boltffi_cli";
+
+/// Read the locked version of the CLI that materializes a `BoltFFI` product.
+/// The lock is an input fact, never an execution probe: malformed TOML is a
+/// scan error, while a missing tool row/version stays unknown.
+fn parse_boltffi_tool_version(lock_toml: &str) -> Result<Option<String>, GeneratorError> {
+    let table: toml::Table = lock_toml.parse().map_err(|error| {
+        GeneratorError::usage(format!(
+            "parse lock TOML for BoltFFI adapter identity: {error}"
+        ))
+    })?;
+    let Some(tools) = table.get("tools").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
+    let Some(entry) = tools.get(BOLTFFI_TOOL_KEY) else {
+        return Ok(None);
+    };
+    let row = entry
+        .as_array()
+        .and_then(|rows| rows.first())
+        .unwrap_or(entry);
+    Ok(row
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned))
+}
+
+fn boltffi_tool_version(context: &ScanContext<'_>) -> Result<Option<String>, GeneratorError> {
+    if !context.file_set.contains("mise.lock") {
+        return Ok(None);
+    }
+    let path = context.root.join("mise.lock");
+    let lock_toml = fs::read_to_string(&path)
+        .map_err(|error| GeneratorError::io("read mise.lock", &path, &error))?;
+    parse_boltffi_tool_version(&lock_toml)
+}
 
 /// Whether `arch` is an architecture `BoltFFI` can place in an Apple slice
 /// (`boltffi_cli/src/target.rs` `Architecture`, Apple members only).
 fn valid_boltffi_apple_arch(arch: &str) -> bool {
     matches!(arch, "arm64" | "x86_64" | "armv7" | "x86")
+}
+
+fn valid_boltffi_macos_arch(arch: &str) -> bool {
+    matches!(arch, "arm64" | "x86_64")
 }
 
 /// Resolve the expected `XCFramework` slice directories in `BoltFFI` target
@@ -1399,11 +1454,31 @@ fn boltffi_slice_dirs(manifest: &BoltffiManifest) -> Result<Vec<String>, String>
         manifest.macos_architectures.as_ref(),
         &BOLTFFI_DEFAULT_MULTI_ARCHITECTURES,
     );
-    for arch in ios.iter().chain(simulator.iter()).chain(macos.iter()) {
+    for arch in ios.iter().chain(simulator.iter()) {
         if !valid_boltffi_apple_arch(arch) {
             return Err(format!(
                 "architecture `{arch}` is not a supported Apple slice architecture"
             ));
+        }
+    }
+    for arch in &macos {
+        if !valid_boltffi_macos_arch(arch) {
+            return Err(format!(
+                "architecture `{arch}` is not a supported macOS slice architecture"
+            ));
+        }
+    }
+    for (label, architectures) in [
+        ("iOS", &ios),
+        ("iOS simulator", &simulator),
+        ("macOS", &macos),
+    ] {
+        let mut seen = BTreeSet::new();
+        if architectures
+            .iter()
+            .any(|architecture| !seen.insert(architecture))
+        {
+            return Err(format!("{label} architecture list contains duplicates"));
         }
     }
     let mut slices = Vec::new();
@@ -1770,8 +1845,8 @@ pub(crate) fn valid_cargo_profile(profile: &str) -> bool {
 pub(crate) const MACOSX_DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
 
 /// An Apple deployment floor: `major.minor[.patch]`, all numeric. The
-/// recipe exports exactly this value; the manifest scan fact stays the
-/// raw `targets.apple.deployment_target` string on the producer.
+/// recipe exports exactly this value; the manifest scan fact stays separate
+/// from the effective target on the producer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeploymentFloor(pub(crate) String);
 
@@ -2081,6 +2156,7 @@ fn boltffi_producer_from_manifest(
     context: &ScanContext<'_>,
     manifest_path: &String,
     diagnostics: &mut Vec<String>,
+    tool_version: Option<&str>,
 ) -> Result<Option<BoltffiProducer>, GeneratorError> {
     let root = parent_path(manifest_path);
     let path = context.root.join(manifest_path);
@@ -2183,10 +2259,11 @@ fn boltffi_producer_from_manifest(
         output_files,
         bindings_dir: bindings.dir,
         bindings_file: bindings.file,
-        deployment_target: bindings.deployment_target,
+        manifest_deployment_target: bindings.deployment_target,
         framework,
         package_swift: bindings.package_swift,
         recipe,
+        tool_version: tool_version.map(str::to_owned),
         unit: None,
         inputs,
         inputs_unknown,
@@ -2199,12 +2276,20 @@ pub(crate) fn boltffi_producers(
 ) -> Result<(Vec<BoltffiProducer>, Vec<String>), GeneratorError> {
     let mut manifests = files_named(context.files, "boltffi.toml");
     manifests.sort();
+    let tool_version = if manifests.is_empty() {
+        None
+    } else {
+        boltffi_tool_version(context)?
+    };
     let mut producers = Vec::new();
     let mut diagnostics = Vec::new();
     for manifest_path in &manifests {
-        if let Some(producer) =
-            boltffi_producer_from_manifest(context, manifest_path, &mut diagnostics)?
-        {
+        if let Some(producer) = boltffi_producer_from_manifest(
+            context,
+            manifest_path,
+            &mut diagnostics,
+            tool_version.as_deref(),
+        )? {
             producers.push(producer);
         }
     }
@@ -2269,11 +2354,31 @@ pub(crate) fn detect(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{include_str_paths, package_runs_doctests, parse_cargo_manifest};
+    use super::{
+        include_str_paths, package_runs_doctests, parse_boltffi_tool_version, parse_cargo_manifest,
+    };
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+
+    #[test]
+    fn boltffi_tool_version_reads_the_locked_cli_version() {
+        let lock = "[[tools.\"cargo:boltffi_cli\"]]\nversion = \"0.30.1\"\nbackend = \"cargo:boltffi_cli\"\n";
+        assert_eq!(
+            parse_boltffi_tool_version(lock).ok(),
+            Some(Some("0.30.1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn boltffi_tool_version_stays_unknown_without_a_valid_pin() {
+        assert_eq!(
+            parse_boltffi_tool_version("[tools]\nother = \"1.0.0\"\n").ok(),
+            Some(None)
+        );
+        assert!(parse_boltffi_tool_version("[").is_err());
+    }
 
     #[test]
     fn lib_crate_types_mark_ffi_evidence() {
@@ -3237,6 +3342,17 @@ mod tests {
             boltffi_slice_dirs(&parsed),
             Ok(vec!["macos-arm64_x86_64".to_owned()])
         );
+        // Enabling macOS opts into BoltFFI's verified universal default; the
+        // default path above does not add a macOS slice when it is disabled.
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n\
+             [targets.apple]\ninclude_macos = true\n\
+             ios_architectures = []\nsimulator_architectures = []\n",
+        );
+        assert_eq!(
+            boltffi_slice_dirs(&parsed),
+            Ok(vec!["macos-arm64_x86_64".to_owned()])
+        );
     }
 
     #[test]
@@ -3247,6 +3363,23 @@ mod tests {
         );
         let error = must_err(boltffi_slice_dirs(&parsed), "unknown arch must fail");
         assert!(error.contains("riscv64"), "unexpected error: {error}");
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple]\ninclude_macos = true\n\
+             ios_architectures = []\nsimulator_architectures = []\n\
+             macos_architectures = [\"armv7\"]\n",
+        );
+        let error = must_err(
+            boltffi_slice_dirs(&parsed),
+            "unsupported macOS arch must fail",
+        );
+        assert!(error.contains("armv7"), "unexpected error: {error}");
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple]\ninclude_macos = true\n\
+             ios_architectures = []\nsimulator_architectures = []\n\
+             macos_architectures = [\"arm64\", \"arm64\"]\n",
+        );
+        let error = must_err(boltffi_slice_dirs(&parsed), "duplicate arch must fail");
+        assert!(error.contains("duplicates"), "unexpected error: {error}");
         // Everything disabled: BoltFFI itself rejects the empty slice set.
         let parsed = parse_boltffi_manifest(
             "[package]\nname = \"x\"\n\n\
@@ -3442,7 +3575,7 @@ mod tests {
             producer.bindings_file,
             "app/Sources/BridgeBindings/BoltFFI/BridgeCoreFfiBoltFFI.swift"
         );
-        assert_eq!(producer.deployment_target, "15.0");
+        assert_eq!(producer.manifest_deployment_target, "15.0");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3515,7 +3648,7 @@ mod tests {
             producer.bindings_file,
             "crates/plain/dist/apple/Sources/BoltFFI/PlainCoreBoltFFI.swift"
         );
-        assert_eq!(producer.deployment_target, "16.0");
+        assert_eq!(producer.manifest_deployment_target, "16.0");
         assert!(
             producer
                 .inputs
@@ -4112,7 +4245,7 @@ mod tests {
             assert_eq!(producers.len(), 1);
             (
                 producers[0].recipe.deployment.as_str().to_owned(),
-                producers[0].deployment_target.clone(),
+                producers[0].manifest_deployment_target.clone(),
             )
         };
         let default = AppleNativePolicy::default();

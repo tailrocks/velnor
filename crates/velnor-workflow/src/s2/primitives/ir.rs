@@ -8633,17 +8633,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &format!("{record}:true"),
             );
             let marker = crate::s2::platform::transport_marker(producer, &product.name);
-            let identity = self
-                .units
-                .iter()
-                .find(|unit| unit.id == *producer)
-                .and_then(|unit| crate::s2::platform::ProductIdentity::for_product(unit, product));
             let block = super::product_transport::render_consumer_block_with_identity(
                 self.pins.download_artifact,
                 producer,
                 product,
                 &marker,
-                identity.as_ref(),
+                product.identity.as_ref(),
             );
             output.push_str(&prefix_step_block_with_if(&block, Some(&gate)));
         }
@@ -8699,17 +8694,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     .collect::<Vec<_>>()
                     .join(" || ")
             });
-            let Some(producer_unit) = self.units.iter().find(|unit| unit.id == producer) else {
-                continue;
-            };
-            let identity =
-                crate::s2::platform::ProductIdentity::for_product(producer_unit, product);
             let marker = crate::s2::platform::transport_marker(&producer, &product.name);
             let Some(block) = super::product_transport::render_native_product_cache_restore_block(
                 self.pins.cache_restore,
                 &producer,
                 product,
-                identity.as_ref(),
+                product.identity.as_ref(),
                 &marker,
             ) else {
                 continue;
@@ -8757,16 +8747,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 .all(|records| records.contains(record));
             let gate = (!shared)
                 .then(|| provider_input::contains_gate(provider_input::PRODUCT_PROVIDES, record));
-            let identity = self
-                .units
-                .iter()
-                .find(|unit| unit.id == *producer)
-                .and_then(|unit| crate::s2::platform::ProductIdentity::for_product(unit, product));
             let block = super::product_transport::render_producer_block_with_identity(
                 self.pins.upload_artifact,
                 producer,
                 product,
-                identity.as_ref(),
+                product.identity.as_ref(),
             );
             output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
         }
@@ -8811,17 +8796,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     .collect::<Vec<_>>()
                     .join(" || ")
             });
-            let Some(producer_unit) = self.units.iter().find(|unit| unit.id == producer) else {
-                continue;
-            };
-            let identity =
-                crate::s2::platform::ProductIdentity::for_product(producer_unit, product);
             let Some(block) = super::product_transport::render_native_product_cache_save_block(
                 self.pins.cache_restore,
                 self.pins.cache_save,
                 &producer,
                 product,
-                identity.as_ref(),
+                product.identity.as_ref(),
                 &trusted_gate,
             ) else {
                 continue;

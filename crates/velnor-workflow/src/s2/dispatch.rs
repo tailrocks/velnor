@@ -25,6 +25,7 @@ const RUNTIME_COMMANDS: &[&str] = &[
     "release",
     "version",
     "closure",
+    "apple-test-summary",
     "prepared-tool-install",
     "stage-product",
     "verify-product",
@@ -278,5 +279,25 @@ mod tests {
                 "{command} routes as a binary-only runtime command"
             );
         }
+    }
+
+    #[test]
+    fn apple_test_summary_routes_to_the_runtime_parser() {
+        let arguments = args(&["apple-test-summary"]);
+        assert!(
+            RUNTIME_COMMANDS.contains(&"apple-test-summary"),
+            "apple-test-summary must enter the schema-2 runtime branch"
+        );
+
+        // The strict handler rejects a missing input before reading any
+        // summary. Seeing this error proves the runtime owns the command.
+        let error = match crate::s2::runtime::try_run(&arguments) {
+            Err(error) => error.to_string(),
+            Ok(handled) => format!("expected runtime error, got Ok({handled})"),
+        };
+        assert!(
+            error.contains("apple-test-summary requires --input PATH"),
+            "apple-test-summary must reach the runtime handler: {error}"
+        );
     }
 }
