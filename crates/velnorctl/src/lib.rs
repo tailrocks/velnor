@@ -593,8 +593,8 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             #[cfg(target_os = "macos")]
             {
                 let selected = packaged::select(&globals)?;
-                let _installed = packaged::enter_installed_operation(&selected, true)?;
-                local_diagnostics::preflight(&globals, &args)
+                let installed = packaged::installed_operation(&selected, true)?;
+                local_diagnostics::preflight(&globals, &args, installed.as_ref())
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -605,8 +605,8 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             #[cfg(target_os = "macos")]
             {
                 let selected = packaged::select(&globals)?;
-                let _installed = packaged::enter_installed_operation(&selected, true)?;
-                local_diagnostics::docker_report(&globals, &args)
+                let installed = packaged::installed_operation(&selected, true)?;
+                local_diagnostics::docker_report(&globals, &args, installed.as_ref())
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -628,7 +628,24 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             // unit environment on a packaged host.
             let selected = packaged::select(&globals)?;
             #[cfg(target_os = "macos")]
-            let _installed = packaged::enter_installed_operation(&selected, true)?;
+            let installed = packaged::installed_operation(&selected, true)?;
+            #[cfg(target_os = "macos")]
+            if let Some(operation) = &installed {
+                operation
+                    .validate_path_override(
+                        "config-dir",
+                        args.config_dir.as_deref(),
+                        &operation.instance.config_dir,
+                    )
+                    .map_err(packaged::darwin_error)?;
+                operation
+                    .validate_path_override(
+                        "state-dir",
+                        args.state_dir.as_deref(),
+                        &operation.instance.daemon_dir,
+                    )
+                    .map_err(packaged::darwin_error)?;
+            }
             if args.json || globals.output_format().is_machine() {
                 return status_health_json(&args, &selected);
             }
@@ -637,7 +654,7 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
                 let runtime_args =
                     velnor_runner::args::Command::Status((*args).clone().into_runtime(&selected)?);
                 let runner_result = run_status(runtime_args).await;
-                local_diagnostics::status(&globals, &args, runner_result)
+                local_diagnostics::status(&globals, &args, runner_result, installed.as_ref())
             }
             #[cfg(not(target_os = "macos"))]
             run_status(velnor_runner::args::Command::Status(
@@ -664,8 +681,8 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             #[cfg(target_os = "macos")]
             if matches!(&args.command, runtime::StorageCommand::Paths) {
                 let selected = packaged::select(&globals)?;
-                let _installed = packaged::enter_installed_operation(&selected, false)?;
-                return local_diagnostics::paths(&globals, &args);
+                let installed = packaged::installed_operation(&selected, false)?;
+                return local_diagnostics::paths(&globals, &args, installed.as_ref());
             }
             if matches!(
                 &args.command,

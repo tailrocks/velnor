@@ -85,7 +85,8 @@ case "$command_name" in
     ;;
   info)
     [ "$host" = "${FAKE_EXPECT_HOST:-}" ] || exit 65
-    printf '{"OperatingSystem":"%s","OSType":"linux","Architecture":"aarch64","Name":"%s","ClientInfo":{"Os":"darwin"}}\n' \
+    printf '{"ID":"%s","OperatingSystem":"%s","OSType":"linux","Architecture":"aarch64","Name":"%s","ClientInfo":{"Os":"darwin"}}\n' \
+      "${FAKE_DOCKER_DAEMON_ID-fixture-engine}" \
       "${FAKE_DOCKER_SERVER_OS-Docker Desktop}" \
       "${FAKE_DOCKER_SERVER_NAME-docker-desktop}"
     ;;
@@ -101,7 +102,7 @@ cat > "$tmp/bin/velnor-runner" <<'FAKE_RUNNER'
 set -eu
 {
   printf 'args=%s\n' "$*"
-  env | sort | grep -E '^(DOCKER_CONTEXT|DOCKER_HOST|VELNOR_DOCKER_CONTEXT|VELNOR_DOCKER_HOST|VELNOR_GITHUB_HTTP_TRANSPORT|PATH)=' || true
+  env | sort | grep -E '^(DOCKER_CONTEXT|DOCKER_HOST|VELNOR_DOCKER_CONTEXT|VELNOR_DOCKER_HOST|VELNOR_DOCKER_DAEMON_ID|VELNOR_GITHUB_HTTP_TRANSPORT|PATH)=' || true
 } > "$FAKE_RUNNER_ENV"
 FAKE_RUNNER
 chmod 755 "$tmp/bin/velnor-runner"
@@ -148,6 +149,7 @@ run_launcher() {
     FAKE_EXPECT_HOST="unix://$socket_path" \
     FAKE_DOCKER_SERVER_OS="Docker Desktop" \
     FAKE_DOCKER_SERVER_NAME=docker-desktop \
+    FAKE_DOCKER_DAEMON_ID=fixture-engine \
     FAKE_DOCKER_LOG="$docker_log" \
     FAKE_DOCKER_CONTEXT_USE_MARKER="$tmp/$case_name.context-use" \
     FAKE_RUNNER_ENV="$runner_env" \
@@ -186,6 +188,7 @@ grep -F 'info --format' "$tmp/success.docker-log" >/dev/null
 grep -F "DOCKER_HOST=unix://$socket_path" "$tmp/success.runner-env" >/dev/null
 grep -F "VELNOR_DOCKER_HOST=unix://$socket_path" "$tmp/success.runner-env" >/dev/null
 grep -F 'VELNOR_DOCKER_CONTEXT=desktop-linux' "$tmp/success.runner-env" >/dev/null
+grep -F 'VELNOR_DOCKER_DAEMON_ID=fixture-engine' "$tmp/success.runner-env" >/dev/null
 grep -F "PATH=$tmp/bin:/usr/bin:/bin:$provider_root/bin" "$tmp/success.runner-env" >/dev/null
 grep -F 'VELNOR_GITHUB_HTTP_TRANSPORT=curl' "$tmp/success.runner-env" >/dev/null
 ! grep -F 'DOCKER_CONTEXT=' "$tmp/success.runner-env"

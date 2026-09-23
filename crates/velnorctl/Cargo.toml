@@ -28,6 +28,7 @@ velnor-model = { path = "../velnor-model", version = "0.1.0" }
 velnor-control = { path = "../velnor-control", version = "0.1.0" }
 velnor-client = { path = "../velnor-client", version = "0.1.0" }
 velnor-render = { path = "../velnor-render", version = "0.1.0" }
+sha2.workspace = true
 # Interim execution facade (Plan 064 dependency law): the operator CLI owns
 # every command surface while the legacy runtime library executes the
 # handlers. Removed together with the velnor-runner crate cutover in Plan 079.
@@ -42,7 +43,6 @@ default = []
 release-build = ["velnor-runner/release-build"]
 
 [dev-dependencies]
-sha2 = { workspace = true }
 
 [lints.clippy]
 unwrap_used = "deny"

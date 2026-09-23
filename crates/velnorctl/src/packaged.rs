@@ -98,6 +98,7 @@ pub fn instances() -> Result<Vec<DaemonInstance>, CommandError> {
             .unwrap_or_default());
     }
 
+    #[cfg(not(target_os = "macos"))]
     daemon_instance::enumerate().map_err(|error| {
         CommandError::operation(format!(
             "enumerate packaged daemon instances under {}: {error:#}",
@@ -106,17 +107,19 @@ pub fn instances() -> Result<Vec<DaemonInstance>, CommandError> {
     })
 }
 
-/// Enter the package-owned environment for a Darwin installed service.
-/// Linux/systemd and development selections remain no-ops here.
-pub fn enter_installed_operation(
+/// Resolve immutable package-owned inputs for a Darwin installed operation.
+/// Linux/systemd and development selections retain their existing behavior.
+pub fn installed_operation(
     selected: &Selected,
     require_docker: bool,
-) -> Result<crate::darwin::EnvironmentGuard, CommandError> {
+) -> Result<Option<crate::darwin::InstalledOperation>, CommandError> {
     match selected.packaged() {
         Some(instance) if instance.unit == crate::darwin::SERVICE_LABEL => {
-            crate::darwin::enter(instance, require_docker).map_err(darwin_error)
+            crate::darwin::operation(instance, require_docker)
+                .map(Some)
+                .map_err(darwin_error)
         }
-        _ => Ok(crate::darwin::EnvironmentGuard::noop()),
+        _ => Ok(None),
     }
 }
 
@@ -128,7 +131,7 @@ pub fn is_darwin_installed(selected: &Selected) -> bool {
         .is_some_and(|instance| instance.unit == crate::darwin::SERVICE_LABEL)
 }
 
-fn darwin_error(error: crate::darwin::Error) -> CommandError {
+pub(crate) fn darwin_error(error: crate::darwin::Error) -> CommandError {
     let (class, reason) = match error.kind {
         crate::darwin::ErrorKind::Metadata => (ExitClass::Operation, "darwin.service_metadata"),
         crate::darwin::ErrorKind::DockerConfiguration => {

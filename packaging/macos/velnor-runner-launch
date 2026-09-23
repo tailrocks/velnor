@@ -106,6 +106,50 @@ validate_provider_evidence() {
     fail "Docker provider evidence is unknown or contradictory"
 }
 
+persist_docker_binding() {
+  binding_file=$1
+  [ ! -L "$binding_file" ] || fail "durable Docker binding must not be a symlink"
+  if [ -e "$binding_file" ]; then
+    [ -f "$binding_file" ] || fail "durable Docker binding is not a regular file"
+    "$json_parser" -e 'exit((File.stat(ARGV.fetch(0)).mode & 0777) == 0600 ? 0 : 1)' \
+      "$binding_file" || fail "durable Docker binding must be mode 0600"
+    binding_json=$(cat "$binding_file") || fail "cannot read durable Docker binding"
+    [ "$(json_string "$binding_json" schema || true)" = "velnor.docker-binding/v1" ] || \
+      fail "durable Docker binding has an unknown schema"
+    bound_context=$(json_string "$binding_json" context || true)
+    bound_host=$(json_string "$binding_json" host || true)
+    bound_daemon_id=$(json_string "$binding_json" daemon_id || true)
+    [ "$bound_context" = "$selected_context" ] || \
+      fail "Docker context changed; explicit rebind is required"
+    [ "$bound_host" = "$resolved_docker_host" ] || \
+      fail "Docker endpoint changed; explicit rebind is required"
+    [ "$bound_daemon_id" = "$daemon_id" ] || \
+      fail "Docker daemon identity changed; explicit rebind is required"
+    return
+  fi
+
+  binding_tmp="$binding_file.$$"
+  if ! "$json_parser" -rjson -e '
+    puts JSON.generate({
+      "schema" => "velnor.docker-binding/v1",
+      "host" => ARGV.fetch(0),
+      "context" => ARGV.fetch(1),
+      "daemon_id" => ARGV.fetch(2)
+    })
+  ' "$resolved_docker_host" "$selected_context" "$daemon_id" > "$binding_tmp"; then
+    rm -f "$binding_tmp"
+    fail "cannot serialize durable Docker binding"
+  fi
+  chmod 0600 "$binding_tmp" || {
+    rm -f "$binding_tmp"
+    fail "cannot protect durable Docker binding"
+  }
+  mv -f "$binding_tmp" "$binding_file" || {
+    rm -f "$binding_tmp"
+    fail "cannot install durable Docker binding"
+  }
+}
+
 provider_tool_dir=
 
 resolve_docker_endpoint() {
@@ -189,12 +233,18 @@ resolve_docker_endpoint() {
     info --format '{{json .}}' 2>/dev/null) || \
     fail "Docker info probe failed for resolved endpoint: $resolved_docker_host"
   validate_provider_evidence
+  daemon_id=$(json_string "$info_json" ID || true)
+  case "$daemon_id" in
+    ''|*[!A-Za-z0-9_.:-]*) fail "Docker daemon identity is missing or malformed" ;;
+  esac
+  persist_docker_binding "$package_docker_binding"
 
   VELNOR_DOCKER_CONTEXT=$selected_context
   VELNOR_DOCKER_HOST=$resolved_docker_host
   DOCKER_HOST=$resolved_docker_host
+  VELNOR_DOCKER_DAEMON_ID=$daemon_id
   unset DOCKER_CONTEXT
-  export VELNOR_DOCKER_CONTEXT VELNOR_DOCKER_HOST DOCKER_HOST
+  export VELNOR_DOCKER_CONTEXT VELNOR_DOCKER_HOST DOCKER_HOST VELNOR_DOCKER_DAEMON_ID
 }
 
 toml_field() {
@@ -433,6 +483,7 @@ package_log_dir=${VELNOR_LOG_DIR:?VELNOR_LOG_DIR is required}
 package_state_db=${VELNOR_STATE_DB:?VELNOR_STATE_DB is required}
 package_permit_ledger=${VELNOR_PERMIT_LEDGER:?VELNOR_PERMIT_LEDGER is required}
 package_mode_state=${VELNOR_MODE_STATE:?VELNOR_MODE_STATE is required}
+package_docker_binding=$package_storage_root/docker-binding.json
 package_path=${VELNOR_PATH:?VELNOR_PATH is required}
 package_worker_verifier=${VELNOR_WORKER_VERIFIER:?VELNOR_WORKER_VERIFIER is required}
 package_worker_verifier_contract=${VELNOR_WORKER_VERIFIER_CONTRACT:?VELNOR_WORKER_VERIFIER_CONTRACT is required}
@@ -458,6 +509,9 @@ configured_velnor_docker_host=${VELNOR_DOCKER_HOST:-}
 configured_docker_host=${DOCKER_HOST:-}
 configured_velnor_docker_context=${VELNOR_DOCKER_CONTEXT:-}
 configured_docker_context=${DOCKER_CONTEXT:-}
+
+umask 077
+mkdir -p "$package_config_dir" "$package_storage_root" "$package_log_dir" "$package_work_dir"
 
 # Reassert package-owned invariants after loading mutable operator settings.
 VELNOR_ENV_FILE=$package_env_file
@@ -550,8 +604,6 @@ case "$mode" in
   scale-set-only|both) validate_gh_for_scale ;;
 esac
 
-umask 077
-mkdir -p "$VELNOR_CONFIG_DIR" "$VELNOR_STORAGE_ROOT" "$VELNOR_LOG_DIR" "$VELNOR_WORK_DIR"
 write_mode_state
 
 set -- daemon \

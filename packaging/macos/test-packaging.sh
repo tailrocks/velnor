@@ -60,6 +60,8 @@ grep -F 'VELNOR_ENV_FILE' "$launcher" >/dev/null
 grep -F 'VELNOR_STATE_DB' "$launcher" >/dev/null
 grep -F 'VELNOR_PERMIT_LEDGER' "$launcher" >/dev/null
 grep -F 'VELNOR_PATH' "$launcher" >/dev/null
+grep -F 'docker-binding.json' "$launcher" >/dev/null
+grep -F 'explicit rebind is required' "$launcher" >/dev/null
 grep -F 'VELNOR_WORKER_VERIFIER' "$launcher" >/dev/null
 grep -F 'attestation verify --help' "$launcher" >/dev/null
 grep -F -- '--deny-self-hosted-runners' "$launcher" >/dev/null

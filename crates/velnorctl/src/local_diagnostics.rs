@@ -24,7 +24,7 @@ use velnor_runner::execution::{
     MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
 };
 
-use crate::{commands, runtime, CommandError, GlobalArgs};
+use crate::{commands, darwin::InstalledOperation, runtime, CommandError, GlobalArgs};
 
 const REPORT_SCHEMA_VERSION: u8 = 1;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -33,14 +33,29 @@ const MAX_COMMAND_DETAIL_BYTES: usize = 600;
 const DEFAULT_WORK_DIR_NAME: &str = ".velnor-work";
 
 /// Run macOS-local preflight without invoking Linux systemd/Firecracker code.
-pub fn preflight(globals: &GlobalArgs, args: &runtime::PreflightArgs) -> Result<(), CommandError> {
-    let config_dir = default_or_explicit_execution_dir(args.config_dir.as_deref())?;
+pub fn preflight(
+    globals: &GlobalArgs,
+    args: &runtime::PreflightArgs,
+    installed: Option<&InstalledOperation>,
+) -> Result<(), CommandError> {
+    let config_dir = match installed {
+        Some(operation) => operation.instance.config_dir.clone(),
+        None => default_or_explicit_execution_dir(args.config_dir.as_deref())?,
+    };
     let work_dir = args
         .work_dir
         .clone()
         .or_else(|| env::var_os("VELNOR_WORK_DIR").map(PathBuf::from))
         .unwrap_or_else(|| current_work_dir().join(DEFAULT_WORK_DIR_NAME));
-    let paths = resolve_paths(Some(&config_dir), Some(&work_dir))?;
+    let paths = resolve_paths(
+        args.config_dir.as_deref().or(Some(&config_dir)),
+        if installed.is_some() {
+            args.work_dir.as_deref()
+        } else {
+            Some(&work_dir)
+        },
+        installed,
+    )?;
     let (backend, config_file) = match load_execution(&config_dir, false) {
         Ok(value) => value,
         Err(error) => {
@@ -76,8 +91,12 @@ pub fn preflight(globals: &GlobalArgs, args: &runtime::PreflightArgs) -> Result<
 
     match backend {
         ExecutionBackendKind::Docker => {
-            let endpoint = resolve_docker_endpoint().ok();
-            let git = run_process("git", &["--version"], COMMAND_TIMEOUT);
+            let target = resolve_docker_target(installed);
+            let git = match installed.map(|operation| operation.command("git")) {
+                Some(Ok(command)) => run_process_command(command, &["--version"], COMMAND_TIMEOUT),
+                Some(Err(error)) => ProcessResult::failed(error.to_string()),
+                None => run_process("git", &["--version"], COMMAND_TIMEOUT),
+            };
             checks.push(check_command(
                 "host-git",
                 &git,
@@ -86,6 +105,7 @@ pub fn preflight(globals: &GlobalArgs, args: &runtime::PreflightArgs) -> Result<
             ));
 
             let docker = collect_docker_report(
+                &target,
                 Some(args.docker_image.as_str()),
                 true,
                 args.require_buildx,
@@ -95,14 +115,13 @@ pub fn preflight(globals: &GlobalArgs, args: &runtime::PreflightArgs) -> Result<
             );
             checks.extend(docker.checks.iter().cloned());
             checks.push(check_job_image_tools(
-                endpoint.as_ref(),
+                target.as_ref().ok(),
                 &args.docker_image,
                 docker.server_reachable,
             ));
             checks.push(check_container_docker_client(
-                endpoint.as_ref(),
+                target.as_ref().ok(),
                 &args.docker_image,
-                docker.socket_exists,
                 args.require_buildx,
             ));
 
@@ -159,13 +178,14 @@ pub fn status(
     _globals: &GlobalArgs,
     args: &runtime::StatusArgs,
     runner_result: Result<(), CommandError>,
+    installed: Option<&InstalledOperation>,
 ) -> Result<(), CommandError> {
     let runner_error = runner_result.err();
-    let (backend, config_file) = match load_execution_for_status(args.config_dir.as_deref()) {
+    let paths = resolve_paths(args.config_dir.as_deref(), None, installed)?;
+    let (backend, config_file) = match load_execution_for_status(Some(&paths.config)) {
         Ok(value) => value,
         Err(error) => return Err(runner_error.unwrap_or(error)),
     };
-    let paths = resolve_paths(args.config_dir.as_deref(), None)?;
     println!();
     println!("Backend: {backend}");
     println!("Execution config: {}", config_file.display());
@@ -173,7 +193,15 @@ pub fn status(
 
     let backend_result = match backend {
         ExecutionBackendKind::Docker => {
-            let report = collect_docker_report(None, false, true, true, &paths.work, None);
+            let report = collect_docker_report(
+                &resolve_docker_target(installed),
+                None,
+                false,
+                true,
+                true,
+                &paths.work,
+                None,
+            );
             print_docker_human(&report);
             if report.runner_ready {
                 Ok(())
@@ -204,8 +232,12 @@ pub fn status(
 }
 
 /// Report the canonical local paths needed to inspect a runner installation.
-pub fn paths(globals: &GlobalArgs, args: &runtime::StorageArgs) -> Result<(), CommandError> {
-    let report = resolve_paths(args.config_dir.as_deref(), None)?;
+pub fn paths(
+    globals: &GlobalArgs,
+    args: &runtime::StorageArgs,
+    installed: Option<&InstalledOperation>,
+) -> Result<(), CommandError> {
+    let report = resolve_paths(args.config_dir.as_deref(), None, installed)?;
     if globals.output_format().is_machine() {
         emit_json(&report)
     } else {
@@ -218,14 +250,24 @@ pub fn paths(globals: &GlobalArgs, args: &runtime::StorageArgs) -> Result<(), Co
 pub fn docker_report(
     globals: &GlobalArgs,
     args: &commands::DockerArgs,
+    installed: Option<&InstalledOperation>,
 ) -> Result<(), CommandError> {
     let work_dir = args
         .work_dir
         .clone()
         .or_else(|| env::var_os("VELNOR_WORK_DIR").map(PathBuf::from))
         .unwrap_or_else(|| current_work_dir().join(DEFAULT_WORK_DIR_NAME));
-    let paths = resolve_paths(None, Some(&work_dir))?;
+    let paths = resolve_paths(
+        None,
+        if installed.is_some() {
+            args.work_dir.as_deref()
+        } else {
+            Some(&work_dir)
+        },
+        installed,
+    )?;
     let report = collect_docker_report(
+        &resolve_docker_target(installed),
         args.check_bind_mount.then_some(args.image.as_str()),
         args.check_bind_mount,
         true,
@@ -393,6 +435,56 @@ struct ProcessResult {
     error: Option<String>,
 }
 
+/// A single resolved endpoint and command environment for the entire report.
+/// Installed probes carry their service binding through every nested check.
+#[derive(Debug)]
+struct DockerTarget {
+    endpoint: DockerEndpoint,
+    installed: Option<InstalledOperation>,
+}
+
+impl DockerTarget {
+    fn command(&self) -> Result<Command, String> {
+        match &self.installed {
+            Some(operation) => operation
+                .command("docker")
+                .map_err(|error| error.to_string()),
+            None => find_executable("docker")
+                .map(Command::new)
+                .ok_or_else(|| "Docker CLI is unavailable on PATH".to_owned()),
+        }
+    }
+}
+
+fn resolve_docker_target(
+    installed: Option<&InstalledOperation>,
+) -> Result<DockerTarget, CommandError> {
+    let endpoint = match installed {
+        Some(operation) => operation
+            .docker
+            .as_ref()
+            .map(|binding| binding.endpoint.clone())
+            .ok_or_else(|| {
+                CommandError::new(
+                    ExitClass::Condition,
+                    "darwin.docker_config_missing",
+                    "installed service has no pinned Docker binding",
+                )
+            })?,
+        None => resolve_docker_endpoint().map_err(|error| {
+            CommandError::new(
+                ExitClass::Condition,
+                "docker.endpoint_unresolved",
+                error.to_string(),
+            )
+        })?,
+    };
+    Ok(DockerTarget {
+        endpoint,
+        installed: installed.cloned(),
+    })
+}
+
 impl ProcessResult {
     fn failed(error: impl Into<String>) -> Self {
         Self {
@@ -410,6 +502,7 @@ impl ProcessResult {
 }
 
 fn collect_docker_report(
+    resolved: &Result<DockerTarget, CommandError>,
     image: Option<&str>,
     check_bind_mount: bool,
     require_buildx: bool,
@@ -417,7 +510,11 @@ fn collect_docker_report(
     work_dir: &Path,
     docker_host_work_dir: Option<&Path>,
 ) -> DockerReport {
-    let docker_cli = find_executable("docker");
+    let docker_cli = resolved
+        .as_ref()
+        .ok()
+        .and_then(|target| target.command().ok())
+        .map(|command| PathBuf::from(command.get_program()));
     let mut checks = Vec::new();
     if let Some(path) = &docker_cli {
         checks.push(Check::pass(
@@ -437,9 +534,9 @@ fn collect_docker_report(
     // context in `~/.docker/config.json`, portable defaults) that the daemon
     // and its Engine client use. The report can therefore never describe a
     // daemon the runner would not connect to.
-    let resolved = resolve_docker_endpoint();
-    let (endpoint_source, context, endpoint, socket_path) = match &resolved {
-        Ok(endpoint) => {
+    let (endpoint_source, context, endpoint, socket_path) = match resolved {
+        Ok(target) => {
+            let endpoint = &target.endpoint;
             checks.push(Check::pass(
                 "docker-endpoint",
                 format!(
@@ -722,7 +819,7 @@ fn collect_docker_report(
 }
 
 fn check_job_image_tools(
-    target: Option<&DockerEndpoint>,
+    target: Option<&DockerTarget>,
     image: &str,
     server_reachable: bool,
 ) -> Check {
@@ -765,65 +862,64 @@ fn check_job_image_tools(
 }
 
 fn check_container_docker_client(
-    target: Option<&DockerEndpoint>,
+    target: Option<&DockerTarget>,
     image: &str,
-    socket_exists: bool,
     require_buildx: bool,
 ) -> Check {
-    let Some(endpoint) = target else {
+    if target.is_none() {
         return Check::skipped(
             "job-docker-client",
-            "not run because no local Docker socket was resolved",
-        );
-    };
-    let socket_path = &endpoint.socket;
-    if !socket_exists {
-        return Check::skipped(
-            "job-docker-client",
-            "not run because the resolved Docker socket is unavailable",
+            "not run because no local Docker endpoint was resolved",
         );
     }
-    let command = if require_buildx {
-        "docker version && docker buildx version"
-    } else {
-        "docker version"
-    };
-    let mount = format!(
-        "type=bind,src={},dst=/var/run/docker.sock,readonly",
-        socket_path.display()
-    );
+    let args = docker_client_probe_args(image, require_buildx);
     let result = run_docker_process(
         target,
-        &[
-            "run",
-            "--pull=never",
-            "--rm",
-            "--name",
-            &probe_name("docker-client"),
-            "--mount",
-            &mount,
-            image,
-            "sh",
-            "-c",
-            command,
-        ],
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
         CONTAINER_TIMEOUT,
     );
     if result.succeeded() {
         Check::pass(
             "job-docker-client",
-            format!("image {image} can reach the mounted Docker socket"),
+            format!("image {image} has Docker client tooling; job-owned daemon access requires separate conformance evidence"),
         )
     } else {
         Check::fail(
             "job-docker-client",
-            format!("image {image}: {}", process_detail(&result, "job Docker client")),
-            Some(format!(
-                "Use a Linux Velnor job image with Docker CLI{} and ensure the daemon socket is mountable; OrbStack's host socket proves the CLI endpoint, not Linux runner cgroup compatibility.",
-                if require_buildx { " and Buildx" } else { "" }
-            )),
+            format!(
+                "image {image}: {}",
+                process_detail(&result, "job Docker client")
+            ),
+            Some(
+                "Use a Linux job image with Docker CLI and the required Buildx plugin.".to_owned(),
+            ),
         )
     }
+}
+
+fn docker_client_probe_args(image: &str, require_buildx: bool) -> Vec<String> {
+    // Tool availability does not require daemon access. A read-only bind of
+    // a Unix socket still grants the unrestricted Docker API, and Darwin's
+    // host socket cannot be assumed mountable through the provider VM.
+    let command = if require_buildx {
+        "docker --version && docker buildx version"
+    } else {
+        "docker --version"
+    };
+    [
+        "run",
+        "--pull=never",
+        "--rm",
+        "--name",
+        &probe_name("docker-client"),
+        image,
+        "sh",
+        "-c",
+        command,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 /// Bind-mount spec and in-container check for the bind-mount probe, built
@@ -844,7 +940,7 @@ fn bind_mount_probe_spec(source: &Path, marker_name: &str) -> (String, String) {
 }
 
 fn check_bind_mount_probe(
-    target: Option<&DockerEndpoint>,
+    target: Option<&DockerTarget>,
     image: &str,
     work_dir: &Path,
     docker_host_work_dir: Option<&Path>,
@@ -996,7 +1092,30 @@ fn load_execution_for_status(
 fn resolve_paths(
     explicit_config: Option<&Path>,
     explicit_work: Option<&Path>,
+    installed: Option<&InstalledOperation>,
 ) -> Result<PathsReport, CommandError> {
+    if let Some(operation) = installed {
+        let instance = &operation.instance;
+        for (key, explicit, expected) in [
+            ("config-dir", explicit_config, &instance.config_dir),
+            ("work-dir", explicit_work, &instance.work_dir),
+        ] {
+            operation
+                .validate_path_override(key, explicit, expected)
+                .map_err(crate::packaged::darwin_error)?;
+        }
+        return Ok(PathsReport {
+            mode: "installed-service".to_owned(),
+            cache: instance.cache_root.clone(),
+            lib: instance.lib_root.clone(),
+            run: instance.run_root.clone(),
+            log: instance.log_root.clone(),
+            config: instance.config_dir.clone(),
+            work: instance.work_dir.clone(),
+            runner_log: instance.config_dir.join("logs"),
+            artifacts: daemon_shared_root(instance.work_dir.clone()).join("_velnor_artifacts"),
+        });
+    }
     let storage_root = env::var_os("VELNOR_STORAGE_ROOT")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -1128,13 +1247,23 @@ fn docker_visible_path(
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let path = env::var_os("PATH")?;
     env::split_paths(&path)
         .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| {
+            fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
 }
 
 fn run_process(program: &str, args: &[&str], timeout: Duration) -> ProcessResult {
+    run_process_command(Command::new(program), args, timeout)
+}
+
+fn run_process_command(mut command: Command, args: &[&str], timeout: Duration) -> ProcessResult {
+    let program = command.get_program().to_string_lossy().into_owned();
     let stdout_path = probe_output_path("stdout");
     let stderr_path = probe_output_path("stderr");
     let stdout_file = match OpenOptions::new()
@@ -1156,7 +1285,7 @@ fn run_process(program: &str, args: &[&str], timeout: Duration) -> ProcessResult
             return ProcessResult::failed(format!("create command error file: {error}"));
         }
     };
-    let mut child = match Command::new(program)
+    let mut child = match command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
@@ -1207,17 +1336,72 @@ fn run_process(program: &str, args: &[&str], timeout: Duration) -> ProcessResult
 }
 
 fn run_docker_process(
-    target: Option<&DockerEndpoint>,
+    target: Option<&DockerTarget>,
     args: &[&str],
     timeout: Duration,
 ) -> ProcessResult {
-    let Some(endpoint) = target else {
+    let Some(target) = target else {
         return ProcessResult::failed("Docker endpoint is unresolved; no daemon to probe");
     };
-    let mut command_args = docker_cli_endpoint_args(endpoint);
+    if let Some(operation) = &target.installed {
+        let Some(binding) = &operation.docker else {
+            return ProcessResult::failed("installed Docker binding is missing");
+        };
+        // Verify before *each* probe, including cleanup. No retry against a
+        // fallback daemon after context changes, outages or provider restart.
+        if let Some(context) = &binding.endpoint.context {
+            let result = run_bound_docker(
+                target,
+                &["context", "inspect", "--format", "{{json .}}", context],
+                COMMAND_TIMEOUT,
+            );
+            let Some(metadata) = parse_json_output(&result) else {
+                return ProcessResult::failed(
+                    "installed Docker context is unavailable; refusing probe",
+                );
+            };
+            if let Err(error) = binding.verify_context(&metadata) {
+                return ProcessResult::failed(error.to_string());
+            }
+        }
+        let result = run_bound_docker(target, &["info", "--format", "{{json .}}"], COMMAND_TIMEOUT);
+        let Some(info) = parse_json_output(&result) else {
+            return ProcessResult::failed(
+                "installed Docker daemon identity is unavailable; refusing probe",
+            );
+        };
+        if let Err(error) = binding.verify_daemon(&info) {
+            return ProcessResult::failed(error.to_string());
+        }
+        if args == ["info", "--format", "{{json .}}"] {
+            // Report the same identity-bearing response that was verified,
+            // not a second request to a possibly replaced socket.
+            return result;
+        }
+    }
+    run_bound_docker(target, args, timeout)
+}
+
+fn run_bound_docker(target: &DockerTarget, args: &[&str], timeout: Duration) -> ProcessResult {
+    let mut command = match target.command() {
+        Ok(command) => command,
+        Err(error) => return ProcessResult::failed(error),
+    };
+    // --host and these removals prevent Docker's own context/TLS environment
+    // from redirecting an already resolved local Unix endpoint.
+    for key in [
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+    ] {
+        command.env_remove(key);
+    }
+    let mut command_args = docker_cli_endpoint_args(&target.endpoint);
     command_args.extend(args.iter().map(|arg| (*arg).to_owned()));
     let command_args = command_args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_process("docker", &command_args, timeout)
+    run_process_command(command, &command_args, timeout)
 }
 
 fn probe_output_path(kind: &str) -> PathBuf {
@@ -1265,7 +1449,7 @@ fn json_u64(value: &Value, path: &[&str]) -> Option<u64> {
 }
 
 fn docker_resource_boundary_check(
-    target: Option<&DockerEndpoint>,
+    target: Option<&DockerTarget>,
     cgroup_mode: &str,
     driver: Option<&str>,
     version: Option<&str>,
@@ -1303,7 +1487,7 @@ fn docker_resource_boundary_check(
 }
 
 fn check_docker_vm_resource_controls(
-    target: Option<&DockerEndpoint>,
+    target: Option<&DockerTarget>,
     image: &str,
     provider: &str,
 ) -> Check {
@@ -1994,5 +2178,120 @@ mod tests {
         );
         assert!(resources.ready);
         assert!(!docker_resources(Some(&info), false).ready);
+    }
+
+    #[test]
+    fn docker_client_tool_probe_never_mounts_management_socket() {
+        for buildx in [true, false] {
+            let args = docker_client_probe_args("fixture-image", buildx);
+            assert!(!args
+                .iter()
+                .any(|arg| arg.contains("docker.sock") || arg == "--mount" || arg == "-v"));
+            let script = args.last().unwrap();
+            assert!(script.starts_with("docker --version"));
+            assert_eq!(script.contains("buildx version"), buildx);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn installed_fixture(label: &str) -> (PathBuf, InstalledOperation) {
+        let root = crate::darwin::tests::temp_root(label);
+        let paths = crate::darwin::tests::fixture(&root, true);
+        let instance = crate::darwin::resolve_from_formula_prefix(&paths.formula_prefix)
+            .unwrap()
+            .into_daemon_instance();
+        (root, crate::darwin::operation(&instance, true).unwrap())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_paths_are_explicit_and_reject_conflicting_flags() {
+        let (root, installed) = installed_fixture("diagnostic-paths");
+        let paths = resolve_paths(None, None, Some(&installed)).unwrap();
+        let instance = &installed.instance;
+        assert_eq!(paths.config, instance.config_dir);
+        assert_eq!(paths.work, instance.work_dir);
+        assert_eq!(paths.log, instance.log_root);
+        assert_eq!(paths.run, instance.run_root);
+        assert_eq!(paths.cache, instance.cache_root);
+        assert_eq!(paths.lib, instance.lib_root);
+        for (config, work) in [
+            (Some(Path::new("/tmp/other")), None),
+            (None, Some(Path::new("/tmp/other"))),
+        ] {
+            let error = resolve_paths(config, work, Some(&installed)).unwrap_err();
+            assert_eq!(error.reason, "darwin.path_drift");
+        }
+        assert!(resolve_paths(
+            Some(&instance.config_dir),
+            Some(&instance.work_dir),
+            Some(&installed)
+        )
+        .is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_docker_probes_refuse_context_drift_identity_drift_and_outage() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, installed) = installed_fixture("diagnostic-daemon-binding");
+        let bin = root.join("bin with spaces");
+        fs::create_dir_all(&bin).unwrap();
+        let docker = bin.join("docker");
+        fs::write(
+            &docker,
+            r#"#!/bin/sh
+set -eu
+fixture_dir=${0%/*}
+[ "$1" = --host ] && [ "$2" = unix:///tmp/orbstack/docker.sock ] || exit 12
+[ -z "${DOCKER_CONTEXT:-}" ] && [ -z "${DOCKER_TLS_VERIFY:-}" ] || exit 13
+[ -z "${GITHUB_TOKEN:-}" ] && [ -z "${GH_TOKEN:-}" ] || exit 14
+shift 2
+case "$1" in
+    context) /bin/cat "$fixture_dir/context.json" ;;
+    info) /bin/cat "$fixture_dir/info.json" ;;
+    *) /usr/bin/printf '%s\n' "$1" >> "$fixture_dir/executed" ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut instance = installed.instance.clone();
+        instance
+            .environment
+            .insert("VELNOR_PATH".to_owned(), bin.to_string_lossy().into_owned());
+        let operation = crate::darwin::operation(&instance, true).unwrap();
+        let target = resolve_docker_target(Some(&operation)).unwrap();
+        let context = bin.join("context.json");
+        let info = bin.join("info.json");
+        let good_context = serde_json::json!({"Name":"orbstack","Endpoints":{"docker":{"Host":"unix:///tmp/orbstack/docker.sock"}}}).to_string();
+        fs::write(&context, &good_context).unwrap();
+        fs::write(&info, r#"{"ID":"engine-a","OSType":"linux"}"#).unwrap();
+        assert!(run_docker_process(Some(&target), &["version"], COMMAND_TIMEOUT).succeeded());
+        assert_eq!(
+            fs::read_to_string(bin.join("executed")).unwrap(),
+            "version\n"
+        );
+
+        fs::write(&info, r#"{"ID":"engine-replaced","OSType":"linux"}"#).unwrap();
+        let result = run_docker_process(Some(&target), &["rm", "owned-canary"], COMMAND_TIMEOUT);
+        assert!(result.error.unwrap().contains("pinned daemon ID"));
+        fs::write(
+            &context,
+            good_context.replace("orbstack/docker.sock", "other/docker.sock"),
+        )
+        .unwrap();
+        let result = run_docker_process(Some(&target), &["create", "canary"], COMMAND_TIMEOUT);
+        assert!(result.error.unwrap().contains("pinned endpoint"));
+        fs::write(&context, &good_context).unwrap();
+        fs::remove_file(&info).unwrap();
+        let result = run_docker_process(Some(&target), &["run", "canary"], COMMAND_TIMEOUT);
+        assert!(result.error.unwrap().contains("identity is unavailable"));
+        assert_eq!(
+            fs::read_to_string(bin.join("executed")).unwrap(),
+            "version\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
