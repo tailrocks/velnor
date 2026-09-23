@@ -570,11 +570,7 @@ fn attest_volume_holder_at(
     }
     verify_volume_holder_mounts(&name, &mounts)?;
     let mounts: Vec<super::ownership::Mount> =
-        serde_json::from_value(serde_json::Value::Array(mounts)).map_err(|error| {
-            eprintln!("temporary holder mount parse diagnostic: {error:#}");
-            error
-        })?;
-    eprintln!("temporary holder mounts parsed: {mounts:?}");
+        serde_json::from_value(serde_json::Value::Array(mounts))?;
     for mount in &mounts {
         let inspected = runner.run("docker", &[
             "volume".into(), "inspect".into(), "--format".into(),
@@ -593,10 +589,6 @@ fn attest_volume_holder_at(
         let labels: BTreeMap<String, String> = serde_json::from_str(fields[2])?;
         let options: Option<BTreeMap<String, String>> = serde_json::from_str(fields[3])?;
         let source: String = serde_json::from_str(fields[4])?;
-        eprintln!(
-            "temporary inspected volume: name={volume_name:?} mount={:?} driver={driver:?} source={source:?} expected_source={:?} labels={labels:?}",
-            mount.name, mount.source
-        );
         if volume_name != mount.name
             || driver != "local"
             || source != mount.source

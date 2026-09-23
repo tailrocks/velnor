@@ -91,11 +91,7 @@ pub(crate) fn attest_isolation(
             output.code
         );
     }
-    let result = validate_isolation(identity, target, role, volumes, state_dir, &output.stdout);
-    if let Err(error) = &result {
-        eprintln!("temporary isolation diagnostic: {error:#}");
-    }
-    result
+    validate_isolation(identity, target, role, volumes, state_dir, &output.stdout)
 }
 
 fn validate_isolation(

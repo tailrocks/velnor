@@ -801,7 +801,6 @@ fn anonymous_mount(engine: &mut FakeEngine, spec: &str) -> FakeMount {
         })
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect::<BTreeMap<_, _>>();
-    eprintln!("temporary volume labels: {labels:?}");
     engine.next_volume_id += 1;
     let name = format!("fake-anonymous-volume-{:04}", engine.next_volume_id);
     let mountpoint = format!("/var/lib/docker/volumes/{name}/_data");
@@ -864,7 +863,6 @@ impl WorkerRunner for FakeDocker {
         assert_eq!(program, "docker");
         let mut engine = self.lock();
         engine.seen.push(args.to_vec());
-        eprintln!("fake docker: {args:?}");
         let head = args.first().cloned().unwrap_or_default();
         match head.as_str() {
             "create" => {
@@ -1143,7 +1141,6 @@ impl WorkerRunner for FakeDocker {
                                 serde_json::to_string(&requested_mounts)
                                     .expect("requested mounts serialize"),
                             );
-                            eprintln!("fake isolation projection: {projection}");
                             Ok(ok(&projection))
                         }
                         Some(entry) if format.contains(".Mounts") => {
@@ -1391,6 +1388,22 @@ impl WorkerRunner for FakeDocker {
                                             .expect("network labels serialize")
                                     )))
                                 }
+                                Some(network)
+                                    if format.contains(".Id") && format.contains(".Labels") =>
+                                {
+                                    let labels = network
+                                        .labels
+                                        .iter()
+                                        .map(|(key, value)| (key.clone(), value.clone()))
+                                        .collect::<BTreeMap<_, _>>();
+                                    Ok(ok(&format!(
+                                        "{}\t{}\n",
+                                        serde_json::to_string(&network.id)
+                                            .expect("network id serializes"),
+                                        serde_json::to_string(&labels)
+                                            .expect("network labels serialize")
+                                    )))
+                                }
                                 Some(network) if format.contains(".Id") => {
                                     Ok(ok(&format!("{}\n", network.id)))
                                 }
@@ -1573,8 +1586,11 @@ fn assert_holder_cleanup_uses_immutable_id(docker: &FakeDocker, identity: &Worke
             && target.starts_with("fake-id-")
     }));
     assert!(
-        docker.volume_commands().is_empty(),
-        "worker cleanup must not use docker volume rm"
+        docker
+            .volume_commands()
+            .iter()
+            .all(|argv| argv.get(1).is_some_and(|verb| verb == "inspect")),
+        "worker cleanup must not mutate volumes by name"
     );
 }
 
@@ -2189,28 +2205,16 @@ async fn wait_for(
     what: &str,
     mut done: impl FnMut(&DemandStore, &SharedLedger) -> bool,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let demand = DemandStore::open(db).unwrap();
         let ledger = SharedLedger::open(ledger_path).unwrap();
         if done(&demand, &ledger) {
             return;
         }
-        let observed = demand
-            .get(SCALE_SET_ID, REQUEST_ID)
-            .unwrap()
-            .map(|row| row.state);
-        let occupied = ledger.occupied().unwrap();
-        let live_states = WorkerRegistry::open(db)
-            .unwrap()
-            .list_live()
-            .unwrap()
-            .into_iter()
-            .map(|row| format!("{}:{:?}", row.runner_name, row.worker_state))
-            .collect::<Vec<_>>();
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{what} did not converge in 30s: state={observed:?}, occupied={occupied}, live={live_states:?}"
+            "{what} did not converge in 30s"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -2218,8 +2222,6 @@ async fn wait_for(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_adopts_live_worker_without_reprovision() {
-    let _tracing =
-        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
     let server = MockServer::start().await;
     mount_token_chain(&server).await;
     mount_group_lookup(&server).await;
