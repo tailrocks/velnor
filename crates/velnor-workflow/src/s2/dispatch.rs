@@ -25,6 +25,7 @@ const RUNTIME_COMMANDS: &[&str] = &[
     "release",
     "version",
     "closure",
+    "apple-test-summary",
     "prepared-tool-install",
     "stage-product",
     "verify-product",
@@ -266,6 +267,14 @@ mod tests {
     fn version_and_closure_stay_put() {
         assert!(!wants_s2(&args(&["version"])));
         assert!(!wants_s2(&args(&["closure"])));
+    }
+
+    #[test]
+    fn apple_test_summary_routes_as_runtime_command() {
+        assert!(
+            RUNTIME_COMMANDS.contains(&"apple-test-summary"),
+            "apple-test-summary must enter the schema-2 runtime branch"
+        );
     }
 
     #[test]

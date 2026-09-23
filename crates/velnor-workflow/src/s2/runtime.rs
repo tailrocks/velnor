@@ -451,6 +451,41 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// Parse one already-produced `XCTest` or Swift Testing summary and print the
+/// accepted counts. The command never executes a project tool; malformed,
+/// empty, skipped, cancelled, or failed evidence is a hard error.
+fn apple_test_summary(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["input", "source"])?;
+    let input = options
+        .get("input")
+        .ok_or_else(|| GeneratorError::usage("apple-test-summary requires --input PATH"))?;
+    let bytes = fs::read(input)
+        .map_err(|error| GeneratorError::io("read Apple test summary", Path::new(input), &error))?;
+    let evidence = match options.get("source").map_or("auto", String::as_str) {
+        "auto" => crate::apple_test_results::parse_summary(&bytes),
+        "xctest" => crate::apple_test_results::parse_xctest_summary(&bytes),
+        "swift-testing" => crate::apple_test_results::parse_swift_testing_summary(&bytes),
+        source => {
+            return Err(GeneratorError::usage(format!(
+                "apple-test-summary --source must be auto, xctest, or swift-testing; got {source:?}"
+            )));
+        }
+    }
+    .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    println!(
+        "source={} status={} total={} passed={} failed={} skipped={} cancelled={} unknown={}",
+        evidence.source,
+        evidence.status,
+        evidence.counts.total,
+        evidence.counts.passed,
+        evidence.counts.failed,
+        evidence.counts.skipped,
+        evidence.counts.cancelled,
+        evidence.counts.unknown,
+    );
+    Ok(())
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
 pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
@@ -511,6 +546,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "closure" => {
             print_closure(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "apple-test-summary" => {
+            apple_test_summary(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "prepared-tool-install" => {
@@ -9458,6 +9497,44 @@ workspace_check = true
             ),
             "unknown commands belong to the generator CLI"
         );
+    }
+
+    #[test]
+    fn try_run_dispatches_apple_test_summary() {
+        let error = must_fail(
+            try_run(&[OsString::from("apple-test-summary")]),
+            "a bare Apple summary command names its missing input",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("apple-test-summary requires --input PATH"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn apple_test_summary_accepts_xctest_summary() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-workflow-apple-test-summary-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            std::fs::write(&path, br#"{"passedTests":2,"failedTests":0}"#),
+            "write Apple summary fixture",
+        );
+        let args = vec![
+            OsString::from("apple-test-summary"),
+            OsString::from("--input"),
+            path.clone().into_os_string(),
+            OsString::from("--source"),
+            OsString::from("xctest"),
+        ];
+        assert!(
+            must(try_run(&args), "run Apple summary command"),
+            "Apple summary command is handled by the runtime"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     // S4 aggregate wiring cut: the planner's expected work binds the
