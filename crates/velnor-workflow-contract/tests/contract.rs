@@ -208,6 +208,18 @@ fn the_setup_action_is_owned_verbatim() {
     );
 }
 
+/// The runtime-product bootstrap is another repository-owned static workflow;
+/// its generated canonical target must remain byte-identical to its source.
+#[test]
+fn the_runtime_product_bootstrap_is_owned_verbatim() {
+    let source = read(".github-gen/sources/workflows/runtime-products-bootstrap.yml");
+    let installed = read(".github/workflows/ci-runtime-products.yml");
+    assert_eq!(
+        source, installed,
+        "the runtime-product bootstrap drifted from its source"
+    );
+}
+
 /// Activation is a protected-main operation. Its requested renderer and
 /// published product must be in the dispatched main ancestry, the attestation
 /// must bind one publisher workflow/run/attempt to the canonical v2 readiness

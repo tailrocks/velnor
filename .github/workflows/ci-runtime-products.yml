@@ -418,6 +418,23 @@ jobs:
             "$RUNNER_TEMP/publication-readiness.json" >/dev/null
           cp "$RUNNER_TEMP/publication-readiness.json" dist/publication-readiness.json
           echo "manifest-digest=$manifest_digest" >> "$GITHUB_OUTPUT"
+      - name: Attest publication readiness
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/publication-readiness.json
+      - name: Verify publication readiness attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.closure.outputs.head-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          signer='tailrocks/velnor/.github/workflows/ci-runtime-products.yml'
+          gh attestation verify dist/publication-readiness.json \
+            --owner tailrocks \
+            --signer-workflow "$signer" \
+            --source-ref refs/heads/main \
+            --source-digest "$HEAD_SHA"
       - name: Prove protected tip immediately before release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,31 +1,31 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	fab14deb614aeecc
-scan	12a63d95e7d5b940
+config	3fb0741ab186e8c5
+scan	0c8f6ca5964538fd
 generator	70
 [outputs]
 .github/AGENTS.md	02ebb7198c435e9b
 .github/actionlint.yaml	85a2e7172b525ecb
 .github/actions/report-velnor-ci-outcomes/action.yml	3c9db68a0a158ce0
-.github/actions/setup-velnor-workflow/action.yml	660db8b63fd8ec78
+.github/actions/setup-velnor-workflow/action.yml	9ef992ff8f559511
 .github/ci/project.toml	df8b7d0cc5dd57b0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/activate-renderer.yml	7d815de984b4a795
-.github/workflows/ci-main.yml	7173ecc41e5f7e40
-.github/workflows/ci-policy.yml	c0267d3f9e9869ec
-.github/workflows/ci-pr.yml	883d52bac9105228
 .github/workflows/candidate-qualification.yml	de0104a6a773505b
+.github/workflows/ci-main.yml	73e8e686f9e471d1
+.github/workflows/ci-policy.yml	8d7e2d0c32830f97
+.github/workflows/ci-pr.yml	0d466d54998bc698
 .github/workflows/ci-release-package-signer.yml	29e2df02b006cd2e
-.github/workflows/ci-runtime-products.yml	6a3157ac4fd01dad
-.github/workflows/ci-unit-bun.yml	0e2c2ea6b57a4a83
-.github/workflows/ci-unit-docker.yml	a75202085d1e8605
-.github/workflows/ci-unit-docs.yml	48c937512b8d6cb5
-.github/workflows/ci-unit-opentofu.yml	95522bca3361bac7
-.github/workflows/ci-unit-rust.yml	d0d4c34e3195a06e
+.github/workflows/ci-runtime-products.yml	0bebdd04761f7d6d
+.github/workflows/ci-unit-bun.yml	295741670cf4e70b
+.github/workflows/ci-unit-docker.yml	82b8205b7d937993
+.github/workflows/ci-unit-docs.yml	a572f79b93d1df59
+.github/workflows/ci-unit-opentofu.yml	3f6503e21e7ef363
+.github/workflows/ci-unit-rust.yml	be7d2bfc732c8e94
 .github/workflows/maintenance.yml	6dbfdcc53e02b85b
 .github/workflows/nightly.yml	cde4c359bcb710cc
-.github/workflows/preview.yml	9f24aa5a29a336b3
-.github/workflows/release.yml	eb9877030c786d10
+.github/workflows/preview.yml	e0396a4ff4580aa7
+.github/workflows/release.yml	3227d6340d0f6758
 config/fleet/velnor-host.env	d14b419216449423
 .github/CLAUDE.md	78a740c6ccf6937a

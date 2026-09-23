@@ -96,7 +96,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -108,7 +110,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: bun-velnor
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -162,7 +166,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -174,7 +180,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: docker
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -208,7 +216,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -220,7 +230,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: docs
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -258,7 +270,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -270,7 +284,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: opentofu
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -453,7 +469,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -465,7 +483,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-policy
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -624,7 +644,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -636,7 +658,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-unit-collector
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -648,7 +672,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-unit-collector
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -660,7 +686,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-unit-collector
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -672,7 +700,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-unit-collector
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -832,7 +862,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -844,7 +876,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-bench
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -856,7 +890,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-bench
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -868,7 +904,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-bench
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -880,7 +918,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-bench
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1040,7 +1080,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -1052,7 +1094,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-client
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1064,7 +1108,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-client
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1076,7 +1122,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-client
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1088,7 +1136,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-client
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1248,7 +1298,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -1260,7 +1312,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-control
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1272,7 +1326,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-control
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1284,7 +1340,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-control
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1296,7 +1354,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-control
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1456,7 +1516,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -1468,7 +1530,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-model
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1480,7 +1544,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-model
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1492,7 +1558,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-model
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1504,7 +1572,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-model
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1664,7 +1734,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -1676,7 +1748,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-render
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1688,7 +1762,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-render
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1700,7 +1776,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-render
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1712,7 +1790,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-render
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1872,7 +1952,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -1884,7 +1966,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-runner
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1896,7 +1980,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-runner
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1908,7 +1994,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-runner
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1920,7 +2008,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-runner
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2080,7 +2170,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -2092,7 +2184,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-tools
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2104,7 +2198,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-tools
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2116,7 +2212,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-tools
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2276,7 +2374,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -2297,7 +2397,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2457,7 +2559,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -2469,7 +2573,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow-contract
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2481,7 +2587,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow-contract
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2493,7 +2601,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow-contract
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2653,7 +2763,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -2665,7 +2777,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnorctl
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2677,7 +2791,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnorctl
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2689,7 +2805,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnorctl
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2701,7 +2819,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnorctl
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2859,7 +2979,9 @@ jobs:
       - name: Plan full release selection
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: |
           set -euo pipefail
@@ -2871,7 +2993,9 @@ jobs:
           CI_SCOPE: full
           CI_UNIT_ID: rust-production-topology
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
           CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
