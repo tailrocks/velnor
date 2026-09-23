@@ -529,31 +529,10 @@ mod tests {
         root
     }
 
-    #[test]
-    #[expect(
-        clippy::panic,
-        reason = "tests need setup failures to name their root cause"
-    )]
-    fn renovate_workflows_pass_trusted_policy_audit() {
-        let config = renovate_config();
-        let writer = must(
-            render_renovate(&config, &full_spec()),
-            "render renovate workflow",
-        );
-        let validator = must(
-            render_renovate_validate(&config, &full_spec()),
-            "render renovate validator",
-        );
-        let root = audited_tree(
-            "audit",
-            &[
-                ("renovate.yml", &writer),
-                ("renovate-validate.yml", &validator),
-            ],
-        );
-        // The selector audit matches runs-on against the declared
-        // selectors, so the audited tree carries the generation config
-        // the writer rendered from.
+    /// Scan and audit one source contract; never reconstruct its selectors
+    /// independently in a hand-built ProjectConfig.
+    fn scanned_audit_tree(repository: &str, routing: &str, visibility: &str) -> std::path::PathBuf {
+        let root = audited_tree("audit", &[]);
         must(
             std::fs::create_dir_all(root.join(".github-gen")),
             "create generation config dir",
@@ -561,24 +540,82 @@ mod tests {
         must(
             std::fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
-                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [workflow]\nproviders = [\"velnor\"]\n\n\
-                 [workflow.selectors.velnor]\nruns_on = [\"velnor-native\"]\n",
+                format!(
+                    "schema = 2\n[generator]\nrepository = {repository:?}\n\
+                     [workflow]\n{routing}\n\
+                     [renovate]\nenabled = true\nvalidate = true\nreason = \"Fixture dependency updates\"\n\
+                     [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n\
+                     [[declare]]\nprimitive = \"renovate-validate\"\nfile = \"renovate-validate.yml\"\n"
+                ),
             ),
             "write generation config",
         );
-        let audit = match crate::s2::policy::audit_workflows(&root) {
-            Ok(audit) => audit,
-            Err(error) => panic!("audit renovate workflows: {error}"),
-        };
-        assert!(
-            audit.pull_request_target.is_empty(),
-            "{:?}",
-            audit.pull_request_target
+        must(
+            std::fs::write(
+                root.join(".github-gen/visibility.toml"),
+                format!("repository = {repository:?}\nvisibility = {visibility:?}\n"),
+            ),
+            "write visibility evidence",
         );
-        assert!(audit.runners.is_empty(), "{:?}", audit.runners);
-        assert!(audit.actions.is_empty(), "{:?}", audit.actions);
-        assert!(audit.structure.is_empty(), "{:?}", audit.structure);
-        let _ = std::fs::remove_dir_all(root);
+        must(
+            std::fs::write(root.join("renovate.json"), "{}\n"),
+            "write Renovate config",
+        );
+        let config = must(
+            crate::s2::scan_repository(&root, None),
+            "scan Renovate fixture",
+        );
+        let spec = must_some(config.renovate.as_ref(), "scanned Renovate contract");
+        for (file, rendered) in [
+            ("renovate.yml", render_renovate(&config, spec)),
+            (
+                "renovate-validate.yml",
+                render_renovate_validate(&config, spec),
+            ),
+        ] {
+            must(
+                std::fs::write(
+                    root.join(".github/workflows").join(file),
+                    must(rendered, "render Renovate"),
+                ),
+                "write rendered Renovate",
+            );
+        }
+        root
+    }
+
+    #[test]
+    fn renovate_workflows_pass_trusted_policy_audit() {
+        for repository in ["example/original", "unrelated/renamed-repository"] {
+            for (routing, visibility, expected_runner) in [
+                ("provider_mode = \"both\"", "public", "ubuntu-24.04"),
+                (
+                    "providers = [\"velnor\"]\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-native\", \"local-mac\"]",
+                    "private",
+                    "[self-hosted, velnor-native, local-mac]",
+                ),
+                (
+                    "providers = [\"velnor\"]\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-native\", \"bastion\"]",
+                    "private",
+                    "[self-hosted, velnor-native, bastion]",
+                ),
+            ] {
+                let root = scanned_audit_tree(repository, routing, visibility);
+                for file in ["renovate.yml", "renovate-validate.yml"] {
+                    let workflow = must(
+                        std::fs::read_to_string(root.join(".github/workflows").join(file)),
+                        "read Renovate workflow",
+                    );
+                    assert_eq!(workflow.matches("    runs-on:").count(), 1, "single writer/validator: {workflow}");
+                    assert!(workflow.contains(&format!("runs-on: {expected_runner}")), "{repository}: {workflow}");
+                }
+                let audit = must(crate::s2::policy::audit_workflows(&root), "audit Renovate workflows");
+                assert!(audit.pull_request_target.is_empty(), "{:?}", audit.pull_request_target);
+                assert!(audit.runners.is_empty(), "{:?}", audit.runners);
+                assert!(audit.actions.is_empty(), "{:?}", audit.actions);
+                assert!(audit.structure.is_empty(), "{:?}", audit.structure);
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
     }
 }

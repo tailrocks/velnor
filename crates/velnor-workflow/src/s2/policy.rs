@@ -48,6 +48,7 @@ use std::process::{Command, Stdio};
 
 use serde_yaml::{Mapping, Value};
 
+use super::provider::{self, ProviderId, ProviderSet, SelectorMap};
 use super::{
     closure as closure_identity, config, runtime, GeneratorError, ProjectConfig, SOURCE_CLOSURE,
     SOURCE_REVISION,
@@ -2486,7 +2487,10 @@ fn inspect_workflow(
 /// The local provider a static `runs-on` resolves to, if any. Labels are
 /// compared as sets against the declared selectors; anything that matches
 /// no selector is not a local job (it is a finding elsewhere).
-fn static_local_provider(job: &Mapping, velnor_policy: &VelnorPolicyContract) -> Option<String> {
+fn static_local_provider(
+    job: &Mapping,
+    velnor_policy: &VelnorPolicyContract,
+) -> Option<ProviderId> {
     let runs_on = mapping_value(job, "runs-on")?;
     let labels = match runs_on {
         Value::String(label) => vec![label.as_str()],
@@ -2505,14 +2509,14 @@ fn static_local_provider(job: &Mapping, velnor_policy: &VelnorPolicyContract) ->
         return None;
     }
     let provider = velnor_policy.provider_for_labels(&labels)?;
-    VelnorPolicyContract::is_local_provider(provider).then(|| provider.to_owned())
+    provider.is_local().then_some(provider)
 }
 
 /// A GitHub-owned execution label: inherently hosted, never a trust fact.
 /// Selectors for local capacity are caller-managed and never carry these
 /// prefixes.
 fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+    provider::is_github_owned_label(label)
 }
 
 fn has_safe_runner_gate(
@@ -2539,7 +2543,7 @@ fn has_safe_runner_gate(
     let Some(provider) = static_local_provider(job, velnor_policy) else {
         return false;
     };
-    is_generated_provider_gate(condition, &provider)
+    is_generated_provider_gate(condition, provider)
 }
 
 /// Whether the condition is a pure top-level `&&` conjunction with the
@@ -2591,25 +2595,6 @@ fn has_exact_trusted_conjunct(condition: &str) -> bool {
     members.iter().any(|member| *member == trusted)
 }
 
-fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorError> {
-    let path = root.join(GENERATION_CONFIG);
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(GeneratorError::io(
-                "read generation workflow config",
-                &path,
-                &error,
-            ));
-        }
-    };
-    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
-        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
-    })?;
-    Ok(value.get("workflow").cloned())
-}
-
 fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
     config::discover(root)
         .ok()
@@ -2643,27 +2628,27 @@ fn toml_string_array(
 /// job's `runs-on` resolves to.
 #[derive(Clone, Debug, Default)]
 struct VelnorPolicyContract {
-    providers: Vec<String>,
-    automatic_providers: Vec<String>,
-    selectors: BTreeMap<String, Vec<String>>,
+    providers: ProviderSet,
+    automatic_providers: ProviderSet,
+    selectors: SelectorMap,
     default_branch: String,
 }
 
 impl VelnorPolicyContract {
     /// The provider whose declared selector `labels` equals, if any. Labels
     /// are compared as sets: order is not a routing fact.
-    fn provider_for_labels(&self, labels: &[&str]) -> Option<&str> {
+    fn provider_for_labels(&self, labels: &[&str]) -> Option<ProviderId> {
         let mut sorted = labels.to_vec();
         sorted.sort_unstable();
         self.selectors.iter().find_map(|(provider, selector)| {
-            let mut expected = selector.iter().map(String::as_str).collect::<Vec<_>>();
+            let mut expected = selector
+                .runs_on
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
             expected.sort_unstable();
-            (expected == sorted).then_some(provider.as_str())
+            (self.providers.contains(provider) && expected == sorted).then_some(*provider)
         })
-    }
-
-    fn is_local_provider(provider: &str) -> bool {
-        matches!(provider, "github-self-hosted" | "velnor")
     }
 }
 
@@ -2679,52 +2664,54 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(GeneratorError::io("read workflow config", &path, &error)),
     };
-    let generation = generation_workflow(root)?;
+    let generation = config::discover(root)?;
     if runtime.is_none() && generation.is_none() {
         return Ok(VelnorPolicyContract {
             default_branch: "main".to_owned(),
             ..VelnorPolicyContract::default()
         });
     }
-    let generation_workflow = generation.as_ref().and_then(toml::Value::as_table);
-    let mut providers = runtime
-        .as_ref()
-        .and_then(|value| value.get("providers"))
-        .map(|value| toml_string_array(Some(value), "providers"))
-        .transpose()?
-        .unwrap_or_default();
-    if providers.is_empty() {
-        providers = toml_string_array(
-            generation_workflow.and_then(|workflow| workflow.get("providers")),
-            "[workflow] providers",
-        )?;
-    }
-    let automatic_providers = runtime
-        .as_ref()
-        .and_then(|value| value.get("automatic_providers"))
-        .map(|value| toml_string_array(Some(value), "automatic_providers"))
-        .transpose()?
-        .unwrap_or_default();
+    let runtime_set = |field: &str| {
+        runtime
+            .as_ref()
+            .and_then(|value| value.get(field))
+            .map(|value| {
+                provider::parse_provider_set(&toml_string_array(Some(value), field)?, field)
+            })
+            .transpose()
+    };
+    let runtime_providers = runtime_set("providers")?;
+    let runtime_automatic = runtime_set("automatic_providers")?;
+    let mut providers = runtime_providers
+        .clone()
+        .unwrap_or_else(|| ProviderId::ALL.into_iter().collect());
+    let mut automatic_providers = runtime_automatic
+        .clone()
+        .unwrap_or_else(|| providers.clone());
     // Selectors are generation-time only: the runtime contract never carries
     // them. Generation overlays declared selectors on the scan defaults, so
     // the audit starts from the same defaults; otherwise a default-routed
     // job reads as foreign.
-    let mut selectors: BTreeMap<String, Vec<String>> = super::scan::default_selectors()
-        .into_iter()
-        .map(|(provider, selector)| (provider.as_str().to_owned(), selector.runs_on))
-        .collect();
-    if let Some(tables) = generation_workflow
-        .and_then(|workflow| workflow.get("selectors"))
-        .and_then(toml::Value::as_table)
-    {
-        for (provider, table) in tables {
-            let runs_on = toml_string_array(
-                table.get("runs_on"),
-                &format!("[workflow.selectors.{provider}] runs_on"),
-            )?;
-            if !runs_on.is_empty() {
-                selectors.insert(provider.clone(), runs_on);
-            }
+    let mut selectors = super::scan::default_selectors();
+    if let Some(generation) = &generation {
+        generation.apply_provider_routing(
+            &mut providers,
+            &mut automatic_providers,
+            &mut selectors,
+        )?;
+    }
+    for (field, recorded, resolved) in [
+        ("providers", runtime_providers.as_ref(), &providers),
+        (
+            "automatic_providers",
+            runtime_automatic.as_ref(),
+            &automatic_providers,
+        ),
+    ] {
+        if recorded.is_some_and(|recorded| recorded != resolved) {
+            return Err(GeneratorError::usage(format!(
+                "workflow policy found runtime `{field}` inconsistent with generation config"
+            )));
         }
     }
     let default_branch = runtime
@@ -2732,9 +2719,9 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         .and_then(|value| value.get("default_branch"))
         .and_then(toml::Value::as_str)
         .or_else(|| {
-            generation_workflow
-                .and_then(|workflow| workflow.get("default_branch"))
-                .and_then(toml::Value::as_str)
+            generation
+                .as_ref()
+                .and_then(config::RepoGenerationConfig::default_branch)
         })
         .unwrap_or("main")
         .to_owned();
@@ -2753,31 +2740,15 @@ impl VelnorPolicyContract {
     /// them first: canonical ids only, the automatic set inside the universe,
     /// and a selector for every provider in the universe.
     fn validate(&self) -> Result<(), GeneratorError> {
-        for provider in self.providers.iter().chain(&self.automatic_providers) {
-            if !matches!(
-                provider.as_str(),
-                "github-hosted" | "github-self-hosted" | "velnor"
-            ) {
-                return Err(GeneratorError::usage(format!(
-                    "workflow policy found unknown provider `{provider}` in the configured provider sets"
-                )));
-            }
-        }
-        for provider in &self.automatic_providers {
-            if !self.providers.iter().any(|known| known == provider) {
-                return Err(GeneratorError::usage(format!(
-                    "workflow policy found automatic provider `{provider}` outside the configured provider universe"
-                )));
-            }
-        }
-        for (provider, selector) in &self.selectors {
-            if selector.is_empty() {
-                return Err(GeneratorError::usage(format!(
-                    "workflow policy found provider `{provider}` with an empty selector"
-                )));
-            }
-        }
-        Ok(())
+        provider::require_non_empty(&self.providers, "workflow policy providers")?;
+        provider::require_subset(
+            &self.automatic_providers,
+            &self.providers,
+            "workflow policy automatic_providers",
+            "workflow policy providers",
+        )?;
+        provider::validate_selector_identities(&self.selectors, &self.providers)?;
+        provider::validate_selector_disjointness(&self.selectors)
     }
 }
 
@@ -2814,7 +2785,7 @@ fn trusted_event_conjunct() -> &'static str {
 /// dispatch predicate. No input match survives. The reusable provider/unit
 /// selector prefix is stripped first; the remaining expression must be
 /// exactly the admission the generator renders.
-fn is_generated_provider_gate(value: &str, _provider: &str) -> bool {
+fn is_generated_provider_gate(value: &str, _provider: ProviderId) -> bool {
     let normalized = normalize_gate_expression(value);
     let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
     let trusted = trusted_event_conjunct();
@@ -3204,7 +3175,7 @@ fn classify_static_label(label: &str, velnor_policy: &VelnorPolicyContract) -> R
         return RunnerAnalysis::default();
     }
     match velnor_policy.provider_for_labels(&[label]) {
-        Some(provider) if VelnorPolicyContract::is_local_provider(provider) => RunnerAnalysis {
+        Some(provider) if provider.is_local() => RunnerAnalysis {
             local_provider: true,
             ..RunnerAnalysis::default()
         },
@@ -3223,7 +3194,7 @@ fn classify_static_labels(labels: &[&str], velnor_policy: &VelnorPolicyContract)
         return classify_static_label(labels[0], velnor_policy);
     }
     match velnor_policy.provider_for_labels(labels) {
-        Some(provider) if VelnorPolicyContract::is_local_provider(provider) => RunnerAnalysis {
+        Some(provider) if provider.is_local() => RunnerAnalysis {
             local_provider: true,
             ..RunnerAnalysis::default()
         },

@@ -714,16 +714,153 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
 // Semantic rules over a synthetic tree
 // ---------------------------------------------------------------------------
 
+#[test]
+fn policy_provider_contract_resolves_modes_in_renamed_sparse_trees() {
+    for repository in ["example/original", "unrelated/renamed-copy"] {
+        for (mode, automatic) in [
+            ("native-only", vec!["github-hosted", "velnor"]),
+            (
+                "scale-set-only",
+                vec!["github-hosted", "github-self-hosted"],
+            ),
+            (
+                "both",
+                vec!["github-hosted", "github-self-hosted", "velnor"],
+            ),
+        ] {
+            let root = temporary_directory("policy-provider-mode");
+            write(
+                &root.join(GENERATION_CONFIG),
+                &format!(
+                    "schema = 2\n[generator]\nrepository = {repository:?}\n[workflow]\nprovider_mode = {mode:?}\n"
+                ),
+            );
+            let contract = must(configured_velnor_policy(&root), "sparse provider contract");
+            assert_eq!(
+                contract
+                    .providers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                ["github-hosted", "github-self-hosted", "velnor"],
+                "{repository}: {mode} must retain the complete provider universe"
+            );
+            assert_eq!(
+                contract
+                    .automatic_providers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                automatic,
+                "{repository}: {mode} must retain automatic-provider selection"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+}
+
+#[test]
+fn policy_provider_contract_rejects_invalid_selectors_and_sets() {
+    for (name, workflow, expected) in [
+        (
+            "hostless",
+            "providers = [\"velnor\"]\n[workflow.selectors.velnor]\nruns_on = [\"velnor-native\"]\n",
+            "self-hosted",
+        ),
+        (
+            "hosted-local",
+            "providers = [\"github-hosted\"]\n[workflow.selectors.github-hosted]\nruns_on = [\"self-hosted\", \"velnor-native\", \"local-mac\"]\n",
+            "not a GitHub-hosted label",
+        ),
+        (
+            "alias",
+            "providers = [\"github-hosted\"]\n[workflow.selectors.github]\nruns_on = [\"ubuntu-24.04\"]\n",
+            "unknown provider",
+        ),
+        (
+            "duplicate",
+            "providers = [\"velnor\", \"velnor\"]\n",
+            "more than once",
+        ),
+        (
+            "outside-universe",
+            "providers = [\"github-hosted\"]\nautomatic_providers = [\"velnor\"]\n",
+            "outside",
+        ),
+        (
+            "contradictory-mode",
+            "provider_mode = \"both\"\nproviders = [\"velnor\"]\n",
+            "mutually exclusive",
+        ),
+        (
+            "swapped-engine",
+            "providers = [\"github-self-hosted\"]\n[workflow.selectors.github-self-hosted]\nruns_on = [\"self-hosted\", \"velnor-native\", \"local-mac\"]\n",
+            "velnor-scale-set",
+        ),
+        (
+            "two-hosts",
+            "providers = [\"velnor\"]\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-native\", \"local-mac\", \"bastion\"]\n",
+            "exactly one host",
+        ),
+    ] {
+        let root = temporary_directory(name);
+        write(
+            &root.join(GENERATION_CONFIG),
+            &format!("schema = 2\n[generator]\nrepository = \"example/fixture\"\n[workflow]\n{workflow}"),
+        );
+        let error = must_fail(configured_velnor_policy(&root), name);
+        assert!(error.to_string().contains(expected), "{name}: {error}");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn policy_provider_contract_rejects_stale_runtime_sets() {
+    let root = temporary_directory("policy-stale-runtime");
+    write(
+        &root.join(GENERATION_CONFIG),
+        "schema = 2\n[generator]\nrepository = \"example/fixture\"\n[workflow]\nprovider_mode = \"scale-set-only\"\n",
+    );
+    for (runtime, expected) in [
+        (
+            "providers = [\"github-hosted\"]\n",
+            "runtime `providers` inconsistent",
+        ),
+        (
+            "providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\n",
+            "runtime `automatic_providers` inconsistent",
+        ),
+        (
+            "providers = [\"github-hosted\", \"github-hosted\"]\n",
+            "more than once",
+        ),
+        (
+            "providers = [\"github\"]\n",
+            "unknown provider",
+        ),
+    ] {
+        write(&root.join(RUNTIME_CONFIG), runtime);
+        let error = must_fail(configured_velnor_policy(&root), "stale runtime");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    write(
+        &root.join(RUNTIME_CONFIG),
+        "providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"github-self-hosted\"]\n",
+    );
+    must(configured_velnor_policy(&root), "matching runtime");
+    let _ = fs::remove_dir_all(root);
+}
+
 /// The Velnor selector the synthetic trees declare: the labels are the
 /// tree's own routing, matched by set equality against `runs-on`.
-const VELNOR_SELECTOR: &str = "example-velnor";
+const VELNOR_SELECTOR: &str = "\"self-hosted\", \"velnor-native\", \"local-mac\"";
 
 fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
     let root = temporary_directory(name);
     write(
         &root.join(GENERATION_CONFIG),
         &format!(
-            "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"{VELNOR_SELECTOR}\"]\n"
+            "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [{VELNOR_SELECTOR}]\n"
         ),
     );
     write(
@@ -743,6 +880,35 @@ fn gated_trusted_job() -> String {
     format!(
         "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
     )
+}
+
+#[test]
+fn policy_rejects_wrong_host_and_disabled_local_selectors() {
+    let wrong_host = velnor_tree(
+        "wrong-host",
+        &gated_trusted_job().replace("local-mac", "bastion"),
+    );
+    let hosted_only = velnor_tree("disabled-local-selector", &gated_trusted_job());
+    write(
+        &hosted_only.join(GENERATION_CONFIG),
+        "schema = 2\n[generator]\nrepository = \"example/consumer\"\n[workflow]\nproviders = [\"github-hosted\"]\n",
+    );
+    write(
+        &hosted_only.join(RUNTIME_CONFIG),
+        "providers = [\"github-hosted\"]\nautomatic_providers = [\"github-hosted\"]\n",
+    );
+    for root in [wrong_host, hosted_only] {
+        let audit = must(audit_workflows(&root), "audit local routing violation");
+        assert!(
+            audit.runners.iter().any(|finding| {
+                finding.contains("velnor-docker")
+                    && finding.contains("does not match any declared provider selector")
+            }),
+            "wrong host or disabled provider must fail even behind a trusted-event gate: {:?}",
+            audit.runners
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 /// The semantic rules pass on a tree whose trusted Velnor job carries the
@@ -827,14 +993,14 @@ fn provider_gate_admits_dispatch_on_any_ref() {
     // An automatic provider renders the bare trusted-event conjunct.
     let automatic = format!("${{{{ {trusted} }}}}");
     assert!(
-        is_generated_provider_gate(&automatic, "velnor"),
+        is_generated_provider_gate(&automatic, ProviderId::Velnor),
         "provider gate admitted: {automatic}"
     );
     // A manual provider conjoins it with the dispatch predicate: dispatches
     // select the static universe on any ref, with no input to match.
     let manual = format!("${{{{ (github.event_name == 'workflow_dispatch') && {trusted} }}}}");
     assert!(
-        is_generated_provider_gate(&manual, "velnor"),
+        is_generated_provider_gate(&manual, ProviderId::Velnor),
         "provider gate admitted: {manual}"
     );
     // An input-matching gate is not generated: no input selects providers.
@@ -842,7 +1008,7 @@ fn provider_gate_admits_dispatch_on_any_ref() {
         "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
     );
     assert!(
-        !is_generated_provider_gate(&input_match, "velnor"),
+        !is_generated_provider_gate(&input_match, ProviderId::Velnor),
         "an input-matching gate is not generated: {input_match}"
     );
 }

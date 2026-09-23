@@ -7,17 +7,26 @@
 //! wrong-provider records all fail. Exclusions excuse nothing unless the
 //! planner declared them before expansion, and qualification matrices never
 //! fail fast.
+//!
+//! Root-cause invariant: a result is admissible only when its complete
+//! repository/source/run/attempt/plan/unit/provider/host/platform/architecture
+//! and command/profile/fixture identity equals the frozen plan. The previous
+//! `(unit, provider)` key omitted physical host and execution inputs, allowing
+//! a successful result from another host to substitute silently. This is a
+//! class of identity-confusion bugs, so the binding is frozen before execution
+//! and checked before any result enters the success bucket.
 
 #![allow(
     dead_code,
     reason = "D2 remainder API; schema-2 emission caller lands in d2a-rest"
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::s2::planner::{Exclusion, Execution};
 use crate::s2::provider::{
-    evaluate_verdict, ObservedResult, ProviderId, RunIdentity, VerdictFailure,
+    evaluate_verdict, is_github_owned_label, ObservedResult, ProviderId, RequiredHost,
+    ResultBinding, RunIdentity, VerdictFailure, BASTION_HOST_LABEL, LOCAL_MAC_HOST_LABEL,
 };
 use crate::s2::GeneratorError;
 
@@ -27,23 +36,123 @@ use crate::s2::GeneratorError;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExpectedSet {
     members: BTreeSet<(String, ProviderId)>,
+    bindings: BTreeMap<(String, ProviderId), ResultBinding>,
     exclusions: Vec<Exclusion>,
     digest: String,
 }
 
+fn required_host(execution: &Execution) -> Result<RequiredHost, GeneratorError> {
+    if execution.provider == ProviderId::GithubHosted {
+        if execution.runs_on.is_empty()
+            || execution
+                .runs_on
+                .iter()
+                .any(|label| !is_github_owned_label(label))
+        {
+            return Err(GeneratorError::usage(format!(
+                "required result `{}` on `{}` has a non-hosted runner selector; refusing to infer GitHub-hosted placement",
+                execution.unit_id, execution.provider
+            )));
+        }
+        return Ok(RequiredHost::GithubHosted);
+    }
+
+    let hosts = execution
+        .runs_on
+        .iter()
+        .filter_map(|label| match label.as_str() {
+            LOCAL_MAC_HOST_LABEL => Some(RequiredHost::LocalMac),
+            BASTION_HOST_LABEL => Some(RequiredHost::Bastion),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match hosts.as_slice() {
+        [host] => Ok(*host),
+        _ => Err(GeneratorError::usage(format!(
+            "required result `{}` on `{}` must have exactly one physical host selector ({LOCAL_MAC_HOST_LABEL}|{BASTION_HOST_LABEL})",
+            execution.unit_id, execution.provider
+        ))),
+    }
+}
+
+fn non_empty_identity(
+    value: &str,
+    unit_id: &str,
+    dimension: &str,
+) -> Result<String, GeneratorError> {
+    if value.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "required result `{unit_id}` has an empty {dimension} identity"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn digest_for(
+    digests: &BTreeMap<String, String>,
+    unit_id: &str,
+    dimension: &str,
+) -> Result<String, GeneratorError> {
+    let value = digests.get(unit_id).ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "required result `{unit_id}` has no planned {dimension} digest"
+        ))
+    })?;
+    non_empty_identity(value, unit_id, dimension)
+}
+
 impl ExpectedSet {
     /// Freeze the planner output. The digest covers members and exclusions so
-    /// a post-hoc exclusion cannot masquerade as a planner declaration.
-    #[must_use]
-    pub(crate) fn freeze(executions: &[Execution], exclusions: Vec<Exclusion>) -> Self {
-        let members: BTreeSet<(String, ProviderId)> = executions
-            .iter()
-            .map(|execution| (execution.unit_id.clone(), execution.provider))
-            .collect();
+    /// a post-hoc exclusion cannot masquerade as a planner declaration. Every
+    /// selected execution must also provide non-empty profile and fixture
+    /// digests; omitted inputs are an error, never an implicit default.
+    ///
+    /// # Errors
+    /// Returns a usage error for duplicate executions, unqualified local
+    /// placement, or missing command/profile/fixture identity.
+    pub(crate) fn freeze(
+        executions: &[Execution],
+        exclusions: Vec<Exclusion>,
+        profile_digests: &BTreeMap<String, String>,
+        fixture_digests: &BTreeMap<String, String>,
+    ) -> Result<Self, GeneratorError> {
+        let mut members = BTreeSet::new();
+        let mut bindings = BTreeMap::new();
         let mut digest_input = String::new();
-        for (unit_id, provider) in &members {
+        for execution in executions {
+            let key = (execution.unit_id.clone(), execution.provider);
+            if !members.insert(key.clone()) {
+                return Err(GeneratorError::usage(format!(
+                    "duplicate required result execution `{}` on provider `{}`",
+                    execution.unit_id, execution.provider
+                )));
+            }
+            let binding = ResultBinding {
+                required_host: required_host(execution)?,
+                platform: execution.platform,
+                target_architecture: execution.platform.target_architecture(),
+                command_digest: non_empty_identity(
+                    &execution.command_digest,
+                    &execution.unit_id,
+                    "command",
+                )?,
+                profile_digest: digest_for(profile_digests, &execution.unit_id, "profile")?,
+                fixture_digest: digest_for(fixture_digests, &execution.unit_id, "fixture")?,
+            };
+            bindings.insert(key, binding.clone());
             use std::fmt::Write as _;
-            let _ = writeln!(digest_input, "expected:{unit_id}:{provider}");
+            let _ = writeln!(
+                digest_input,
+                "expected:{}:{}:host={}:platform={}:arch={}:command={}:profile={}:fixture={}",
+                execution.unit_id,
+                execution.provider,
+                binding.required_host.as_str(),
+                binding.platform.as_str(),
+                binding.target_architecture.as_str(),
+                binding.command_digest,
+                binding.profile_digest,
+                binding.fixture_digest,
+            );
         }
         let mut exclusions = exclusions;
         exclusions.sort_by(|left, right| {
@@ -60,16 +169,22 @@ impl ExpectedSet {
             );
         }
         let digest = crate::s2::content_digest_bytes(digest_input.as_bytes());
-        Self {
+        Ok(Self {
             members,
+            bindings,
             exclusions,
             digest: format!("{digest:016x}"),
-        }
+        })
     }
 
     #[must_use]
     pub(crate) fn members(&self) -> &BTreeSet<(String, ProviderId)> {
         &self.members
+    }
+
+    #[must_use]
+    pub(crate) fn bindings(&self) -> &BTreeMap<(String, ProviderId), ResultBinding> {
+        &self.bindings
     }
 
     #[must_use]
@@ -89,7 +204,7 @@ impl ExpectedSet {
         observed: &[ObservedResult],
         run: &RunIdentity,
     ) -> Vec<VerdictFailure> {
-        evaluate_verdict(&self.members, observed, run)
+        evaluate_verdict(&self.bindings, observed, run)
     }
 
     /// Whether the verdict passes: no failures at all.
@@ -157,8 +272,9 @@ mod tests {
     use crate::s2::provider::ProviderSelector;
     use crate::s2::provider::{
         Capabilities, ExclusionReason, ObservedOutcome, Platform, ProviderSet, ResultIdentity,
-        SelectorMap, TrustReq,
+        SelectorMap, TargetArchitecture, TrustReq,
     };
+    use std::collections::BTreeMap;
 
     fn selectors() -> SelectorMap {
         SelectorMap::from([
@@ -171,13 +287,21 @@ mod tests {
             (
                 ProviderId::GithubSelfHosted,
                 ProviderSelector {
-                    runs_on: vec!["velnor-official".to_owned()],
+                    runs_on: vec![
+                        "self-hosted".to_owned(),
+                        "velnor-scale-set".to_owned(),
+                        LOCAL_MAC_HOST_LABEL.to_owned(),
+                    ],
                 },
             ),
             (
                 ProviderId::Velnor,
                 ProviderSelector {
-                    runs_on: vec!["velnor-native".to_owned()],
+                    runs_on: vec![
+                        "self-hosted".to_owned(),
+                        "velnor-native".to_owned(),
+                        LOCAL_MAC_HOST_LABEL.to_owned(),
+                    ],
                 },
             ),
         ])
@@ -205,20 +329,43 @@ mod tests {
     fn frozen_single() -> (ExpectedSet, RunIdentity) {
         let plan = fanout(&[planned("rust-a")], None, &universe(), &selectors(), true).unwrap();
         let plan_digest = plan.digest.clone();
-        let digests = plan.command_digests();
-        let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
+        let profile_digests = BTreeMap::from([("rust-a".to_owned(), "profile-rust-a".to_owned())]);
+        let fixture_digests = BTreeMap::from([("rust-a".to_owned(), "fixture-rust-a".to_owned())]);
+        let frozen = ExpectedSet::freeze(
+            &plan.executions,
+            plan.exclusions,
+            &profile_digests,
+            &fixture_digests,
+        )
+        .unwrap();
         let run = RunIdentity {
             repository_id: "123".to_owned(),
             source_sha: "abc".to_owned(),
             run_id: "42".to_owned(),
             run_attempt: "1".to_owned(),
             plan_digest,
-            command_digests: digests,
         };
         (frozen, run)
     }
 
-    fn identity(run: &RunIdentity, unit: &str, provider: ProviderId) -> ResultIdentity {
+    fn identity(
+        frozen: &ExpectedSet,
+        run: &RunIdentity,
+        unit: &str,
+        provider: ProviderId,
+    ) -> ResultIdentity {
+        let binding = frozen
+            .bindings()
+            .get(&(unit.to_owned(), provider))
+            .cloned()
+            .unwrap_or(ResultBinding {
+                required_host: RequiredHost::LocalMac,
+                platform: Platform::LinuxX64,
+                target_architecture: Platform::LinuxX64.target_architecture(),
+                command_digest: "command-out-of-plan".to_owned(),
+                profile_digest: "profile-out-of-plan".to_owned(),
+                fixture_digest: "fixture-out-of-plan".to_owned(),
+            });
         ResultIdentity {
             repository_id: run.repository_id.clone(),
             source_sha: run.source_sha.clone(),
@@ -227,22 +374,30 @@ mod tests {
             plan_digest: run.plan_digest.clone(),
             unit_id: unit.to_owned(),
             provider,
-            platform: Platform::LinuxX64,
-            command_digest: run.command_digests.get(unit).cloned().unwrap_or_default(),
+            required_host: binding.required_host,
+            platform: binding.platform,
+            target_architecture: binding.target_architecture,
+            command_digest: binding.command_digest,
+            profile_digest: binding.profile_digest,
+            fixture_digest: binding.fixture_digest,
         }
     }
 
-    fn success_for(run: &RunIdentity, provider: ProviderId) -> ObservedResult {
+    fn success_for(
+        frozen: &ExpectedSet,
+        run: &RunIdentity,
+        provider: ProviderId,
+    ) -> ObservedResult {
         ObservedResult {
-            identity: identity(run, "rust-a", provider),
+            identity: identity(frozen, run, "rust-a", provider),
             outcome: ObservedOutcome::Success,
         }
     }
 
-    fn all_green(run: &RunIdentity) -> Vec<ObservedResult> {
+    fn all_green(frozen: &ExpectedSet, run: &RunIdentity) -> Vec<ObservedResult> {
         ProviderId::ALL
             .iter()
-            .map(|provider| success_for(run, *provider))
+            .map(|provider| success_for(frozen, run, *provider))
             .collect()
     }
 
@@ -260,15 +415,15 @@ mod tests {
     #[test]
     fn all_green_passes() {
         let (frozen, run) = frozen_single();
-        assert!(frozen.passes(&all_green(&run), &run));
+        assert!(frozen.passes(&all_green(&frozen, &run), &run));
     }
 
     #[test]
     fn missing_result_fails() {
         let (frozen, run) = frozen_single();
         let observed = vec![
-            success_for(&run, ProviderId::GithubHosted),
-            success_for(&run, ProviderId::GithubSelfHosted),
+            success_for(&frozen, &run, ProviderId::GithubHosted),
+            success_for(&frozen, &run, ProviderId::GithubSelfHosted),
         ];
         let failures = frozen.verdict(&observed, &run);
         assert_eq!(failure_classes(&failures), vec!["missing"]);
@@ -281,7 +436,7 @@ mod tests {
     #[test]
     fn skipped_result_fails() {
         let (frozen, run) = frozen_single();
-        let mut observed = all_green(&run);
+        let mut observed = all_green(&frozen, &run);
         observed[2].outcome = ObservedOutcome::Skipped;
         assert_eq!(
             failure_classes(&frozen.verdict(&observed, &run)),
@@ -292,7 +447,7 @@ mod tests {
     #[test]
     fn cancelled_result_fails() {
         let (frozen, run) = frozen_single();
-        let mut observed = all_green(&run);
+        let mut observed = all_green(&frozen, &run);
         observed[1].outcome = ObservedOutcome::Cancelled;
         assert_eq!(
             failure_classes(&frozen.verdict(&observed, &run)),
@@ -303,7 +458,7 @@ mod tests {
     #[test]
     fn timed_out_result_fails() {
         let (frozen, run) = frozen_single();
-        let mut observed = all_green(&run);
+        let mut observed = all_green(&frozen, &run);
         observed[0].outcome = ObservedOutcome::TimedOut;
         assert_eq!(
             failure_classes(&frozen.verdict(&observed, &run)),
@@ -314,7 +469,7 @@ mod tests {
     #[test]
     fn failed_result_fails() {
         let (frozen, run) = frozen_single();
-        let mut observed = all_green(&run);
+        let mut observed = all_green(&frozen, &run);
         observed[0].outcome = ObservedOutcome::Failed;
         assert_eq!(
             failure_classes(&frozen.verdict(&observed, &run)),
@@ -325,9 +480,9 @@ mod tests {
     #[test]
     fn duplicate_conflicting_records_fail() {
         let (frozen, run) = frozen_single();
-        let mut observed = all_green(&run);
+        let mut observed = all_green(&frozen, &run);
         observed.push(ObservedResult {
-            identity: identity(&run, "rust-a", ProviderId::Velnor),
+            identity: identity(&frozen, &run, "rust-a", ProviderId::Velnor),
             outcome: ObservedOutcome::Failed,
         });
         assert_eq!(
@@ -339,7 +494,7 @@ mod tests {
     #[test]
     fn identity_mismatch_fails() {
         let (frozen, run) = frozen_single();
-        let mut observed = all_green(&run);
+        let mut observed = all_green(&frozen, &run);
         observed[2].identity.command_digest = "forged".to_owned();
         // The forged record mismatches identity; the genuine velnor record is
         // then missing too. Both fail.
@@ -349,9 +504,70 @@ mod tests {
     }
 
     #[test]
+    fn wrong_host_substitution_fails_closed() {
+        let (frozen, run) = frozen_single();
+        let mut observed = all_green(&frozen, &run);
+        observed[2].identity.required_host = RequiredHost::Bastion;
+
+        let failures = frozen.verdict(&observed, &run);
+        assert!(failures.iter().any(|failure| matches!(
+            failure,
+            VerdictFailure::WrongHost {
+                provider: ProviderId::Velnor,
+                expected: RequiredHost::LocalMac,
+                claimed: RequiredHost::Bastion,
+                ..
+            }
+        )));
+        assert!(failures.iter().any(|failure| matches!(
+            failure,
+            VerdictFailure::Missing {
+                provider: ProviderId::Velnor,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn target_architecture_profile_and_fixture_are_bound() {
+        let (frozen, run) = frozen_single();
+
+        let mutators: [fn(&mut ResultIdentity); 3] = [
+            |identity: &mut ResultIdentity| {
+                identity.target_architecture = TargetArchitecture::Aarch64;
+            },
+            |identity: &mut ResultIdentity| {
+                identity.profile_digest = "forged-profile".to_owned();
+            },
+            |identity: &mut ResultIdentity| {
+                identity.fixture_digest = "forged-fixture".to_owned();
+            },
+        ];
+        for mutate in mutators {
+            let mut observed = all_green(&frozen, &run);
+            mutate(&mut observed[2].identity);
+            let failures = frozen.verdict(&observed, &run);
+            assert!(failures.iter().any(|failure| matches!(
+                failure,
+                VerdictFailure::IdentityMismatch {
+                    provider: ProviderId::Velnor,
+                    ..
+                }
+            )));
+            assert!(failures.iter().any(|failure| matches!(
+                failure,
+                VerdictFailure::Missing {
+                    provider: ProviderId::Velnor,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[test]
     fn stale_attempt_fails() {
         let (frozen, run) = frozen_single();
-        let mut observed = all_green(&run);
+        let mut observed = all_green(&frozen, &run);
         observed[2].identity.run_attempt = "0".to_owned();
         let classes = failure_classes(&frozen.verdict(&observed, &run));
         assert!(classes.contains(&"stale-attempt"), "{classes:?}");
@@ -369,20 +585,40 @@ mod tests {
         )
         .unwrap();
         let plan_digest = plan.digest.clone();
-        let digests = plan.command_digests();
-        let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
+        let profile_digests = BTreeMap::from([("rust-a".to_owned(), "profile-rust-a".to_owned())]);
+        let fixture_digests = BTreeMap::from([("rust-a".to_owned(), "fixture-rust-a".to_owned())]);
+        let frozen = ExpectedSet::freeze(
+            &plan.executions,
+            plan.exclusions,
+            &profile_digests,
+            &fixture_digests,
+        )
+        .unwrap();
         let run = RunIdentity {
             repository_id: "123".to_owned(),
             source_sha: "abc".to_owned(),
             run_id: "42".to_owned(),
             run_attempt: "1".to_owned(),
             plan_digest,
-            command_digests: digests,
         };
         // A local lane claims the hosted-only unit: wrong provider, and the
         // expected hosted record is missing.
         let observed = vec![ObservedResult {
-            identity: identity(&run, "rust-a", ProviderId::Velnor),
+            identity: ResultIdentity {
+                repository_id: run.repository_id.clone(),
+                source_sha: run.source_sha.clone(),
+                run_id: run.run_id.clone(),
+                run_attempt: run.run_attempt.clone(),
+                plan_digest: run.plan_digest.clone(),
+                unit_id: "rust-a".to_owned(),
+                provider: ProviderId::Velnor,
+                required_host: RequiredHost::LocalMac,
+                platform: Platform::LinuxX64,
+                target_architecture: Platform::LinuxX64.target_architecture(),
+                command_digest: "platform=linux-x64;payload=digest-of-rust-a".to_owned(),
+                profile_digest: "profile-rust-a".to_owned(),
+                fixture_digest: "fixture-rust-a".to_owned(),
+            },
             outcome: ObservedOutcome::Success,
         }];
         let failures = frozen.verdict(&observed, &run);
@@ -398,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_classes_cover_all_nine() {
+    fn failure_classes_cover_all_ten() {
         let classes = [
             VerdictFailure::Missing {
                 unit_id: String::new(),
@@ -439,6 +675,12 @@ mod tests {
                 expected: ProviderId::GithubHosted,
                 claimed: ProviderId::Velnor,
             },
+            VerdictFailure::WrongHost {
+                unit_id: "rust-a".to_owned(),
+                provider: ProviderId::Velnor,
+                expected: RequiredHost::LocalMac,
+                claimed: RequiredHost::Bastion,
+            },
         ];
         assert_eq!(
             failure_classes(&classes),
@@ -452,6 +694,7 @@ mod tests {
                 "identity-mismatch",
                 "stale-attempt",
                 "wrong-provider",
+                "wrong-host",
             ]
         );
     }
@@ -468,8 +711,8 @@ mod tests {
         assert!(error.contains("not excluded by the planner"), "{error}");
         // And the verdict still fails on the missing member.
         let observed = vec![
-            success_for(&run, ProviderId::GithubHosted),
-            success_for(&run, ProviderId::GithubSelfHosted),
+            success_for(&frozen, &run, ProviderId::GithubHosted),
+            success_for(&frozen, &run, ProviderId::GithubSelfHosted),
         ];
         assert!(!frozen.passes(&observed, &run));
     }
@@ -478,7 +721,15 @@ mod tests {
     fn planner_declared_exclusions_are_accepted() {
         let plan = fanout(&[planned("rust-a")], None, &universe(), &selectors(), false).unwrap();
         assert!(!plan.exclusions.is_empty());
-        let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions.clone());
+        let profile_digests = BTreeMap::from([("rust-a".to_owned(), "profile-rust-a".to_owned())]);
+        let fixture_digests = BTreeMap::from([("rust-a".to_owned(), "fixture-rust-a".to_owned())]);
+        let frozen = ExpectedSet::freeze(
+            &plan.executions,
+            plan.exclusions.clone(),
+            &profile_digests,
+            &fixture_digests,
+        )
+        .unwrap();
         for exclusion in &plan.exclusions {
             reject_late_exclusion(&frozen, exclusion).unwrap();
         }
@@ -516,7 +767,10 @@ mod tests {
                 provider: ProviderId::Velnor,
                 reason: ExclusionReason::Trust,
             }],
-        );
+            &BTreeMap::from([("rust-a".to_owned(), "profile-rust-a".to_owned())]),
+            &BTreeMap::from([("rust-a".to_owned(), "fixture-rust-a".to_owned())]),
+        )
+        .unwrap();
         assert_ne!(frozen.digest(), other.digest());
     }
 }

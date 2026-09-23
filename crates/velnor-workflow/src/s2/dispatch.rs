@@ -1,22 +1,21 @@
-//! Schema dispatch for the R2 bridge release.
+//! Dispatch the sole workflow-generator pipeline.
 //!
-//! The bridge binary serves two configuration schemas: schema 1 renders
-//! through the original pipeline in the crate root, schema 2 through the
-//! provider pipeline in [`crate::s2`]. This module peeks at the invocation
-//! (an explicit `--providers`/`--provider-mode` flag, or the target's own
-//! `.github-gen/velnor-workflow.toml`) and routes before either parser runs.
-//!
-//! The peek is fail-closed in both directions: a misrouted invocation still
-//! hits the destination pipeline's strict schema gate, which rejects the
-//! foreign schema with a usage error instead of rendering it.
+//! Schema 2 owns scanning, typed provider routing, and rendering for every
+//! generator invocation. The only command left outside this module is the
+//! non-generator `visibility` evidence command, which belongs to the
+//! repository-level evidence boundary. In particular, target shape or the
+//! presence of a generation config must never select an older runner model.
 
 use std::env;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
-/// Binary-only subcommands, mirroring `runtime::try_run` plus the reuse
-/// slice it falls through to. These never take a generator target, so the
-/// peek roots them at the policy `--workflow-root` or the working directory.
+/// Runtime subcommands owned by schema 2. Kept in the test-only dispatch
+/// probe below to document the command boundary without making it a second
+/// runtime router.
+#[cfg(test)]
 const RUNTIME_COMMANDS: &[&str] = &[
     "plan",
     "run",
@@ -35,19 +34,30 @@ const RUNTIME_COMMANDS: &[&str] = &[
     "reuse-decision",
 ];
 
-/// Run the schema-2 pipeline when this invocation targets it, else yield to
-/// the schema-1 path. `None` means "not a schema-2 invocation".
+/// Run schema 2 for every workflow-generator/runtime invocation.
+///
+/// `visibility` is evidence plumbing, not workflow generation, so it remains
+/// owned by the repository-level command parser. No target or option may
+/// reach the legacy `Github`/`Velnor`/`Both` generator path.
 pub(crate) fn run_if_s2() -> Option<Result<(), crate::GeneratorError>> {
     let arguments: Vec<OsString> = env::args_os().skip(1).collect();
-    if wants_s2(&arguments) {
-        // Both error types carry a single message string, so the bridge maps
-        // across the pipeline boundary without losing context.
-        Some(super::run_from_env().map_err(|error| crate::GeneratorError::usage(error.to_string())))
-    } else {
-        None
+    if arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .is_some_and(|command| command == "visibility")
+    {
+        return None;
     }
+    // Both error types carry a single message string, so the boundary maps
+    // without losing context.
+    Some(super::run_from_env().map_err(|error| crate::GeneratorError::usage(error.to_string())))
 }
 
+// The functions below retain the old routing probe only for the historical
+// unit tests in this module. They are not called by `run_if_s2`; production
+// dispatch no longer consults target schema, provider flags, or legacy lane
+// names to choose an executable pipeline.
+#[cfg(test)]
 fn wants_s2(arguments: &[OsString]) -> bool {
     // `visibility` is schema-agnostic evidence plumbing; it always stays on
     // the schema-1 path, which owns the subcommand for both pipelines.
@@ -69,6 +79,7 @@ fn wants_s2(arguments: &[OsString]) -> bool {
     wants_s2_generator(arguments)
 }
 
+#[cfg(test)]
 fn has_provider_selection_flag(arguments: &[OsString]) -> bool {
     arguments.iter().any(|argument| {
         let text = argument.to_string_lossy();
@@ -82,6 +93,7 @@ fn has_provider_selection_flag(arguments: &[OsString]) -> bool {
 /// Runtime subcommands operate on the working directory (or the policy
 /// `--workflow-root`), never on a generator target. `version` and `closure`
 /// print build constants shared by both pipelines, so they stay put.
+#[cfg(test)]
 fn wants_s2_runtime(command: &str, arguments: &[OsString]) -> bool {
     if command == "version" || command == "closure" {
         return false;
@@ -99,6 +111,7 @@ fn wants_s2_runtime(command: &str, arguments: &[OsString]) -> bool {
 /// whose generation config declares `schema = 2`. Anything else (a remote
 /// target, an unparsable command line) stays on the schema-1 path, which
 /// reports the real error.
+#[cfg(test)]
 fn wants_s2_generator(arguments: &[OsString]) -> bool {
     let Ok(cli) = crate::Cli::parse_args(arguments.to_vec()) else {
         return false;
@@ -116,6 +129,7 @@ fn wants_s2_generator(arguments: &[OsString]) -> bool {
 
 /// The policy `--workflow-root` value in either `--flag value` or
 /// `--flag=value` form, mirroring `policy::run_cli`.
+#[cfg(test)]
 fn workflow_root_argument(arguments: &[OsString]) -> Option<PathBuf> {
     let mut index = 0;
     while index < arguments.len() {

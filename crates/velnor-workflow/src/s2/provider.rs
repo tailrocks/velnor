@@ -79,6 +79,29 @@ pub(crate) const LOCAL_MAC_HOST_LABEL: &str = "local-mac";
 pub(crate) const BASTION_HOST_LABEL: &str = "bastion";
 const LOCAL_HOST_LABELS: [&str; 2] = [LOCAL_MAC_HOST_LABEL, BASTION_HOST_LABEL];
 
+/// The physical/control-plane host required for one result.
+///
+/// This is deliberately separate from [`ProviderId`]. The same local provider
+/// can exist on both physical hosts, so provider identity alone cannot prove
+/// placement.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum RequiredHost {
+    GithubHosted,
+    LocalMac,
+    Bastion,
+}
+
+impl RequiredHost {
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::GithubHosted => "github-hosted",
+            Self::LocalMac => LOCAL_MAC_HOST_LABEL,
+            Self::Bastion => BASTION_HOST_LABEL,
+        }
+    }
+}
+
 /// A named runner target used by scheduled and release jobs. `macos` is a
 /// platform target, not a provider alias; all provider targets use the
 /// canonical provider IDs above. In particular, `github` is intentionally not
@@ -492,11 +515,40 @@ impl Platform {
             ))),
         }
     }
+
+    /// The architecture portion of this execution platform, carried as a
+    /// separate required-result identity dimension.
+    #[must_use]
+    pub(crate) fn target_architecture(self) -> TargetArchitecture {
+        match self {
+            Self::LinuxX64 => TargetArchitecture::X86_64,
+            Self::LinuxArm64 | Self::MacosArm64 => TargetArchitecture::Aarch64,
+        }
+    }
 }
 
 impl std::fmt::Display for Platform {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+/// Workload architecture required by a result. OS belongs to [`Platform`];
+/// architecture is repeated explicitly so a result cannot substitute a
+/// different ABI while retaining the same platform-shaped label.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum TargetArchitecture {
+    X86_64,
+    Aarch64,
+}
+
+impl TargetArchitecture {
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+        }
     }
 }
 
@@ -771,16 +823,23 @@ pub(crate) fn execution_identity_digest(platform: Platform, payload_digest: &str
     format!("platform={};payload={payload_digest}", platform.as_str())
 }
 
-fn execution_identity_platform(identity_digest: &str) -> Option<Platform> {
-    let platform = identity_digest
-        .strip_prefix("platform=")?
-        .split_once(";payload=")?
-        .0;
-    Platform::parse(platform).ok()
+/// The execution-specific portion of a required-result identity.
+///
+/// It is frozen from the plan before work starts. In particular, `required_host`
+/// is not inferred from a job-reported hostname after execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResultBinding {
+    pub(crate) required_host: RequiredHost,
+    pub(crate) platform: Platform,
+    pub(crate) target_architecture: TargetArchitecture,
+    pub(crate) command_digest: String,
+    pub(crate) profile_digest: String,
+    pub(crate) fixture_digest: String,
 }
 
-/// Full result identity (spec §2): repository + sha + run + attempt +
-/// plan digest + unit + provider + platform + command/profile/features/fixture.
+/// Full required-result identity (spec §2): repository + source + run +
+/// attempt + plan + unit + provider + required host + target platform and
+/// architecture + command/profile/fixture digests.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
@@ -794,8 +853,26 @@ pub(crate) struct ResultIdentity {
     pub(crate) plan_digest: String,
     pub(crate) unit_id: String,
     pub(crate) provider: ProviderId,
+    pub(crate) required_host: RequiredHost,
     pub(crate) platform: Platform,
+    pub(crate) target_architecture: TargetArchitecture,
     pub(crate) command_digest: String,
+    pub(crate) profile_digest: String,
+    pub(crate) fixture_digest: String,
+}
+
+impl ResultIdentity {
+    #[must_use]
+    pub(crate) fn binding(&self) -> ResultBinding {
+        ResultBinding {
+            required_host: self.required_host,
+            platform: self.platform,
+            target_architecture: self.target_architecture,
+            command_digest: self.command_digest.clone(),
+            profile_digest: self.profile_digest.clone(),
+            fixture_digest: self.fixture_digest.clone(),
+        }
+    }
 }
 
 /// One observed result record keyed by its identity tuple.
@@ -869,6 +946,12 @@ pub(crate) enum VerdictFailure {
         expected: ProviderId,
         claimed: ProviderId,
     },
+    WrongHost {
+        unit_id: String,
+        provider: ProviderId,
+        expected: RequiredHost,
+        claimed: RequiredHost,
+    },
 }
 
 impl VerdictFailure {
@@ -888,14 +971,16 @@ impl VerdictFailure {
             Self::IdentityMismatch { .. } => "identity-mismatch",
             Self::StaleAttempt { .. } => "stale-attempt",
             Self::WrongProvider { .. } => "wrong-provider",
+            Self::WrongHost { .. } => "wrong-host",
         }
     }
 }
 
 /// Strict expected-set verdict (hosted, per run/attempt).
 ///
-/// `expected` is the frozen plan set of (unit, provider) pairs. Every member
-/// must be exactly `success` with matching identity; anything else fails.
+/// `expected` is the frozen plan set of (unit, provider) pairs plus their
+/// execution bindings. Every member must be exactly `success` with matching
+/// identity; anything else fails.
 /// Records whose identity tuple does not match the run fail as
 /// identity-mismatch; two records with the same identity and conflicting
 /// outcomes fail as duplicate-conflicting. Excluded pairs are not in the
@@ -909,7 +994,7 @@ impl VerdictFailure {
     reason = "d2a shape: one complete verdict evaluator"
 )]
 pub(crate) fn evaluate_verdict(
-    expected: &BTreeSet<(String, ProviderId)>,
+    expected: &BTreeMap<(String, ProviderId), ResultBinding>,
     observed: &[ObservedResult],
     run: &RunIdentity,
 ) -> Vec<VerdictFailure> {
@@ -945,30 +1030,13 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
-        let expected_command_digest = run.command_digest_for(&identity.unit_id);
-        if identity.command_digest != expected_command_digest {
-            failures.push(VerdictFailure::IdentityMismatch {
-                unit_id: identity.unit_id.clone(),
-                provider: identity.provider,
-                reason: "command digest does not match the planned unit".to_owned(),
-            });
-            continue;
-        }
-        if execution_identity_platform(&expected_command_digest) != Some(identity.platform) {
-            failures.push(VerdictFailure::IdentityMismatch {
-                unit_id: identity.unit_id.clone(),
-                provider: identity.provider,
-                reason: "execution identity digest does not bind the planned platform".to_owned(),
-            });
-            continue;
-        }
-        if !expected.contains(&key) {
+        let Some(expected_binding) = expected.get(&key) else {
             // A record for a pair outside the expected set is either a claim
             // for another provider's work or an unselected unit: both fail.
-            let wrong_provider = expected.iter().any(|(unit, _)| unit == &identity.unit_id);
+            let wrong_provider = expected.keys().any(|(unit, _)| unit == &identity.unit_id);
             if wrong_provider {
                 let expected_provider = expected
-                    .iter()
+                    .keys()
                     .find(|(unit, _)| unit == &identity.unit_id)
                     .map_or(identity.provider, |(_, provider)| *provider);
                 failures.push(VerdictFailure::WrongProvider {
@@ -984,10 +1052,59 @@ pub(crate) fn evaluate_verdict(
                 });
             }
             continue;
+        };
+        if identity.required_host != expected_binding.required_host {
+            failures.push(VerdictFailure::WrongHost {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                expected: expected_binding.required_host,
+                claimed: identity.required_host,
+            });
+            continue;
+        }
+        if identity.platform != expected_binding.platform {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "target platform does not match the frozen result identity".to_owned(),
+            });
+            continue;
+        }
+        if identity.target_architecture != expected_binding.target_architecture {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "target architecture does not match the frozen result identity".to_owned(),
+            });
+            continue;
+        }
+        if identity.command_digest != expected_binding.command_digest {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "command digest does not match the frozen result identity".to_owned(),
+            });
+            continue;
+        }
+        if identity.profile_digest != expected_binding.profile_digest {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "profile digest does not match the frozen result identity".to_owned(),
+            });
+            continue;
+        }
+        if identity.fixture_digest != expected_binding.fixture_digest {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "fixture digest does not match the frozen result identity".to_owned(),
+            });
+            continue;
         }
         by_key.entry(key).or_default().push(record);
     }
-    for (unit_id, provider) in expected {
+    for (unit_id, provider) in expected.keys() {
         match by_key.get(&(unit_id.clone(), *provider)) {
             None => failures.push(VerdictFailure::Missing {
                 unit_id: unit_id.clone(),
@@ -1048,20 +1165,6 @@ pub(crate) struct RunIdentity {
     pub(crate) run_id: String,
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
-    pub(crate) command_digests: BTreeMap<String, String>,
-}
-
-impl RunIdentity {
-    #[allow(
-        dead_code,
-        reason = "D2 part-A strict-results API; no schema-2 caller yet"
-    )]
-    fn command_digest_for(&self, unit_id: &str) -> String {
-        self.command_digests
-            .get(unit_id)
-            .cloned()
-            .unwrap_or_default()
-    }
 }
 
 /// Per-(unit, provider) job id: `{provider}-{unit}`.
@@ -1406,7 +1509,14 @@ mod tests {
             run_id: "run".to_owned(),
             run_attempt: "1".to_owned(),
             plan_digest: "plan".to_owned(),
-            command_digests: BTreeMap::from([(unit_id.clone(), command_digest.clone())]),
+        };
+        let binding = ResultBinding {
+            required_host: RequiredHost::GithubHosted,
+            platform: Platform::LinuxX64,
+            target_architecture: TargetArchitecture::X86_64,
+            command_digest: command_digest.clone(),
+            profile_digest: "profile".to_owned(),
+            fixture_digest: "fixture".to_owned(),
         };
         let identity = || ResultIdentity {
             repository_id: run.repository_id.clone(),
@@ -1416,10 +1526,14 @@ mod tests {
             plan_digest: run.plan_digest.clone(),
             unit_id: unit_id.clone(),
             provider,
+            required_host: RequiredHost::GithubHosted,
             platform: Platform::LinuxX64,
+            target_architecture: TargetArchitecture::X86_64,
             command_digest: command_digest.clone(),
+            profile_digest: "profile".to_owned(),
+            fixture_digest: "fixture".to_owned(),
         };
-        let expected = BTreeSet::from([(unit_id.clone(), provider)]);
+        let expected = BTreeMap::from([((unit_id.clone(), provider), binding)]);
         let success = || ObservedResult {
             identity: identity(),
             outcome: ObservedOutcome::Success,
@@ -1432,7 +1546,7 @@ mod tests {
         assert!(failures.iter().any(|failure| matches!(
             failure,
             VerdictFailure::IdentityMismatch { reason, .. }
-                if reason.contains("planned platform")
+                if reason.contains("target platform")
         )));
 
         let duplicate_failures = evaluate_verdict(&expected, &[success(), success()], &run);

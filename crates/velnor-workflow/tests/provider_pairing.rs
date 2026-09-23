@@ -275,6 +275,63 @@ fn renamed_fixture_keeps_explicit_provider_host_and_trust_boundaries() {
 }
 
 #[test]
+fn renamed_fixtures_pair_every_unit_on_the_explicit_host() {
+    for (repository, host) in [
+        ("example/arbitrary-original", "local-mac"),
+        ("different/renamed-project", "bastion"),
+    ] {
+        let root = unique_dir("explicit-host-pairing");
+        write_rust_fixture(&root, 2);
+        write_workflow_config_for(
+            &root,
+            repository,
+            &format!(
+                "provider_mode = \"both\"\n\n{HOSTED_SELECTOR}\n\
+                 [workflow.selectors.github-self-hosted]\n\
+                 runs_on = [\"self-hosted\", \"velnor-scale-set\", {host:?}]\n\
+                 [workflow.selectors.velnor]\n\
+                 runs_on = [\"self-hosted\", \"velnor-native\", {host:?}]\n"
+            ),
+        );
+        write_visibility_for(&root, repository, "public");
+        let generated = generate(&root);
+        for file in ["ci-pr.yml", "ci-main.yml"] {
+            let jobs = parse_jobs(&generated.workflow(file));
+            let mut providers_by_unit: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for (id, job) in &jobs {
+                if let Some((provider, unit)) = aggregate_provider_caller_id(id) {
+                    providers_by_unit.entry(unit).or_default().push(provider);
+                    assert_eq!(job["with"]["provider"].as_str(), Some(provider));
+                    assert_eq!(job["with"]["unit"].as_str(), Some(unit));
+                }
+            }
+            assert_eq!(providers_by_unit.len(), 2, "{repository}: {file}");
+            for (unit, providers) in providers_by_unit {
+                assert_eq!(
+                    providers,
+                    ["github-hosted", "github-self-hosted", "velnor"],
+                    "{repository}: {file}: {unit} must retain every sibling"
+                );
+            }
+        }
+        let jobs = parse_jobs(&generated.workflow("ci-unit-rust.yml"));
+        assert_eq!(job_runs_on(&jobs["verify-github-hosted"]), "ubuntu-24.04");
+        for (provider, engine) in [
+            ("github-self-hosted", "velnor-scale-set"),
+            ("velnor", "velnor-native"),
+        ] {
+            assert_eq!(
+                job_runs_on(&jobs[&format!("verify-{provider}")]),
+                format!("self-hosted,{engine},{host}"),
+                "{repository}: {provider} must retain its configured host"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&generated.output);
+    }
+}
+
+#[test]
 fn hosted_only_emits_only_hosted_callers() {
     let root = unique_dir("hosted-only");
     write_rust_fixture(&root, 2);

@@ -23,7 +23,8 @@ use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::s2::provider::{
-    parse_provider_set, parse_selectors, ProviderId, ProviderMode, ProviderSelector, RunnerTarget,
+    self, parse_provider_set, parse_selectors, ProviderId, ProviderMode, ProviderSelector,
+    ProviderSet, RunnerTarget, SelectorMap,
 };
 use crate::s2::{content_digest_bytes, GeneratorError};
 
@@ -1782,6 +1783,40 @@ impl RepoGenerationConfig {
     /// The declared per-provider selectors, keyed by provider id string.
     pub(crate) fn selectors(&self) -> &BTreeMap<String, ProviderSelector> {
         &self.workflow.selectors
+    }
+
+    /// Resolve the same typed routing contract for generation and policy,
+    /// including advisory checkouts without a generated runtime contract.
+    pub(crate) fn apply_provider_routing(
+        &self,
+        providers: &mut ProviderSet,
+        automatic_providers: &mut ProviderSet,
+        selectors: &mut SelectorMap,
+    ) -> Result<(), GeneratorError> {
+        validate_workflow(&self.workflow)?;
+        if let Some(mode) = self.provider_mode() {
+            *providers = mode.provider_universe();
+            *automatic_providers = mode.automatic_providers();
+        } else if let Some(declared) = self.providers() {
+            *providers = parse_provider_set(declared, "[workflow] providers")?;
+            provider::require_non_empty(providers, "[workflow] providers")?;
+            *automatic_providers = self
+                .automatic_providers()
+                .map(|values| parse_provider_set(values, "[workflow] automatic_providers"))
+                .transpose()?
+                .unwrap_or_else(|| providers.clone());
+        } else if let Some(automatic) = self.automatic_providers() {
+            *automatic_providers = parse_provider_set(automatic, "[workflow] automatic_providers")?;
+        }
+        provider::require_subset(
+            automatic_providers,
+            providers,
+            "[workflow] automatic_providers",
+            "[workflow] providers",
+        )?;
+        selectors.extend(parse_selectors(self.selectors())?);
+        provider::validate_selector_identities(selectors, providers)?;
+        provider::validate_selector_disjointness(selectors)
     }
 
     /// The declared Rust unit `needs:` topology.

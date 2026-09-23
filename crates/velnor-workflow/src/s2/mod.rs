@@ -2460,35 +2460,11 @@ fn apply_provider_generation_config(
     config: &mut ProjectConfig,
     generation: &config::RepoGenerationConfig,
 ) -> Result<(), GeneratorError> {
-    if let Some(mode) = generation.provider_mode() {
-        config.providers = mode.provider_universe();
-        config.automatic_providers = mode.automatic_providers();
-    } else if let Some(providers) = generation.providers() {
-        config.providers = provider::parse_provider_set(providers, "[workflow] providers")?;
-        provider::require_non_empty(&config.providers, "[workflow] providers")?;
-        if let Some(automatic) = generation.automatic_providers() {
-            config.automatic_providers =
-                provider::parse_provider_set(automatic, "[workflow] automatic_providers")?;
-        } else {
-            // The universe moved; the automatic set follows it unless declared.
-            config.automatic_providers.clone_from(&config.providers);
-        }
-    } else if let Some(automatic) = generation.automatic_providers() {
-        config.automatic_providers =
-            provider::parse_provider_set(automatic, "[workflow] automatic_providers")?;
-    }
-    provider::require_subset(
-        &config.automatic_providers,
-        &config.providers,
-        "[workflow] automatic_providers",
-        "[workflow] providers",
+    generation.apply_provider_routing(
+        &mut config.providers,
+        &mut config.automatic_providers,
+        &mut config.selectors,
     )?;
-    let selectors = provider::parse_selectors(generation.selectors())?;
-    for (provider, selector) in selectors {
-        config.selectors.insert(provider, selector);
-    }
-    provider::require_selectors_for(&config.selectors, &config.providers)?;
-    provider::validate_selector_disjointness(&config.selectors)?;
     if let Some(rust_needs) = generation.rust_needs() {
         config.rust_needs = parse_rust_needs(rust_needs)?;
     }
