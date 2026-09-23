@@ -17,6 +17,8 @@ use crate::{
 /// Toolchain identity pins shared by every Apple cache and watch contract.
 /// `.swift-tools-version` is intentionally absent: it is only a minimum floor.
 const APPLE_TOOLCHAIN_PIN_KEY_FILES: [&str; 3] = ["mise.lock", ".swift-version", ".xcode-version"];
+const SWIFT_FORMAT_CONFIG: &str = ".swift-format";
+const SWIFT_LINT_CONFIGS: [&str; 2] = [".swiftlint.yml", ".swiftlint.yaml"];
 
 fn append_apple_toolchain_pin_paths(paths: &mut Vec<String>) {
     paths.extend(
@@ -26,40 +28,100 @@ fn append_apple_toolchain_pin_paths(paths: &mut Vec<String>) {
     );
 }
 
-fn call_present(contents: &str, call: &str) -> bool {
-    let mut rest = contents;
-    while let Some(found) = rest.find(call) {
-        rest = &rest[found + call.len()..];
-        if rest
-            .trim_start_matches([' ', '\t', '\n', '\r'])
-            .starts_with('(')
+fn swift_raw_string_quote(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    if bytes.get(start) != Some(&b'#') {
+        return None;
+    }
+    let mut quote = start;
+    while bytes.get(quote) == Some(&b'#') {
+        quote += 1;
+    }
+    (bytes.get(quote) == Some(&b'"')).then_some((quote, quote - start))
+}
+
+fn string_delimiter_is_escaped(bytes: &[u8], quote: usize, hashes: usize) -> bool {
+    let mut slash = quote;
+    while slash > 0 && bytes[slash - 1] == b'\\' {
+        slash -= 1;
+    }
+    if (quote - slash) % 2 == 1 {
+        return true;
+    }
+    hashes > 0
+        && quote > hashes
+        && bytes[quote - hashes..quote]
+            .iter()
+            .all(|byte| *byte == b'#')
+        && bytes[quote - hashes - 1] == b'\\'
+}
+
+fn swift_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let (quote, hashes) = if bytes.get(start) == Some(&b'"') {
+        (start, 0)
+    } else {
+        swift_raw_string_quote(bytes, start)?
+    };
+    let multiline = bytes.get(quote + 1) == Some(&b'"') && bytes.get(quote + 2) == Some(&b'"');
+    let opening_len = if multiline { 3 } else { 1 };
+    let closing_len = opening_len + hashes;
+    let mut index = quote + opening_len;
+    while index + closing_len <= bytes.len() {
+        let closes = if multiline {
+            bytes[index..].starts_with(b"\"\"\"")
+        } else {
+            bytes[index] == b'"'
+        };
+        if closes
+            && !string_delimiter_is_escaped(bytes, index, hashes)
+            && bytes[index + opening_len..index + closing_len]
+                .iter()
+                .all(|byte| *byte == b'#')
         {
+            return Some(index + closing_len);
+        }
+        if hashes == 0 && !multiline && bytes[index] == b'\\' {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn swift_string_has_interpolation(bytes: &[u8], start: usize, end: usize) -> bool {
+    let (quote, hashes) = if bytes.get(start) == Some(&b'"') {
+        (start, 0)
+    } else if let Some((quote, hashes)) = swift_raw_string_quote(bytes, start) {
+        (quote, hashes)
+    } else {
+        return false;
+    };
+    let multiline = bytes.get(quote + 1) == Some(&b'"') && bytes.get(quote + 2) == Some(&b'"');
+    let opening_len = if multiline { 3 } else { 1 };
+    let content_start = quote + opening_len;
+    let content_end = end.saturating_sub(opening_len + hashes);
+    let mut index = content_start;
+    while index < content_end {
+        if bytes[index] != b'\\' {
+            index += 1;
+            continue;
+        }
+        let slash_start = index;
+        while index < content_end && bytes[index] == b'\\' {
+            index += 1;
+        }
+        if (index - slash_start) % 2 != 1 {
+            continue;
+        }
+        let marker_start = index;
+        while index < content_end && bytes[index] == b'#' {
+            index += 1;
+        }
+        if index - marker_start == hashes && bytes.get(index) == Some(&b'(') {
             return true;
         }
     }
     false
-}
-
-fn swift_string_end(bytes: &[u8], start: usize) -> Option<usize> {
-    if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
-        let mut index = start + 3;
-        while index + 3 <= bytes.len() {
-            if bytes[index..index + 3] == *b"\"\"\"" {
-                return Some(index + 3);
-            }
-            index += 1;
-        }
-        return None;
-    }
-    let mut index = start + 1;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 2,
-            b'"' => return Some(index + 1),
-            _ => index += 1,
-        }
-    }
-    None
 }
 
 fn swift_block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
@@ -105,16 +167,177 @@ fn swift_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn qualified_swift_call(call: &str) -> Option<&'static str> {
+    match call {
+        ".testTarget" => Some("Target.testTarget"),
+        ".binaryTarget" => Some("Target.binaryTarget"),
+        _ => None,
+    }
+}
+
+fn module_qualified_swift_call(call: &str) -> Option<&'static str> {
+    match call {
+        ".testTarget" => Some("PackageDescription.Target.testTarget"),
+        ".binaryTarget" => Some("PackageDescription.Target.binaryTarget"),
+        "Product.executable" => Some("PackageDescription.Product.executable"),
+        _ => None,
+    }
+}
+
 /// Detect a Swift call without treating comments or string contents as
 /// package declarations. The scan only needs the call marker: it intentionally
 /// refuses the whole schema-1 surface when a product might require a `swift
 /// run` phase that this pipeline cannot model.
 fn has_swift_call(contents: &str, call: &str) -> bool {
+    has_swift_call_marker(contents, call)
+        || qualified_swift_call(call)
+            .is_some_and(|qualified| has_swift_call_marker(contents, qualified))
+        || module_qualified_swift_call(call)
+            .is_some_and(|qualified| has_swift_call_marker(contents, qualified))
+}
+
+fn has_swift_call_marker(contents: &str, call: &str) -> bool {
     let bytes = contents.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
             b'"' => {
+                let Some(next) = swift_string_end(bytes, index) else {
+                    return true;
+                };
+                index = next;
+            }
+            b'#' if swift_raw_string_quote(bytes, index).is_some() => {
+                let Some(next) = swift_string_end(bytes, index) else {
+                    return true;
+                };
+                index = next;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let Some(next) = swift_block_comment_end(bytes, index) else {
+                    return true;
+                };
+                index = next;
+            }
+            _ => {
+                let matches_call = contents[index..].starts_with(call)
+                    && (index == 0
+                        || (!swift_identifier_byte(bytes[index - 1]) && bytes[index - 1] != b'.'))
+                    && (index + call.len() == bytes.len()
+                        || !swift_identifier_byte(bytes[index + call.len()]));
+                if matches_call {
+                    let Some(next) = swift_trivia_end(bytes, index + call.len()) else {
+                        return true;
+                    };
+                    if bytes.get(next) == Some(&b'(') {
+                        return true;
+                    }
+                }
+                let width = contents[index..].chars().next().map_or(1, char::len_utf8);
+                index += width;
+            }
+        }
+    }
+    false
+}
+
+fn swift_group_has_literal(
+    contents: &str,
+    bytes: &[u8],
+    group_start: usize,
+    key: &str,
+    literal: &str,
+) -> Option<(bool, usize)> {
+    let mut depth = 1;
+    let mut cursor = group_start + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' => {
+                let next = swift_string_end(bytes, cursor)?;
+                cursor = next;
+            }
+            b'#' if swift_raw_string_quote(bytes, cursor).is_some() => {
+                let next = swift_string_end(bytes, cursor)?;
+                cursor = next;
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = swift_block_comment_end(bytes, cursor)?;
+            }
+            b'(' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                depth -= 1;
+                cursor += 1;
+                if depth == 0 {
+                    return Some((false, cursor));
+                }
+            }
+            _ => {
+                let matches_key = depth == 1
+                    && contents[cursor..].starts_with(key)
+                    && (cursor == 0 || !swift_identifier_byte(bytes[cursor - 1]))
+                    && (cursor + key.len() == bytes.len()
+                        || !swift_identifier_byte(bytes[cursor + key.len()]));
+                if matches_key {
+                    let colon = swift_trivia_end(bytes, cursor + key.len())?;
+                    if bytes.get(colon) == Some(&b':') {
+                        let value = swift_trivia_end(bytes, colon + 1)?;
+                        let is_string = bytes.get(value) == Some(&b'"')
+                            || swift_raw_string_quote(bytes, value).is_some();
+                        if is_string {
+                            let end = swift_string_end(bytes, value)?;
+                            if !swift_string_has_interpolation(bytes, value, end)
+                                && contents[value..end].contains(literal)
+                            {
+                                return Some((true, end));
+                            }
+                            cursor = end;
+                            continue;
+                        }
+                    }
+                }
+                let width = contents[cursor..].chars().next().map_or(1, char::len_utf8);
+                cursor += width;
+            }
+        }
+    }
+    None
+}
+
+fn swift_call_has_literal(contents: &str, call: &str, key: &str, literal: &str) -> bool {
+    swift_call_has_literal_marker(contents, call, key, literal)
+        || qualified_swift_call(call).is_some_and(|qualified| {
+            swift_call_has_literal_marker(contents, qualified, key, literal)
+        })
+        || module_qualified_swift_call(call).is_some_and(|qualified| {
+            swift_call_has_literal_marker(contents, qualified, key, literal)
+        })
+}
+
+fn swift_call_has_literal_marker(contents: &str, call: &str, key: &str, literal: &str) -> bool {
+    let bytes = contents.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let Some(next) = swift_string_end(bytes, index) else {
+                    return false;
+                };
+                index = next;
+            }
+            b'#' if swift_raw_string_quote(bytes, index).is_some() => {
                 let Some(next) = swift_string_end(bytes, index) else {
                     return false;
                 };
@@ -133,23 +356,150 @@ fn has_swift_call(contents: &str, call: &str) -> bool {
             }
             _ => {
                 let matches_call = contents[index..].starts_with(call)
-                    && (index == 0 || !swift_identifier_byte(bytes[index - 1]))
+                    && (index == 0
+                        || (!swift_identifier_byte(bytes[index - 1]) && bytes[index - 1] != b'.'))
                     && (index + call.len() == bytes.len()
                         || !swift_identifier_byte(bytes[index + call.len()]));
-                if matches_call {
-                    let Some(next) = swift_trivia_end(bytes, index + call.len()) else {
-                        return false;
-                    };
-                    if bytes.get(next) == Some(&b'(') {
-                        return true;
-                    }
+                if !matches_call {
+                    let width = contents[index..].chars().next().map_or(1, char::len_utf8);
+                    index += width;
+                    continue;
                 }
-                let width = contents[index..].chars().next().map_or(1, char::len_utf8);
-                index += width;
+                let Some(group_start) = swift_trivia_end(bytes, index + call.len()) else {
+                    return false;
+                };
+                if bytes.get(group_start) != Some(&b'(') {
+                    index += call.len();
+                    continue;
+                }
+                let Some((found, next)) =
+                    swift_group_has_literal(contents, bytes, group_start, key, literal)
+                else {
+                    return false;
+                };
+                if found {
+                    return true;
+                }
+                index = next;
             }
         }
     }
     false
+}
+
+fn join_style_path(root: &str, name: &str) -> String {
+    if root == "." {
+        name.to_owned()
+    } else {
+        format!("{root}/{name}")
+    }
+}
+
+fn parent_style_path(path: &str) -> Option<String> {
+    if path == "." {
+        None
+    } else {
+        Some(
+            path.rsplit_once('/')
+                .map_or_else(|| ".".to_owned(), |(parent, _)| parent.to_owned()),
+        )
+    }
+}
+
+/// Find the nearest repository config at the unit root or one of its
+/// ancestors. A root unit never inherits a nested package's config.
+fn nearest_style_config(unit_root: &str, files: &[String], names: &[&str]) -> Option<String> {
+    let mut scope = unit_root.to_owned();
+    loop {
+        for name in names {
+            let candidate = join_style_path(&scope, name);
+            if files.iter().any(|file| file == &candidate) {
+                return Some(candidate);
+            }
+        }
+        let Some(parent) = parent_style_path(&scope) else {
+            break;
+        };
+        scope = parent;
+    }
+    None
+}
+
+fn relative_style_path(from: &str, to: &str) -> String {
+    let from_parts = if from == "." {
+        Vec::new()
+    } else {
+        from.split('/').collect::<Vec<_>>()
+    };
+    let to_parts = if to == "." {
+        Vec::new()
+    } else {
+        to.split('/').collect::<Vec<_>>()
+    };
+    let common = from_parts
+        .iter()
+        .zip(&to_parts)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = Vec::new();
+    parts.extend(std::iter::repeat_n("..", from_parts.len() - common));
+    parts.extend(to_parts[common..].iter().copied());
+    if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn swift_style_checks(unit_root: &str, files: &[String]) -> Vec<(String, ValidationPhase, String)> {
+    let mut checks = Vec::new();
+    if let Some(config) = nearest_style_config(unit_root, files, &[SWIFT_FORMAT_CONFIG]) {
+        let config_arg = shell_quote(&relative_style_path(unit_root, &config));
+        checks.push((
+            format!(
+                "{}swift format lint --configuration {config_arg} --recursive --strict .",
+                shell_change_dir(unit_root)
+            ),
+            ValidationPhase::SwiftFormat,
+            config,
+        ));
+    }
+    if let Some(config) = nearest_style_config(unit_root, files, &SWIFT_LINT_CONFIGS) {
+        let config_arg = shell_quote(&relative_style_path(unit_root, &config));
+        checks.push((
+            format!(
+                "{}swiftlint lint --config {config_arg} --strict",
+                shell_change_dir(unit_root)
+            ),
+            ValidationPhase::SwiftLint,
+            config,
+        ));
+    }
+    checks
+}
+
+fn apply_swift_style_checks(unit: &mut Unit, files: &[String]) {
+    let checks = swift_style_checks(&unit.root, files);
+    if checks.is_empty() {
+        return;
+    }
+    let mut commands = checks
+        .iter()
+        .map(|(command, _, _)| command.clone())
+        .collect::<Vec<_>>();
+    commands.extend(std::mem::take(&mut unit.pr_commands));
+    unit.pr_commands = commands.clone();
+    unit.full_commands = commands;
+    let mut phases = checks
+        .iter()
+        .map(|(_, phase, _)| *phase)
+        .collect::<Vec<_>>();
+    phases.extend(std::mem::take(&mut unit.phases));
+    unit.phases = phases;
+    unit.watch
+        .extend(checks.into_iter().map(|(_, _, config)| config));
+    unit.watch.sort();
+    unit.watch.dedup();
 }
 
 fn is_xcodegen_spec(contents: &str) -> bool {
@@ -383,6 +733,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             mbx: None,
             prepared_tools: Vec::new(),
         };
+        apply_swift_style_checks(&mut unit, files);
         unit.watch.sort();
         unit.watch.dedup();
         units.push(unit);
@@ -397,7 +748,8 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
 fn package_manifest_needs_xcframework(root: &Path, package_root: &str) -> bool {
     let manifest = root.join(join_repo_path(package_root, "Package.swift"));
     let contents = fs::read_to_string(manifest).unwrap_or_default();
-    contents.contains(".binaryTarget") && contents.contains(".xcframework")
+    swift_call_has_literal(&contents, ".binaryTarget", "path", ".xcframework")
+        || swift_call_has_literal(&contents, ".binaryTarget", "url", ".xcframework")
 }
 
 pub(crate) fn detect(
@@ -418,13 +770,14 @@ pub(crate) fn detect(
         }
         let has_tests = contents
             .as_deref()
-            .is_none_or(|contents| call_present(contents, ".testTarget"));
+            .is_none_or(|contents| has_swift_call(contents, ".testTarget"));
         if !has_tests {
             shape.limitations.push(format!(
                 "Swift package {manifest} declares no test targets; emitting build-only commands."
             ));
         }
         let mut unit = swift_package_unit(&package_root, has_tests);
+        apply_swift_style_checks(&mut unit, context.files);
         if package_manifest_needs_xcframework(context.root, &package_root) {
             unit.platform = crate::platform::PlatformRequirement::apple_xcframework();
         }
@@ -471,7 +824,8 @@ pub(crate) fn detect(
 #[cfg(test)]
 mod tests {
     use super::{
-        has_swift_call, is_xcodegen_spec, swift_package_unit, xcode_scheme_has_test_action,
+        apply_swift_style_checks, has_swift_call, is_xcodegen_spec, swift_call_has_literal,
+        swift_package_unit, swift_style_checks, xcode_scheme_has_test_action,
         APPLE_TOOLCHAIN_PIN_KEY_FILES,
     };
     use crate::ValidationPhase;
@@ -509,6 +863,10 @@ mod tests {
             "Product.executable"
         ));
         assert!(has_swift_call(
+            "products: [PackageDescription.Product.executable(name: \"App\", targets: [\"App\"])]",
+            "Product.executable"
+        ));
+        assert!(has_swift_call(
             "products: [.executable /* comment */ (name: \"App\", targets: [\"App\"])]",
             ".executable"
         ));
@@ -520,6 +878,174 @@ mod tests {
             "/* .executable(name: \"App\") */",
             ".executable"
         ));
+        assert!(!has_swift_call(
+            "let note = #\".executable(name: \"App\")\"#",
+            ".executable"
+        ));
+        assert!(has_swift_call(
+            "let note = \"unterminated .testTarget(name: ",
+            ".testTarget"
+        ));
+    }
+
+    #[test]
+    fn test_target_detection_skips_comments_strings_and_lookalikes() {
+        assert!(has_swift_call(
+            ".testTarget /* gap */ (name: \"Tests\")",
+            ".testTarget"
+        ));
+        assert!(has_swift_call(
+            "Target.testTarget(name: \"Tests\")",
+            ".testTarget"
+        ));
+        assert!(has_swift_call(
+            "PackageDescription.Target.testTarget(name: \"Tests\")",
+            ".testTarget"
+        ));
+        assert!(!has_swift_call(
+            "// .testTarget(name: \"Comment\")\nlet text = \".testTarget(name: \\\"String\\\")\"",
+            ".testTarget"
+        ));
+        assert!(!has_swift_call(
+            ".not_testTarget(name: \"Lookalike\")\n.testTargeting(name: \"Lookalike\")\nOther.testTarget(name: \"Lookalike\")",
+            ".testTarget"
+        ));
+    }
+
+    #[test]
+    fn xcframework_identity_requires_a_real_binary_target_literal() {
+        assert!(swift_call_has_literal(
+            ".binaryTarget /* gap */ (path: \"Build/App.xcframework\")",
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+        assert!(swift_call_has_literal(
+            "Target.binaryTarget(path: \"Build/App.xcframework\")",
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+        assert!(swift_call_has_literal(
+            "PackageDescription.Target.binaryTarget(path: \"Build/App.xcframework\")",
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+        assert!(swift_call_has_literal(
+            ".binaryTarget(url: \"https://example.com/App.xcframework\", checksum: \"abc\")",
+            ".binaryTarget",
+            "url",
+            ".xcframework"
+        ));
+        assert!(!swift_call_has_literal(
+            ".binaryTarget(path: \"Build/\\(name).xcframework\")",
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+        assert!(!swift_call_has_literal(
+            r##".binaryTarget(path: #"Build/\#(name).xcframework"#)"##,
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+        assert!(!swift_call_has_literal(
+            "let note = \".binaryTarget(path: \\\"Fake.xcframework\\\")\"\n\
+             // .binaryTarget(path: \"Comment.xcframework\")",
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+        assert!(!swift_call_has_literal(
+            ".binaryTarget(path: computed)\nlet path = \"Build/App.xcframework\"",
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+        assert!(!swift_call_has_literal(
+            ".binaryTarget(name: \"Fake.xcframework\", path: computed)",
+            ".binaryTarget",
+            "path",
+            ".xcframework"
+        ));
+    }
+
+    #[test]
+    fn swift_style_checks_use_nearest_real_configs() {
+        let files = vec![
+            "Packages/App/Package.swift".to_owned(),
+            "Packages/.swift-format".to_owned(),
+            "Packages/.swiftlint.yaml".to_owned(),
+            "Packages/App/.swiftlint.yml".to_owned(),
+            "Packages/App/notes.swift-format".to_owned(),
+            "Packages/App/docs/.swiftlint.yml".to_owned(),
+        ];
+        let checks = swift_style_checks("Packages/App", &files);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(
+            checks[0],
+            (
+                "cd -- 'Packages/App' && swift format lint --configuration '../.swift-format' --recursive --strict ."
+                    .to_owned(),
+                ValidationPhase::SwiftFormat,
+                "Packages/.swift-format".to_owned(),
+            )
+        );
+        assert_eq!(
+            checks[1],
+            (
+                "cd -- 'Packages/App' && swiftlint lint --config '.swiftlint.yml' --strict"
+                    .to_owned(),
+                ValidationPhase::SwiftLint,
+                "Packages/App/.swiftlint.yml".to_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn swift_style_checks_do_not_inherit_nested_configs_or_change_cache_keys() {
+        let files = vec![
+            "Package.swift".to_owned(),
+            "Packages/App/.swift-format".to_owned(),
+            "Packages/App/.swiftlint.yml".to_owned(),
+        ];
+        assert!(swift_style_checks(".", &files).is_empty());
+
+        let mut unit = swift_package_unit("Packages/App", true);
+        let cache_keys = unit.cache.as_ref().map(|cache| cache.key_files.clone());
+        assert!(cache_keys.is_some());
+        apply_swift_style_checks(&mut unit, &files);
+        assert_eq!(
+            unit.phases,
+            vec![
+                ValidationPhase::SwiftFormat,
+                ValidationPhase::SwiftLint,
+                ValidationPhase::SwiftBuild,
+                ValidationPhase::SwiftTest,
+            ]
+        );
+        assert_eq!(
+            unit.pr_commands,
+            vec![
+                "cd -- 'Packages/App' && swift format lint --configuration '.swift-format' --recursive --strict ."
+                    .to_owned(),
+                "cd -- 'Packages/App' && swiftlint lint --config '.swiftlint.yml' --strict"
+                    .to_owned(),
+                "cd -- 'Packages/App' && swift build".to_owned(),
+                "cd -- 'Packages/App' && swift test --parallel".to_owned(),
+            ]
+        );
+        assert!(unit
+            .watch
+            .contains(&"Packages/App/.swift-format".to_owned()));
+        assert!(unit
+            .watch
+            .contains(&"Packages/App/.swiftlint.yml".to_owned()));
+        assert_eq!(
+            unit.cache.as_ref().map(|cache| &cache.key_files),
+            cache_keys.as_ref()
+        );
     }
 
     #[test]
