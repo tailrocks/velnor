@@ -23,6 +23,7 @@ const RUNTIME_COMMANDS: &[&str] = &[
     "test-crates",
     "policy",
     "release",
+    "release-admission",
     "version",
     "closure",
     "prepared-tool-install",

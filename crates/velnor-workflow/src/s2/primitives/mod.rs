@@ -50,6 +50,7 @@ pub(crate) use ir::{
     validate_xcodegen_tools_are_locked, ProviderAdmission, WorkflowIr, WorkflowKind,
     D19_PIN_FETCH_COMMANDS, GITHUB_WORKFLOW_BYTE_LIMIT, MISE_INSTALL_DEPS_MODEL_VERSION,
 };
+pub(crate) use package_release::release_admission_command;
 
 #[cfg(test)]
 pub(crate) use ir::jq_read_plan_matrix;

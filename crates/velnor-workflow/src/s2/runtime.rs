@@ -464,30 +464,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "run" => {
-            let options = parse_options(&arguments[1..], &["config", "scope", "unit", "phase"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-            let config = resolve_config_path(options.get("config"));
-            let scope = options
-                .get("scope")
-                .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
-            let phase = options
-                .get("phase")
-                .map(|value| {
-                    ValidationPhase::parse(value).ok_or_else(|| {
-                        GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"
-                        ))
-                    })
-                })
-                .transpose()?;
-            run_units(
-                &root,
-                &config,
-                scope,
-                options.get("unit").map(String::as_str),
-                phase,
-            )?;
+            run_ci_command(&arguments[1..])?;
             Ok(true)
         }
         "test-crates" => {
@@ -503,6 +480,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "release" => {
             release(&arguments[1..])?;
+            Ok(true)
+        }
+        "release-admission" => {
+            run_release_admission(&arguments[1..])?;
             Ok(true)
         }
         "version" => {
@@ -553,6 +534,63 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         _ => try_run_reuse(command, arguments),
     }
+}
+
+fn run_ci_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["config", "scope", "unit", "phase"])?;
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let config = resolve_config_path(options.get("config"));
+    let scope = options
+        .get("scope")
+        .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
+    let phase = options
+        .get("phase")
+        .map(|value| {
+            ValidationPhase::parse(value).ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"
+                ))
+            })
+        })
+        .transpose()?;
+    run_units(
+        &root,
+        &config,
+        scope,
+        options.get("unit").map(String::as_str),
+        phase,
+    )
+}
+
+fn run_release_admission(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "repository",
+            "ref",
+            "event",
+            "before",
+            "head",
+            "replay-from",
+        ],
+    )?;
+    let required = |name: &str| {
+        options.get(name).ok_or_else(|| {
+            GeneratorError::usage(format!("release-admission requires --{name} VALUE"))
+        })
+    };
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    super::primitives::release_admission_command(
+        &root,
+        required("repository")?,
+        required("ref")?,
+        required("event")?,
+        required("before")?,
+        required("head")?,
+        options.get("replay-from").map(Path::new),
+    )
 }
 
 /// Dispatch the slice-C subcommands (`aggregate`, `select`, `fingerprint`,

@@ -7,9 +7,14 @@
 // consumer updater invocation. No consumer repository or product name is
 // embedded here.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
+
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use serde::{Deserialize, Serialize};
 
 use super::{Args, Primitive, RenderCtx, Rendered, PACKAGE_RELEASE};
 use crate::s2::provider::ProviderId;
@@ -42,6 +47,76 @@ struct PackageReleaseSpec {
     updater_token_secret: String,
     update_commit_message: String,
     concurrency_group: String,
+    release_inputs: ReleaseInputRules,
+}
+
+/// Repository-owned positive and negative path declarations for source-head
+/// preview admission. Unknown paths intentionally remain production-capable:
+/// an incomplete path inventory may publish an unnecessary preview, but it
+/// must never silently suppress a required one.
+///
+/// These globs classify paths, not Rust semantics. Inline Rust tests live in
+/// production `src/` files, so edits there conservatively admit a preview even
+/// when the edit only changes an inline test. A path-only classifier cannot
+/// claim semantic test-only precision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseInputRules {
+    production_inputs: BTreeMap<String, Vec<String>>,
+    production_dependencies: BTreeMap<String, Vec<String>>,
+    non_production_inputs: BTreeMap<String, Vec<String>>,
+}
+
+/// A path matched by a named rule. Paths are recorded so an operator can
+/// explain and replay the exact decision without consulting current main.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AdmissionMatch {
+    id: String,
+    path: String,
+}
+
+/// Full path-level result of one push admission decision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AdmissionPath {
+    path: String,
+    previous: Option<String>,
+    status: String,
+}
+
+/// Source-head release admission evidence. The result has no timestamp or
+/// mutable-main lookup, so replay of the same explicit source tuple and rules
+/// is byte-stable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseAdmission {
+    schema: String,
+    repository: String,
+    /// Ref named by the triggering event, retained so a replay is tied to it.
+    source_ref: String,
+    /// Repository-configured source ref that is allowed to publish previews.
+    configured_source_ref: String,
+    before_sha: String,
+    head_sha: String,
+    head_tree: String,
+    changed_paths: Vec<AdmissionPath>,
+    matched_rules: Vec<AdmissionMatch>,
+    matched_dependencies: Vec<AdmissionMatch>,
+    matched_non_production: Vec<AdmissionMatch>,
+    disposition: String,
+    reason: String,
+    rules_digest: String,
+}
+
+struct AdmissionEvent<'a> {
+    repository: &'a str,
+    event_ref: &'a str,
+    configured_source_ref: &'a str,
+    event_name: &'a str,
+    before_sha: &'a str,
+    head_sha: &'a str,
+    head_tree: &'a str,
 }
 
 pub(crate) struct PackageRelease;
@@ -68,6 +143,9 @@ impl Primitive for PackageRelease {
             "publish_environment",
             "release_tag",
             "release_title_prefix",
+            "production_inputs",
+            "production_dependencies",
+            "non_production_inputs",
             "source_ref",
             "source_repository",
             "supporting_assets",
@@ -239,6 +317,479 @@ fn validate_mise_tasks(root: &Path, key: &str, tasks: &[String]) -> Result<(), G
             )));
         }
     }
+    Ok(())
+}
+
+fn valid_rule_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
+}
+
+fn compile_release_groups(
+    key: &str,
+    groups: &BTreeMap<String, Vec<String>>,
+    required: bool,
+) -> Result<Vec<(String, GlobSet)>, GeneratorError> {
+    if required && groups.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "package-release {key} must declare at least one named path group"
+        )));
+    }
+    let mut compiled = Vec::with_capacity(groups.len());
+    for (id, patterns) in groups {
+        if !valid_rule_id(id) {
+            return Err(GeneratorError::usage(format!(
+                "package-release {key} group id {id:?} must use lowercase letters, digits, `-`, or `_`"
+            )));
+        }
+        if patterns.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "package-release {key} group {id} must contain at least one path glob"
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            if pattern.is_empty()
+                || pattern.starts_with('/')
+                || pattern.contains(['\\', '\0', '\n', '\r'])
+                || pattern.split('/').any(|part| matches!(part, "." | ".."))
+                || !seen.insert(pattern)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "package-release {key} group {id} has an unsafe or duplicate repository-relative glob: {pattern:?}"
+                )));
+            }
+            let glob = GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .build()
+                .map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "package-release {key} group {id} has invalid glob {pattern:?}: {error}"
+                    ))
+                })?;
+            builder.add(glob);
+        }
+        let set = builder.build().map_err(|error| {
+            GeneratorError::usage(format!(
+                "package-release {key} group {id} has invalid glob set: {error}"
+            ))
+        })?;
+        compiled.push((id.clone(), set));
+    }
+    Ok(compiled)
+}
+
+fn parse_release_input_rules(args: &Args<'_>) -> Result<ReleaseInputRules, GeneratorError> {
+    let production_inputs = args.string_tables("production_inputs")?.unwrap_or_default();
+    let production_dependencies = args
+        .string_tables("production_dependencies")?
+        .unwrap_or_default();
+    let non_production_inputs = args
+        .string_tables("non_production_inputs")?
+        .unwrap_or_default();
+
+    let rules = ReleaseInputRules {
+        production_inputs,
+        production_dependencies,
+        non_production_inputs,
+    };
+    compile_release_groups("production_inputs", &rules.production_inputs, true)?;
+    compile_release_groups(
+        "production_dependencies",
+        &rules.production_dependencies,
+        false,
+    )?;
+    compile_release_groups("non_production_inputs", &rules.non_production_inputs, false)?;
+
+    for patterns in rules
+        .production_inputs
+        .values()
+        .chain(rules.production_dependencies.values())
+    {
+        for pattern in patterns {
+            if rules
+                .non_production_inputs
+                .values()
+                .flatten()
+                .any(|skip| skip == pattern)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "package-release path glob {pattern:?} is declared as both production and non-production input"
+                )));
+            }
+        }
+    }
+    Ok(rules)
+}
+
+fn git_output(root: &Path, args: &[&str], operation: &str) -> Result<Vec<u8>, GeneratorError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "run git {operation} for release admission: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "git {operation} failed for release admission: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
+fn full_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn empty_tree_sha(root: &Path) -> Result<String, GeneratorError> {
+    let mut child = Command::new("git")
+        .args(["hash-object", "-t", "tree", "--stdin"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "start empty-tree identity computation for release admission: {error}"
+            ))
+        })?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| GeneratorError::usage("git empty-tree stdin unavailable"))?
+        .write_all(&[])
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "write empty-tree input for release admission: {error}"
+            ))
+        })?;
+    let output = child.wait_with_output().map_err(|error| {
+        GeneratorError::usage(format!(
+            "read empty-tree identity for release admission: {error}"
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "git empty-tree identity computation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let tree = String::from_utf8(output.stdout)
+        .map_err(|_| GeneratorError::usage("git returned a non-UTF-8 empty-tree identity"))?
+        .trim()
+        .to_owned();
+    if !full_sha(&tree) {
+        return Err(GeneratorError::usage(
+            "git returned an invalid empty-tree identity",
+        ));
+    }
+    Ok(tree)
+}
+
+fn compiled_groups(
+    key: &str,
+    groups: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<(String, GlobSet)>, GeneratorError> {
+    compile_release_groups(key, groups, false)
+}
+
+fn match_groups(
+    groups: &[(String, GlobSet)],
+    paths: &[String],
+) -> (Vec<AdmissionMatch>, BTreeSet<String>) {
+    let mut matches = BTreeSet::new();
+    let mut matched_paths = BTreeSet::new();
+    for path in paths {
+        for (id, globs) in groups {
+            if globs.is_match(path) {
+                matches.insert(AdmissionMatch {
+                    id: id.clone(),
+                    path: path.clone(),
+                });
+                matched_paths.insert(path.clone());
+            }
+        }
+    }
+    (matches.into_iter().collect(), matched_paths)
+}
+
+fn admission_path(change: &crate::s2::reuse::ChangedPath) -> AdmissionPath {
+    let status = match change.status {
+        crate::s2::reuse::ChangeKind::Added => "added",
+        crate::s2::reuse::ChangeKind::Modified => "modified",
+        crate::s2::reuse::ChangeKind::Deleted => "deleted",
+        crate::s2::reuse::ChangeKind::Renamed => "renamed",
+    };
+    AdmissionPath {
+        path: change.path.clone(),
+        previous: change.previous.clone(),
+        status: status.to_owned(),
+    }
+}
+
+fn evaluate_release_admission(
+    event: &AdmissionEvent<'_>,
+    rules: &ReleaseInputRules,
+    changes: &[crate::s2::reuse::ChangedPath],
+) -> Result<ReleaseAdmission, GeneratorError> {
+    let production = compiled_groups("production_inputs", &rules.production_inputs)?;
+    let dependencies = compiled_groups("production_dependencies", &rules.production_dependencies)?;
+    let non_production = compiled_groups("non_production_inputs", &rules.non_production_inputs)?;
+    let changed_paths = changes.iter().map(admission_path).collect::<Vec<_>>();
+    let effective_paths = crate::s2::reuse::effective_paths(changes);
+    let (matched_rules, production_paths) = match_groups(&production, &effective_paths);
+    let (matched_dependencies, dependency_paths) = match_groups(&dependencies, &effective_paths);
+    let (matched_non_production, non_production_paths) =
+        match_groups(&non_production, &effective_paths);
+    let mut all_known = production_paths.clone();
+    all_known.extend(dependency_paths.iter().cloned());
+    all_known.extend(non_production_paths.iter().cloned());
+    let unknown_paths = effective_paths
+        .iter()
+        .filter(|path| !all_known.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let (disposition, reason) = if event.event_name != "push" {
+        (
+            "skip".to_owned(),
+            format!("event {:?} is not a qualifying push", event.event_name),
+        )
+    } else if event.event_ref != event.configured_source_ref {
+        (
+            "skip".to_owned(),
+            format!(
+                "push ref {:?} does not match configured source ref {:?}",
+                event.event_ref, event.configured_source_ref
+            ),
+        )
+    } else if !matched_rules.is_empty() || !matched_dependencies.is_empty() {
+        let first = matched_rules
+            .first()
+            .map(|entry| format!("production rule {} matched {}", entry.id, entry.path))
+            .or_else(|| {
+                matched_dependencies.first().map(|entry| {
+                    format!("production dependency {} matched {}", entry.id, entry.path)
+                })
+            })
+            .unwrap_or_else(|| "declared production input matched".to_owned());
+        ("admit".to_owned(), first)
+    } else if !unknown_paths.is_empty() {
+        (
+            "admit".to_owned(),
+            format!(
+                "{} changed path(s) have no non-production declaration; admitting conservatively",
+                unknown_paths.len()
+            ),
+        )
+    } else if changed_paths.is_empty() {
+        (
+            "skip".to_owned(),
+            "push changed no paths between its recorded before and head SHAs".to_owned(),
+        )
+    } else {
+        (
+            "skip".to_owned(),
+            format!(
+                "all {} changed path(s) match declared non-production inputs",
+                changed_paths.len()
+            ),
+        )
+    };
+    let rules_digest = hex_sha256(&serde_json::to_vec(rules).map_err(|error| {
+        GeneratorError::usage(format!("serialize release input rules: {error}"))
+    })?);
+    Ok(ReleaseAdmission {
+        schema: "homebrew-source-release-admission/v1".to_owned(),
+        repository: event.repository.to_owned(),
+        source_ref: event.event_ref.to_owned(),
+        configured_source_ref: event.configured_source_ref.to_owned(),
+        before_sha: event.before_sha.to_owned(),
+        head_sha: event.head_sha.to_owned(),
+        head_tree: event.head_tree.to_owned(),
+        changed_paths,
+        matched_rules,
+        matched_dependencies,
+        matched_non_production,
+        disposition,
+        reason,
+        rules_digest,
+    })
+}
+
+const RELEASE_DIGEST_HEX: &[u8; 16] = b"0123456789abcdef";
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(RELEASE_DIGEST_HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(RELEASE_DIGEST_HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn package_release_spec(root: &Path) -> Result<PackageReleaseSpec, GeneratorError> {
+    let config_path = root.join(crate::s2::config::GENERATION_CONFIG_PATH);
+    let config = crate::s2::config::load(&config_path)?;
+    let rows = config
+        .declare()
+        .iter()
+        .filter(|row| row.primitive() == super::PACKAGE_RELEASE)
+        .collect::<Vec<_>>();
+    if rows.len() != 1 {
+        return Err(GeneratorError::usage(format!(
+            "release-admission requires exactly one package-release declaration; found {}",
+            rows.len()
+        )));
+    }
+    parse_spec(&Args(rows[0].args()))
+}
+
+fn checked_source_head_tree(root: &Path, head_sha: &str) -> Result<String, GeneratorError> {
+    let head_commit = String::from_utf8(git_output(
+        root,
+        &["rev-parse", "HEAD^{commit}"],
+        "rev-parse",
+    )?)
+    .map_err(|_| GeneratorError::usage("git returned a non-UTF-8 checkout HEAD"))?
+    .trim()
+    .to_owned();
+    if head_commit != head_sha {
+        return Err(GeneratorError::usage(format!(
+            "release-admission checkout HEAD {head_commit} does not match event head {head_sha}"
+        )));
+    }
+    let head_tree = String::from_utf8(git_output(
+        root,
+        &["rev-parse", "HEAD^{tree}"],
+        "rev-parse tree",
+    )?)
+    .map_err(|_| GeneratorError::usage("git returned a non-UTF-8 checkout tree"))?
+    .trim()
+    .to_owned();
+    if !full_sha(&head_tree) {
+        return Err(GeneratorError::usage(
+            "git returned an invalid source head tree identity",
+        ));
+    }
+    Ok(head_tree)
+}
+
+fn release_changed_paths(
+    root: &Path,
+    before_sha: &str,
+    head_sha: &str,
+    qualifying_push: bool,
+) -> Result<Vec<crate::s2::reuse::ChangedPath>, GeneratorError> {
+    if !qualifying_push {
+        return Ok(Vec::new());
+    }
+    let base = if before_sha.bytes().all(|byte| byte == b'0') {
+        empty_tree_sha(root)?
+    } else {
+        if git_output(
+            root,
+            &["cat-file", "-e", &format!("{before_sha}^{{commit}}")],
+            "cat-file before commit",
+        )
+        .is_err()
+        {
+            return Err(GeneratorError::usage(format!(
+                "release-admission before commit {before_sha} is unavailable; fetch or restore that exact history and replay the recorded event, never substitute current main"
+            )));
+        }
+        before_sha.to_owned()
+    };
+    let diff = git_output(
+        root,
+        &[
+            "diff",
+            "--name-status",
+            "--find-renames=50%",
+            "-z",
+            &base,
+            head_sha,
+        ],
+        "diff",
+    )?;
+    crate::s2::reuse::parse_name_status_nul(&diff).ok_or_else(|| {
+        GeneratorError::usage(
+            "release-admission could not parse the complete NUL-delimited Git diff; refusing a skip",
+        )
+    })
+}
+
+fn verify_replay_receipt(path: &Path, result: &ReleaseAdmission) -> Result<(), GeneratorError> {
+    let recorded = std::fs::read(path).map_err(|error| {
+        GeneratorError::io("read release admission replay evidence", path, &error)
+    })?;
+    let expected: ReleaseAdmission = serde_json::from_slice(&recorded).map_err(|error| {
+        GeneratorError::usage(format!("parse release admission replay evidence: {error}"))
+    })?;
+    if expected != *result {
+        return Err(GeneratorError::usage(
+            "release-admission replay evidence does not match the exact repository/ref/before/head/tree, rules, complete diff, or disposition",
+        ));
+    }
+    Ok(())
+}
+
+/// Run the source-specific admission command against explicit event inputs.
+/// The source checkout must already be pinned at `head`; the command never
+/// reads a branch tip or queries GitHub's path-filter API.
+pub(crate) fn release_admission_command(
+    root: &Path,
+    repository: &str,
+    event_ref: &str,
+    event: &str,
+    before_sha: &str,
+    head_sha: &str,
+    replay_from: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let spec = package_release_spec(root)?;
+    if repository != spec.source_repository {
+        return Err(GeneratorError::usage(format!(
+            "release-admission repository {repository:?} does not match configured source {}",
+            spec.source_repository
+        )));
+    }
+    if !full_sha(head_sha) || !full_sha(before_sha) {
+        return Err(GeneratorError::usage(
+            "release-admission before and head must be full 40-character lowercase commit SHAs",
+        ));
+    }
+    let head_tree = checked_source_head_tree(root, head_sha)?;
+    let qualifying_push = event == "push" && event_ref == spec.source_ref;
+    let changes = release_changed_paths(root, before_sha, head_sha, qualifying_push)?;
+    let event = AdmissionEvent {
+        repository: &spec.source_repository,
+        event_ref,
+        configured_source_ref: &spec.source_ref,
+        event_name: event,
+        before_sha,
+        head_sha,
+        head_tree: &head_tree,
+    };
+    let result = evaluate_release_admission(&event, &spec.release_inputs, &changes)?;
+    if let Some(path) = replay_from {
+        verify_replay_receipt(path, &result)?;
+    }
+    let json = serde_json::to_string(&result)
+        .map_err(|error| GeneratorError::usage(format!("serialize release admission: {error}")))?;
+    println!("{json}");
     Ok(())
 }
 
@@ -463,6 +1014,7 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "package-release-preview".to_owned());
     validate_one_line("concurrency_group", &concurrency_group)?;
+    let release_inputs = parse_release_input_rules(args)?;
 
     Ok(PackageReleaseSpec {
         build_tasks,
@@ -486,6 +1038,7 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         updater_token_secret,
         update_commit_message,
         concurrency_group,
+        release_inputs,
     })
 }
 
@@ -821,6 +1374,38 @@ fn release_asset_names(spec: &PackageReleaseSpec) -> Vec<String> {
     names
 }
 
+fn render_admission_job(
+    spec: &PackageReleaseSpec,
+    runner: &str,
+    checkout: &str,
+    upload: &str,
+    runtime_setup: &str,
+) -> String {
+    let repository_expr = github_expression("github.repository");
+    let ref_expr = github_expression("github.ref");
+    let event_expr = github_expression("github.event_name");
+    let before_expr = github_expression("github.event.before || github.sha");
+    let head_expr = github_expression("github.sha");
+    let runner_temp_expr = github_expression("runner.temp");
+    let expected_repository = crate::s2::yaml_scalar(&spec.source_repository);
+    let expected_ref = crate::s2::yaml_scalar(&spec.source_ref);
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  admission:\n    name: Admit production release inputs\n    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'\n    runs-on: {runner}\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    outputs:\n      disposition: {}\n      head_sha: {}\n      head_tree: {}\n    steps:\n      - name: Checkout exact event head and full history\n        uses: {checkout}\n        with:\n          ref: {head_expr}\n          fetch-depth: 0\n          persist-credentials: false\n",
+        github_expression("steps.admit.outputs.disposition"),
+        github_expression("steps.admit.outputs.head_sha"),
+        github_expression("steps.admit.outputs.head_tree"),
+    );
+    output.push_str(runtime_setup);
+    let _ = writeln!(
+        output,
+        "      - name: Classify complete source push diff\n        id: admit\n        env:\n          EVENT_REPOSITORY: {repository_expr}\n          EVENT_REF: {ref_expr}\n          EVENT_NAME: {event_expr}\n          BEFORE_SHA: {before_expr}\n          HEAD_SHA: {head_expr}\n          EXPECTED_SOURCE_REPOSITORY: {expected_repository}\n          EXPECTED_SOURCE_REF: {expected_ref}\n        run: |\n          set -euo pipefail\n          result_file=\"$RUNNER_TEMP/package-release-admission.json\"\n          velnor-workflow release-admission \\\n            --repository \"$EVENT_REPOSITORY\" \\\n            --ref \"$EVENT_REF\" \\\n            --event \"$EVENT_NAME\" \\\n            --before \"$BEFORE_SHA\" \\\n            --head \"$HEAD_SHA\" > \"$result_file\"\n          [[ \"$(jq -er '.repository' \"$result_file\")\" == \"$EXPECTED_SOURCE_REPOSITORY\" ]]\n          [[ \"$(jq -er '.source_ref' \"$result_file\")\" == \"$EVENT_REF\" ]]
+          [[ \"$(jq -er '.configured_source_ref' \"$result_file\")\" == \"$EXPECTED_SOURCE_REF\" ]]\n          disposition=\"$(jq -er '.disposition' \"$result_file\")\"\n          case \"$disposition\" in admit|skip) ;; *) echo \"::error::invalid release admission disposition: $disposition\" >&2; exit 1;; esac\n          printf 'disposition=%s\\n' \"$disposition\" >> \"$GITHUB_OUTPUT\"\n          printf 'head_sha=%s\\n' \"$(jq -er '.head_sha' \"$result_file\")\" >> \"$GITHUB_OUTPUT\"\n          printf 'head_tree=%s\\n' \"$(jq -er '.head_tree' \"$result_file\")\" >> \"$GITHUB_OUTPUT\"\n          jq -cr '\"admission=\" + .disposition + \" reason=\" + .reason + \" changed_paths=\" + (.changed_paths|length|tostring)' \"$result_file\"\n      - name: Retain source admission evidence\n        uses: {upload}\n        with:\n          name: source-release-admission-{head_expr}\n          path: {runner_temp_expr}/package-release-admission.json\n          if-no-files-found: error\n          retention-days: 30\n"
+    );
+    output
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_workflow(
     config: &ProjectConfig,
@@ -852,7 +1437,11 @@ fn render_workflow(
     let download = ActionPin::DownloadArtifact.reference();
     let mise = ActionPin::Mise.reference();
     let attest = ActionPin::Attest.reference();
-    let source_commit_expr = github_expression("github.sha");
+    let source_commit_expr = github_expression("needs.admission.outputs.head_sha");
+    let source_tree_expr = github_expression("needs.admission.outputs.head_tree");
+    let build_runtime_setup = format!(
+        "{runtime_setup}      - name: Verify admitted source tree\n        run: |\n          set -euo pipefail\n          actual_tree=\"$(git rev-parse HEAD^{{tree}})\"\n          if [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\n"
+    );
     let publish_source_commit_expr = github_expression("needs.build.outputs.source_commit");
     let workspace_expr = github_expression("github.workspace");
     let build_verify = indent_script(&verification_script(spec), 10);
@@ -865,10 +1454,8 @@ fn render_workflow(
     let updater_token_expr = github_expression(&format!("secrets.{}", spec.updater_token_secret));
     let github_token_expr = github_expression("github.token");
     let build_if = github_expression(&format!(
-        "github.ref == 'refs/heads/{}'",
+        "needs.admission.outputs.disposition == 'admit' && github.ref == '{}'",
         spec.source_ref
-            .strip_prefix("refs/heads/")
-            .unwrap_or("main")
     ));
     let package_dir_yaml = crate::s2::yaml_scalar(&spec.package_dir);
     let package_dir = spec.package_dir.as_str();
@@ -945,15 +1532,24 @@ fn render_workflow(
         output,
         "concurrency:\n  group: {concurrency_yaml}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n"
     );
+    output.push_str("jobs:\n");
+    output.push_str(&render_admission_job(
+        spec,
+        &runner,
+        checkout,
+        upload,
+        &runtime_setup,
+    ));
+    output.push('\n');
     let _ = writeln!(
         output,
-        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
+        "  build:\n    name: Verify package release\n    needs: admission\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n",
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -2815,6 +3411,16 @@ updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
 update_commit_message = "chore: update verified preview"
 concurrency_group = "package-release-preview"
+
+[production_inputs]
+application = ["crates/app/src/**", "Cargo.lock"]
+
+[production_dependencies]
+engine = ["crates/engine/**"]
+
+[non_production_inputs]
+documentation = ["README.md", "docs/**"]
+contract_fixture = ["tests/contract-fixtures/**"]
 "#,
         )
         .expect("fixture args")
@@ -2864,6 +3470,16 @@ updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
 update_commit_message = "chore: update verified preview"
 concurrency_group = "package-release-preview"
+
+[declare.args.production_inputs]
+application = ["crates/app/src/**", "Cargo.lock"]
+
+[declare.args.production_dependencies]
+engine = ["crates/engine/**"]
+
+[declare.args.non_production_inputs]
+documentation = ["README.md", "docs/**"]
+contract_fixture = ["tests/contract-fixtures/**"]
 "#,
         )
         .expect("schema 2 package declaration must parse");

@@ -85,6 +85,16 @@ consumer_repository = "example/tap"
 consumer_branch = "main"
 updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
+
+[declare.args.production_inputs]
+release_source = ["src/**", "Cargo.toml", "Cargo.lock"]
+
+[declare.args.production_dependencies]
+runtime_resource = ["resources/**"]
+
+[declare.args.non_production_inputs]
+documentation = ["README.md", "docs/**"]
+verification_fixtures = ["tests/fixtures/**"]
 "#
     )
 }
@@ -247,9 +257,9 @@ fn package_release_hook_rejects_undeclared_mise_task() {
 fn package_release_hook_renders_locked_pre_publish_migration_with_narrow_tokens() {
     let workspace = temporary_root("pre-publish");
     let root = fixture_root(&workspace.join("repo"));
-    let config = format!(
-        "{}\npre_publish_tasks = [\"migrate-preview-legacy\"]\n",
-        package_config("verify-release")
+    let config = package_config("verify-release").replace(
+        "[declare.args.production_inputs]",
+        "pre_publish_tasks = [\"migrate-preview-legacy\"]\n\n[declare.args.production_inputs]",
     );
     write_inputs(&root, &config, true);
     let generated = generate_in_place(&root);
