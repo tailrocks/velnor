@@ -10,12 +10,17 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use super::{RepositoryShape, ScanContext};
 use crate::s2::{parent_path, GeneratorError};
 
-/// Generator-owned artifacts must not feed back into the next scan pass.
-const GENERATOR_OWNED_SCAN_FILES: &[&str] = &["config/fleet/velnor-host.env"];
-
 pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
+) -> Result<Vec<String>, GeneratorError> {
+    repository_files_with_declared_outputs(root, exclude, &BTreeSet::new())
+}
+
+pub(crate) fn repository_files_with_declared_outputs(
+    root: &Path,
+    exclude: &[String],
+    declared_outputs: &BTreeSet<std::path::PathBuf>,
 ) -> Result<Vec<String>, GeneratorError> {
     if !root.is_dir() {
         return Err(GeneratorError::usage(format!(
@@ -23,7 +28,10 @@ pub(crate) fn repository_files(
             root.display()
         )));
     }
-    let generator_owned = crate::s2::generator_owned_output_paths(root)?;
+    let generator_owned = crate::s2::generator_owned_output_paths(root)?
+        .union(declared_outputs)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     // Generation must stay a function of the committed repository, not of the
     // checkout: untracked CI runtime artifacts, scratch files, and the `.git`
     // file of a linked worktree would otherwise enter the scan and make the
@@ -38,11 +46,7 @@ pub(crate) fn repository_files(
         files
     };
     let excludes = exclude_set(exclude)?;
-    files.retain(|file| {
-        !excludes.is_match(file)
-            && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
-            && !generator_owned.contains(Path::new(file))
-    });
+    files.retain(|file| !excludes.is_match(file) && !generator_owned.contains(Path::new(file)));
     files.sort();
     Ok(files)
 }

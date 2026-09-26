@@ -57,21 +57,20 @@ The schema-1 Swift scanner fails closed for executable Swift products and
 recognized XcodeGen specs because it cannot emit their complete phase and
 selection contracts; use schema 2 for those Apple surfaces.
 
-## Velnor fleet host env output
+## Repository-owned static outputs
 
-`[cache.velnor]` emits `config/fleet/velnor-host.env` by default so existing
-fleet hosts keep their cache configuration. Set `emit_host_env = false` when
-no Velnor fleet host consumes the file:
+Use `[[static_files]]` for bytes the repository owns but generation must place
+at another repository path. `source` must be a normalized repository-relative
+path outside `.github/` and `config/`; `file` must be a normalized path under
+one of those generated trees. The generator records and prunes declared output
+paths, excludes them from scans, rejects path collisions and unowned existing
+targets, and refuses symlink traversal.
 
 ```toml
-[cache.velnor]
-emit_host_env = false
+[[static_files]]
+file = "config/generated/example.env"
+source = ".github-gen/sources/example.env"
 ```
-
-The switch is independent of `[workflow].providers`; choose it based on fleet
-host configuration. Regeneration removes a previously generated copy when the
-switch is disabled, and keeps the path reserved during scans so an old copy
-does not alter recorded inputs.
 
 ## Typed package-release verification hooks
 
