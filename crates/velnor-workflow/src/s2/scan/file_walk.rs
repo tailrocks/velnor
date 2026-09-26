@@ -10,9 +10,6 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use super::{RepositoryShape, ScanContext};
 use crate::s2::{parent_path, GeneratorError};
 
-/// Generator-owned artifacts must not feed back into the next scan pass.
-const GENERATOR_OWNED_SCAN_FILES: &[&str] = &["config/fleet/velnor-host.env"];
-
 pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
@@ -38,11 +35,7 @@ pub(crate) fn repository_files(
         files
     };
     let excludes = exclude_set(exclude)?;
-    files.retain(|file| {
-        !excludes.is_match(file)
-            && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
-            && !generator_owned.contains(Path::new(file))
-    });
+    files.retain(|file| !excludes.is_match(file) && !generator_owned.contains(Path::new(file)));
     files.sort();
     Ok(files)
 }
@@ -462,6 +455,14 @@ mod tests {
             "write recorded output",
         );
         must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create fleet config directory",
+        );
+        must(
+            fs::write(root.join("config/fleet/velnor-host.env"), "MANUAL=1\n"),
+            "write manual fleet config",
+        );
+        must(
             fs::write(
                 root.join(crate::s2::OWNERSHIP_STATE),
                 format!(
@@ -478,8 +479,25 @@ mod tests {
         );
         assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
         assert!(files.contains(&".github/workflows/forged.yml".to_owned()));
+        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
         assert!(!files.contains(&".github/workflows/generated.yml".to_owned()));
         assert!(!files.contains(&crate::s2::OWNERSHIP_STATE.to_owned()));
+
+        must(
+            fs::write(
+                root.join(crate::s2::OWNERSHIP_STATE),
+                format!(
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nconfig/fleet/velnor-host.env\t0000000000000000\n",
+                    crate::s2::GENERATOR_REVISION
+                ),
+            ),
+            "record fleet config as generated",
+        );
+        let files = must(
+            repository_files(&root, &[]),
+            "scan after fleet config ownership is recorded",
+        );
+        assert!(!files.contains(&"config/fleet/velnor-host.env".to_owned()));
     }
 
     #[test]
