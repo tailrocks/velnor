@@ -1,0 +1,28 @@
+{
+  "fixture": "/var/folders/jr/d5xn2gl91gdf4kd3bqj6wrd80000gn/T/velnor-locked-parent-xzu36lpu",
+  "results": [
+    {
+      "condition": "baseline",
+      "argv": [
+        "--yes",
+        "install",
+        "python"
+      ],
+      "exit": 1,
+      "output": "mise by @jdx \u2013 installing 1 tool\nmise \u2717 python@3.14.7  18ms \u00b7 failed: offline mode is enabled\nmise \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1/1 \u00b7 installed 0 tools \u00b7 1 failed in 20ms\nmise ERROR Failed to install core:python@3.14.7: offline mode is enabled\nmise ERROR Version: 2026.9.11 macos-arm64 (2026-09-18)\nmise ERROR Run with --verbose or MISE_VERBOSE=1 for more information\n",
+      "lock": "version = 1\n"
+    },
+    {
+      "condition": "candidate",
+      "argv": [
+        "--yes",
+        "--locked",
+        "install",
+        "python"
+      ],
+      "exit": 1,
+      "output": "mise by @jdx \u2013 installing 1 tool\nmise \u2717 python@3.14.7  1ms \u00b7 failed: python@3.14.7 is not in the lockfile\nmise \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1/1 \u00b7 installed 0 tools \u00b7 1 failed in 3ms\nmise WARN  Failed to resolve tool version list for python: [/private/var/folders/jr/d5xn2gl91gdf4kd3bqj6wrd80000gn/T/velnor-locked-parent-xzu36lpu/mise.toml] python@3.14.7: python@3.14.7 is not in the lockfile\nhint: Run `mise install` without --locked to update the lockfile\nmise ERROR Failed to install core:python@3.14.7: python@3.14.7 is not in the lockfile\nhint: Run `mise install` without --locked to update the lockfile\nmise ERROR Version: 2026.9.11 macos-arm64 (2026-09-18)\nmise ERROR Run with --verbose or MISE_VERBOSE=1 for more information\n",
+      "lock": "version = 1\n"
+    }
+  ]
+}

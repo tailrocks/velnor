@@ -1,0 +1,176 @@
+{
+  "source_sha256": "e4f4b659844ae0ed5fe4e695f21dc342aefdae3bfe94411261f46fc57322c6ad",
+  "script_sha256": "fb1096f1f713e21fa2917fa52d370dc51981f45dea5577c6004e05cc7587df90",
+  "cases": [
+    {
+      "hit": "",
+      "primary": "",
+      "matched": "",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "",
+      "primary": "",
+      "matched": "primary",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "",
+      "primary": "",
+      "matched": "fallback",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "",
+      "primary": "primary",
+      "matched": "",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "",
+      "primary": "primary",
+      "matched": "primary",
+      "expected": "exact",
+      "actual": "exact"
+    },
+    {
+      "hit": "",
+      "primary": "primary",
+      "matched": "fallback",
+      "expected": "prefix",
+      "actual": "prefix"
+    },
+    {
+      "hit": "true",
+      "primary": "",
+      "matched": "",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "true",
+      "primary": "",
+      "matched": "primary",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "true",
+      "primary": "",
+      "matched": "fallback",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "true",
+      "primary": "primary",
+      "matched": "",
+      "expected": "exact",
+      "actual": "exact"
+    },
+    {
+      "hit": "true",
+      "primary": "primary",
+      "matched": "primary",
+      "expected": "exact",
+      "actual": "exact"
+    },
+    {
+      "hit": "true",
+      "primary": "primary",
+      "matched": "fallback",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "false",
+      "primary": "",
+      "matched": "",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "false",
+      "primary": "",
+      "matched": "primary",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "false",
+      "primary": "",
+      "matched": "fallback",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "false",
+      "primary": "primary",
+      "matched": "",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "false",
+      "primary": "primary",
+      "matched": "primary",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "false",
+      "primary": "primary",
+      "matched": "fallback",
+      "expected": "prefix",
+      "actual": "prefix"
+    },
+    {
+      "hit": "TRUE",
+      "primary": "",
+      "matched": "",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "TRUE",
+      "primary": "",
+      "matched": "primary",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "TRUE",
+      "primary": "",
+      "matched": "fallback",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "TRUE",
+      "primary": "primary",
+      "matched": "",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "TRUE",
+      "primary": "primary",
+      "matched": "primary",
+      "expected": "unknown",
+      "actual": "unknown"
+    },
+    {
+      "hit": "TRUE",
+      "primary": "primary",
+      "matched": "fallback",
+      "expected": "unknown",
+      "actual": "unknown"
+    }
+  ],
+  "pass_count": 24,
+  "scope": "source-action executable classification only; no CI performance claim"
+}

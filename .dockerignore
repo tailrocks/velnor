@@ -1,0 +1,7 @@
+.git/
+target/
+.velnor-work/
+.velnor-config/
+.velnor-job-dumps/
+.velnor-live-evidence/
+.DS_Store

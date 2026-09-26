@@ -1,0 +1,12 @@
+Host:sentry
+Instance:sentry/main
+Slot:sentry-0
+RunnerRegistration:velnor-sentry-slot-0
+Job:job-42
+Run:run-32714994603
+QueueEntry:queue/job-43
+Event:event-000123
+Reservation:reservation-job-42
+Lease:lease/target-store
+Capability:capability/actions.checkout
+Adapter:adapter/actions-checkout
