@@ -1,6 +1,0 @@
-# Operator-facing execution backend. Exactly one of: docker | microvm
-# There is no automatic fallback. A selected microvm that cannot preflight
-# fails closed and does not run on host Docker.
-
-[execution]
-backend = "docker"

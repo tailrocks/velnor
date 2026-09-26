@@ -1,3 +1,0 @@
-[workspace]
-members = ["libs/bridge-ffi"]
-resolver = "2"

@@ -1,8 +1,0 @@
-2026-09-20T03:11:01.3736570Z   HEAD_SHA: 17142395609c29de76d7b99b3f661d55aa95edc5
-2026-09-20T03:11:04.9311412Z [36;1m[[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }[0m
-2026-09-20T03:11:04.9318040Z [36;1m[[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }[0m
-2026-09-20T03:11:04.9320003Z [36;1m[[ "$manifest_closure" == "$head_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }[0m
-2026-09-20T03:11:04.9363527Z   HEAD_SHA: 17142395609c29de76d7b99b3f661d55aa95edc5
-2026-09-20T03:11:04.9364166Z   BASE_PIN: 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
-2026-09-20T03:26:17.0436011Z ##[error]no candidate product velnor-workflow-candidate-1e7d319be3752d36-Linux-X64 was published within 15 minutes
-2026-09-20T03:26:17.0445962Z ##[error]Process completed with exit code 1.
