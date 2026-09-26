@@ -1159,6 +1159,34 @@ fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn fake_environment_observing_candidate_renderer(
+    directory: &Path,
+    closure: &str,
+    sentinel: &Path,
+) -> PathBuf {
+    let binary = directory.join("candidate-env");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --closure ]; then\n  if [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; fi\n  echo {closure}; exit 0\nfi\nif [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; exit 17; fi\ncp -r \"$1/.\" \"$3/\"\n",
+                sentinel.display(),
+                sentinel.display(),
+            ),
+        ),
+        "write environment-observing candidate renderer",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "mark environment-observing candidate renderer executable",
+        );
+    }
+    binary
+}
+
+#[cfg(unix)]
 fn closure_fixture(name: &str) -> (PathBuf, String) {
     let root = temporary_directory(name);
     git_ok(&root, &["init", "-q", "-b", "main"]);
@@ -1265,6 +1293,41 @@ fn bound_candidate_matching_head_tree_is_accepted() {
         )
         .as_deref(),
         Some(wanted.as_str())
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_renderer_receives_no_ambient_environment() {
+    assert!(
+        env::var_os("HOME").is_some(),
+        "Unix test environment must provide HOME to detect ambient inheritance"
+    );
+    let (root, head) = closure_fixture("candidate-hermetic-env");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-hermetic-env-scratch");
+    let sentinel = root.join("ambient-environment-observed");
+    let binary = fake_environment_observing_candidate_renderer(&root, &wanted, &sentinel);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    assert_eq!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "hermetic candidate reproduces the tree",
+        )
+        .as_deref(),
+        Some(wanted.as_str())
+    );
+    assert!(
+        !sentinel.exists(),
+        "candidate closure and render probes must not inherit HOME or Actions credentials"
     );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);

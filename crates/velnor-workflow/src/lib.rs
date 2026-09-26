@@ -5424,10 +5424,10 @@ fn audited_pin_script() -> &'static str {
 /// validator's manifest binding. The poll name and the manifest gate both
 /// key off the head closure — the same identity the publisher names the
 /// artifact by and the validator's `wanted` binding checks — so the three
-/// legs rendezvous on one digest. The `--closure` probe runs with
-/// `GH_TOKEN` and `GITHUB_TOKEN` emptied: the probe needs no auth, so the
-/// exec point holds no token even though the API steps above it use the job
-/// token. Fork generator changes fail closed: only same-repository runs
+/// legs rendezvous on one digest. The `--closure` probe runs under `env -i`:
+/// the probe needs no auth, so the exec point inherits no credential or
+/// ambient variable even though the API steps above it use the job token.
+/// Fork generator changes fail closed: only same-repository runs
 /// are even considered. The same-repository select compares the embedded
 /// `.head_repository.id` object: the runs-list endpoint exposes no
 /// `.head_repository_id` scalar, and selecting on it matches nothing.
@@ -5509,7 +5509,7 @@ fn policy_candidate_step(revision: &str) -> String {
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
+          reported="$(env -i "$candidate/velnor-workflow" --closure)"
           [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
           echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
@@ -18894,18 +18894,19 @@ channel = "stable"
 
     /// The acquire step's `--closure` probe executes the candidate binary in a
     /// step whose env carries the read-scoped job token for the artifact API
-    /// calls above it. The probe needs no auth, so the invocation prefixes
-    /// both token variables with empty values: the exec point holds no
-    /// token. The values are quoted (`VAR=""`) so shellcheck's SC1007 does
-    /// not flag the prefix assignments as suspicious spacing.
+    /// calls above it. The probe needs no auth, so `env -i` removes the whole
+    /// ambient environment at the exec point instead of maintaining a list
+    /// of credential names.
     #[test]
     fn policy_candidate_closure_probe_holds_no_token() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
-            owner.contains(
-                "reported=\"$(GH_TOKEN=\"\" GITHUB_TOKEN=\"\" \"$candidate/velnor-workflow\" --closure)\""
-            ),
-            "the candidate probe strips both tokens from its own invocation: {owner}"
+            owner.contains("reported=\"$(env -i \"$candidate/velnor-workflow\" --closure)\""),
+            "the candidate probe executes in an empty environment: {owner}"
+        );
+        assert!(
+            !owner.contains("GH_TOKEN=\"\" GITHUB_TOKEN=\"\""),
+            "the probe does not rely on an incomplete credential denylist: {owner}"
         );
     }
 
