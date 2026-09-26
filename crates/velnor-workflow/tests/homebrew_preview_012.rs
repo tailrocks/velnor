@@ -859,12 +859,13 @@ fn run_candidate_brew_step_with_runner_environment(
 ) -> Output {
     use std::os::unix::fs::PermissionsExt;
 
+    ensure_candidate_formula_git_baseline(&fixture.root);
     let bin = fixture.base.join("candidate-fake-brew-bin");
     fs::create_dir_all(&bin).expect("create fake brew command directory");
     let fake_brew = bin.join("brew");
     fs::write(
         &fake_brew,
-        "#!/usr/bin/env bash\nset -euo pipefail\ncase \"${1-}\" in\n  ruby) ;;\n  install|test) printf '%s\\n' \"$*\" >> \"$FAKE_BREW_LOG\"; if [[ \"${FAKE_BREW_FAIL_SUBCOMMAND:-}\" == \"${1-}\" ]]; then exit 23; fi ;;\n  *) exit 64 ;;\nesac\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\ncase \"${1-}\" in\n  --repository) printf '%s\\n' \"$GITHUB_WORKSPACE\" ;;\n  ruby) if [[ \"$3\" == *Formulary.factory* ]]; then :; else exec ruby -e \"$3\" \"${@:4}\"; fi ;;\n  install|test) printf '%s\\n' \"$*\" >> \"$FAKE_BREW_LOG\"; if [[ \"${FAKE_BREW_FAIL_SUBCOMMAND:-}\" == \"${1-}\" ]]; then exit 23; fi ;;\n  *) exit 64 ;;\nesac\n",
     )
     .expect("write fake brew executable for install/test commands");
     let mut permissions = fs::metadata(&fake_brew)
@@ -876,7 +877,8 @@ fn run_candidate_brew_step_with_runner_environment(
     let mut command = Command::new("bash");
     command
         .args(["-euo", "pipefail", "-c", script])
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .current_dir(&fixture.root)
+        .env("PATH", fake_brew_path(&bin))
         .env("GITHUB_WORKSPACE", &fixture.root)
         .env("TAP", TAP)
         .env("FORMULA", formula)
@@ -889,6 +891,217 @@ fn run_candidate_brew_step_with_runner_environment(
     command
         .output()
         .expect("execute generated candidate install/test script with fake brew")
+}
+
+#[cfg(unix)]
+fn fake_brew_path(bin: &std::path::Path) -> String {
+    format!(
+        "{}:/usr/bin:/bin:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+#[cfg(unix)]
+fn ensure_candidate_formula_git_baseline(root: &std::path::Path) {
+    if root.join(".git").exists() {
+        return;
+    }
+    run_fixture_git(root, &["init", "--quiet"]);
+    run_fixture_git(root, &["config", "user.name", "TASK-012 fixture"]);
+    run_fixture_git(root, &["config", "user.email", "task012@example.invalid"]);
+    run_fixture_git(root, &["add", "Formula/preview.rb"]);
+    run_fixture_git(
+        root,
+        &["commit", "--quiet", "-m", "candidate formula baseline"],
+    );
+}
+
+#[cfg(unix)]
+struct FormulaMutationControl {
+    root: PathBuf,
+    formula: PathBuf,
+    bin: PathBuf,
+    log: PathBuf,
+    sentinel: PathBuf,
+    stub: PathBuf,
+    expected_blob: String,
+}
+
+#[cfg(unix)]
+fn prepare_formula_mutation_control(fixture: &Fixture, stage: &str) -> FormulaMutationControl {
+    let root = fixture.base.join(format!("formula-mutation-{stage}"));
+    let formula = root.join("Formula/preview.rb");
+    fs::create_dir_all(formula.parent().expect("formula has parent"))
+        .expect("create formula mutation checkout");
+    fs::write(
+        &formula,
+        format!(
+            r##"if ENV.fetch("FORMULA_MUTATION_STAGE", "") == ENV.fetch("FORMULA_BREW_PHASE", "")
+  File.write(ENV.fetch("FORMULA_MUTATION_SENTINEL"), "executed")
+  File.write(__FILE__, "# rewritten at {stage}\n")
+end
+"##
+        ),
+    )
+    .expect("write self-rewriting formula fixture");
+    ensure_candidate_formula_git_baseline(&root);
+    let expected_blob = run_fixture_git(&root, &["rev-parse", "HEAD:Formula/preview.rb"]);
+    let bin = fixture.base.join(format!("formula-mutation-bin-{stage}"));
+    fs::create_dir_all(&bin).expect("create formula mutation fake brew directory");
+    let stub = fixture
+        .base
+        .join(format!("formula-mutation-stub-{stage}.rb"));
+    fs::write(
+        &stub,
+        r#"module Formulary
+  FormulaFixture = Struct.new(:path) do
+    def service?; true; end
+  end
+  def self.factory(_name)
+    formula_path = File.realpath(ENV.fetch("FORMULA_FIXTURE"))
+    load formula_path
+    FormulaFixture.new(formula_path)
+  end
+end
+"#,
+    )
+    .expect("write isolated Formulary mutation fixture");
+    FormulaMutationControl {
+        root,
+        formula,
+        bin,
+        log: fixture.base.join(format!("formula-mutation-{stage}.log")),
+        sentinel: fixture
+            .base
+            .join(format!("formula-mutation-{stage}.sentinel")),
+        stub,
+        expected_blob,
+    }
+}
+
+#[cfg(unix)]
+fn run_formula_mutation_control(
+    script: &str,
+    control: &FormulaMutationControl,
+    stage: &str,
+) -> Output {
+    let fake_brew = control.bin.join("brew");
+    let contents = format!(
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+case "${{1-}}" in
+  --repository) printf '%s\n' "$GITHUB_WORKSPACE" ;;
+  ruby)
+    ruby_program="$3"
+    if [[ "$ruby_program" == *Formulary.factory* ]]; then
+      if [[ "$ruby_program" == *formula_file* ]]; then export FORMULA_BREW_PHASE=validation; else export FORMULA_BREW_PHASE=service; fi
+      printf '%s\n' service >> "$FAKE_BREW_LOG"
+      actual_formula_blob="$(git hash-object --no-filters "$FORMULA_FIXTURE")"
+      [[ "$actual_formula_blob" == "$EXPECTED_FORMULA_BLOB" ]] || exit 81
+      exec ruby -r "$FORMULARY_STUB" -e "$ruby_program" "${{@:4}}"
+    fi
+    export FORMULA_BREW_PHASE=validation
+    exec ruby -e "$ruby_program" "${{@:4}}"
+    ;;
+  install|test)
+    printf '%s\n' "${{1-}}" >> "$FAKE_BREW_LOG"
+    actual_formula_blob="$(git hash-object --no-filters "$FORMULA_FIXTURE")"
+    [[ "$actual_formula_blob" == "$EXPECTED_FORMULA_BLOB" ]] || exit 81
+    export FORMULA_BREW_PHASE="${{1-}}"
+    ruby -e 'load ENV.fetch("FORMULA_FIXTURE")'
+    ;;
+  *) exit 64 ;;
+esac
+"##
+    );
+    let_executable(&fake_brew, &contents);
+    let _ = fs::remove_file(&control.log);
+    let _ = fs::remove_file(&control.sentinel);
+    Command::new("bash")
+        .args(["-euo", "pipefail", "-c", script])
+        .current_dir(&control.root)
+        .env("PATH", fake_brew_path(&control.bin))
+        .env("GITHUB_WORKSPACE", &control.root)
+        .env("TAP", TAP)
+        .env("FORMULA", FORMULA)
+        .env(
+            "SERVICE_REQUIRED",
+            if stage == "validation" {
+                "false"
+            } else {
+                "true"
+            },
+        )
+        .env("FORMULA_FIXTURE", &control.formula)
+        .env("FORMULARY_STUB", &control.stub)
+        .env("FORMULA_MUTATION_STAGE", stage)
+        .env("FORMULA_MUTATION_SENTINEL", &control.sentinel)
+        .env("EXPECTED_FORMULA_BLOB", &control.expected_blob)
+        .env("FAKE_BREW_LOG", &control.log)
+        .output()
+        .expect("execute generated candidate step with self-rewriting formula")
+}
+
+#[cfg(unix)]
+fn assert_candidate_formula_mutation_controls(fixture: &Fixture, script: &str) {
+    for (stage, expected_calls) in [
+        ("validation", vec!["install", "test"]),
+        ("install", vec!["install"]),
+        ("test", vec!["install", "test"]),
+        ("service", vec!["install", "test", "service"]),
+    ] {
+        let control = prepare_formula_mutation_control(fixture, stage);
+        let result = run_formula_mutation_control(script, &control, stage);
+        let calls = fs::read_to_string(&control.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if stage == "validation" {
+            assert!(
+                result.status.success(),
+                "path validation does not load a self-rewriting formula: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                run_fixture_git(
+                    &control.root,
+                    &["hash-object", "--no-filters", "Formula/preview.rb"],
+                ),
+                control.expected_blob.as_str(),
+                "validation preserves the committed formula blob"
+            );
+            assert!(
+                !control.sentinel.exists(),
+                "validation leaves the formula body unevaluated"
+            );
+        } else {
+            assert!(
+                !result.status.success(),
+                "persistent formula rewrite at {stage} fails the exact blob guard"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("candidate formula bytes differ from checked-out Git blob"),
+                "rewrite at {stage} reports the blob mismatch: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                control.sentinel.exists(),
+                "self-rewriting formula actually executes at {stage}"
+            );
+        }
+        assert_eq!(
+            calls,
+            expected_calls
+                .iter()
+                .map(|call| (*call).to_owned())
+                .collect::<Vec<_>>(),
+            "later brew boundaries are not reached after a rewrite at {stage}"
+        );
+    }
 }
 
 fn exact_candidate_brew_call(actual: &str, subcommand: &str) -> bool {
@@ -946,12 +1159,14 @@ end
 "#,
     )
     .expect("write isolated Formulary stub");
+    ensure_candidate_formula_git_baseline(&attack_workspace);
 
     let_executable(
         &trusted_bin.join("brew"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
 case "${1-}" in
+  --repository) printf '%s\n' "$GITHUB_WORKSPACE" ;;
   ruby) exec ruby -r "$FORMULARY_STUB" -e "$3" "${@:4}" ;;
   install)
     ruby -e 'load ENV.fetch("FORMULA_FIXTURE")'
@@ -973,7 +1188,7 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
     let _ = fs::remove_file(&github_path);
     let _ = fs::remove_file(&trusted_log);
     let _ = fs::remove_file(&rogue_log);
-    let trusted_path = format!("{}:/usr/bin:/bin", trusted_bin.display());
+    let trusted_path = fake_brew_path(&trusted_bin);
 
     CandidatePathPoisoningFixture {
         attack_workspace,
@@ -994,6 +1209,7 @@ fn assert_combined_candidate_step_keeps_trusted_brew(
 ) {
     let combined = Command::new("bash")
         .args(["-euo", "pipefail", "-c", script])
+        .current_dir(&fixture.attack_workspace)
         .env("PATH", &fixture.trusted_path)
         .env("GITHUB_WORKSPACE", &fixture.attack_workspace)
         .env("GITHUB_PATH", &fixture.github_path)
@@ -1042,26 +1258,18 @@ fn assert_combined_candidate_step_keeps_trusted_brew(
 }
 
 #[cfg(unix)]
-fn assert_split_candidate_steps_are_hijackable(
-    script: &str,
-    fixture: &CandidatePathPoisoningFixture,
-) {
-    // Negative control: model the former split workflow. The formula-load step
-    // writes GITHUB_PATH; the runner applies it before separate install/test steps.
+fn assert_split_candidate_steps_are_hijackable(fixture: &CandidatePathPoisoningFixture) {
+    // Negative control: the former formula-load step writes GITHUB_PATH before
+    // the runner starts later Homebrew steps with the added directory on PATH.
     let _ = fs::remove_file(&fixture.github_path);
     let _ = fs::remove_file(&fixture.rogue_log);
-    let path_check = ruby_path_check_from_shell(script)
-        .expect("combined script includes the pre-load formula path guard");
-    let old_formula_load_step = format!(
-        "set -euo pipefail\nbrew ruby -e '{path_check}' \"$TAP/$FORMULA\" \"$GITHUB_WORKSPACE/Formula/$FORMULA.rb\" \"$GITHUB_WORKSPACE\""
-    );
+    let old_formula_load_step = "set -euo pipefail\nruby -e 'load ENV.fetch(\"FORMULA_FIXTURE\")'";
     let formula_load = Command::new("bash")
-        .args(["-euo", "pipefail", "-c", &old_formula_load_step])
+        .args(["-euo", "pipefail", "-c", old_formula_load_step])
+        .current_dir(&fixture.attack_workspace)
         .env("PATH", &fixture.trusted_path)
         .env("GITHUB_WORKSPACE", &fixture.attack_workspace)
         .env("GITHUB_PATH", &fixture.github_path)
-        .env("TAP", TAP)
-        .env("FORMULA", FORMULA)
         .env("FORMULA_FIXTURE", &fixture.attack_formula)
         .env("FORMULARY_STUB", &fixture.formulary_stub)
         .env("FAKE_ROGUE_BREW_BIN", &fixture.rogue_bin)
@@ -1086,29 +1294,21 @@ fn assert_split_candidate_steps_are_hijackable(
         .fold(fixture.trusted_path.clone(), |path, addition| {
             format!("{addition}:{path}")
         });
-    for subcommand in [
-        format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
-        format!("test --verbose {TAP}/{FORMULA}"),
-    ] {
-        let later_step_script = format!("set -euo pipefail\nbrew {subcommand}");
-        let later_step = Command::new("bash")
-            .args(["-euo", "pipefail", "-c", &later_step_script])
-            .env("PATH", &applied_path)
-            .env("FAKE_ROGUE_BREW_LOG", &fixture.rogue_log)
-            .output()
-            .expect("run old separate brew step after applying GITHUB_PATH");
-        assert!(later_step.status.success());
-    }
+    let later_step_script = format!("set -euo pipefail\nbrew test --verbose {TAP}/{FORMULA}");
+    let later_step = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", &later_step_script])
+        .env("PATH", &applied_path)
+        .env("FAKE_ROGUE_BREW_LOG", &fixture.rogue_log)
+        .output()
+        .expect("run old separate brew test after applying GITHUB_PATH");
+    assert!(later_step.status.success());
     assert_eq!(
         fs::read_to_string(&fixture.rogue_log)
-            .expect("old split install and test are hijacked by rogue brew")
+            .expect("old split test is hijacked by rogue brew")
             .lines()
             .collect::<Vec<_>>(),
-        vec![
-            format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
-            format!("test --verbose {TAP}/{FORMULA}"),
-        ],
-        "negative control proves GITHUB_PATH takes effect between former workflow steps"
+        vec![format!("test --verbose {TAP}/{FORMULA}")],
+        "negative control proves GITHUB_PATH takes effect after a separate formula-load step"
     );
 }
 
@@ -1116,7 +1316,7 @@ fn assert_split_candidate_steps_are_hijackable(
 fn assert_candidate_path_poisoning_controls(fixture: &Fixture, script: &str) {
     let attack_fixture = prepare_candidate_path_poisoning_fixture(fixture);
     assert_combined_candidate_step_keeps_trusted_brew(script, &attack_fixture);
-    assert_split_candidate_steps_are_hijackable(script, &attack_fixture);
+    assert_split_candidate_steps_are_hijackable(&attack_fixture);
 }
 
 #[cfg(unix)]
@@ -1188,6 +1388,7 @@ fn run_formula_path_check(
         .arg(formula_argument)
         .arg(formula_path)
         .arg(workspace)
+        .arg(formula_path)
         .env("FORMULA_FIXTURE", outside_formula)
         .env("FORMULA_SENTINEL", sentinel)
         .output()
@@ -1230,7 +1431,7 @@ fn run_path_then_service_check(
     paths: &FormulaEscapePaths<'_>,
     formula_fixture: &std::path::Path,
 ) -> Output {
-    let script = "set -euo pipefail\nruby -r \"$FORMULARY_STUB\" -e \"$PATH_CHECK_RUBY\" \"$FORMULA_ARGUMENT\" \"$CANDIDATE_FORMULA\" \"$WORKSPACE_PATH\"\nruby -r \"$FORMULARY_STUB\" -e \"$SERVICE_CHECK_RUBY\" \"$FORMULA_ARGUMENT\"";
+    let script = "set -euo pipefail\nruby -r \"$FORMULARY_STUB\" -e \"$PATH_CHECK_RUBY\" \"$FORMULA_ARGUMENT\" \"$CANDIDATE_FORMULA\" \"$WORKSPACE_PATH\" \"$CANDIDATE_FORMULA\"\nruby -r \"$FORMULARY_STUB\" -e \"$SERVICE_CHECK_RUBY\" \"$FORMULA_ARGUMENT\"";
     Command::new("bash")
         .args(["-euo", "pipefail", "-c", script])
         .env("FORMULARY_STUB", paths.stub_path)
@@ -1293,11 +1494,9 @@ fn assert_valid_formula_loaders(
     service_required: bool,
     paths: &FormulaEscapePaths<'_>,
 ) {
-    fs::write(
-        paths.candidate_formula,
-        "File.write(ENV.fetch(\"FORMULA_SENTINEL\"), \"executed\")\n",
-    )
-    .expect("write in-checkout formula for sentinel control");
+    let formula_source = "File.write(ENV.fetch(\"FORMULA_SENTINEL\"), \"executed\")\nFile.write(__FILE__, \"# rewritten by formula\\n\")\n";
+    fs::write(paths.candidate_formula, formula_source)
+        .expect("write in-checkout self-rewriting formula for sentinel control");
     let in_checkout = run_formula_path_check(
         path_check_script,
         paths.stub_path,
@@ -1309,16 +1508,19 @@ fn assert_valid_formula_loaders(
     );
     assert!(
         in_checkout.status.success(),
-        "valid candidate path reaches the formula loader: {}{}",
+        "valid candidate path check succeeds without loading formula code: {}{}",
         String::from_utf8_lossy(&in_checkout.stdout),
         String::from_utf8_lossy(&in_checkout.stderr)
     );
-    assert_eq!(
-        fs::read_to_string(paths.sentinel).expect("valid control executes its formula fixture"),
-        "executed",
-        "sentinel detects formula body evaluation when the path is accepted"
+    assert!(
+        !paths.sentinel.exists(),
+        "valid path check leaves candidate formula code unevaluated"
     );
-    fs::remove_file(paths.sentinel).expect("reset formula sentinel before escape cases");
+    assert_eq!(
+        fs::read_to_string(paths.candidate_formula).expect("read formula after path check"),
+        formula_source,
+        "valid path check preserves exact formula source bytes"
+    );
     assert!(
         service_required,
         "service metadata is required for this fixture"
@@ -1339,7 +1541,12 @@ fn assert_valid_formula_loaders(
     assert_eq!(
         fs::read_to_string(paths.sentinel).expect("valid service inspection loads its fixture"),
         "executed",
-        "service inspection evaluates formula code only after the path guard succeeds"
+        "service inspection evaluates formula code after path validation"
+    );
+    assert_ne!(
+        fs::read_to_string(paths.candidate_formula).expect("read formula after service load"),
+        formula_source,
+        "self-rewriting service fixture proves service loader can mutate candidate bytes"
     );
     fs::remove_file(paths.sentinel).expect("reset formula sentinel before escape cases");
 }
@@ -2761,33 +2968,38 @@ fn assert_candidate_formula_path(
     assert!(
         scripts
             .iter()
-            .any(|script| script.contains("Formulary.factory")
+            .any(|script| script.contains("verify_candidate_formula_bytes")
+                && script.contains("git rev-parse \"HEAD:Formula/$FORMULA.rb\"")
+                && script.contains("git hash-object --no-filters")
                 && script.contains("File.symlink?(formula_file)")
                 && script.contains("workspace_prefix")
                 && script.contains("expected.start_with?(workspace_prefix)")
-                && script.contains("File.realpath(formula.path)")
-                && script.contains("unless actual == expected")
+                && script.contains("File.realpath(tap_formula_file) == expected")
                 && script.contains("\"$TAP/$FORMULA\"")
                 && script.contains("\"$GITHUB_WORKSPACE/Formula/$FORMULA.rb\"")
                 && script.contains("\"$GITHUB_WORKSPACE\"")),
-        "candidate formula symlinks/resolved paths are contained before Homebrew loads formula: {file}:{job_id}"
+        "candidate formula path and committed bytes are verified without loading the formula: {file}:{job_id}"
     );
     let path_check = scripts
         .iter()
         .find_map(|script| ruby_path_check_from_shell(script))
         .unwrap_or_else(|| panic!("candidate path check exposes its Ruby guard: {file}:{job_id}"));
+    assert!(
+        !path_check.contains("Formulary.factory"),
+        "path validation does not evaluate candidate formula code: {file}:{job_id}"
+    );
     let direct = path_check
         .find("File.symlink?(formula_file)")
         .expect("guard rejects a direct formula symlink");
     let containment = path_check
         .find("expected.start_with?(workspace_prefix)")
         .expect("guard rejects resolved paths outside workspace");
-    let load = path_check
-        .find("Formulary.factory")
-        .expect("guard resolves exact candidate formula through Homebrew");
+    let tap_match = path_check
+        .find("File.realpath(tap_formula_file) == expected")
+        .expect("guard resolves the tap formula to the candidate file");
     assert!(
-        direct < load && containment < load,
-        "containment checks run before formula DSL load"
+        direct < containment && containment < tap_match,
+        "symlink and checkout containment checks precede the tap-path match"
     );
     assert!(
         content.contains("brew install --build-from-source"),
@@ -2863,6 +3075,11 @@ fn assert_candidate_service_loader(
             && script.contains("if [[ \"$SERVICE_REQUIRED\" == true ]]; then"),
         "exact candidate service DSL is inspected without starting it and inside the formula-check terminal step: {file}:{job_id}"
     );
+    assert_eq!(
+        script.matches("verify_candidate_formula_bytes").count(),
+        6,
+        "byte guard brackets path validation and every formula-load boundary: {file}:{job_id}"
+    );
     for (index, step) in steps.iter().enumerate() {
         if yaml_contains(step, "Formulary.factory") && yaml_contains(step, "service?") {
             assert!(
@@ -2876,6 +3093,31 @@ fn assert_candidate_service_loader(
     assert!(
         script.find("brew test --verbose") < script.rfind("brew ruby -e"),
         "service declaration check follows candidate test in the same terminal step: {file}:{job_id}"
+    );
+    let install = script
+        .find("brew install --build-from-source")
+        .expect("candidate install is present in the guarded step");
+    let post_install = script[install..]
+        .find("verify_candidate_formula_bytes\nbrew test --verbose")
+        .map(|offset| install + offset)
+        .expect("candidate bytes are checked after install and before test");
+    let test = script
+        .find("brew test --verbose")
+        .expect("candidate test is present in the guarded step");
+    let post_test = script[test..]
+        .find("verify_candidate_formula_bytes\nif [[ \"$SERVICE_REQUIRED\" == true ]]")
+        .map(|offset| test + offset)
+        .expect("candidate bytes are checked after test and before service inspection");
+    let service = script
+        .rfind("brew ruby -e")
+        .expect("candidate service inspection is present");
+    let post_service = script[service..]
+        .find("verify_candidate_formula_bytes")
+        .map(|offset| service + offset)
+        .expect("candidate bytes are checked after service inspection");
+    assert!(
+        install < post_install && post_install < test && test < post_test && post_test < service && service < post_service,
+        "committed formula bytes are checked across install, test, and service loads: {file}:{job_id}"
     );
     service_ruby.to_owned()
 }
@@ -2920,15 +3162,16 @@ fn assert_candidate_install_controls(fixture: &Fixture, job_id: &str, script: &s
             "install --build-from-source --verbose {TAP}/{FORMULA}"
         )]
     );
+    assert_candidate_formula_mutation_controls(fixture, script);
     let wrong_log = fixture.base.join(format!("fake-brew-wrong-{job_id}.log"));
     let wrong = run_candidate_brew_step(script, "different-formula", fixture, &wrong_log, None);
-    assert!(wrong.status.success());
-    let wrong_call = fs::read_to_string(&wrong_log).expect("read wrong-formula fake brew control");
     assert!(
-        wrong_call.lines().all(|call| {
-            !exact_candidate_brew_call(call, "install") && !exact_candidate_brew_call(call, "test")
-        }),
-        "exact formula oracle rejects another formula"
+        !wrong.status.success(),
+        "candidate step fails closed when its committed formula blob is missing"
+    );
+    assert!(
+        !wrong_log.exists(),
+        "no install or test reaches Homebrew for a formula without a checked-out blob"
     );
 }
 
