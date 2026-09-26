@@ -607,12 +607,102 @@ fn assert_build_job_contract(workflow: &serde_yaml::Value) {
         .contains("TAP_TOKEN"));
 }
 
+fn assert_preview_publication_dag(workflow: &serde_yaml::Value) {
+    let verify = &workflow["jobs"]["verify"];
+    let verify_needs = verify["needs"]
+        .as_sequence()
+        .expect("package verifier depends on admission and build");
+    assert_eq!(
+        verify_needs
+            .iter()
+            .map(|dependency| dependency
+                .as_str()
+                .expect("verifier dependency is a job name"))
+            .collect::<Vec<_>>(),
+        ["admission", "build"]
+    );
+    assert_eq!(
+        verify["if"].as_str(),
+        Some(
+            "${{ needs.admission.outputs.disposition == 'admit' && github.ref == 'refs/heads/main' }}"
+        )
+    );
+    assert_eq!(verify["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(
+        verify["env"]["EXPECTED_SOURCE_COMMIT"].as_str(),
+        Some("${{ needs.admission.outputs.head_sha }}")
+    );
+    assert_eq!(
+        verify["env"]["EXPECTED_SOURCE_TREE"].as_str(),
+        Some("${{ needs.admission.outputs.head_tree }}")
+    );
+    assert_eq!(
+        verify["outputs"]["source_commit"].as_str(),
+        Some("${{ steps.verify.outputs.source_commit }}")
+    );
+    assert_eq!(
+        job_step(verify, "Download untrusted package candidate")["with"]["name"].as_str(),
+        Some("${{ format('package-release-candidate-{0}', needs.admission.outputs.head_sha) }}")
+    );
+    assert_eq!(
+        job_step(verify, "Upload verified package handoff")["with"]["name"].as_str(),
+        Some("${{ format('package-release-{0}', steps.verify.outputs.source_commit) }}")
+    );
+
+    let attest = &workflow["jobs"]["attest"];
+    let attest_needs = attest["needs"]
+        .as_sequence()
+        .expect("attestation depends on admission and fresh verification");
+    assert_eq!(
+        attest_needs
+            .iter()
+            .map(|dependency| dependency
+                .as_str()
+                .expect("attestation dependency is a job name"))
+            .collect::<Vec<_>>(),
+        ["admission", "verify"]
+    );
+    assert_eq!(
+        attest["if"].as_str(),
+        Some(
+            "${{ needs.admission.outputs.disposition == 'admit' && github.ref == 'refs/heads/main' }}"
+        )
+    );
+    assert_eq!(
+        attest["env"]["EXPECTED_SOURCE_COMMIT"].as_str(),
+        Some("${{ needs.admission.outputs.head_sha }}")
+    );
+    assert_eq!(
+        attest["outputs"]["source_commit"].as_str(),
+        Some("${{ steps.verify.outputs.source_commit }}")
+    );
+    assert_eq!(
+        job_step(attest, "Download verified package handoff")["with"]["name"].as_str(),
+        Some("${{ format('package-release-{0}', needs.verify.outputs.source_commit) }}")
+    );
+    assert_eq!(
+        job_step(attest, "Upload attested package handoff")["with"]["name"].as_str(),
+        Some("${{ format('package-release-attested-{0}', needs.verify.outputs.source_commit) }}")
+    );
+
+    let publish = &workflow["jobs"]["publish"];
+    assert_eq!(publish["needs"].as_str(), Some("attest"));
+    assert_eq!(
+        publish["env"]["EXPECTED_SOURCE_COMMIT"].as_str(),
+        Some("${{ needs.attest.outputs.source_commit }}")
+    );
+    assert_eq!(
+        job_step(publish, "Download verified package handoff")["with"]["name"].as_str(),
+        Some("${{ format('package-release-attested-{0}', needs.attest.outputs.source_commit) }}")
+    );
+}
+
 fn assert_publisher_token_scope(workflow: &serde_yaml::Value) {
     let admission_text =
         serde_yaml::to_string(&workflow["jobs"]["admission"]).expect("serialize admission job");
     assert!(!admission_text.contains("TAP_TOKEN"));
     let publish = &workflow["jobs"]["publish"];
-    assert_eq!(publish["needs"].as_str(), Some("build"));
+    assert_eq!(publish["needs"].as_str(), Some("attest"));
     assert!(!serde_yaml::to_string(&publish["env"])
         .expect("serialize publish job environment")
         .contains("TAP_TOKEN"));
@@ -670,6 +760,7 @@ fn assert_generated_workflow_contract(fixture: &GitFixture) {
     assert_admission_classifier_contract(&workflow);
     assert_admission_artifact_contract(&workflow);
     assert_build_job_contract(&workflow);
+    assert_preview_publication_dag(&workflow);
     assert_publisher_token_scope(&workflow);
     assert_required_ci_no_work_surface(fixture, "ci-pr.yml", "${{ !cancelled() }}");
     assert_required_ci_no_work_surface(fixture, "ci-main.yml", "${{ always() }}");
