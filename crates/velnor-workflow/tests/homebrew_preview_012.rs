@@ -901,7 +901,19 @@ fn exact_candidate_brew_call(actual: &str, subcommand: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn assert_candidate_path_poisoning_controls(fixture: &Fixture, script: &str) {
+struct CandidatePathPoisoningFixture {
+    attack_workspace: PathBuf,
+    attack_formula: PathBuf,
+    github_path: PathBuf,
+    rogue_bin: PathBuf,
+    formulary_stub: PathBuf,
+    trusted_log: PathBuf,
+    rogue_log: PathBuf,
+    trusted_path: String,
+}
+
+#[cfg(unix)]
+fn prepare_candidate_path_poisoning_fixture(fixture: &Fixture) -> CandidatePathPoisoningFixture {
     let attack_workspace = fixture.base.join("candidate-path-attack-workspace");
     let attack_formula = attack_workspace.join("Formula").join("preview.rb");
     let github_path = fixture.base.join("candidate-github-path");
@@ -962,18 +974,36 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
     let _ = fs::remove_file(&trusted_log);
     let _ = fs::remove_file(&rogue_log);
     let trusted_path = format!("{}:/usr/bin:/bin", trusted_bin.display());
+
+    CandidatePathPoisoningFixture {
+        attack_workspace,
+        attack_formula,
+        github_path,
+        rogue_bin,
+        formulary_stub,
+        trusted_log,
+        rogue_log,
+        trusted_path,
+    }
+}
+
+#[cfg(unix)]
+fn assert_combined_candidate_step_keeps_trusted_brew(
+    script: &str,
+    fixture: &CandidatePathPoisoningFixture,
+) {
     let combined = Command::new("bash")
         .args(["-euo", "pipefail", "-c", script])
-        .env("PATH", &trusted_path)
-        .env("GITHUB_WORKSPACE", &attack_workspace)
-        .env("GITHUB_PATH", &github_path)
+        .env("PATH", &fixture.trusted_path)
+        .env("GITHUB_WORKSPACE", &fixture.attack_workspace)
+        .env("GITHUB_PATH", &fixture.github_path)
         .env("TAP", TAP)
         .env("FORMULA", FORMULA)
-        .env("FORMULA_FIXTURE", &attack_formula)
-        .env("FORMULARY_STUB", &formulary_stub)
-        .env("FAKE_ROGUE_BREW_BIN", &rogue_bin)
-        .env("FAKE_BREW_LOG", &trusted_log)
-        .env("FAKE_ROGUE_BREW_LOG", &rogue_log)
+        .env("FORMULA_FIXTURE", &fixture.attack_formula)
+        .env("FORMULARY_STUB", &fixture.formulary_stub)
+        .env("FAKE_ROGUE_BREW_BIN", &fixture.rogue_bin)
+        .env("FAKE_BREW_LOG", &fixture.trusted_log)
+        .env("FAKE_ROGUE_BREW_LOG", &fixture.rogue_log)
         .env("SERVICE_REQUIRED", "true")
         .output()
         .expect("run the combined candidate formula step with adversarial formula");
@@ -984,7 +1014,7 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
         String::from_utf8_lossy(&combined.stderr)
     );
     assert_eq!(
-        fs::read_to_string(&trusted_log)
+        fs::read_to_string(&fixture.trusted_log)
             .expect("trusted brew records same-step install and test")
             .lines()
             .collect::<Vec<_>>(),
@@ -995,25 +1025,31 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
         "formula-written GITHUB_PATH does not replace PATH before the same-step test"
     );
     assert!(
-        !rogue_log.exists(),
+        !fixture.rogue_log.exists(),
         "rogue brew cannot intercept commands before the runner applies GITHUB_PATH"
     );
-    let additions =
-        fs::read_to_string(&github_path).expect("formula appends rogue directory to GITHUB_PATH");
+    let additions = fs::read_to_string(&fixture.github_path)
+        .expect("formula appends rogue directory to GITHUB_PATH");
     assert!(
         additions
             .lines()
-            .any(|path| path == rogue_bin.display().to_string())
+            .any(|path| path == fixture.rogue_bin.display().to_string())
             && additions
                 .lines()
-                .all(|path| path == rogue_bin.display().to_string()),
+                .all(|path| path == fixture.rogue_bin.display().to_string()),
         "adversarial formula actually writes the rogue brew directory to the command file"
     );
+}
 
+#[cfg(unix)]
+fn assert_split_candidate_steps_are_hijackable(
+    script: &str,
+    fixture: &CandidatePathPoisoningFixture,
+) {
     // Negative control: model the former split workflow. The formula-load step
     // writes GITHUB_PATH; the runner applies it before separate install/test steps.
-    let _ = fs::remove_file(&github_path);
-    let _ = fs::remove_file(&rogue_log);
+    let _ = fs::remove_file(&fixture.github_path);
+    let _ = fs::remove_file(&fixture.rogue_log);
     let path_check = ruby_path_check_from_shell(script)
         .expect("combined script includes the pre-load formula path guard");
     let old_formula_load_step = format!(
@@ -1021,14 +1057,14 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
     );
     let formula_load = Command::new("bash")
         .args(["-euo", "pipefail", "-c", &old_formula_load_step])
-        .env("PATH", &trusted_path)
-        .env("GITHUB_WORKSPACE", &attack_workspace)
-        .env("GITHUB_PATH", &github_path)
+        .env("PATH", &fixture.trusted_path)
+        .env("GITHUB_WORKSPACE", &fixture.attack_workspace)
+        .env("GITHUB_PATH", &fixture.github_path)
         .env("TAP", TAP)
         .env("FORMULA", FORMULA)
-        .env("FORMULA_FIXTURE", &attack_formula)
-        .env("FORMULARY_STUB", &formulary_stub)
-        .env("FAKE_ROGUE_BREW_BIN", &rogue_bin)
+        .env("FORMULA_FIXTURE", &fixture.attack_formula)
+        .env("FORMULARY_STUB", &fixture.formulary_stub)
+        .env("FAKE_ROGUE_BREW_BIN", &fixture.rogue_bin)
         .output()
         .expect("run former standalone formula-load step");
     assert!(
@@ -1037,17 +1073,19 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
         String::from_utf8_lossy(&formula_load.stdout),
         String::from_utf8_lossy(&formula_load.stderr)
     );
-    let additions =
-        fs::read_to_string(&github_path).expect("negative-control formula load writes GITHUB_PATH");
+    let additions = fs::read_to_string(&fixture.github_path)
+        .expect("negative-control formula load writes GITHUB_PATH");
     assert!(additions
         .lines()
-        .any(|path| path == rogue_bin.display().to_string()));
+        .any(|path| path == fixture.rogue_bin.display().to_string()));
 
     // GitHub applies each command-file path before the next job step.
     let applied_path = additions
         .lines()
         .rev()
-        .fold(trusted_path, |path, addition| format!("{addition}:{path}"));
+        .fold(fixture.trusted_path.clone(), |path, addition| {
+            format!("{addition}:{path}")
+        });
     for subcommand in [
         format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
         format!("test --verbose {TAP}/{FORMULA}"),
@@ -1056,13 +1094,13 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
         let later_step = Command::new("bash")
             .args(["-euo", "pipefail", "-c", &later_step_script])
             .env("PATH", &applied_path)
-            .env("FAKE_ROGUE_BREW_LOG", &rogue_log)
+            .env("FAKE_ROGUE_BREW_LOG", &fixture.rogue_log)
             .output()
             .expect("run old separate brew step after applying GITHUB_PATH");
         assert!(later_step.status.success());
     }
     assert_eq!(
-        fs::read_to_string(rogue_log)
+        fs::read_to_string(&fixture.rogue_log)
             .expect("old split install and test are hijacked by rogue brew")
             .lines()
             .collect::<Vec<_>>(),
@@ -1072,6 +1110,13 @@ printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
         ],
         "negative control proves GITHUB_PATH takes effect between former workflow steps"
     );
+}
+
+#[cfg(unix)]
+fn assert_candidate_path_poisoning_controls(fixture: &Fixture, script: &str) {
+    let attack_fixture = prepare_candidate_path_poisoning_fixture(fixture);
+    assert_combined_candidate_step_keeps_trusted_brew(script, &attack_fixture);
+    assert_split_candidate_steps_are_hijackable(script, &attack_fixture);
 }
 
 #[cfg(unix)]
