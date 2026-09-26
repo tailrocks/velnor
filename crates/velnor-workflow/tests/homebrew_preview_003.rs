@@ -607,7 +607,12 @@ fn assert_build_job_contract(workflow: &serde_yaml::Value) {
         .contains("TAP_TOKEN"));
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Assert the complete admission/build/verify/attest/publish/consumer graph together."
+)]
 fn assert_preview_publication_dag(workflow: &serde_yaml::Value) {
+    assert!(workflow.get("concurrency").is_none());
     let verify = &workflow["jobs"]["verify"];
     let verify_needs = verify["needs"]
         .as_sequence()
@@ -687,6 +692,17 @@ fn assert_preview_publication_dag(workflow: &serde_yaml::Value) {
 
     let publish = &workflow["jobs"]["publish"];
     assert_eq!(publish["needs"].as_str(), Some("attest"));
+    assert_eq!(publish["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(publish["permissions"]["contents"].as_str(), Some("write"));
+    assert!(publish["permissions"].get("pull-requests").is_none());
+    assert_eq!(
+        publish["concurrency"]["group"].as_str(),
+        Some("package-release-preview")
+    );
+    assert_eq!(
+        publish["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(false)
+    );
     assert_eq!(
         publish["env"]["EXPECTED_SOURCE_COMMIT"].as_str(),
         Some("${{ needs.attest.outputs.source_commit }}")
@@ -694,6 +710,98 @@ fn assert_preview_publication_dag(workflow: &serde_yaml::Value) {
     assert_eq!(
         job_step(publish, "Download verified package handoff")["with"]["name"].as_str(),
         Some("${{ format('package-release-attested-{0}', needs.attest.outputs.source_commit) }}")
+    );
+
+    let verify_published = &workflow["jobs"]["verify_published"];
+    let verify_published_needs = verify_published["needs"]
+        .as_sequence()
+        .expect("published verifier depends on admission and release publication");
+    assert_eq!(
+        verify_published_needs
+            .iter()
+            .map(|dependency| dependency.as_str().expect("dependency is a job name"))
+            .collect::<Vec<_>>(),
+        ["admission", "publish"]
+    );
+    assert_eq!(verify_published["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(
+        verify_published["permissions"]["contents"].as_str(),
+        Some("read")
+    );
+    assert_eq!(
+        verify_published["permissions"]["attestations"].as_str(),
+        Some("read")
+    );
+    assert!(verify_published["permissions"].get("id-token").is_none());
+    assert_eq!(
+        job_step(verify_published, "Download immutable published release")["env"]
+            ["RELEASE_ASSET_TAG"]
+            .as_str(),
+        Some("${{ needs.publish.outputs.release_tag }}")
+    );
+    assert!(
+        job_step(verify_published, "Run published package verification tasks")["run"]
+            .as_str()
+            .is_some_and(|script| script.contains("mise run 'verify-release'"))
+    );
+
+    let consumer = &workflow["jobs"]["consumer"];
+    assert_eq!(consumer["needs"].as_str(), Some("verify_published"));
+    assert_eq!(consumer["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(consumer["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(
+        consumer["permissions"]["attestations"].as_str(),
+        Some("read")
+    );
+    assert!(consumer["permissions"].get("id-token").is_none());
+    let consumer_steps = consumer["steps"].as_sequence().expect("consumer steps");
+    let consumer_reverify = consumer_steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Re-verify immutable release for consumer"))
+        .expect("consumer fixed verifier");
+    let consumer_attestation = consumer_steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Verify consumer release attestations"))
+        .expect("consumer release attestation verifier");
+    let consumer_identity = consumer_steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str() == Some("Verify immutable consumer package identity")
+        })
+        .expect("consumer identity verifier");
+    let consumer_checkout = consumer_steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Checkout consumer repository"))
+        .expect("consumer token checkout");
+    assert!(
+        consumer_reverify < consumer_attestation
+            && consumer_attestation < consumer_identity
+            && consumer_identity < consumer_checkout,
+        "consumer attestation rechecks the exact fresh download before TAP_TOKEN use"
+    );
+    assert_eq!(
+        consumer_steps[consumer_attestation]["env"]["GH_TOKEN"].as_str(),
+        Some("${{ github.token }}")
+    );
+    assert!(consumer_steps[consumer_attestation]["run"]
+        .as_str()
+        .is_some_and(|script| script.contains("gh attestation verify")));
+    assert_eq!(
+        job_step(consumer, "Download immutable release for consumer")["env"]["RELEASE_ASSET_TAG"]
+            .as_str(),
+        Some("${{ needs.verify_published.outputs.release_tag }}")
+    );
+    assert_eq!(
+        job_step(consumer, "Re-verify immutable release for consumer")["id"].as_str(),
+        Some("verify")
+    );
+    assert_eq!(
+        serde_yaml::to_string(workflow)
+            .expect("serialize rendered workflow")
+            .matches("mise run 'verify-release'")
+            .count(),
+        3,
+        "verification task executes in the producer, fresh handoff verifier, and post-publish verifier"
     );
 }
 
@@ -706,10 +814,14 @@ fn assert_publisher_token_scope(workflow: &serde_yaml::Value) {
     assert!(!serde_yaml::to_string(&publish["env"])
         .expect("serialize publish job environment")
         .contains("TAP_TOKEN"));
-    let steps = publish["steps"]
+    assert!(!serde_yaml::to_string(publish)
+        .expect("serialize release writer")
+        .contains("TAP_TOKEN"));
+    let consumer = &workflow["jobs"]["consumer"];
+    let steps = consumer["steps"]
         .as_sequence()
-        .expect("publish job has steps");
-    let checkout = job_step(publish, "Checkout consumer repository");
+        .expect("consumer job has steps");
+    let checkout = job_step(consumer, "Checkout consumer repository");
     assert_eq!(
         checkout["with"]["token"].as_str(),
         Some("${{ secrets.TAP_TOKEN }}")
@@ -719,7 +831,7 @@ fn assert_publisher_token_scope(workflow: &serde_yaml::Value) {
         Some(false),
         "the tap token must not persist in checkout Git configuration"
     );
-    let updater = job_step(publish, "Run updater and create or update consumer PR");
+    let updater = job_step(consumer, "Run updater and create or update consumer PR");
     for key in ["GH_TOKEN", "UPDATER_TOKEN"] {
         assert_eq!(
             updater["env"][key].as_str(),
@@ -737,8 +849,8 @@ fn assert_publisher_token_scope(workflow: &serde_yaml::Value) {
         }
     }
     assert_eq!(
-        serde_yaml::to_string(publish)
-            .expect("serialize publish job")
+        serde_yaml::to_string(consumer)
+            .expect("serialize consumer job")
             .matches("secrets.TAP_TOKEN")
             .count(),
         3

@@ -1817,20 +1817,34 @@ fn render_workflow(
     } else {
         String::new()
     };
-    let publish_runtime_setup = if provider == ProviderId::GithubHosted {
-        workflow_runtime_setup_at_checkout_path(
-            ProviderId::GithubHosted,
-            &config.repository,
-            &config.workflow_revision,
-            "source",
-        )
-    } else {
-        String::new()
-    };
+    let publish_runtime_setup = workflow_runtime_setup_at_checkout_path(
+        ProviderId::GithubHosted,
+        &config.repository,
+        &config.workflow_revision,
+        "source",
+    );
+    let verification_runtime_setup = workflow_runtime_setup_at_checkout_path(
+        ProviderId::GithubHosted,
+        &config.repository,
+        &config.workflow_revision,
+        "source",
+    );
     let checkout = ActionPin::Checkout.reference();
     let upload = ActionPin::UploadArtifact.reference();
     let download = ActionPin::DownloadArtifact.reference();
     let mise = ActionPin::Mise.reference();
+    let verification_task_setup = if spec.verify_tasks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{verification_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n"
+        )
+    };
+    let handoff_verify_tasks = render_verification_task_step(
+        "Run handoff package verification tasks",
+        &spec.verify_tasks,
+        None,
+    );
     let attest = ActionPin::Attest.reference();
     let source_commit_expr = github_expression("needs.admission.outputs.head_sha");
     let source_tree_expr = github_expression("needs.admission.outputs.head_tree");
@@ -1855,16 +1869,13 @@ fn render_workflow(
         &spec.verify_tasks,
         None,
     );
-    let updater_token_expr = github_expression(&format!("secrets.{}", spec.updater_token_secret));
     let github_token_expr = github_expression("github.token");
     let build_if = github_expression(&format!(
         "needs.admission.outputs.disposition == 'admit' && github.ref == '{}'",
         spec.source_ref
     ));
     let verify_source_check = indent_script(
-        &format!(
-            "set -euo pipefail\nactual_commit=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{{commit}})\"\nif [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\nactual_tree=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{{tree}})\"\nif [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\nsource_status=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" status --porcelain=v1 --untracked-files=all -- .)\"\nif [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package verification\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n"
-        ),
+        "set -euo pipefail\nactual_commit=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{commit})\"\nif [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\nactual_tree=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{tree})\"\nif [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\nsource_status=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" status --porcelain=v1 --untracked-files=all -- .)\"\nif [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package verification\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n",
         10,
     );
     let package_dir_yaml = crate::s2::yaml_scalar(&spec.package_dir);
@@ -1875,10 +1886,6 @@ fn render_workflow(
     let schema_yaml = crate::s2::yaml_scalar(&spec.manifest_schema);
     let tag_yaml = crate::s2::yaml_scalar(&spec.release_tag);
     let title_yaml = crate::s2::yaml_scalar(&spec.release_title_prefix);
-    let consumer_repository_yaml = crate::s2::yaml_scalar(&spec.consumer_repository);
-    let consumer_branch_yaml = crate::s2::yaml_scalar(&spec.consumer_branch);
-    let updater_yaml = crate::s2::yaml_scalar(&spec.updater);
-    let message_yaml = crate::s2::yaml_scalar(&spec.update_commit_message);
     let concurrency_yaml = crate::s2::yaml_scalar(&spec.concurrency_group);
     let source_shell = shell_quote(&spec.source_ref);
     let package_scratch_expr = format!(
@@ -1948,10 +1955,7 @@ fn render_workflow(
                 .unwrap_or("main")
         )
     );
-    let _ = writeln!(
-        output,
-        "concurrency:\n  group: {concurrency_yaml}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n"
-    );
+    let _ = writeln!(output, "permissions:\n  contents: read\n");
     output.push_str("jobs:\n");
     output.push_str(&render_admission_job(
         spec,
@@ -1972,7 +1976,7 @@ fn render_workflow(
     output.push('\n');
     let _ = writeln!(
         output,
-        "  verify:\n    name: Verify package candidate on a fresh runner\n    needs: [admission, build]\n    if: {build_if}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    permissions:\n      contents: read\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{verify_source_check}      - name: Require empty package candidate destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::package candidate destination already exists\" >&2; exit 1; fi\n      - name: Download untrusted package candidate\n        uses: {download}\n        with:\n          name: {candidate_artifact_name_expr}\n          path: package\n          merge-multiple: true\n      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{publish_verify}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: {verified_artifact_name_expr}\n          path: |\n{verified_artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  verify:\n    name: Verify package candidate on a fresh runner\n    needs: [admission, build]\n    if: {build_if}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    permissions:\n      contents: read\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{verify_source_check}      - name: Require empty package candidate destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::package candidate destination already exists\" >&2; exit 1; fi\n      - name: Download untrusted package candidate\n        uses: {download}\n        with:\n          name: {candidate_artifact_name_expr}\n          path: package\n          merge-multiple: true\n      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{publish_verify}{verification_task_setup}{handoff_verify_tasks}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: {verified_artifact_name_expr}\n          path: |\n{verified_artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
     );
@@ -1992,18 +1996,16 @@ fn render_workflow(
     output.push('\n');
     output.push_str(&render_publish_job(
         spec,
-        &runner,
+        "ubuntu-24.04",
         checkout,
         download,
         &publish_verify,
         &publish_runtime_setup,
         mise,
-        &spec.verify_tasks,
         &spec.pre_publish_tasks,
         &publish_attestation_targets,
         &attestation_flags,
         &workspace_expr,
-        &updater_token_expr,
         &github_token_expr,
         &publish_source_commit_expr,
         &channel_yaml,
@@ -2012,11 +2014,29 @@ fn render_workflow(
         &schema_yaml,
         &tag_yaml,
         &title_yaml,
-        &consumer_repository_yaml,
-        &consumer_branch_yaml,
-        &updater_yaml,
-        &message_yaml,
         &concurrency_yaml,
+    ));
+    output.push('\n');
+    output.push_str(&render_published_verification_job(
+        spec,
+        checkout,
+        mise,
+        &verification_runtime_setup,
+        &publish_verify,
+        &publish_attestation_targets,
+        &attestation_flags,
+        &workspace_expr,
+        &verify_source_check,
+    ));
+    output.push('\n');
+    output.push_str(&render_consumer_job(
+        spec,
+        checkout,
+        &publish_verify,
+        &publish_attestation_targets,
+        &attestation_flags,
+        &workspace_expr,
+        &verify_source_check,
     ));
     output
 }
@@ -2051,7 +2071,209 @@ jq -e \
   'keys == ["manifest","source_digest","source_ref","source_repository"] and
    .source_repository == $repository and .source_ref == $source_ref and
    .source_digest == $commit and .manifest == $package_manifest[0]' "$identity" >/dev/null
-"#
+    "#
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_published_verification_job(
+    spec: &PackageReleaseSpec,
+    checkout: &str,
+    mise: &str,
+    runtime_setup: &str,
+    publish_verify: &str,
+    publish_attestation_targets: &str,
+    attestation_flags: &str,
+    workspace_expr: &str,
+    source_check: &str,
+) -> String {
+    let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
+    let source_repository_yaml = crate::s2::yaml_scalar(&spec.source_repository);
+    let source_ref_yaml = crate::s2::yaml_scalar(&spec.source_ref);
+    let schema_yaml = crate::s2::yaml_scalar(&spec.manifest_schema);
+    let tag_yaml = crate::s2::yaml_scalar(&spec.release_tag);
+    let source_commit_expr = github_expression("needs.admission.outputs.head_sha");
+    let source_tree_expr = github_expression("needs.admission.outputs.head_tree");
+    let release_tag_expr = github_expression("needs.publish.outputs.release_tag");
+    let task_setup = if spec.verify_tasks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n"
+        )
+    };
+    let task_step = render_verification_task_step(
+        "Run published package verification tasks",
+        &spec.verify_tasks,
+        Some(&format!("{workspace_expr}/published-package")),
+    );
+
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  verify_published:\n    name: Verify immutable publication on a fresh runner\n    needs: [admission, publish]\n    if: {}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    permissions:\n      contents: read\n      attestations: read\n    outputs:\n      version: {}\n      source_commit: {}\n      source_tree: {}\n      release_tag: {}\n    env:\n      PACKAGE_DIR: published-package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/published-package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      RELEASE_TAG: {tag_yaml}\n      RELEASE_ASSET_TAG: {release_tag_expr}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{source_check}      - name: Require empty published package destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/published-package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::published package destination already exists\" >&2; exit 1; fi\n      - name: Download immutable published release\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          mkdir -- \"$GITHUB_WORKSPACE/published-package\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$GITHUB_WORKSPACE/published-package\"\n      - name: Re-verify immutable published release\n        id: verify\n        run: |\n{publish_verify}      - name: Verify published release attestations\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          for payload in \\\n{publish_attestation_targets}          do\n            gh attestation verify \"$payload\" {attestation_flags}\n          done\n{task_setup}{task_step}",
+        github_expression(&format!(
+            "github.event_name == 'push' && github.ref == '{}' && needs.admission.outputs.disposition == 'admit'",
+            spec.source_ref
+        )),
+        github_expression("steps.verify.outputs.version"),
+        github_expression("steps.verify.outputs.source_commit"),
+        source_tree_expr,
+        release_tag_expr,
+        github_expression("github.token"),
+        github_expression("github.token"),
+    );
+    output
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_consumer_update_script(immutable_tag: bool) -> String {
+    let mut script = String::from(
+        r#"set -euo pipefail
+cd consumer
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+stale_branch="automation/package-release-$RELEASE_TAG"
+automation_branch="automation/package-release-$RELEASE_ASSET_TAG"
+while IFS= read -r stale_pr_url; do
+  if [ -n "$stale_pr_url" ]; then
+    gh pr close "$stale_pr_url" --repo "$CONSUMER_REPOSITORY" --comment "Superseded by immutable package release $RELEASE_ASSET_TAG"
+  fi
+done < <(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$stale_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[].url')
+if ! remote_branch_refs="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch")"; then
+  echo "::error::consumer automation branch lookup failed; refusing branch mutation" >&2
+  exit 1
+fi
+if ! remote_branch_sha="$(awk 'NF >= 2 {print $1; exit}' <<<"$remote_branch_refs")"; then
+  echo "::error::consumer automation branch response could not be parsed; refusing branch mutation" >&2
+  exit 1
+fi
+if [ -n "$remote_branch_sha" ] && ! [[ "$remote_branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "::error::consumer automation branch response contained an invalid object ID" >&2
+  exit 1
+fi
+if [ -n "$remote_branch_sha" ]; then
+  git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" fetch origin "refs/heads/$automation_branch:refs/remotes/origin/$automation_branch"
+  git switch --detach "origin/$automation_branch"
+else
+  git switch --create "$automation_branch" "origin/$CONSUMER_BRANCH"
+fi
+"#,
+    );
+    if immutable_tag {
+        script.push_str("unset RELEASE_TAG\n");
+    }
+    script.push_str(
+        r#"bash -c "$UPDATER"
+untracked_files="$(git ls-files --others --exclude-standard)"
+if [ -n "$untracked_files" ]; then
+  echo "::notice::consumer updater produced untracked files; staging them"
+  printf '%s\n' "$untracked_files"
+fi
+git add -A
+git diff --cached --check
+if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
+  echo "consumer already references the verified release"
+else
+  if [ -n "$remote_branch_sha" ]; then
+    echo "::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it" >&2
+    exit 1
+  fi
+  git commit -s -m "$UPDATE_COMMIT_MESSAGE"
+  git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" push origin "HEAD:refs/heads/$automation_branch"
+fi
+pr_url="$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[0].url // empty')"
+if [ -z "$pr_url" ] && ! git diff --quiet HEAD "origin/$CONSUMER_BRANCH"; then
+  pr_url="$(gh pr create --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --title "$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)" --body "Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.")"
+fi
+printf 'pr_url=%s\n' "$pr_url" >> "$GITHUB_OUTPUT"
+if [ -n "$pr_url" ]; then echo "::notice::Consumer update PR: $pr_url"; else echo "::notice::Consumer update PR: none"; fi
+"#,
+    );
+    script
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_consumer_job(
+    spec: &PackageReleaseSpec,
+    checkout: &str,
+    publish_verify: &str,
+    publish_attestation_targets: &str,
+    attestation_flags: &str,
+    workspace_expr: &str,
+    source_check: &str,
+) -> String {
+    let source_commit_expr = github_expression("needs.verify_published.outputs.source_commit");
+    let source_tree_expr = github_expression("needs.verify_published.outputs.source_tree");
+    let release_tag_expr = github_expression("needs.verify_published.outputs.release_tag");
+    let source_repository_yaml = crate::s2::yaml_scalar(&spec.source_repository);
+    let source_ref_yaml = crate::s2::yaml_scalar(&spec.source_ref);
+    let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
+    let schema_yaml = crate::s2::yaml_scalar(&spec.manifest_schema);
+    let consumer_repository_yaml = crate::s2::yaml_scalar(&spec.consumer_repository);
+    let consumer_branch_yaml = crate::s2::yaml_scalar(&spec.consumer_branch);
+    let updater_yaml = crate::s2::yaml_scalar(&spec.updater);
+    let message_yaml = crate::s2::yaml_scalar(&spec.update_commit_message);
+    let tag_yaml = crate::s2::yaml_scalar(&spec.release_tag);
+    let publish_environment_yaml = crate::s2::yaml_scalar(&spec.publish_environment);
+    let updater_token_expr = github_expression(&format!("secrets.{}", spec.updater_token_secret));
+    let verification = indent_script(publish_verify, 10);
+    let consumer_update = indent_script(
+        &render_consumer_update_script(spec.consumer_tag_mode == ConsumerTagMode::Immutable),
+        10,
+    );
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  consumer:\n    name: Update consumer from verified immutable release\n    needs: verify_published\n    if: needs.verify_published.result == 'success'\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    environment: {publish_environment_yaml}\n    permissions:\n      contents: read\n      attestations: read\n    outputs:\n      consumer_pr_url: {}\n    env:\n      PACKAGE_DIR: consumer-package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/consumer-package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n      CONSUMER_REPOSITORY: {consumer_repository_yaml}\n      CONSUMER_BRANCH: {consumer_branch_yaml}\n      UPDATER: {updater_yaml}\n      UPDATE_COMMIT_MESSAGE: {message_yaml}\n      RELEASE_TAG: {tag_yaml}\n      RELEASE_ASSET_TAG: {release_tag_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{source_check}      - name: Require empty consumer package destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/consumer-package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::consumer package destination already exists\" >&2; exit 1; fi\n      - name: Download immutable release for consumer\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          mkdir -- \"$GITHUB_WORKSPACE/consumer-package\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$GITHUB_WORKSPACE/consumer-package\"\n      - name: Re-verify immutable release for consumer\n        id: verify\n        run: |\n{verification}      - name: Verify consumer release attestations\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          for payload in \\\n{publish_attestation_targets}          do\n            gh attestation verify \"$payload\" {attestation_flags}\n          done\n      - name: Verify immutable consumer package identity\n        env:\n          VELNOR_PACKAGE_ASSET_TAG: {release_tag_expr}\n          VELNOR_PACKAGE_VERSION: {}\n          VELNOR_PACKAGE_SOURCE_COMMIT: {}\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: {source_repository_yaml}\n          VELNOR_PACKAGE_SOURCE_REF: {source_ref_yaml}\n          VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n          VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/consumer-package\n",
+        github_expression("steps.consumer-pr.outputs.pr_url"),
+        github_expression("github.token"),
+        github_expression("github.token"),
+        github_expression("steps.verify.outputs.version"),
+        github_expression("steps.verify.outputs.source_commit"),
+    );
+    if spec.consumer_tag_mode == ConsumerTagMode::Legacy {
+        let _ = writeln!(output, "          VELNOR_PACKAGE_RELEASE_TAG: {tag_yaml}");
+    }
+    output.push_str("        run: |\n");
+    output.push_str(&indent_script(render_consumer_identity_check_script(), 10));
+    output.push_str("      - name: Checkout consumer repository\n        uses: ");
+    output.push_str(checkout);
+    output.push_str("\n        with:\n          repository: ");
+    output.push_str(&consumer_repository_yaml);
+    output.push_str("\n          ref: ");
+    output.push_str(&consumer_branch_yaml);
+    output.push_str("\n          token: ");
+    output.push_str(&updater_token_expr);
+    output.push_str("\n          path: consumer\n          persist-credentials: false\n");
+    output.push_str("      - name: Run updater and create or update consumer PR\n        id: consumer-pr\n        env:\n          RELEASE_ASSET_TAG: ");
+    output.push_str(&release_tag_expr);
+    output.push_str("\n          GH_TOKEN: ");
+    output.push_str(&updater_token_expr);
+    output.push_str("\n          UPDATER_TOKEN: ");
+    output.push_str(&updater_token_expr);
+    output.push_str("\n          VELNOR_PACKAGE_ASSET_TAG: ");
+    output.push_str(&release_tag_expr);
+    output.push_str("\n          VELNOR_PACKAGE_VERSION: ");
+    output.push_str(&github_expression("steps.verify.outputs.version"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_COMMIT: ");
+    output.push_str(&github_expression("steps.verify.outputs.source_commit"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: ");
+    output.push_str(&source_repository_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REF: ");
+    output.push_str(&source_ref_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_CHANNEL: ");
+    output.push_str(&channel_yaml);
+    output.push_str("\n          VELNOR_VERIFIED_PACKAGE_DIR: ");
+    output.push_str(workspace_expr);
+    output.push_str("/consumer-package");
+    if spec.consumer_tag_mode == ConsumerTagMode::Legacy {
+        output.push_str("\n          VELNOR_PACKAGE_RELEASE_TAG: ");
+        output.push_str(&tag_yaml);
+    }
+    output.push('\n');
+    output.push_str("        run: |\n");
+    output.push_str(&consumer_update);
+    output
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3542,12 +3764,10 @@ fn render_publish_job(
     publish_verify: &str,
     runtime_setup: &str,
     mise: &str,
-    verify_tasks: &[String],
     pre_publish_tasks: &[String],
     publish_attestation_targets: &str,
     attestation_flags: &str,
     workspace_expr: &str,
-    updater_token_expr: &str,
     github_token_expr: &str,
     publish_source_commit_expr: &str,
     channel_yaml: &str,
@@ -3556,10 +3776,6 @@ fn render_publish_job(
     schema_yaml: &str,
     tag_yaml: &str,
     title_yaml: &str,
-    consumer_repository_yaml: &str,
-    consumer_branch_yaml: &str,
-    updater_yaml: &str,
-    message_yaml: &str,
     concurrency_yaml: &str,
 ) -> String {
     let publish_environment_yaml = crate::s2::yaml_scalar(&spec.publish_environment);
@@ -3617,7 +3833,7 @@ fn render_publish_job(
     });
     let mut output = String::new();
     let _ = writeln!(output, "  publish:");
-    output.push_str("    name: Publish immutable package and update consumer\n");
+    output.push_str("    name: Publish immutable package release\n");
     output.push_str("    needs: attest\n");
     output.push_str("    if: ");
     output.push_str(&github_expression(&format!(
@@ -3630,13 +3846,15 @@ fn render_publish_job(
     output.push_str("\n    timeout-minutes: 30\n    environment: ");
     output.push_str(&publish_environment_yaml);
     output.push('\n');
-    output.push_str(
-        "    permissions:\n      contents: write\n      pull-requests: write\n      attestations: read\n",
-    );
+    if pre_publish_tasks.is_empty() {
+        output.push_str("    permissions:\n      contents: write\n      attestations: read\n");
+    } else {
+        output.push_str(
+            "    permissions:\n      contents: write\n      pull-requests: write\n      attestations: read\n",
+        );
+    }
     output.push_str("    outputs:\n      release_tag: ");
     output.push_str(&github_expression("steps.publish.outputs.immutable_tag"));
-    output.push_str("\n      consumer_pr_url: ");
-    output.push_str(&github_expression("steps.consumer-pr.outputs.pr_url"));
     output.push_str("\n      rolling_refresh_outcome: ");
     let rolling_refresh_outcome = if spec.refresh_rolling_release {
         github_expression("steps.rolling-refresh.outcome")
@@ -3667,14 +3885,6 @@ fn render_publish_job(
     output.push_str(&release_prerelease_yaml);
     output.push_str("\n      RELEASE_TITLE_PREFIX: ");
     output.push_str(title_yaml);
-    output.push_str("\n      CONSUMER_REPOSITORY: ");
-    output.push_str(consumer_repository_yaml);
-    output.push_str("\n      CONSUMER_BRANCH: ");
-    output.push_str(consumer_branch_yaml);
-    output.push_str("\n      UPDATER: ");
-    output.push_str(updater_yaml);
-    output.push_str("\n      UPDATE_COMMIT_MESSAGE: ");
-    output.push_str(message_yaml);
     // This is the required repository-wide writer lock for every generated
     // publication job; all generated publication writers must share its group.
     // Keep cancellation disabled so a writer can finish rollback and release
@@ -3691,12 +3901,14 @@ fn render_publish_job(
     output.push_str(publish_source_commit_expr);
     output.push_str("\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n");
 
-    output.push_str(runtime_setup);
-    output.push_str("      - name: Set up Mise\n        uses: ");
-    output.push_str(mise);
-    output.push_str(
-        "\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n",
-    );
+    if !pre_publish_tasks.is_empty() {
+        output.push_str(runtime_setup);
+        output.push_str("      - name: Set up Mise\n        uses: ");
+        output.push_str(mise);
+        output.push_str(
+            "\n        with:\n          install: false\n      - name: Install locked pre-publish task tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n",
+        );
+    }
 
     output.push_str(
         "      - name: Require empty package handoff destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::package handoff destination already exists\" >&2; exit 1; fi\n",
@@ -3712,11 +3924,6 @@ fn render_publish_job(
         "      - name: Re-verify downloaded handoff\n        id: verify\n        run: |\n",
     );
     output.push_str(publish_verify);
-    output.push_str(&render_verification_task_step(
-        "Run handoff package verification tasks",
-        verify_tasks,
-        None,
-    ));
 
     output.push_str("      - name: Verify build attestations\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
@@ -3765,11 +3972,6 @@ fn render_publish_job(
         "\n        run: |\n          set -euo pipefail\n          published_dir=\"$GITHUB_WORKSPACE/published-package\"\n          if [[ -e \"$published_dir\" || -L \"$published_dir\" ]]; then echo \"::error::published package handoff destination already exists\" >&2; exit 1; fi\n          mkdir -- \"$published_dir\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$published_dir\"\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$published_dir\"\n          export PACKAGE_HANDOFF_ROOT=\"$GITHUB_WORKSPACE\"\n          export PACKAGE_HANDOFF_RELATIVE=\"published-package\"\n          export PACKAGE_HANDOFF_SOURCE_COMMIT=\"$EXPECTED_SOURCE_COMMIT\"\n",
     );
     output.push_str(publish_verify);
-    output.push_str(&render_verification_task_step(
-        "Run published package verification tasks",
-        verify_tasks,
-        Some(&format!("{workspace_expr}/published-package")),
-    ));
 
     output.push_str(
         "      - name: Verify published release attestations\n        env:\n          GH_TOKEN: ",
@@ -3811,124 +4013,6 @@ fn render_publish_job(
         10,
     ));
 
-    output.push_str(
-        "      - name: Verify immutable consumer package identity\n        env:\n          VELNOR_PACKAGE_ASSET_TAG: ",
-    );
-    output.push_str(&immutable_tag_output);
-    output.push_str("\n          VELNOR_PACKAGE_VERSION: ");
-    output.push_str(&github_expression("steps.verify.outputs.version"));
-    output.push_str("\n          VELNOR_PACKAGE_SOURCE_COMMIT: ");
-    output.push_str(&github_expression("steps.verify.outputs.source_commit"));
-    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: ");
-    output.push_str(source_repository_yaml);
-    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REF: ");
-    output.push_str(source_ref_yaml);
-    output.push_str("\n          VELNOR_PACKAGE_CHANNEL: ");
-    output.push_str(channel_yaml);
-    output.push_str("\n          VELNOR_VERIFIED_PACKAGE_DIR: ");
-    output.push_str(workspace_expr);
-    output.push_str("/published-package\n        run: |\n");
-    output.push_str(&indent_script(render_consumer_identity_check_script(), 10));
-
-    output.push_str("      - name: Checkout consumer repository\n        uses: ");
-    output.push_str(checkout);
-    output.push_str("\n        with:\n          repository: ");
-    output.push_str(consumer_repository_yaml);
-    output.push_str("\n          ref: ");
-    output.push_str(consumer_branch_yaml);
-    output.push_str("\n          token: ");
-    output.push_str(updater_token_expr);
-    output.push_str("\n          path: consumer\n          persist-credentials: false\n");
-
-    output.push_str("      - name: Run updater and create or update consumer PR\n        id: consumer-pr\n        env:\n          RELEASE_ASSET_TAG: ");
-    output.push_str(&immutable_tag_output);
-    output.push_str("\n          GH_TOKEN: ");
-    output.push_str(updater_token_expr);
-    output.push_str("\n          UPDATER_TOKEN: ");
-    output.push_str(updater_token_expr);
-    output.push_str("\n          VELNOR_PACKAGE_ASSET_TAG: ");
-    output.push_str(&immutable_tag_output);
-    output.push_str("\n          VELNOR_PACKAGE_VERSION: ");
-    output.push_str(&github_expression("steps.verify.outputs.version"));
-    output.push_str("\n          VELNOR_PACKAGE_SOURCE_COMMIT: ");
-    output.push_str(&github_expression("steps.verify.outputs.source_commit"));
-    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: ");
-    output.push_str(source_repository_yaml);
-    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REF: ");
-    output.push_str(source_ref_yaml);
-    output.push_str("\n          VELNOR_PACKAGE_CHANNEL: ");
-    output.push_str(channel_yaml);
-    output.push_str("\n          VELNOR_VERIFIED_PACKAGE_DIR: ");
-    output.push_str(workspace_expr);
-    output.push_str("/published-package");
-    if spec.consumer_tag_mode == ConsumerTagMode::Legacy {
-        output.push_str("\n          VELNOR_PACKAGE_RELEASE_TAG: ");
-        output.push_str(tag_yaml);
-    }
-    output.push_str(
-        r#"
-        run: |
-          set -euo pipefail
-          cd consumer
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          stale_branch="automation/package-release-$RELEASE_TAG"
-          automation_branch="automation/package-release-$RELEASE_ASSET_TAG"
-          while IFS= read -r stale_pr_url; do
-            if [ -n "$stale_pr_url" ]; then
-              gh pr close "$stale_pr_url" --repo "$CONSUMER_REPOSITORY" --comment "Superseded by immutable package release $RELEASE_ASSET_TAG"
-            fi
-          done < <(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$stale_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[].url')
-          if ! remote_branch_refs="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch")"; then
-            echo "::error::consumer automation branch lookup failed; refusing branch mutation" >&2
-            exit 1
-          fi
-          if ! remote_branch_sha="$(awk 'NF >= 2 {print $1; exit}' <<<"$remote_branch_refs")"; then
-            echo "::error::consumer automation branch response could not be parsed; refusing branch mutation" >&2
-            exit 1
-          fi
-          if [ -n "$remote_branch_sha" ] && ! [[ "$remote_branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::consumer automation branch response contained an invalid object ID" >&2
-            exit 1
-          fi
-          if [ -n "$remote_branch_sha" ]; then
-            git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" fetch origin "refs/heads/$automation_branch:refs/remotes/origin/$automation_branch"
-            git switch --detach "origin/$automation_branch"
-          else
-            git switch --create "$automation_branch" "origin/$CONSUMER_BRANCH"
-          fi
-"#,
-    );
-    if spec.consumer_tag_mode == ConsumerTagMode::Immutable {
-        output.push_str("          unset RELEASE_TAG\n");
-    }
-    output.push_str(
-        r#"          bash -c "$UPDATER"
-          untracked_files="$(git ls-files --others --exclude-standard)"
-          if [ -n "$untracked_files" ]; then
-            echo "::notice::consumer updater produced untracked files; staging them"
-            printf '%s\n' "$untracked_files"
-          fi
-          git add -A
-          git diff --cached --check
-          if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
-            echo "consumer already references the verified release"
-          else
-            if [ -n "$remote_branch_sha" ]; then
-              echo "::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it" >&2
-              exit 1
-            fi
-            git commit -s -m "$UPDATE_COMMIT_MESSAGE"
-            git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" push origin "HEAD:refs/heads/$automation_branch"
-          fi
-          pr_url="$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[0].url // empty')"
-          if [ -z "$pr_url" ] && ! git diff --quiet HEAD "origin/$CONSUMER_BRANCH"; then
-            pr_url="$(gh pr create --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --title "$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)" --body "Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.")"
-          fi
-          printf 'pr_url=%s\n' "$pr_url" >> "$GITHUB_OUTPUT"
-          if [ -n "$pr_url" ]; then echo "::notice::Consumer update PR: $pr_url"; else echo "::notice::Consumer update PR: none"; fi
-"#,
-    );
     output
 }
 
@@ -5306,7 +5390,7 @@ expected_names="$TEST_TMPDIR/expected-names"
     }
 
     #[test]
-    fn rendered_workflow_runs_repository_verification_tasks_at_all_boundaries() {
+    fn rendered_workflow_runs_repository_verification_tasks_outside_writer() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert_eq!(
@@ -5324,27 +5408,87 @@ expected_names="$TEST_TMPDIR/expected-names"
         let handoff = workflow
             .find("Re-verify downloaded handoff")
             .expect("handoff step");
+        let fresh_verify = workflow
+            .find("Verify manifest, identity, checksums, and exact file set")
+            .expect("fresh package verifier step");
+        let signer = workflow.find("  attest:").expect("attestation job");
+        let publisher = workflow.find("\n  publish:").expect("publisher job");
+        let verifier = workflow
+            .find("\n  verify_published:")
+            .expect("fresh published verifier job");
+        let consumer = workflow.find("\n  consumer:").expect("consumer job");
         let handoff_verify = workflow
             .find("Run handoff package verification tasks")
             .expect("handoff verification task step");
+        let handoff_upload = workflow
+            .find("Upload verified package handoff")
+            .expect("verified package upload step");
+        let published_verify = workflow
+            .find("Run published package verification tasks")
+            .expect("published verification task step");
         let immutable = workflow
             .find("Download and re-verify published release")
             .expect("immutable download step");
-        let immutable_verify = workflow
-            .find("Run published package verification tasks")
-            .expect("immutable verification task step");
         let rolling = workflow
             .find("Refresh rolling preview release")
             .expect("rolling update step");
         assert!(producer < producer_verify);
-        assert!(producer_verify < handoff);
-        assert!(handoff < handoff_verify);
-        assert!(handoff_verify < immutable);
-        assert!(immutable < immutable_verify);
-        assert!(immutable_verify < rolling);
+        assert!(producer_verify < fresh_verify);
+        assert!(fresh_verify < handoff_verify);
+        assert!(handoff_verify < handoff_upload);
+        assert!(handoff_upload < signer);
+        assert!(signer < publisher);
+        assert!(handoff < immutable);
+        assert!(immutable < rolling);
+        assert!(publisher < verifier);
+        assert!(verifier < published_verify);
+        assert!(published_verify < consumer);
+        let publisher_workflow = &workflow[publisher..verifier];
+        assert!(!publisher_workflow.contains("mise run 'verify-preview-package'"));
+        assert!(!publisher_workflow.contains("Run handoff package verification tasks"));
+        assert!(!publisher_workflow.contains("Run published package verification tasks"));
+        assert!(!workflow[consumer..].contains("verify-preview-package"));
         assert!(workflow
             .contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package"));
         assert!(!workflow.contains("verify-preview-package --"));
+    }
+
+    #[test]
+    fn privileged_jobs_use_fresh_hosted_runners_for_local_producer() {
+        let mut config = render_config();
+        config.providers = BTreeSet::from([ProviderId::Velnor]);
+        config.automatic_providers = BTreeSet::from([ProviderId::Velnor]);
+        config.selectors = BTreeMap::from([(
+            ProviderId::Velnor,
+            crate::s2::provider::ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned(), "synthetic-target".to_owned()],
+            },
+        )]);
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&config, &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        assert_eq!(
+            document["jobs"]["build"]["runs-on"],
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("self-hosted".to_owned()),
+                serde_yaml::Value::String("synthetic-target".to_owned()),
+            ]),
+            "producer follows the configured local runner selector"
+        );
+        for job in [
+            "verify",
+            "attest",
+            "publish",
+            "verify_published",
+            "consumer",
+        ] {
+            assert_eq!(
+                document["jobs"][job]["runs-on"].as_str(),
+                Some("ubuntu-24.04"),
+                "job {job} must not share a self-hosted runner with source-controlled producer work"
+            );
+        }
     }
 
     #[test]
@@ -5397,8 +5541,7 @@ expected_names="$TEST_TMPDIR/expected-names"
             "{workflow}"
         );
         assert!(
-            workflow
-                .contains("contents: write\n      pull-requests: write\n      attestations: read"),
+            workflow.contains("contents: write\n      attestations: read"),
             "{workflow}"
         );
         assert!(workflow.contains("tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\""));
@@ -5467,6 +5610,14 @@ expected_names="$TEST_TMPDIR/expected-names"
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
             .expect("rendered workflow is YAML");
+        assert!(
+            document.get("concurrency").is_none(),
+            "workflow-level lock would overlap the publisher job lock"
+        );
+        assert_eq!(
+            workflow.matches("group: package-release-preview").count(),
+            1
+        );
         let publish = document
             .get("jobs")
             .and_then(serde_yaml::Value::as_mapping)
@@ -5487,7 +5638,8 @@ expected_names="$TEST_TMPDIR/expected-names"
             permissions
                 .get("pull-requests")
                 .and_then(serde_yaml::Value::as_str),
-            Some("write")
+            Some("write"),
+            "the explicit pre-publish migration retains its established GitHub token scope"
         );
         assert_eq!(
             permissions
@@ -5511,8 +5663,6 @@ expected_names="$TEST_TMPDIR/expected-names"
         let migration = step("Run pre-publish migration tasks");
         let immutable = step("Publish immutable source-bound release");
         let published = step("Download and re-verify published release");
-        let consumer_checkout = step("Checkout consumer repository");
-        let consumer_update = step("Run updater and create or update consumer PR");
         let index = |target: &serde_yaml::Value| {
             steps
                 .iter()
@@ -5524,6 +5674,11 @@ expected_names="$TEST_TMPDIR/expected-names"
         assert!(index(lock) < index(migration));
         assert!(index(migration) < index(immutable));
         assert!(index(immutable) < index(published));
+        assert_eq!(
+            publish.get("runs-on").and_then(serde_yaml::Value::as_str),
+            Some("ubuntu-24.04"),
+            "writer runs on a fresh GitHub-hosted runner even when the producer is local"
+        );
 
         let migration_env = migration
             .get("env")
@@ -5565,6 +5720,34 @@ expected_names="$TEST_TMPDIR/expected-names"
                 .and_then(serde_yaml::Value::as_str),
             Some("${{ github.token }}")
         );
+        let jobs = document
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("workflow jobs");
+        let consumer = jobs
+            .get("consumer")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("isolated consumer job");
+        assert_eq!(
+            consumer.get("needs").and_then(serde_yaml::Value::as_str),
+            Some("verify_published")
+        );
+        assert_eq!(
+            consumer.get("runs-on").and_then(serde_yaml::Value::as_str),
+            Some("ubuntu-24.04")
+        );
+        let consumer_steps = consumer
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("consumer steps");
+        let consumer_step = |name: &str| {
+            consumer_steps
+                .iter()
+                .find(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some(name))
+                .expect("missing consumer step")
+        };
+        let consumer_checkout = consumer_step("Checkout consumer repository");
+        let consumer_update = consumer_step("Run updater and create or update consumer PR");
         let consumer_checkout_with = consumer_checkout
             .get("with")
             .and_then(serde_yaml::Value::as_mapping)
@@ -5596,6 +5779,9 @@ expected_names="$TEST_TMPDIR/expected-names"
             .and_then(serde_yaml::Value::as_mapping)
             .expect("publish job environment");
         assert!(!publish_job_env.contains_key("UPDATER_TOKEN"));
+        assert!(!serde_yaml::to_string(publish)
+            .expect("serialize writer job")
+            .contains("TAP_TOKEN"));
         assert_eq!(workflow.matches("${{ secrets.TAP_TOKEN }}").count(), 3);
         assert_eq!(
             workflow
@@ -5625,16 +5811,21 @@ expected_names="$TEST_TMPDIR/expected-names"
                 .expect("missing build step");
             assert!(!script.contains("migrate-preview-legacy"), "{name}");
         }
-        for name in [
-            "Run handoff package verification tasks",
-            "Run published package verification tasks",
-        ] {
-            let script = step(name)
-                .get("run")
-                .and_then(serde_yaml::Value::as_str)
-                .unwrap_or("");
-            assert!(!script.contains("migrate-preview-legacy"), "{name}");
-        }
+        let producer_verification = build_steps
+            .iter()
+            .find(|candidate| {
+                candidate.get("name").and_then(serde_yaml::Value::as_str)
+                    == Some("Run repository package verification tasks")
+            })
+            .and_then(|candidate| candidate.get("run"))
+            .and_then(serde_yaml::Value::as_str)
+            .expect("producer verification task");
+        assert!(producer_verification.contains("mise run 'verify-preview-package'"));
+        let publisher_yaml =
+            serde_yaml::to_string(publish).expect("serialize credentialed publisher");
+        assert!(!publisher_yaml.contains("verify-preview-package"));
+        assert!(!publisher_yaml.contains("Run handoff package verification tasks"));
+        assert!(!publisher_yaml.contains("Run published package verification tasks"));
         let lock_run = lock
             .get("run")
             .and_then(serde_yaml::Value::as_str)
@@ -5667,8 +5858,9 @@ expected_names="$TEST_TMPDIR/expected-names"
         assert!(workflow.contains("automation/package-release-$RELEASE_ASSET_TAG"));
         assert!(workflow.contains("gh pr close \"$stale_pr_url\""));
         assert!(workflow.contains("git switch --detach \"origin/$automation_branch\""));
-        assert!(workflow
-            .contains("VELNOR_PACKAGE_ASSET_TAG: ${{ steps.publish.outputs.immutable_tag }}"));
+        assert!(workflow.contains(
+            "VELNOR_PACKAGE_ASSET_TAG: ${{ needs.verify_published.outputs.release_tag }}"
+        ));
         assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG: preview"));
         assert!(workflow.contains("VELNOR_PACKAGE_VERSION: ${{ steps.verify.outputs.version }}"));
         assert!(workflow
@@ -5676,7 +5868,7 @@ expected_names="$TEST_TMPDIR/expected-names"
         assert!(workflow.contains("VELNOR_PACKAGE_SOURCE_REPOSITORY: \"example/project\""));
         assert!(workflow.contains("VELNOR_PACKAGE_SOURCE_REF: \"refs/heads/main\""));
         assert!(workflow
-            .contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package"));
+            .contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/consumer-package"));
         assert!(!workflow.contains("git switch --force-create \"$automation_branch\""));
         assert!(workflow.contains("git ls-files --others --exclude-standard"));
         assert!(workflow.contains("git status --porcelain --untracked-files=all"));
@@ -5755,7 +5947,15 @@ expected_names="$TEST_TMPDIR/expected-names"
             .is_some_and(|value| value.contains("not-requested")));
         assert!(!workflow.contains("Refresh rolling preview release"));
         assert!(workflow.contains("Verify immutable consumer package identity"));
-        let steps = publish["steps"].as_sequence().expect("publish steps");
+        let consumer = &document["jobs"]["consumer"];
+        assert_eq!(consumer["needs"].as_str(), Some("verify_published"));
+        let steps = consumer["steps"].as_sequence().expect("consumer steps");
+        let download_index = steps
+            .iter()
+            .position(|step| {
+                step["name"].as_str() == Some("Re-verify immutable release for consumer")
+            })
+            .expect("consumer fixed verifier step");
         let identity_index = steps
             .iter()
             .position(|step| {
@@ -5777,7 +5977,7 @@ expected_names="$TEST_TMPDIR/expected-names"
         let env_value = |key: &str| env.get(key).and_then(serde_yaml::Value::as_str);
         assert_eq!(
             env_value("VELNOR_PACKAGE_ASSET_TAG"),
-            Some("${{ steps.publish.outputs.immutable_tag }}")
+            Some("${{ needs.verify_published.outputs.release_tag }}")
         );
         assert_eq!(
             env_value("VELNOR_PACKAGE_SOURCE_COMMIT"),
@@ -5789,7 +5989,7 @@ expected_names="$TEST_TMPDIR/expected-names"
         );
         assert_eq!(
             env_value("VELNOR_VERIFIED_PACKAGE_DIR"),
-            Some("${{ github.workspace }}/published-package")
+            Some("${{ github.workspace }}/consumer-package")
         );
         assert!(env_value("VELNOR_PACKAGE_RELEASE_TAG").is_none());
         let updater_script = updater["run"].as_str().expect("consumer updater script");
@@ -5799,6 +5999,8 @@ expected_names="$TEST_TMPDIR/expected-names"
         let updater_execution = updater_script
             .find("bash -c \"$UPDATER\"")
             .expect("consumer updater execution");
+        assert!(download_index < identity_index);
+        assert!(identity_index < checkout_index);
         assert!(unset_legacy_tag < updater_execution);
     }
 
@@ -5824,17 +6026,19 @@ expected_names="$TEST_TMPDIR/expected-names"
             .find(|step| step["name"].as_str() == Some("Refresh rolling preview release"))
             .expect("rolling refresh step");
         assert_eq!(refresh["continue-on-error"].as_bool(), Some(true));
-        let refresh_index = steps
+        let consumer = &document["jobs"]["consumer"];
+        assert_eq!(consumer["needs"].as_str(), Some("verify_published"));
+        assert_eq!(
+            consumer["if"].as_str(),
+            Some("needs.verify_published.result == 'success'")
+        );
+        assert!(consumer["steps"]
+            .as_sequence()
+            .expect("consumer steps")
             .iter()
-            .position(|step| step["name"].as_str() == Some("Refresh rolling preview release"))
-            .expect("rolling refresh step index");
-        let updater_index = steps
-            .iter()
-            .position(|step| {
+            .any(|step| {
                 step["name"].as_str() == Some("Run updater and create or update consumer PR")
-            })
-            .expect("consumer updater step index");
-        assert!(refresh_index < updater_index);
+            }));
         assert!(publish["outputs"]["rolling_refresh_outcome"]
             .as_str()
             .is_some_and(|value| value.contains("steps.rolling-refresh.outcome")));

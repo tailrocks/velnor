@@ -634,6 +634,10 @@ fn execute_rendered_step_after_previous(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Pass all simulated runner inputs explicitly to preserve step isolation in the fixture."
+)]
 fn execute_rendered_step_with_updates(
     fixture: &Fixture,
     job_name: &str,
@@ -894,6 +898,10 @@ fn run_package_pipeline_with_producer_environment(
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Assert the full build/verifier separation and exact candidate artifact flow together."
+)]
 fn assert_build_step_order(fixture: &Fixture) {
     let build = fixture.build_job();
     let verify = fixture.verify_job();
@@ -924,7 +932,9 @@ fn assert_build_step_order(fixture: &Fixture) {
             && step_position(
                 verify,
                 "Verify manifest, identity, checksums, and exact file set"
-            ) < step_position(verify, "Upload verified package handoff"),
+            ) < step_position(verify, "Run handoff package verification tasks")
+            && step_position(verify, "Run handoff package verification tasks")
+                < step_position(verify, "Upload verified package handoff"),
         "fresh verifier checks the admitted source and candidate before handing off verified bytes"
     );
 
@@ -978,17 +988,14 @@ fn assert_build_step_order(fixture: &Fixture) {
         );
     }
     let verify_steps = verify["steps"].as_sequence().expect("fresh verifier steps");
-    assert!(
-        verify_steps.iter().all(|step| {
-            step["name"]
-                .as_str()
-                .is_some_and(|name| !name.contains("repository package verification"))
-                && step
-                    .get("run")
-                    .and_then(YamlValue::as_str)
-                    .is_none_or(|script| !script.contains("mise run"))
-        }),
-        "fresh verifier does not execute producer task scripts"
+    let handoff_task = named_step(verify, "Run handoff package verification tasks");
+    assert!(handoff_task["run"]
+        .as_str()
+        .is_some_and(|script| script.contains("mise run 'verify-release'")));
+    assert_eq!(
+        verify["permissions"]["contents"].as_str(),
+        Some("read"),
+        "source task executes with contents-read permission and no write credential"
     );
     assert!(
         verify_steps.iter().all(|step| {
@@ -1053,6 +1060,93 @@ fn assert_build_step_order(fixture: &Fixture) {
         Some("attest"),
         "credentialed publisher waits for fresh verification and signer"
     );
+    let publish = fixture.publish_job();
+    assert_eq!(publish["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(publish["permissions"]["contents"].as_str(), Some("write"));
+    assert!(publish["permissions"].get("id-token").is_none());
+    assert!(publish["permissions"].get("pull-requests").is_none());
+    let publish_text = serde_yaml::to_string(publish).expect("serialize release writer");
+    assert!(!publish_text.contains("verify-release"));
+    assert!(!publish_text.contains("TAP_TOKEN"));
+
+    let verify_published = &fixture.workflow["jobs"]["verify_published"];
+    let verify_published_needs = verify_published["needs"]
+        .as_sequence()
+        .expect("published verifier job dependencies")
+        .iter()
+        .filter_map(YamlValue::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        verify_published_needs,
+        BTreeSet::from(["admission", "publish"])
+    );
+    assert_eq!(verify_published["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(
+        verify_published["permissions"]["contents"].as_str(),
+        Some("read")
+    );
+    assert_eq!(
+        verify_published["permissions"]["attestations"].as_str(),
+        Some("read")
+    );
+    let published_task = named_step(verify_published, "Run published package verification tasks");
+    assert!(published_task["run"]
+        .as_str()
+        .is_some_and(|script| script.contains("mise run 'verify-release'")));
+    assert_eq!(
+        step_position(verify_published, "Run published package verification tasks"),
+        verify_published["steps"].as_sequence().unwrap().len() - 1,
+        "source-controlled post-publication verification is the final job step"
+    );
+    assert!(!verify_published["env"]
+        .as_mapping()
+        .unwrap()
+        .contains_key("GH_TOKEN"));
+    assert!(
+        named_step(verify_published, "Download immutable published release")["env"]["GH_TOKEN"]
+            .as_str()
+            .is_some_and(|value| value == "${{ github.token }}"),
+        "published read token is scoped to fixed release download"
+    );
+
+    let consumer = &fixture.workflow["jobs"]["consumer"];
+    assert_eq!(consumer["needs"].as_str(), Some("verify_published"));
+    assert_eq!(consumer["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(consumer["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(
+        consumer["permissions"]["attestations"].as_str(),
+        Some("read")
+    );
+    let consumer_steps = consumer["steps"].as_sequence().expect("consumer steps");
+    let consumer_order = [
+        "Download immutable release for consumer",
+        "Re-verify immutable release for consumer",
+        "Verify consumer release attestations",
+        "Verify immutable consumer package identity",
+        "Checkout consumer repository",
+        "Run updater and create or update consumer PR",
+    ];
+    let consumer_indices = consumer_order
+        .iter()
+        .map(|name| step_position(consumer, name))
+        .collect::<Vec<_>>();
+    assert!(consumer_indices.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(consumer_steps.iter().all(|step| {
+        step["name"].as_str().is_none_or(|name| {
+            name == "Checkout consumer repository"
+                || name == "Run updater and create or update consumer PR"
+                || !serde_yaml::to_string(step)
+                    .expect("serialize consumer step")
+                    .contains("TAP_TOKEN")
+        })
+    }));
+    assert_eq!(
+        serde_yaml::to_string(consumer)
+            .expect("serialize consumer job")
+            .matches("secrets.TAP_TOKEN")
+            .count(),
+        3
+    );
     let candidate_name =
         "${{ format('package-release-candidate-{0}', needs.admission.outputs.head_sha) }}";
     assert_eq!(
@@ -1105,6 +1199,10 @@ fn run_build_pipeline(
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep producer output construction and environment-poison controls bound to one run."
+)]
 fn run_build_pipeline_with_producer_environment(
     fixture: &Fixture,
     event: &EventContext,
@@ -1607,6 +1705,10 @@ fn sync_identity_manifest(handoff: &Path, manifest: &JsonValue) {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the producer, fresh verifier, signer, and publisher handoff proof in one native case."
+)]
 fn handoff_survives_producer_exit() {
     let fixture = Fixture::new("producer-exit", "dist");
     let before = fixture.initial_sha.clone();

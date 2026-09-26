@@ -159,6 +159,16 @@ fn package_release_hook_renders_and_passes_policy() {
     assert!(workflow.contains("Run repository package verification tasks"));
     assert!(workflow.contains("Run handoff package verification tasks"));
     assert!(workflow.contains("Run published package verification tasks"));
+    let publish_start = workflow.find("\n  publish:").expect("publisher job");
+    let verify_published_start = workflow
+        .find("\n  verify_published:")
+        .expect("fresh published verifier job");
+    let publisher = &workflow[publish_start..verify_published_start];
+    assert!(!publisher.contains("verify-release"));
+    assert!(!publisher.contains("Run handoff package verification tasks"));
+    assert!(!publisher.contains("Run published package verification tasks"));
+    assert!(publisher.contains("runs-on: ubuntu-24.04"));
+    assert!(workflow.contains("  consumer:\n    name: Update consumer from verified immutable release\n    needs: verify_published"));
     assert!(
         workflow.contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package")
     );

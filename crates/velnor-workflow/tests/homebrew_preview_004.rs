@@ -10,11 +10,13 @@
 )]
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde_json::{json, Value as JsonValue};
 use serde_yaml::{Mapping, Value};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -217,10 +219,29 @@ fn publish_steps(workflow: &Value) -> &[Value] {
 }
 
 fn step_named<'a>(workflow: &'a Value, name: &str) -> &'a Value {
-    publish_steps(workflow)
-        .iter()
-        .find(|step| step["name"].as_str() == Some(name))
-        .expect("missing generated publish step")
+    ["publish", "verify_published", "consumer", "verify", "build"]
+        .into_iter()
+        .find_map(|job_name| {
+            workflow["jobs"][job_name]["steps"]
+                .as_sequence()
+                .and_then(|steps| {
+                    steps
+                        .iter()
+                        .find(|step| step["name"].as_str() == Some(name))
+                })
+        })
+        .expect("missing generated step")
+}
+
+fn job_step_named<'a>(workflow: &'a Value, job_name: &str, name: &str) -> &'a Value {
+    workflow["jobs"][job_name]["steps"]
+        .as_sequence()
+        .and_then(|steps| {
+            steps
+                .iter()
+                .find(|step| step["name"].as_str() == Some(name))
+        })
+        .expect("missing generated job step")
 }
 
 fn step_run<'a>(workflow: &'a Value, name: &str) -> &'a str {
@@ -229,8 +250,20 @@ fn step_run<'a>(workflow: &'a Value, name: &str) -> &'a str {
         .expect("step has no run script")
 }
 
+fn job_step_run<'a>(workflow: &'a Value, job_name: &str, name: &str) -> &'a str {
+    job_step_named(workflow, job_name, name)["run"]
+        .as_str()
+        .expect("step has no run script")
+}
+
 fn env_map<'a>(workflow: &'a Value, name: &str) -> &'a Mapping {
     step_named(workflow, name)["env"]
+        .as_mapping()
+        .expect("step has no environment mapping")
+}
+
+fn job_env_map<'a>(workflow: &'a Value, job_name: &str, name: &str) -> &'a Mapping {
+    job_step_named(workflow, job_name, name)["env"]
         .as_mapping()
         .expect("step has no environment mapping")
 }
@@ -568,24 +601,59 @@ fn workflow_environment(
     workspace: &Path,
     step_name: &str,
 ) -> BTreeMap<String, String> {
+    let job_name = ["publish", "verify_published", "consumer", "verify", "build"]
+        .into_iter()
+        .find(|job_name| {
+            fixture.workflow["jobs"][*job_name]["steps"]
+                .as_sequence()
+                .is_some_and(|steps| {
+                    steps
+                        .iter()
+                        .any(|step| step["name"].as_str() == Some(step_name))
+                })
+        })
+        .expect("missing generated job for step");
+    workflow_environment_for_job(
+        fixture,
+        job_name,
+        source_sha,
+        immutable_tag,
+        workspace,
+        step_name,
+    )
+}
+
+fn workflow_environment_for_job(
+    fixture: &Fixture,
+    job_name: &str,
+    source_sha: &str,
+    immutable_tag: &str,
+    workspace: &Path,
+    step_name: &str,
+) -> BTreeMap<String, String> {
     let mut envs = BTreeMap::new();
-    let publish = &fixture.workflow["jobs"]["publish"];
-    for mapping in [
-        publish["env"].as_mapping(),
-        env_map(&fixture.workflow, step_name).into(),
-    ] {
+    let job = &fixture.workflow["jobs"][job_name];
+    let step_env = job_step_named(&fixture.workflow, job_name, step_name)
+        .get("env")
+        .unwrap_or(&Value::Null);
+    for mapping in [job["env"].as_mapping(), step_env.as_mapping()] {
         let Some(mapping) = mapping else { continue };
         for (key, value) in mapping {
             let Some(value) = value.as_str() else {
                 continue;
             };
-            let resolved = if value == "${{ steps.publish.outputs.immutable_tag }}" {
+            let resolved = if value == "${{ steps.publish.outputs.immutable_tag }}"
+                || value == "${{ needs.publish.outputs.release_tag }}"
+                || value == "${{ needs.verify_published.outputs.release_tag }}"
+            {
                 Some(immutable_tag.to_owned())
             } else if value == "${{ needs.attest.outputs.version }}"
+                || value == "${{ needs.verify_published.outputs.version }}"
                 || value == "${{ steps.verify.outputs.version }}"
             {
                 Some(package_version(source_sha))
             } else if value == "${{ needs.attest.outputs.source_commit }}"
+                || value == "${{ needs.verify_published.outputs.source_commit }}"
                 || value == "${{ needs.admission.outputs.head_sha }}"
                 || value == "${{ steps.verify.outputs.source_commit }}"
             {
@@ -623,6 +691,187 @@ struct ConsumerUpdateRequest<'a> {
     capture: &'a Path,
 }
 
+struct ConsumerPackageGate {
+    workspace: PathBuf,
+    package: PathBuf,
+    verification: Output,
+    attestations: Output,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Execute the rendered download, fixed revalidation, and attestation gates in job order."
+)]
+fn run_consumer_package_gate(
+    fixture: &Fixture,
+    run_root: &Path,
+    publication_root: &Path,
+    source_sha: &str,
+    immutable_tag: &str,
+) -> ConsumerPackageGate {
+    fs::create_dir_all(run_root).expect("create consumer package gate root");
+    let workspace = run_root.join("workspace");
+    fs::create_dir_all(&workspace).expect("create consumer verifier workspace");
+    let source_checkout = workspace.join("source");
+    fs::create_dir_all(&source_checkout).expect("create consumer source checkout fixture");
+    fs::write(source_checkout.join(".source-commit"), source_sha)
+        .expect("bind consumer source checkout to admitted SHA");
+    fs::write(
+        source_checkout.join(".origin-url"),
+        format!("https://github.com/{REPOSITORY}.git"),
+    )
+    .expect("bind consumer source checkout to declared repository");
+    let bin = fake_publication_tools(run_root);
+    let gh_log = run_root.join("consumer-download-gh.log");
+    let git_log = run_root.join("consumer-download-git.log");
+    let output_file = run_root.join("consumer-verify-output");
+    let attestation_log = run_root.join("consumer-attestations.log");
+    fs::write(&gh_log, "").expect("create consumer download GitHub log");
+    fs::write(&git_log, "").expect("create consumer download Git log");
+    fs::write(&output_file, "").expect("create consumer verifier output");
+    fs::write(&attestation_log, "").expect("create consumer attestation log");
+
+    let mut download_envs = workflow_environment(
+        fixture,
+        source_sha,
+        immutable_tag,
+        &workspace,
+        "Download immutable release for consumer",
+    );
+    download_envs.insert(
+        "PATH".to_owned(),
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    download_envs.insert(
+        "GITHUB_WORKSPACE".to_owned(),
+        workspace.to_string_lossy().into_owned(),
+    );
+    download_envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
+    download_envs.insert(
+        "RELEASE_STATE".to_owned(),
+        publication_root
+            .join("release-state.json")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    download_envs.insert(
+        "RELEASE_ASSET_DIR".to_owned(),
+        publication_root
+            .join("released-assets")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    download_envs.insert("GH_LOG".to_owned(), gh_log.to_string_lossy().into_owned());
+    download_envs.insert("GIT_LOG".to_owned(), git_log.to_string_lossy().into_owned());
+    let download = run_bash(
+        step_run(&fixture.workflow, "Download immutable release for consumer"),
+        run_root,
+        &download_envs.into_iter().collect::<Vec<_>>(),
+    );
+    assert!(
+        download.status.success(),
+        "consumer immutable release download failed:\n{}{}",
+        String::from_utf8_lossy(&download.stdout),
+        String::from_utf8_lossy(&download.stderr)
+    );
+
+    let mut verify_envs = workflow_environment(
+        fixture,
+        source_sha,
+        immutable_tag,
+        &workspace,
+        "Re-verify immutable release for consumer",
+    );
+    verify_envs.insert(
+        "PATH".to_owned(),
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    verify_envs.insert(
+        "GITHUB_WORKSPACE".to_owned(),
+        workspace.to_string_lossy().into_owned(),
+    );
+    verify_envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
+    verify_envs.insert(
+        "GITHUB_OUTPUT".to_owned(),
+        output_file.to_string_lossy().into_owned(),
+    );
+    verify_envs.insert("GIT_LOG".to_owned(), git_log.to_string_lossy().into_owned());
+    let verification = run_bash(
+        step_run(
+            &fixture.workflow,
+            "Re-verify immutable release for consumer",
+        ),
+        run_root,
+        &verify_envs.into_iter().collect::<Vec<_>>(),
+    );
+    assert!(
+        verification.status.success(),
+        "consumer fixed package re-verification failed:\n{}{}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
+
+    let mut attestation_envs = workflow_environment(
+        fixture,
+        source_sha,
+        immutable_tag,
+        &workspace,
+        "Verify consumer release attestations",
+    );
+    attestation_envs.insert(
+        "PATH".to_owned(),
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    attestation_envs.insert(
+        "GITHUB_WORKSPACE".to_owned(),
+        workspace.to_string_lossy().into_owned(),
+    );
+    attestation_envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
+    attestation_envs.insert("GH_LOG".to_owned(), gh_log.to_string_lossy().into_owned());
+    attestation_envs.insert("EXPECTED_SOURCE_COMMIT".to_owned(), source_sha.to_owned());
+    attestation_envs.insert(
+        "PACKAGE_DIR".to_owned(),
+        workspace
+            .join("consumer-package")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    attestation_envs.insert(
+        "ATTESTATION_LOG".to_owned(),
+        attestation_log.to_string_lossy().into_owned(),
+    );
+    attestation_envs.insert(
+        "ATTESTATION_EXPECTED_LOG".to_owned(),
+        publication_root
+            .join("attestation-records.log")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let attestations = run_bash(
+        step_run(&fixture.workflow, "Verify consumer release attestations"),
+        run_root,
+        &attestation_envs.into_iter().collect::<Vec<_>>(),
+    );
+    ConsumerPackageGate {
+        workspace,
+        package: run_root.join("workspace/consumer-package"),
+        verification,
+        attestations,
+    }
+}
+
 fn run_consumer_update(request: ConsumerUpdateRequest<'_>) -> String {
     let ConsumerUpdateRequest {
         fixture,
@@ -635,19 +884,23 @@ fn run_consumer_update(request: ConsumerUpdateRequest<'_>) -> String {
         capture,
     } = request;
     let consumer = run_root.join("consumer");
-    fs::create_dir_all(run_root).expect("create consumer run root");
-    let workspace = run_root.join("workspace");
-    let package = run_published_verification(
+    let package_gate = run_consumer_package_gate(
         fixture,
+        run_root,
         publication_root,
-        &workspace,
         source_sha,
         immutable_tag,
-        REPOSITORY,
-        false,
     );
+    assert!(
+        package_gate.attestations.status.success(),
+        "consumer attestation verification rejected publisher-signed package bytes:\n{}{}",
+        String::from_utf8_lossy(&package_gate.attestations.stdout),
+        String::from_utf8_lossy(&package_gate.attestations.stderr)
+    );
+    let workspace = &package_gate.workspace;
+    let package = &package_gate.package;
     let identity =
-        run_consumer_identity_check(fixture, &workspace, &package, source_sha, immutable_tag);
+        run_consumer_identity_check(fixture, workspace, package, source_sha, immutable_tag);
     assert!(
         identity.status.success(),
         "consumer identity check rejected the package downloaded and verified for the updater:\n{}{}",
@@ -668,7 +921,7 @@ fn run_consumer_update(request: ConsumerUpdateRequest<'_>) -> String {
         fixture,
         source_sha,
         immutable_tag,
-        &workspace,
+        workspace,
         "Run updater and create or update consumer PR",
     );
     envs.insert(
@@ -729,7 +982,22 @@ fn run_consumer_identity_check(
     immutable_tag: &str,
 ) -> Output {
     fs::create_dir_all(root).expect("create identity-check root");
-    assert!(package.join("identity.json").is_file());
+    let consumer_package = root.join("consumer-package");
+    if package != consumer_package {
+        fs::create_dir_all(&consumer_package).expect("create consumer identity handoff");
+        for entry in fs::read_dir(package).expect("read verified package for identity copy") {
+            let entry = entry.expect("read package asset");
+            if entry
+                .file_type()
+                .expect("read package asset type")
+                .is_file()
+            {
+                fs::copy(entry.path(), consumer_package.join(entry.file_name()))
+                    .expect("copy verified package asset into consumer workspace");
+            }
+        }
+    }
+    assert!(consumer_package.join("identity.json").is_file());
     let mut envs = workflow_environment(
         fixture,
         source_sha,
@@ -753,17 +1021,107 @@ fn run_consumer_identity_check(
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Assert the full credential boundary and producer-to-consumer job graph together."
+)]
 fn assert_published_verification_gates_consumer_pr(workflow: &Value) {
-    let steps = publish_steps(workflow);
-    let verification_names = [
-        "Download and re-verify published release",
-        "Run published package verification tasks",
-        "Verify published release attestations",
-        "Verify immutable consumer package identity",
+    assert_eq!(
+        serde_yaml::to_string(workflow)
+            .expect("serialize generated workflow")
+            .matches("mise run 'verify-release'")
+            .count(),
+        3,
+        "configured package verification runs in producer, handoff verifier, and published verifier"
+    );
+    let build = &workflow["jobs"]["build"];
+    assert_eq!(
+        build["permissions"]["contents"].as_str(),
+        Some("read"),
+        "source verification task runs with contents-read access in the producer"
+    );
+    let build_steps = build["steps"]
+        .as_sequence()
+        .expect("untrusted package producer has steps");
+    let source_verification = build_steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Run repository package verification tasks"))
+        .expect("configured verification task runs in the uncredentialed producer");
+    assert!(
+        source_verification["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("mise run 'verify-release'")),
+        "producer must retain the configured source verification task"
+    );
+
+    let verifier = &workflow["jobs"]["verify"];
+    let handoff_task = job_step_named(workflow, "verify", "Run handoff package verification tasks");
+    let verifier_steps = verifier["steps"]
+        .as_sequence()
+        .expect("fresh handoff verifier has steps");
+    let task_index = verifier_steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Run handoff package verification tasks"))
+        .expect("handoff verification task exists");
+    let generic_index = verifier_steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str()
+                == Some("Verify manifest, identity, checksums, and exact file set")
+        })
+        .expect("fixed handoff verifier exists");
+    let upload_index = verifier_steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Upload verified package handoff"))
+        .expect("verified handoff upload exists");
+    assert!(generic_index < task_index && task_index < upload_index);
+    assert!(handoff_task["run"]
+        .as_str()
+        .is_some_and(|run| run.contains("mise run 'verify-release'")));
+    assert_eq!(verifier["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(verifier["permissions"]["contents"].as_str(), Some("read"));
+
+    let publisher = &workflow["jobs"]["publish"];
+    let publisher_text = serde_yaml::to_string(publisher).expect("serialize publisher job");
+    assert!(
+        !publisher_text.contains("verify-release"),
+        "source-controlled verification tasks cannot run in the credentialed publisher"
+    );
+    assert!(
+        !publisher_text.contains("Run handoff package verification tasks")
+            && !publisher_text.contains("Run published package verification tasks"),
+        "publisher must use its fixed handoff and attestation checks"
+    );
+    assert_eq!(publisher["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(publisher["permissions"]["contents"].as_str(), Some("write"));
+    assert_eq!(
+        publisher["permissions"]["attestations"].as_str(),
+        Some("read")
+    );
+    assert!(publisher["permissions"].get("pull-requests").is_none());
+    assert!(publisher["outputs"].get("consumer_pr_url").is_none());
+    assert!(!publisher
+        .as_mapping()
+        .is_some_and(|mapping| mapping.contains_key("secrets")));
+    assert!(!publisher_text.contains("TAP_TOKEN"));
+    for name in [
         "Checkout consumer repository",
         "Run updater and create or update consumer PR",
+    ] {
+        assert!(
+            publisher["steps"]
+                .as_sequence()
+                .is_some_and(|steps| steps.iter().all(|step| step["name"].as_str() != Some(name))),
+            "consumer step {name:?} must not run in the release writer"
+        );
+    }
+
+    let steps = publish_steps(workflow);
+    let publisher_gate_names = [
+        "Download and re-verify published release",
+        "Verify published release attestations",
     ];
-    let indices = verification_names
+    let indices = publisher_gate_names
         .iter()
         .map(|name| {
             steps
@@ -774,7 +1132,15 @@ fn assert_published_verification_gates_consumer_pr(workflow: &Value) {
         .collect::<Vec<_>>();
     assert!(
         indices.windows(2).all(|pair| pair[0] < pair[1]),
-        "published asset, package, and attestation checks must precede the consumer PR"
+        "publisher fixed checks and release finalization remain ordered"
+    );
+    assert!(
+        indices[1]
+            < steps
+                .iter()
+                .position(|step| step["name"].as_str() == Some("Finalize package publication lock"))
+                .expect("publication lock finalizer"),
+        "publisher finalizes lock after its immutable attestation check"
     );
     for index in indices.iter().copied() {
         let step = &steps[index];
@@ -789,38 +1155,158 @@ fn assert_published_verification_gates_consumer_pr(workflow: &Value) {
                 !condition.contains("always()")
                     && !condition.contains("failure()")
                     && !condition.contains("cancelled()"),
-                "consumer gate overrides failure-skipping behavior: {} ({condition})",
+                "publisher gate overrides failure-skipping behavior: {} ({condition})",
                 step["name"]
             );
         }
     }
-    let download = step_run(workflow, verification_names[0]);
+    let post_publish = &workflow["jobs"]["verify_published"];
+    let post_publish_needs = post_publish["needs"]
+        .as_sequence()
+        .expect("published verifier depends on admission and publisher");
+    assert_eq!(
+        post_publish_needs
+            .iter()
+            .map(Value::as_str)
+            .collect::<Vec<_>>(),
+        [Some("admission"), Some("publish")]
+    );
+    assert_eq!(post_publish["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(
+        post_publish["permissions"]["contents"].as_str(),
+        Some("read")
+    );
+    assert!(post_publish["permissions"].get("id-token").is_none());
+    assert_eq!(
+        post_publish["permissions"]["attestations"].as_str(),
+        Some("read")
+    );
+    let post_steps = post_publish["steps"]
+        .as_sequence()
+        .expect("published verifier has steps");
+    let post_names = [
+        "Download immutable published release",
+        "Re-verify immutable published release",
+        "Verify published release attestations",
+        "Run published package verification tasks",
+    ];
+    let post_indices = post_names
+        .iter()
+        .map(|name| {
+            post_steps
+                .iter()
+                .position(|step| step["name"].as_str() == Some(name))
+                .expect("published verifier step exists")
+        })
+        .collect::<Vec<_>>();
+    assert!(post_indices.windows(2).all(|pair| pair[0] < pair[1]));
+    let download = job_step_run(workflow, "verify_published", post_names[0]);
     assert!(
         download.contains("gh release download") && download.contains("RELEASE_ASSET_TAG"),
-        "published package bytes are not downloaded by the verification step: {download}"
+        "published package bytes are not downloaded by the fresh verifier: {download}"
     );
-    let attestations = step_run(workflow, verification_names[2]);
+    let attestations = job_step_run(workflow, "verify_published", post_names[2]);
     assert!(
         attestations.contains("gh attestation verify"),
         "published release attestation verification is missing: {attestations}"
     );
-    let identity_step = step_run(workflow, verification_names[3]);
+    assert!(
+        job_step_named(workflow, "verify_published", post_names[3])["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("mise run 'verify-release'"))
+    );
+    assert!(!post_publish["env"]
+        .as_mapping()
+        .unwrap()
+        .contains_key("GH_TOKEN"));
+
+    let consumer = &workflow["jobs"]["consumer"];
+    assert_eq!(consumer["needs"].as_str(), Some("verify_published"));
+    assert_eq!(consumer["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(
+        consumer["environment"], publisher["environment"],
+        "consumer updater must use the configured publisher environment for its environment-scoped token"
+    );
+    assert_eq!(consumer["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(
+        consumer["permissions"]["attestations"].as_str(),
+        Some("read")
+    );
+    assert!(consumer["permissions"].get("id-token").is_none());
+    let consumer_steps = consumer["steps"]
+        .as_sequence()
+        .expect("consumer updater job has steps");
+    let consumer_names = [
+        "Download immutable release for consumer",
+        "Re-verify immutable release for consumer",
+        "Verify consumer release attestations",
+        "Verify immutable consumer package identity",
+        "Checkout consumer repository",
+        "Run updater and create or update consumer PR",
+    ];
+    let consumer_indices = consumer_names
+        .iter()
+        .map(|name| {
+            consumer_steps
+                .iter()
+                .position(|step| step["name"].as_str() == Some(name))
+                .expect("consumer step exists")
+        })
+        .collect::<Vec<_>>();
+    assert!(consumer_indices.windows(2).all(|pair| pair[0] < pair[1]));
+    let consumer_download = job_step_run(workflow, "consumer", consumer_names[0]);
+    assert!(consumer_download.contains("gh release download"));
+    let consumer_reverify = job_step_run(workflow, "consumer", consumer_names[1]);
+    assert!(consumer_reverify.contains("release-manifest.json"));
+    let consumer_attestation = job_step_named(workflow, "consumer", consumer_names[2]);
+    assert!(consumer_attestation["run"]
+        .as_str()
+        .is_some_and(|script| script.contains("gh attestation verify")));
+    assert_eq!(
+        consumer_attestation["env"]["GH_TOKEN"].as_str(),
+        Some("${{ github.token }}")
+    );
+    let identity_step = job_step_run(workflow, "consumer", consumer_names[3]);
     assert!(
         identity_step.contains("VELNOR_PACKAGE_ASSET_TAG")
             && identity_step.contains("VELNOR_PACKAGE_SOURCE_COMMIT")
             && identity_step.contains("release-manifest.json"),
         "consumer identity gate must bind the source tag to the verified manifest: {identity_step}"
     );
-    let identity_env = env_map(workflow, verification_names[3]);
+    let identity_env = job_env_map(workflow, "consumer", consumer_names[3]);
     assert!(
         mapping_string(identity_env, "VELNOR_PACKAGE_ASSET_TAG")
-            .is_some_and(|value| value.contains("steps.publish.outputs.immutable_tag")),
-        "identity gate tag must come from immutable publisher output"
+            .is_some_and(|value| value.contains("needs.verify_published.outputs.release_tag")),
+        "identity gate tag must come from the fresh published verifier output"
     );
     assert!(
         mapping_string(identity_env, "VELNOR_PACKAGE_SOURCE_COMMIT")
             .is_some_and(|value| value.contains("steps.verify.outputs.source_commit")),
         "identity gate source commit must come from package verification output"
+    );
+    let checkout = job_step_named(workflow, "consumer", consumer_names[4]);
+    assert_eq!(
+        checkout["with"]["token"].as_str(),
+        Some("${{ secrets.TAP_TOKEN }}")
+    );
+    assert_eq!(
+        checkout["with"]["persist-credentials"].as_bool(),
+        Some(false)
+    );
+    let updater = job_step_named(workflow, "consumer", consumer_names[5]);
+    for key in ["GH_TOKEN", "UPDATER_TOKEN"] {
+        assert_eq!(
+            updater["env"][key].as_str(),
+            Some("${{ secrets.TAP_TOKEN }}")
+        );
+    }
+    assert_eq!(
+        serde_yaml::to_string(consumer)
+            .expect("serialize consumer job")
+            .matches("secrets.TAP_TOKEN")
+            .count(),
+        3,
+        "TAP_TOKEN appears only in consumer checkout and updater env"
     );
 }
 
@@ -938,6 +1424,13 @@ if [[ "${1:-}" == "attestation" && "${2:-}" == "verify" ]]; then
     exit 100
   }
   digest="$(shasum -a 256 "$asset_path" | awk '{print $1}')"
+  if [[ -n "${ATTESTATION_EXPECTED_LOG:-}" ]]; then
+    expected_line="$RELEASE_ASSET_TAG $(basename "$asset_path") $digest"
+    if ! grep -Fqx -- "$expected_line" "$ATTESTATION_EXPECTED_LOG"; then
+      echo "attestation does not match the signed publisher bytes: $expected_line" >&2
+      exit 103
+    fi
+  fi
   printf '%s %s %s\n' "$RELEASE_ASSET_TAG" "$(basename "$asset_path")" "$digest" >> "$ATTESTATION_LOG"
   exit 0
 fi
@@ -1066,12 +1559,10 @@ fn run_published_verification_controlled(request: PublishedVerificationRequest<'
     let bin = fake_publication_tools(run_root);
     let gh_log = run_root.join("gh-verification.log");
     let git_log = run_root.join("git-verification.log");
-    let mise_log = run_root.join("mise-verification.log");
     let attestation_log = run_root.join("attestation-verification.log");
     let output_file = run_root.join("verification-output");
     fs::write(&gh_log, "").expect("create verification GitHub log");
     fs::write(&git_log, "").expect("create verification Git log");
-    fs::write(&mise_log, "").expect("create task-runner log");
     fs::write(&attestation_log, "").expect("create attestation log");
     fs::write(&output_file, "").expect("create verification output");
     let release_state = publication_root.join("release-state.json");
@@ -1087,37 +1578,39 @@ fn run_published_verification_controlled(request: PublishedVerificationRequest<'
         "published asset byte store is missing"
     );
 
-    let mut envs = workflow_environment(
+    let mut download_envs = workflow_environment(
         fixture,
         source_sha,
         immutable_tag,
         run_root,
-        "Download and re-verify published release",
+        "Download immutable published release",
     );
-    let publish_env = fixture.workflow["jobs"]["publish"]["env"]
+    let verifier_env = fixture.workflow["jobs"]["verify_published"]["env"]
         .as_mapping()
-        .expect("rendered publish job environment");
-    let download_env = env_map(
+        .expect("rendered fresh published verifier environment");
+    let download_step_env = job_env_map(
         &fixture.workflow,
-        "Download and re-verify published release",
+        "verify_published",
+        "Download immutable published release",
     );
-    let source_checkout_step = step_named(
+    let source_checkout_step = job_step_named(
         &fixture.workflow,
-        "Checkout verified source for publication",
+        "verify_published",
+        "Checkout admitted source",
     );
     let source_checkout_with = value_field(source_checkout_step, "with")
         .and_then(Value::as_mapping)
         .expect("publication source checkout inputs");
     assert_eq!(
         mapping_string(source_checkout_with, "ref"),
-        Some("${{ needs.attest.outputs.source_commit }}"),
-        "publication checkout action must pin the verified build source commit"
+        Some("${{ needs.admission.outputs.head_sha }}"),
+        "published verifier checkout must pin the admitted source commit"
     );
     let release_tag_prefix = emitted_release_tag_prefix(fixture);
     for (key, expected) in [
         (
             "EXPECTED_SOURCE_COMMIT",
-            "${{ needs.attest.outputs.source_commit }}",
+            "${{ needs.admission.outputs.head_sha }}",
         ),
         ("EXPECTED_SOURCE_REPOSITORY", REPOSITORY),
         ("EXPECTED_SOURCE_REF", "refs/heads/main"),
@@ -1126,22 +1619,22 @@ fn run_published_verification_controlled(request: PublishedVerificationRequest<'
         ("RELEASE_TAG", release_tag_prefix.as_str()),
     ] {
         assert_eq!(
-            mapping_string(publish_env, key),
+            mapping_string(verifier_env, key),
             Some(expected),
             "rendered publish environment must preserve the exact {key} source binding"
         );
     }
     assert_eq!(
-        mapping_string(download_env, "RELEASE_ASSET_TAG"),
-        Some("${{ steps.publish.outputs.immutable_tag }}"),
-        "published verifier tag must come directly from the immutable publisher output"
+        mapping_string(download_step_env, "RELEASE_ASSET_TAG"),
+        Some("${{ needs.publish.outputs.release_tag }}"),
+        "published verifier tag must come directly from immutable publisher output"
     );
     assert_eq!(
-        mapping_string(publish_env, "VELNOR_SOURCE_CHECKOUT_DIR"),
+        mapping_string(verifier_env, "VELNOR_SOURCE_CHECKOUT_DIR"),
         Some("${{ github.workspace }}/source"),
-        "generated source checkout path must bind to this workflow workspace"
+        "fresh verifier source checkout path must bind to this workflow workspace"
     );
-    envs.insert(
+    download_envs.insert(
         "PATH".to_owned(),
         format!(
             "{}:{}",
@@ -1149,35 +1642,25 @@ fn run_published_verification_controlled(request: PublishedVerificationRequest<'
             std::env::var("PATH").unwrap_or_default()
         ),
     );
-    envs.insert("GH_TOKEN".to_owned(), "fixture-token".to_owned());
-    envs.insert(
+    download_envs.insert(
         "GITHUB_WORKSPACE".to_owned(),
         run_root.to_string_lossy().into_owned(),
     );
-    envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
+    download_envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
     let release_tag_prefix = emitted_release_tag_prefix(fixture);
-    for (name, expected) in [
-        ("EXPECTED_SOURCE_COMMIT", source_sha),
-        ("EXPECTED_SOURCE_REPOSITORY", REPOSITORY),
-        ("EXPECTED_SOURCE_REF", "refs/heads/main"),
-        ("EXPECTED_MANIFEST_SCHEMA", "example.preview-manifest-v1"),
-        ("VELNOR_PACKAGE_CHANNEL", CHANNEL),
-        ("RELEASE_TAG", release_tag_prefix.as_str()),
-        ("RELEASE_ASSET_TAG", immutable_tag),
-    ] {
-        assert_eq!(
-            envs.get(name).map(String::as_str),
-            Some(expected),
-            "published verifier {name} must resolve from its rendered workflow binding"
-        );
-    }
+    assert_eq!(
+        download_envs.get("RELEASE_ASSET_TAG").map(String::as_str),
+        Some(immutable_tag),
+        "published verifier tag must resolve from its rendered workflow binding"
+    );
     assert_eq!(
         immutable_tag,
         format!("{release_tag_prefix}-{source_sha}"),
         "published verifier tag must bind its rendered release prefix to the admitted source"
     );
     let source_checkout = PathBuf::from(
-        envs.get("VELNOR_SOURCE_CHECKOUT_DIR")
+        download_envs
+            .get("VELNOR_SOURCE_CHECKOUT_DIR")
             .expect("rendered source checkout binding"),
     );
     assert_eq!(
@@ -1193,78 +1676,77 @@ fn run_published_verification_controlled(request: PublishedVerificationRequest<'
         format!("https://github.com/{checkout_repository}.git"),
     )
     .expect("bind source checkout fixture to declared repository");
-    fs::write(
-        source_checkout.join("mise.toml"),
-        "[tasks.verify-release]\nrun = \"./scripts/verify-package.sh\"\n",
-    )
-    .expect("write checked-out package verification task");
-    write_executable(
-        &source_checkout.join("scripts/verify-package.sh"),
-        &format!(
-            r#"#!/usr/bin/env bash
-set -euo pipefail
-dir="${{VELNOR_VERIFIED_PACKAGE_DIR:?missing verified package directory}}"
-manifest="$dir/release-manifest.json"
-identity="$dir/identity.json"
-source_sha="$(jq -er '.source_commit' "$manifest")"
-[[ "$source_sha" == "$EXPECTED_SOURCE_COMMIT" ]]
-[[ "$(jq -er '.source_repository' "$manifest")" == "$EXPECTED_SOURCE_REPOSITORY" ]]
-[[ "$(jq -er '.source_ref' "$manifest")" == "$EXPECTED_SOURCE_REF" ]]
-[[ "$(jq -er '.schema' "$manifest")" == "$EXPECTED_MANIFEST_SCHEMA" ]]
-[[ "$(jq -er '.version' "$manifest")" == "{expected_version}" ]]
-[[ "$(jq -er '.source_digest' "$identity")" == "$source_sha" ]]
-[[ "$(jq -er '.manifest.source_commit' "$identity")" == "$source_sha" ]]
-for name in "{PAYLOAD}" "{SUPPORT}"; do
-  if [[ "$name" == "{PAYLOAD}" ]]; then
-    expected="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .sha256' "$manifest")"
-  else
-    expected="$(jq -er --arg name "$name" '.supporting_assets[] | select(.name == $name) | .sha256' "$manifest")"
-  fi
-  actual="$(sha256sum -- "$dir/$name" | awk '{{print $1}}')"
-  [[ "$actual" == "$expected" ]]
-done
-(cd "$dir" && sha256sum --check --strict SHA256SUMS) >/dev/null
-"#,
-            expected_version = package_version(source_sha)
-        ),
-    );
-    envs.insert(
-        "PACKAGE_DIR".to_owned(),
-        package_dir.to_string_lossy().into_owned(),
-    );
-    envs.insert(
+    download_envs.insert(
         "RELEASE_STATE".to_owned(),
         release_state.to_string_lossy().into_owned(),
     );
-    envs.insert("ASSET_MODE".to_owned(), "exact".to_owned());
-    envs.insert("TAG_SHA".to_owned(), source_sha.to_owned());
-    envs.insert("LOCK_SHA".to_owned(), LOCK_SHA.to_owned());
-    envs.insert(
+    download_envs.insert("ASSET_MODE".to_owned(), "exact".to_owned());
+    download_envs.insert("TAG_SHA".to_owned(), source_sha.to_owned());
+    download_envs.insert("LOCK_SHA".to_owned(), LOCK_SHA.to_owned());
+    download_envs.insert(
         "RELEASE_ASSET_DIR".to_owned(),
         released_assets.to_string_lossy().into_owned(),
     );
-    envs.insert("GH_LOG".to_owned(), gh_log.to_string_lossy().into_owned());
-    envs.insert("GIT_LOG".to_owned(), git_log.to_string_lossy().into_owned());
-    envs.insert(
-        "MISE_LOG".to_owned(),
-        mise_log.to_string_lossy().into_owned(),
+    download_envs.insert("GH_LOG".to_owned(), gh_log.to_string_lossy().into_owned());
+    download_envs.insert("GIT_LOG".to_owned(), git_log.to_string_lossy().into_owned());
+
+    let download_output = run_bash(
+        job_step_run(
+            &fixture.workflow,
+            "verify_published",
+            "Download immutable published release",
+        ),
+        run_root,
+        &download_envs.into_iter().collect::<Vec<_>>(),
     );
-    envs.insert(
-        "ATTESTATION_LOG".to_owned(),
-        attestation_log.to_string_lossy().into_owned(),
+    assert!(
+        download_output.status.success(),
+        "generated published release download failed:\n{}{}",
+        String::from_utf8_lossy(&download_output.stdout),
+        String::from_utf8_lossy(&download_output.stderr)
     );
-    envs.insert(
+    let mut verify_envs = workflow_environment(
+        fixture,
+        source_sha,
+        immutable_tag,
+        run_root,
+        "Re-verify immutable published release",
+    );
+    verify_envs.insert(
+        "PATH".to_owned(),
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    verify_envs.insert(
+        "GITHUB_WORKSPACE".to_owned(),
+        run_root.to_string_lossy().into_owned(),
+    );
+    verify_envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
+    verify_envs.insert(
+        "RELEASE_STATE".to_owned(),
+        release_state.to_string_lossy().into_owned(),
+    );
+    verify_envs.insert(
+        "RELEASE_ASSET_DIR".to_owned(),
+        released_assets.to_string_lossy().into_owned(),
+    );
+    verify_envs.insert("GH_LOG".to_owned(), gh_log.to_string_lossy().into_owned());
+    verify_envs.insert("GIT_LOG".to_owned(), git_log.to_string_lossy().into_owned());
+    verify_envs.insert(
         "GITHUB_OUTPUT".to_owned(),
         output_file.to_string_lossy().into_owned(),
     );
-
     let output = run_bash(
-        step_run(
+        job_step_run(
             &fixture.workflow,
-            "Download and re-verify published release",
+            "verify_published",
+            "Re-verify immutable published release",
         ),
         run_root,
-        &envs.into_iter().collect::<Vec<_>>(),
+        &verify_envs.into_iter().collect::<Vec<_>>(),
     );
     if let Some(expected_failure) = expected_failure {
         let combined = format!(
@@ -1284,20 +1766,20 @@ done
     }
     assert!(
         output.status.success(),
-        "generated published-package verifier failed:\n{}{}",
+        "generated fresh published-package verifier failed:\n{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let verification_log = fs::read_to_string(&gh_log).expect("read verifier GitHub log");
     assert!(
         verification_log.contains(&format!("release> <download> <{immutable_tag}")),
-        "emitted verifier did not download the expected immutable tag: {verification_log}"
+        "emitted fresh verifier did not download the expected immutable tag: {verification_log}"
     );
     let git_commands = fs::read_to_string(&git_log).expect("read verifier Git log");
     assert!(
         git_commands.contains("rev-parse> <HEAD")
             && git_commands.contains("remote> <get-url> <origin"),
-        "verifier did not bind source checkout commit and origin: {git_commands}"
+        "fresh verifier did not bind source checkout commit and origin: {git_commands}"
     );
     let published = run_root.join("published-package");
     for name in ["release-manifest.json", "identity.json", PAYLOAD, SUPPORT] {
@@ -1307,52 +1789,10 @@ done
         );
     }
 
-    let task_step = "Run published package verification tasks";
-    let mut task_envs =
-        workflow_environment(fixture, source_sha, immutable_tag, run_root, task_step);
-    let expected_package_dir = published.to_string_lossy().into_owned();
-    assert_eq!(
-        task_envs.get("VELNOR_VERIFIED_PACKAGE_DIR"),
-        Some(&expected_package_dir),
-        "published verification task must receive the downloaded package handoff"
-    );
-    task_envs.insert(
-        "PATH".to_owned(),
-        format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
-    );
-    task_envs.insert(
-        "GITHUB_WORKSPACE".to_owned(),
-        run_root.to_string_lossy().into_owned(),
-    );
-    task_envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
-    task_envs.insert(
-        "MISE_LOG".to_owned(),
-        mise_log.to_string_lossy().into_owned(),
-    );
-    let task_output = run_bash(
-        step_run(&fixture.workflow, task_step),
-        run_root,
-        &task_envs.into_iter().collect::<Vec<_>>(),
-    );
-    assert!(
-        task_output.status.success(),
-        "emitted published verification task failed:\n{}{}",
-        String::from_utf8_lossy(&task_output.stdout),
-        String::from_utf8_lossy(&task_output.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(&mise_log).expect("read emitted task invocation"),
-        "run verify-release\n",
-        "generated published verification step did not execute its declared task"
-    );
-
     let attestation_step = "Verify published release attestations";
-    let mut attestation_envs = workflow_environment(
+    let mut attestation_envs = workflow_environment_for_job(
         fixture,
+        "verify_published",
         source_sha,
         immutable_tag,
         run_root,
@@ -1389,7 +1829,7 @@ done
         attestation_log.to_string_lossy().into_owned(),
     );
     let attestation_output = run_bash(
-        step_run(&fixture.workflow, attestation_step),
+        job_step_run(&fixture.workflow, "verify_published", attestation_step),
         run_root,
         &attestation_envs.into_iter().collect::<Vec<_>>(),
     );
@@ -1408,6 +1848,92 @@ done
             "emitted attestation step did not inspect {name} under {immutable_tag}: {attested}"
         );
     }
+
+    fs::write(
+        source_checkout.join("mise.toml"),
+        "[tasks.verify-release]\nrun = \"./scripts/verify-package.sh\"\n",
+    )
+    .expect("write admitted verification task definition");
+    let expected_version = package_version(source_sha);
+    write_executable(
+        &source_checkout.join("scripts/verify-package.sh"),
+        &format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+dir="${{VELNOR_VERIFIED_PACKAGE_DIR:?missing verified package directory}}"
+manifest="$dir/release-manifest.json"
+identity="$dir/identity.json"
+source_sha="$(jq -er '.source_commit' "$manifest")"
+[[ "$source_sha" == "$EXPECTED_SOURCE_COMMIT" ]]
+[[ "$(jq -er '.source_repository' "$manifest")" == "$EXPECTED_SOURCE_REPOSITORY" ]]
+[[ "$(jq -er '.source_ref' "$manifest")" == "$EXPECTED_SOURCE_REF" ]]
+[[ "$(jq -er '.schema' "$manifest")" == "$EXPECTED_MANIFEST_SCHEMA" ]]
+[[ "$(jq -er '.version' "$manifest")" == "{expected_version}" ]]
+[[ "$(jq -er '.source_digest' "$identity")" == "$source_sha" ]]
+[[ "$(jq -er '.manifest.source_commit' "$identity")" == "$source_sha" ]]
+for name in "{PAYLOAD}" "{SUPPORT}"; do
+  if [[ "$name" == "{PAYLOAD}" ]]; then
+    expected="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .sha256' "$manifest")"
+  else
+    expected="$(jq -er --arg name "$name" '.supporting_assets[] | select(.name == $name) | .sha256' "$manifest")"
+  fi
+  actual="$(sha256sum -- "$dir/$name" | awk '{{print $1}}')"
+  [[ "$actual" == "$expected" ]]
+done
+(cd "$dir" && sha256sum --check --strict SHA256SUMS) >/dev/null
+"#,
+        ),
+    );
+    let task_step = "Run published package verification tasks";
+    let mut task_envs = workflow_environment_for_job(
+        fixture,
+        "verify_published",
+        source_sha,
+        immutable_tag,
+        run_root,
+        task_step,
+    );
+    let expected_package_dir = published.to_string_lossy().into_owned();
+    assert_eq!(
+        task_envs.get("VELNOR_VERIFIED_PACKAGE_DIR"),
+        Some(&expected_package_dir),
+        "published verification task must receive the fresh immutable package download"
+    );
+    let mise_log = run_root.join("mise-verification.log");
+    fs::write(&mise_log, "").expect("create verifier task log");
+    task_envs.insert(
+        "PATH".to_owned(),
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    task_envs.insert(
+        "GITHUB_WORKSPACE".to_owned(),
+        run_root.to_string_lossy().into_owned(),
+    );
+    task_envs.insert("GITHUB_REPOSITORY".to_owned(), REPOSITORY.to_owned());
+    task_envs.insert(
+        "MISE_LOG".to_owned(),
+        mise_log.to_string_lossy().into_owned(),
+    );
+    let task_output = run_bash(
+        job_step_run(&fixture.workflow, "verify_published", task_step),
+        run_root,
+        &task_envs.into_iter().collect::<Vec<_>>(),
+    );
+    assert!(
+        task_output.status.success(),
+        "emitted published verification task failed:\n{}{}",
+        String::from_utf8_lossy(&task_output.stdout),
+        String::from_utf8_lossy(&task_output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&mise_log).expect("read emitted task invocation"),
+        "run verify-release\n",
+        "published verifier executes the declared source task exactly once"
+    );
     published
 }
 
@@ -1439,6 +1965,10 @@ fn emitted_release_tag_prefix(fixture: &Fixture) -> String {
     release_tag.to_owned()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep fake publication state and attestation subjects bound to one fixture run."
+)]
 fn run_publication_step(
     fixture: &Fixture,
     root: &Path,
@@ -1452,12 +1982,26 @@ fn run_publication_step(
     let package = write_verified_package(root, &publisher_source_sha, "package");
     let released_assets = root.join("released-assets");
     fs::create_dir_all(&released_assets).expect("create fake public release asset storage");
+    let attestation_records = root.join("attestation-records.log");
+    let immutable_tag = format!(
+        "{}-{publisher_source_sha}",
+        emitted_release_tag_prefix(fixture)
+    );
+    let mut signed_subjects = String::new();
     for name in ["release-manifest.json", "identity.json", PAYLOAD, SUPPORT] {
         if release_body.contains(&format!("\"name\":\"{name}\"")) {
             fs::copy(package.join(name), released_assets.join(name))
                 .expect("seed existing fake release asset bytes");
+            writeln!(
+                signed_subjects,
+                "{immutable_tag} {name} {}",
+                file_sha256(&package.join(name))
+            )
+            .expect("append pinned attestation subject");
         }
     }
+    fs::write(&attestation_records, signed_subjects)
+        .expect("record immutable release subject digests");
     if asset_mode == "digest-mismatch" {
         fs::write(released_assets.join(PAYLOAD), b"changed public byte\n")
             .expect("corrupt existing public asset fixture");
@@ -1663,7 +2207,7 @@ fn immutable_tag_reaches_updater() {
     let emitted_release_tag =
         mapping_string(env, "RELEASE_ASSET_TAG").expect("immutable release output binding");
     assert!(
-        emitted_release_tag.contains("steps.publish.outputs.immutable_tag"),
+        emitted_release_tag.contains("needs.verify_published.outputs.release_tag"),
         "consumer release tag is not bound to publisher output: {emitted_release_tag}"
     );
     let updater_step = step_run(
@@ -1676,7 +2220,7 @@ fn immutable_tag_reaches_updater() {
     );
     assert!(
         mapping_string(updater_env, "VELNOR_PACKAGE_ASSET_TAG")
-            .is_some_and(|value| value.contains("steps.publish.outputs.immutable_tag"))
+            .is_some_and(|value| value.contains("needs.verify_published.outputs.release_tag"))
             || updater_step.contains("VELNOR_PACKAGE_ASSET_TAG=\"$RELEASE_ASSET_TAG\""),
         "immutable updater must receive VELNOR_PACKAGE_ASSET_TAG from RELEASE_ASSET_TAG"
     );
@@ -1705,8 +2249,8 @@ fn immutable_tag_reaches_updater() {
     assert!(
         mapping_string(updater_env, "VELNOR_VERIFIED_PACKAGE_DIR").is_some_and(|value| value
             .contains("github.workspace")
-            && value.ends_with("/published-package")),
-        "immutable updater must receive the verified published package directory"
+            && value.ends_with("/consumer-package")),
+        "immutable updater must receive its independently re-verified consumer package directory"
     );
     assert_eq!(
         mapping_string(updater_env, "VELNOR_PACKAGE_RELEASE_TAG"),
@@ -1767,6 +2311,111 @@ fn immutable_tag_reaches_updater() {
         )),
         "source identity did not reach updater: {observed}"
     );
+
+    let coherent_consumer_tamper_negative_control = || {
+        let tampered_root = fixture.root.join("tampered-publisher-run");
+        let tampered_assets = tampered_root.join("released-assets");
+        fs::create_dir_all(&tampered_assets).expect("create tampered immutable release assets");
+        for name in [PAYLOAD, SUPPORT, "release-manifest.json", "identity.json"] {
+            fs::copy(
+                publisher_root.join("released-assets").join(name),
+                tampered_assets.join(name),
+            )
+            .expect("copy signed release subject into tamper fixture");
+        }
+        fs::copy(
+            publisher_root.join("release-state.json"),
+            tampered_root.join("release-state.json"),
+        )
+        .expect("copy immutable release identity into tamper fixture");
+        fs::copy(
+            publisher_root.join("attestation-records.log"),
+            tampered_root.join("attestation-records.log"),
+        )
+        .expect("pin publisher attestation subjects in tamper fixture");
+
+        fs::write(
+            tampered_assets.join(PAYLOAD),
+            b"post-publication replacement bytes\n",
+        )
+        .expect("mutate release payload after publication");
+        let tampered_payload_sha = file_sha256(&tampered_assets.join(PAYLOAD));
+        fs::write(
+            tampered_assets.join(SUPPORT),
+            format!("{tampered_payload_sha}  {PAYLOAD}\n"),
+        )
+        .expect("rewrite payload checksum to bless changed bytes");
+        let tampered_support_sha = file_sha256(&tampered_assets.join(SUPPORT));
+        let mut tampered_manifest: JsonValue = serde_json::from_slice(
+            &fs::read(tampered_assets.join("release-manifest.json"))
+                .expect("read release manifest for coherent mutation"),
+        )
+        .expect("parse release manifest for coherent mutation");
+        tampered_manifest["assets"][0]["sha256"] = json!(tampered_payload_sha);
+        tampered_manifest["supporting_assets"][0]["sha256"] = json!(tampered_support_sha);
+        let tampered_manifest_json =
+            serde_json::to_string(&tampered_manifest).expect("serialize rewritten manifest");
+        fs::write(
+            tampered_assets.join("release-manifest.json"),
+            format!("{tampered_manifest_json}\n"),
+        )
+        .expect("write checksum-consistent mutated manifest");
+        let tampered_identity = json!({
+            "manifest": tampered_manifest,
+            "source_digest": sha,
+            "source_ref": "refs/heads/main",
+            "source_repository": REPOSITORY,
+        });
+        let tampered_identity_json =
+            serde_json::to_string(&tampered_identity).expect("serialize rewritten identity");
+        fs::write(
+            tampered_assets.join("identity.json"),
+            format!("{tampered_identity_json}\n"),
+        )
+        .expect("write identity consistent with rewritten manifest");
+
+        let pinned_payload = format!(
+            "{tag} {PAYLOAD} {}",
+            file_sha256(&publisher_root.join("released-assets").join(PAYLOAD))
+        );
+        assert!(
+            fs::read_to_string(tampered_root.join("attestation-records.log"))
+                .expect("read pinned publisher subjects")
+                .lines()
+                .any(|line| line == pinned_payload),
+            "fixture must retain the publisher-signed original payload digest"
+        );
+        assert_ne!(
+            tampered_payload_sha,
+            file_sha256(&publisher_root.join("released-assets").join(PAYLOAD)),
+            "mutated payload must have a different digest from its signed subject"
+        );
+        let tampered_gate = run_consumer_package_gate(
+            &fixture,
+            &fixture.root.join("consumer-tamper-run"),
+            &tampered_root,
+            &sha,
+            &tag,
+        );
+        assert!(
+        tampered_gate.verification.status.success(),
+        "generic source/manifest/checksum revalidation should accept the coherent mutation:\n{}{}",
+        String::from_utf8_lossy(&tampered_gate.verification.stdout),
+        String::from_utf8_lossy(&tampered_gate.verification.stderr)
+    );
+        assert!(
+        !tampered_gate.attestations.status.success(),
+        "consumer attestation step accepted changed bytes after checksums and manifest were rewritten"
+    );
+        let tamper_error = String::from_utf8_lossy(&tampered_gate.attestations.stderr);
+        assert!(
+            tamper_error.contains("attestation does not match the signed publisher bytes")
+                && tamper_error.contains(&format!("{tag} {PAYLOAD} {tampered_payload_sha}")),
+            "attestation failure did not name the changed payload subject: {tamper_error}"
+        );
+    };
+    coherent_consumer_tamper_negative_control();
+
     let branch = format!("automation/package-release-{tag}");
     let branch_ref = format!("refs/heads/{branch}:Formula/preview-tool.rb");
     let formula = real_git(
