@@ -154,6 +154,11 @@ impl ProductIdentity {
                     "{context} product identity field `{field}` contains control characters"
                 )));
             }
+            if value.contains("${{") {
+                return Err(GeneratorError::usage(format!(
+                    "{context} product identity field `{field}` contains a GitHub expression opener"
+                )));
+            }
         }
         if let Some(digest) = self.inputs_digest.as_deref()
             && !crate::s2::primitives::prepared_tools::is_digest(digest)
@@ -251,13 +256,12 @@ fn validate_identity_list(
     field: &str,
     values: &[String],
 ) -> Result<(), GeneratorError> {
-    if values
-        .iter()
-        .any(|value| value.is_empty() || value.chars().any(char::is_control))
-        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    if values.iter().any(|value| {
+        value.is_empty() || value.chars().any(char::is_control) || value.contains("${{")
+    }) || values.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(GeneratorError::usage(format!(
-            "{context} product identity `{field}` must be non-empty, unique, and sorted"
+            "{context} product identity `{field}` must be non-empty, printable, expression-free, unique, and sorted"
         )));
     }
     Ok(())
@@ -269,10 +273,14 @@ fn validate_identity_map(
     values: &BTreeMap<String, String>,
 ) -> Result<(), GeneratorError> {
     if values.iter().any(|(key, value)| {
-        key.is_empty() || key.chars().any(char::is_control) || value.chars().any(char::is_control)
+        key.is_empty()
+            || key.chars().any(char::is_control)
+            || value.chars().any(char::is_control)
+            || key.contains("${{")
+            || value.contains("${{")
     }) {
         return Err(GeneratorError::usage(format!(
-            "{context} product identity `{field}` contains an empty or non-printable entry"
+            "{context} product identity `{field}` contains an empty, non-printable, or expression entry"
         )));
     }
     Ok(())
@@ -657,6 +665,84 @@ fn validate_bindings(unit: &Unit, product: &NamedProduct) -> Result<(), Generato
     Ok(())
 }
 
+/// Check the structural files required by an identified Apple `XCFramework`.
+/// Runtime plist and architecture checks remain in the rendered validator.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "XCFramework output paths are an exact, case-sensitive contract"
+)]
+fn validate_apple_xcframework_contract(
+    unit: &Unit,
+    product: &NamedProduct,
+) -> Result<(), GeneratorError> {
+    let Some(identity) = ProductIdentity::for_product(unit, product) else {
+        return Ok(());
+    };
+    if identity.target != "apple-xcframework" {
+        return Ok(());
+    }
+    let frameworks = product
+        .outputs
+        .iter()
+        .filter(|output| output.ends_with(".xcframework"))
+        .collect::<Vec<_>>();
+    if frameworks.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} has apple-xcframework identity but no .xcframework output root",
+            unit.id, product.name
+        )));
+    }
+    // Identity is inferred from product facts. Enforce the full structural
+    // contract only when both slice paths and a deployment floor were found.
+    if identity.architectures.is_empty() || identity.deployment_target.is_empty() {
+        return Ok(());
+    }
+    if !super::scan::rust::valid_deployment_floor(&identity.deployment_target) {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} declares apple-xcframework deployment target {} that is not a valid Apple deployment version",
+            unit.id, product.name, identity.deployment_target
+        )));
+    }
+    if !product.deployment_target.is_empty()
+        && product.deployment_target != identity.deployment_target
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit {} product {} deployment target {} disagrees with typed identity {}",
+            unit.id, product.name, product.deployment_target, identity.deployment_target
+        )));
+    }
+    for framework in frameworks {
+        let info = format!("{framework}/Info.plist");
+        if !product.output_files.iter().any(|file| file == &info) {
+            return Err(GeneratorError::usage(format!(
+                "unit {} product {} XCFramework output {} must declare {}",
+                unit.id, product.name, framework, info
+            )));
+        }
+        for slice in &identity.architectures {
+            let prefix = format!("{framework}/{slice}/");
+            if !product
+                .output_files
+                .iter()
+                .any(|file| file.starts_with(&prefix) && file.ends_with(".a"))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "unit {} product {} XCFramework slice {} declares no static library under {}",
+                    unit.id, product.name, slice, prefix
+                )));
+            }
+            let modulemap = format!("{prefix}Headers/module.modulemap");
+            if !product.output_files.iter().any(|file| file == &modulemap) {
+                return Err(GeneratorError::usage(format!(
+                    "unit {} product {} XCFramework slice {} must declare {}",
+                    unit.id, product.name, slice, modulemap
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate one product's local rebuild: every command is non-empty
 /// printable shell without NUL bytes, so the guarded compound the consumer
 /// prepends cannot silently collapse or inject a second command.
@@ -753,6 +839,7 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
             }
             validate_output_files(unit, product)?;
             validate_bindings(unit, product)?;
+            validate_apple_xcframework_contract(unit, product)?;
             validate_rebuild(unit, product)?;
         }
         for prerequisite in &unit.prerequisites {
@@ -1265,6 +1352,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn product_identity_rejects_github_expression_openers() {
+        let mut scalar = ProductIdentity {
+            schema: super::PRODUCT_IDENTITY_SCHEMA.to_owned(),
+            source: "${{ github.ref }}".to_owned(),
+            ..ProductIdentity::default()
+        };
+        assert!(scalar.validate("fixture").is_err());
+
+        scalar.source.clear();
+        scalar.flags = vec!["${{ github.sha }}".to_owned()];
+        assert!(scalar.validate("fixture").is_err());
+
+        scalar.flags.clear();
+        scalar
+            .generation
+            .insert("recipe".to_owned(), "${{ github.sha }}".to_owned());
+        assert!(scalar.validate("fixture").is_err());
+
+        scalar.generation.clear();
+        scalar
+            .toolchain
+            .insert("${{ github.sha }}".to_owned(), "safe".to_owned());
+        assert!(scalar.validate("fixture").is_err());
+    }
+
     fn requires(producer: &str, product: &str) -> Prerequisite {
         Prerequisite {
             producer: producer.to_owned(),
@@ -1570,6 +1683,25 @@ mod tests {
             resolve(&mut project_config(vec![producer])),
             "files under roots resolve",
         );
+    }
+
+    #[test]
+    fn resolve_rejects_identified_xcframework_without_modulemap() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.output_files = vec![
+            "native/out/lib.xcframework/Info.plist".to_owned(),
+            "native/out/lib.xcframework/macos-arm64/libffi.a".to_owned(),
+        ];
+        ffi.bindings_dir = "app/Sources/Bindings/BoltFFI".to_owned();
+        ffi.bindings_file = "app/Sources/Bindings/BoltFFI/BridgeCoreFfiBoltFFI.swift".to_owned();
+        ffi.deployment_target = "15.0".to_owned();
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "incomplete XCFramework structure fails closed",
+        );
+        assert!(error.to_string().contains("module.modulemap"), "{error}");
     }
 
     #[test]
