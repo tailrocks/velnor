@@ -1380,6 +1380,10 @@ fn valid_boltffi_apple_arch(arch: &str) -> bool {
     matches!(arch, "arm64" | "x86_64" | "armv7" | "x86")
 }
 
+fn valid_boltffi_macos_arch(arch: &str) -> bool {
+    matches!(arch, "arm64" | "x86_64")
+}
+
 /// Resolve the expected `XCFramework` slice directories in `BoltFFI` target
 /// order (iOS device, simulator, macOS). Directory names follow the
 /// `xcodebuild -create-xcframework` convention
@@ -1410,11 +1414,31 @@ fn boltffi_slice_dirs(manifest: &BoltffiManifest) -> Result<Vec<String>, String>
         manifest.macos_architectures.as_ref(),
         &BOLTFFI_DEFAULT_MULTI_ARCHITECTURES,
     );
-    for arch in ios.iter().chain(simulator.iter()).chain(macos.iter()) {
+    for arch in ios.iter().chain(simulator.iter()) {
         if !valid_boltffi_apple_arch(arch) {
             return Err(format!(
                 "architecture `{arch}` is not a supported Apple slice architecture"
             ));
+        }
+    }
+    for arch in &macos {
+        if !valid_boltffi_macos_arch(arch) {
+            return Err(format!(
+                "architecture `{arch}` is not a supported macOS slice architecture"
+            ));
+        }
+    }
+    for (label, architectures) in [
+        ("iOS", &ios),
+        ("iOS simulator", &simulator),
+        ("macOS", &macos),
+    ] {
+        let mut seen = BTreeSet::new();
+        if architectures
+            .iter()
+            .any(|architecture| !seen.insert(architecture.as_str()))
+        {
+            return Err(format!("{label} architecture list contains duplicates"));
         }
     }
     let mut slices = Vec::new();
@@ -3258,6 +3282,40 @@ mod tests {
         );
         let error = must_err(boltffi_slice_dirs(&parsed), "unknown arch must fail");
         assert!(error.contains("riscv64"), "unexpected error: {error}");
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple]\ninclude_macos = true\n\
+             ios_architectures = []\nsimulator_architectures = []\n\
+             macos_architectures = [\"armv7\"]\n",
+        );
+        let error = must_err(
+            boltffi_slice_dirs(&parsed),
+            "iOS-only architecture must fail for macOS",
+        );
+        assert!(error.contains("armv7"), "unexpected error: {error}");
+        assert!(error.contains("macOS"), "unexpected error: {error}");
+        for (label, architectures) in [
+            ("iOS", "ios_architectures = [\"arm64\", \"arm64\"]"),
+            (
+                "iOS simulator",
+                "simulator_architectures = [\"x86_64\", \"x86_64\"]",
+            ),
+            (
+                "macOS",
+                "include_macos = true\nmacos_architectures = [\"arm64\", \"arm64\"]",
+            ),
+        ] {
+            let manifest = format!(
+                "[package]\nname = \"x\"\n\n[targets.apple]\n\
+                 ios_architectures = []\nsimulator_architectures = []\n{architectures}\n"
+            );
+            let parsed = parse_boltffi_manifest(&manifest);
+            let error = must_err(
+                boltffi_slice_dirs(&parsed),
+                "duplicate architectures must fail",
+            );
+            assert!(error.contains(label), "unexpected error: {error}");
+            assert!(error.contains("duplicates"), "unexpected error: {error}");
+        }
         // Everything disabled: BoltFFI itself rejects the empty slice set.
         let parsed = parse_boltffi_manifest(
             "[package]\nname = \"x\"\n\n\
