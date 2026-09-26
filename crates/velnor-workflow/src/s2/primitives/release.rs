@@ -9855,7 +9855,7 @@ verification_providers = ["github-hosted"]
                     );
                     must(symlink(&outside, checkout.join("dist")), "link dist root");
                 }
-                _ => unreachable!(),
+                _ => panic!("unknown symlink root kind: {kind}"),
             }
             let status = must(
                 Command::new("bash")
