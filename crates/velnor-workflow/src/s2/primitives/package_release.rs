@@ -1,11 +1,11 @@
-//! Typed rolling package-release handoff.
+//! Typed source-bound package-release publication and consumer handoff.
 //
 // The producer task remains repository-owned: it builds the package bytes and
 // writes the declared verified directory. Velnor owns the boundary around
 // that directory: exact manifest/identity binding, payload checksums,
-// attestation verification, serialized rolling publication, and the explicit
-// consumer updater invocation. No consumer repository or product name is
-// embedded here.
+// attestation verification, immutable publication, optional rolling refresh,
+// and explicit consumer updater inputs. No consumer repository or product
+// name is embedded here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -38,6 +38,8 @@ struct PackageReleaseSpec {
     supporting_assets: Vec<String>,
     channel: String,
     release_tag: String,
+    consumer_tag_mode: ConsumerTagMode,
+    refresh_rolling_release: bool,
     github_release_type: String,
     publish_environment: String,
     release_title_prefix: String,
@@ -48,6 +50,12 @@ struct PackageReleaseSpec {
     update_commit_message: String,
     concurrency_group: String,
     release_inputs: ReleaseInputRules,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConsumerTagMode {
+    Immutable,
+    Legacy,
 }
 
 /// Repository-owned positive and negative path declarations for source-head
@@ -135,6 +143,7 @@ impl Primitive for PackageRelease {
             "channel",
             "concurrency_group",
             "consumer_branch",
+            "consumer_tag_mode",
             "consumer_repository",
             "github_release_type",
             "manifest_schema",
@@ -143,6 +152,7 @@ impl Primitive for PackageRelease {
             "publish_environment",
             "release_tag",
             "release_title_prefix",
+            "refresh_rolling_release",
             "production_inputs",
             "production_dependencies",
             "non_production_inputs",
@@ -383,7 +393,8 @@ fn compile_release_groups(
 }
 
 fn parse_release_input_rules(args: &Args<'_>) -> Result<ReleaseInputRules, GeneratorError> {
-    let production_inputs = args.string_tables("production_inputs")?.unwrap_or_default();
+    let production_inputs = args.string_tables("production_inputs")?;
+    let production_inputs_declared = production_inputs.is_some();
     let production_dependencies = args
         .string_tables("production_dependencies")?
         .unwrap_or_default();
@@ -392,11 +403,19 @@ fn parse_release_input_rules(args: &Args<'_>) -> Result<ReleaseInputRules, Gener
         .unwrap_or_default();
 
     let rules = ReleaseInputRules {
-        production_inputs,
+        production_inputs: production_inputs.unwrap_or_default(),
         production_dependencies,
         non_production_inputs,
     };
-    compile_release_groups("production_inputs", &rules.production_inputs, true)?;
+    // Declarations predating release admission omit this table. Keep them
+    // valid; their unmatched changes are admitted conservatively below. An
+    // explicitly present table remains a strict contract, including when it
+    // is empty.
+    compile_release_groups(
+        "production_inputs",
+        &rules.production_inputs,
+        production_inputs_declared,
+    )?;
     compile_release_groups(
         "production_dependencies",
         &rules.production_dependencies,
@@ -969,6 +988,33 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
             "package-release release_tag must be a portable tag token",
         ));
     }
+    let consumer_tag_mode = match args
+        .string("consumer_tag_mode")?
+        .as_deref()
+        .unwrap_or("legacy")
+    {
+        "immutable" => ConsumerTagMode::Immutable,
+        "legacy" => ConsumerTagMode::Legacy,
+        _ => {
+            return Err(GeneratorError::usage(
+                "package-release consumer_tag_mode must be `immutable` or `legacy`",
+            ));
+        }
+    };
+    let refresh_rolling_release = match args.0.get("refresh_rolling_release") {
+        None => true,
+        Some(toml::Value::Boolean(value)) => *value,
+        Some(_) => {
+            return Err(GeneratorError::usage(
+                "package-release refresh_rolling_release must be a boolean",
+            ));
+        }
+    };
+    if consumer_tag_mode == ConsumerTagMode::Legacy && !refresh_rolling_release {
+        return Err(GeneratorError::usage(
+            "package-release legacy consumer_tag_mode requires refresh_rolling_release = true",
+        ));
+    }
     let github_release_type = required_string(args, "github_release_type")?;
     if !matches!(github_release_type.as_str(), "prerelease" | "release") {
         return Err(GeneratorError::usage(
@@ -1029,6 +1075,8 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         supporting_assets,
         channel,
         release_tag,
+        consumer_tag_mode,
+        refresh_rolling_release,
         github_release_type,
         publish_environment,
         release_title_prefix,
@@ -1282,7 +1330,7 @@ done
   NF == 2 {
     name = $2
     sub(/^\*/, "", name)
-    if (length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || name == "" || name ~ /[\\/[:space:]]/) {
+    if (length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || name == "" || index(name, "\\") || name ~ /[[:space:]]/) {
       exit 1
     }
     print name
@@ -1586,6 +1634,34 @@ fn render_workflow(
 struct PublishVerification<'a> {
     script: &'a str,
     attestation_flags: &'a str,
+}
+
+fn render_consumer_identity_check_script() -> &'static str {
+    r#"set -euo pipefail
+[[ "$VELNOR_PACKAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::verified package source commit is invalid" >&2; exit 1; }
+[ "$VELNOR_PACKAGE_SOURCE_COMMIT" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::verified package source commit differs from the admitted source" >&2; exit 1; }
+expected_asset_tag="$RELEASE_TAG-$VELNOR_PACKAGE_SOURCE_COMMIT"
+[ "$VELNOR_PACKAGE_ASSET_TAG" = "$expected_asset_tag" ] || { echo "::error::immutable package asset tag does not bind to its source commit" >&2; exit 1; }
+manifest="$VELNOR_VERIFIED_PACKAGE_DIR/release-manifest.json"
+identity="$VELNOR_VERIFIED_PACKAGE_DIR/identity.json"
+test -s "$manifest"
+test -s "$identity"
+jq -e \
+  --arg repository "$VELNOR_PACKAGE_SOURCE_REPOSITORY" \
+  --arg source_ref "$VELNOR_PACKAGE_SOURCE_REF" \
+  --arg commit "$VELNOR_PACKAGE_SOURCE_COMMIT" \
+  --arg version "$VELNOR_PACKAGE_VERSION" \
+  '.source_repository == $repository and .source_ref == $source_ref and
+   .source_commit == $commit and .version == $version' "$manifest" >/dev/null
+jq -e \
+  --arg repository "$VELNOR_PACKAGE_SOURCE_REPOSITORY" \
+  --arg source_ref "$VELNOR_PACKAGE_SOURCE_REF" \
+  --arg commit "$VELNOR_PACKAGE_SOURCE_COMMIT" \
+  --slurpfile package_manifest "$manifest" \
+  'keys == ["manifest","source_digest","source_ref","source_repository"] and
+   .source_repository == $repository and .source_ref == $source_ref and
+   .source_digest == $commit and .manifest == $package_manifest[0]' "$identity" >/dev/null
+"#
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2528,6 +2604,7 @@ if ! assert_publication_lock; then
   echo "::error::Velnor publication lock could not be verified; refusing release validation and mutation" >&2
   exit 1
 fi
+clear_publication_lock_retain
 
 {
 "#,
@@ -3127,15 +3204,17 @@ fn render_publish_job(
         script: publish_verify,
         attestation_flags,
     };
-    let rolling_refresh = indent_script(
-        &render_rolling_refresh_script(
-            &published_assets,
-            &expected_asset_names,
-            &payload_names,
-            &verification,
-        ),
-        10,
-    );
+    let rolling_refresh = spec.refresh_rolling_release.then(|| {
+        indent_script(
+            &render_rolling_refresh_script(
+                &published_assets,
+                &expected_asset_names,
+                &payload_names,
+                &verification,
+            ),
+            10,
+        )
+    });
     let mut output = String::new();
     let _ = writeln!(output, "  publish:");
     output.push_str("    name: Publish immutable package and update consumer\n");
@@ -3158,6 +3237,13 @@ fn render_publish_job(
     output.push_str(&github_expression("steps.publish.outputs.immutable_tag"));
     output.push_str("\n      consumer_pr_url: ");
     output.push_str(&github_expression("steps.consumer-pr.outputs.pr_url"));
+    output.push_str("\n      rolling_refresh_outcome: ");
+    let rolling_refresh_outcome = if spec.refresh_rolling_release {
+        github_expression("steps.rolling-refresh.outcome")
+    } else {
+        github_expression("'not-requested'")
+    };
+    output.push_str(&rolling_refresh_outcome);
     output.push_str("\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: ");
     output.push_str(workspace_expr);
     output.push_str("/package\n      VELNOR_PACKAGE_CHANNEL: ");
@@ -3290,12 +3376,24 @@ fn render_publish_job(
     output.push_str(attestation_flags);
     output.push_str("\n          done\n");
 
-    output.push_str(
-        "      - name: Refresh rolling preview release\n        env:\n          GH_TOKEN: ",
-    );
-    output.push_str(github_token_expr);
-    output.push_str("\n        run: |\n");
-    output.push_str(&rolling_refresh);
+    if !spec.refresh_rolling_release {
+        output.push_str(
+            "      - name: Release immutable-only publication lock after verification\n        if: success()\n        run: |\n          printf 'VELNOR_PUBLICATION_LOCK_RETAIN=0\\n' >> \"$GITHUB_ENV\"\n",
+        );
+    }
+
+    if let Some(rolling_refresh) = rolling_refresh.as_deref() {
+        output.push_str(
+            "      - name: Refresh rolling preview release\n        id: rolling-refresh\n",
+        );
+        if spec.consumer_tag_mode == ConsumerTagMode::Immutable {
+            output.push_str("        continue-on-error: true\n");
+        }
+        output.push_str("        env:\n          GH_TOKEN: ");
+        output.push_str(github_token_expr);
+        output.push_str("\n        run: |\n");
+        output.push_str(rolling_refresh);
+    }
     output.push_str(
         "      - name: Finalize package publication lock\n        if: ${{ always() }}\n        env:\n          GH_TOKEN: ",
     );
@@ -3305,6 +3403,26 @@ fn render_publish_job(
         &render_publication_lock_finalizer_script(),
         10,
     ));
+
+    output.push_str(
+        "      - name: Verify immutable consumer package identity\n        env:\n          VELNOR_PACKAGE_ASSET_TAG: ",
+    );
+    output.push_str(&immutable_tag_output);
+    output.push_str("\n          VELNOR_PACKAGE_VERSION: ");
+    output.push_str(&github_expression("steps.verify.outputs.version"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_COMMIT: ");
+    output.push_str(&github_expression("steps.verify.outputs.source_commit"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: ");
+    output.push_str(source_repository_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REF: ");
+    output.push_str(source_ref_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_CHANNEL: ");
+    output.push_str(channel_yaml);
+    output.push_str("\n          VELNOR_VERIFIED_PACKAGE_DIR: ");
+    output.push_str(workspace_expr);
+    output.push_str("/published-package\n        run: |\n");
+    output.push_str(&indent_script(&render_consumer_identity_check_script(), 10));
+
     output.push_str("      - name: Checkout consumer repository\n        uses: ");
     output.push_str(checkout);
     output.push_str("\n        with:\n          repository: ");
@@ -3321,6 +3439,25 @@ fn render_publish_job(
     output.push_str(updater_token_expr);
     output.push_str("\n          UPDATER_TOKEN: ");
     output.push_str(updater_token_expr);
+    output.push_str("\n          VELNOR_PACKAGE_ASSET_TAG: ");
+    output.push_str(&immutable_tag_output);
+    output.push_str("\n          VELNOR_PACKAGE_VERSION: ");
+    output.push_str(&github_expression("steps.verify.outputs.version"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_COMMIT: ");
+    output.push_str(&github_expression("steps.verify.outputs.source_commit"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: ");
+    output.push_str(source_repository_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REF: ");
+    output.push_str(source_ref_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_CHANNEL: ");
+    output.push_str(channel_yaml);
+    output.push_str("\n          VELNOR_VERIFIED_PACKAGE_DIR: ");
+    output.push_str(workspace_expr);
+    output.push_str("/published-package");
+    if spec.consumer_tag_mode == ConsumerTagMode::Legacy {
+        output.push_str("\n          VELNOR_PACKAGE_RELEASE_TAG: ");
+        output.push_str(tag_yaml);
+    }
     output.push_str(
         r#"
         run: |
@@ -3353,7 +3490,13 @@ fn render_publish_job(
           else
             git switch --create "$automation_branch" "origin/$CONSUMER_BRANCH"
           fi
-          VELNOR_PACKAGE_CHANNEL="$VELNOR_PACKAGE_CHANNEL" VELNOR_PACKAGE_RELEASE_TAG="$RELEASE_TAG" VELNOR_VERIFIED_PACKAGE_DIR="$GITHUB_WORKSPACE/published-package" bash -c "$UPDATER"
+"#,
+    );
+    if spec.consumer_tag_mode == ConsumerTagMode::Immutable {
+        output.push_str("          unset RELEASE_TAG\n");
+    }
+    output.push_str(
+        r#"          bash -c "$UPDATER"
           untracked_files="$(git ls-files --others --exclude-standard)"
           if [ -n "$untracked_files" ]; then
             echo "::notice::consumer updater produced untracked files; staging them"
@@ -3424,6 +3567,59 @@ contract_fixture = ["tests/contract-fixtures/**"]
 "#,
         )
         .expect("fixture args")
+    }
+
+    #[test]
+    fn legacy_release_declarations_without_input_tables_parse_render_and_admit_unknown_changes() {
+        let mut values = args();
+        for key in [
+            "production_inputs",
+            "production_dependencies",
+            "non_production_inputs",
+        ] {
+            values.remove(key);
+        }
+
+        let spec = parse_spec(&Args(&values)).expect("legacy declaration remains valid");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert!(workflow.contains("name: Admit production release inputs"));
+
+        let changes = [crate::s2::reuse::ChangedPath {
+            path: "crates/velnorctl/src/new_module.rs".to_owned(),
+            previous: None,
+            status: crate::s2::reuse::ChangeKind::Added,
+        }];
+        let admission = evaluate_release_admission(
+            &AdmissionEvent {
+                repository: "example/project",
+                event_ref: "refs/heads/main",
+                configured_source_ref: "refs/heads/main",
+                event_name: "push",
+                before_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                head_tree: "cccccccccccccccccccccccccccccccccccccccc",
+            },
+            &spec.release_inputs,
+            &changes,
+        )
+        .expect("legacy unknown path classification");
+        assert_eq!(admission.disposition, "admit");
+        assert!(admission.reason.contains("admitting conservatively"));
+    }
+
+    #[test]
+    fn explicitly_empty_production_inputs_table_remains_invalid() {
+        let mut values = args();
+        values.insert(
+            "production_inputs".to_owned(),
+            toml::Value::Table(Default::default()),
+        );
+
+        let error = parse_release_input_rules(&Args(&values))
+            .expect_err("explicit empty production inputs must fail closed");
+        assert!(error
+            .to_string()
+            .contains("must declare at least one named path group"));
     }
 
     #[test]
@@ -4546,6 +4742,64 @@ gh() {{
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn generated_checksum_name_verifier_runs_with_host_awk() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid checksum fixture");
+        let script = verification_script(&spec);
+        let checker_start = script
+            .find("if ! awk '\n  NF == 2 {\n    name = $2")
+            .expect("generated SHA256SUMS awk checker");
+        let checker_end = checker_start
+            + script[checker_start..]
+                .find("\nif ! (cd \"$dir\" && sha256sum --check --strict SHA256SUMS)")
+                .expect("checksum byte verification boundary");
+        let checker = &script[checker_start..checker_end];
+        let shell = format!(
+            r#"set -euo pipefail
+dir="$TEST_TMPDIR/package"
+checksum_names="$TEST_TMPDIR/checksum-names"
+expected_names="$TEST_TMPDIR/expected-names"
+{checker}
+"#
+        );
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-host-awk-{}",
+            crate::unique_suffix()
+        ));
+        let package_dir = root.join("package");
+        std::fs::create_dir_all(&package_dir).expect("create host awk fixture");
+        std::fs::write(root.join("expected-names"), "a.tar.gz\n")
+            .expect("write expected checksum names");
+
+        let run_checker = |line: &str| {
+            std::fs::write(package_dir.join("SHA256SUMS"), line).expect("write SHA256SUMS fixture");
+            Command::new("bash")
+                .arg("-c")
+                .arg(&shell)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run generated checksum checker with host awk")
+        };
+        let digest = "a".repeat(64);
+        let valid = run_checker(&format!("{digest}  a.tar.gz\n"));
+        assert!(
+            valid.status.success(),
+            "generated SHA256SUMS check rejected a valid entry under host awk:\n{}{}",
+            String::from_utf8_lossy(&valid.stdout),
+            String::from_utf8_lossy(&valid.stderr)
+        );
+
+        let unsafe_name = run_checker(&format!("{digest}  a\\b.tar.gz\n"));
+        assert!(
+            !unsafe_name.status.success(),
+            "generated SHA256SUMS check accepted a path containing a backslash"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn release_asset_set_contains_metadata_payloads_and_supporting_provenance() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
@@ -4913,11 +5167,16 @@ gh() {{
         assert!(workflow.contains("gh pr close \"$stale_pr_url\""));
         assert!(workflow.contains("git switch --detach \"origin/$automation_branch\""));
         assert!(workflow
-            .contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\" VELNOR_VERIFIED_PACKAGE_DIR"));
+            .contains("VELNOR_PACKAGE_ASSET_TAG: ${{ steps.publish.outputs.immutable_tag }}"));
+        assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG: preview"));
+        assert!(workflow.contains("VELNOR_PACKAGE_VERSION: ${{ steps.verify.outputs.version }}"));
+        assert!(workflow
+            .contains("VELNOR_PACKAGE_SOURCE_COMMIT: ${{ steps.verify.outputs.source_commit }}"));
+        assert!(workflow.contains("VELNOR_PACKAGE_SOURCE_REPOSITORY: \"example/project\""));
+        assert!(workflow.contains("VELNOR_PACKAGE_SOURCE_REF: \"refs/heads/main\""));
+        assert!(workflow
+            .contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package"));
         assert!(!workflow.contains("git switch --force-create \"$automation_branch\""));
-        assert!(!workflow.contains(
-            "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\" VELNOR_VERIFIED_PACKAGE_DIR"
-        ));
         assert!(workflow.contains("git ls-files --others --exclude-standard"));
         assert!(workflow.contains("git status --porcelain --untracked-files=all"));
         assert!(workflow.contains("consumer updater produced untracked files; staging them"));
@@ -4935,6 +5194,8 @@ gh() {{
         assert!(!workflow
             .contains("if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then"));
         assert!(workflow.contains("bash -c \"$UPDATER\""));
+        assert!(workflow.contains("immutable package asset tag does not bind to its source commit"));
+        assert!(!workflow.contains("unset RELEASE_TAG"));
         let workflow_lower = workflow.to_ascii_lowercase();
         assert!(!workflow_lower.contains("formula"));
         assert!(!workflow_lower.contains("homebrew"));
@@ -4970,6 +5231,196 @@ gh() {{
             .expect("consumer commit");
         assert!(branch_rewrite_guard < consumer_commit);
         serde_yaml::from_str::<serde_yaml::Value>(&workflow).expect("rendered workflow is YAML");
+    }
+
+    #[test]
+    fn immutable_consumer_uses_verified_source_tag_without_rolling_alias() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("immutable".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(false),
+        );
+        let spec = parse_spec(&Args(&configured)).expect("valid immutable-only fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        let publish = &document["jobs"]["publish"];
+        assert!(publish["outputs"]["rolling_refresh_outcome"]
+            .as_str()
+            .is_some_and(|value| value.contains("not-requested")));
+        assert!(!workflow.contains("Refresh rolling preview release"));
+        assert!(workflow.contains("Verify immutable consumer package identity"));
+        let steps = publish["steps"].as_sequence().expect("publish steps");
+        let identity_index = steps
+            .iter()
+            .position(|step| {
+                step["name"].as_str() == Some("Verify immutable consumer package identity")
+            })
+            .expect("identity check step");
+        let checkout_index = steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some("Checkout consumer repository"))
+            .expect("consumer checkout step");
+        assert!(identity_index < checkout_index);
+        let updater = steps
+            .iter()
+            .find(|step| {
+                step["name"].as_str() == Some("Run updater and create or update consumer PR")
+            })
+            .expect("consumer updater step");
+        let env = updater["env"].as_mapping().expect("updater environment");
+        let env_value = |key: &str| env.get(key).and_then(serde_yaml::Value::as_str);
+        assert_eq!(
+            env_value("VELNOR_PACKAGE_ASSET_TAG"),
+            Some("${{ steps.publish.outputs.immutable_tag }}")
+        );
+        assert_eq!(
+            env_value("VELNOR_PACKAGE_SOURCE_COMMIT"),
+            Some("${{ steps.verify.outputs.source_commit }}")
+        );
+        assert_eq!(
+            env_value("VELNOR_PACKAGE_VERSION"),
+            Some("${{ steps.verify.outputs.version }}")
+        );
+        assert_eq!(
+            env_value("VELNOR_VERIFIED_PACKAGE_DIR"),
+            Some("${{ github.workspace }}/published-package")
+        );
+        assert!(env_value("VELNOR_PACKAGE_RELEASE_TAG").is_none());
+        let updater_script = updater["run"].as_str().expect("consumer updater script");
+        let unset_legacy_tag = updater_script
+            .find("unset RELEASE_TAG")
+            .expect("immutable updater hides the legacy rolling tag");
+        let updater_execution = updater_script
+            .find("bash -c \"$UPDATER\"")
+            .expect("consumer updater execution");
+        assert!(unset_legacy_tag < updater_execution);
+    }
+
+    #[test]
+    fn immutable_consumer_refresh_failure_does_not_skip_tap_update() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("immutable".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(true),
+        );
+        let spec = parse_spec(&Args(&configured)).expect("valid immutable refresh fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        let publish = &document["jobs"]["publish"];
+        let steps = publish["steps"].as_sequence().expect("publish steps");
+        let refresh = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Refresh rolling preview release"))
+            .expect("rolling refresh step");
+        assert_eq!(refresh["continue-on-error"].as_bool(), Some(true));
+        let refresh_index = steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some("Refresh rolling preview release"))
+            .expect("rolling refresh step index");
+        let updater_index = steps
+            .iter()
+            .position(|step| {
+                step["name"].as_str() == Some("Run updater and create or update consumer PR")
+            })
+            .expect("consumer updater step index");
+        assert!(refresh_index < updater_index);
+        assert!(publish["outputs"]["rolling_refresh_outcome"]
+            .as_str()
+            .is_some_and(|value| value.contains("steps.rolling-refresh.outcome")));
+    }
+
+    #[test]
+    fn immutable_only_lock_releases_after_published_assets_are_verified() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("immutable".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(false),
+        );
+        let spec = parse_spec(&Args(&configured)).expect("valid immutable-only fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let verified_release = workflow
+            .find("Verify published release attestations")
+            .expect("published release attestation step");
+        let release_lock = workflow
+            .find("Release immutable-only publication lock after verification")
+            .expect("immutable-only lock release step");
+        let finalizer = workflow
+            .find("Finalize package publication lock")
+            .expect("publication lock finalizer");
+        let consumer_checkout = workflow
+            .find("Checkout consumer repository")
+            .expect("consumer checkout");
+        assert!(verified_release < release_lock);
+        assert!(release_lock < finalizer);
+        assert!(finalizer < consumer_checkout);
+        assert!(workflow.contains("VELNOR_PUBLICATION_LOCK_RETAIN=0"));
+    }
+
+    #[test]
+    fn rolling_refresh_preflight_releases_inherited_retention_before_mutation() {
+        let verification = PublishVerification {
+            script: "set -euo pipefail",
+            attestation_flags: "--repo example/project",
+        };
+        let script = render_rolling_refresh_script("", "", "", &verification);
+        let lock_verified = script
+            .find(
+                "publication lock could not be verified; refusing release validation and mutation",
+            )
+            .expect("lock ownership check");
+        let retention_cleared = script
+            .find("\nclear_publication_lock_retain\n")
+            .expect("preflight retention release");
+        let first_mutation = script
+            .find("mutated=1\n  mark_publication_lock_retain")
+            .expect("retention restored before rolling mutation");
+        assert!(lock_verified < retention_cleared);
+        assert!(retention_cleared < first_mutation);
+    }
+
+    #[test]
+    fn legacy_consumer_requires_rolling_refresh() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("legacy".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(false),
+        );
+        assert!(parse_spec(&Args(&configured)).is_err());
+    }
+
+    #[test]
+    fn consumer_tag_mode_and_rolling_refresh_types_fail_closed() {
+        let mut invalid_mode = args();
+        invalid_mode.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("latest".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid_mode)).is_err());
+
+        let mut invalid_refresh = args();
+        invalid_refresh.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::String("false".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid_refresh)).is_err());
     }
 
     #[test]
@@ -5072,7 +5523,7 @@ gh() {{
         );
         assert!(workflow
             .contains("gh attestation verify \"$transaction_dir/rolling-published/$payload\""));
-        assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
+        assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG: preview"));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
     }
