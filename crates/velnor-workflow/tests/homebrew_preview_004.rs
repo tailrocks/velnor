@@ -885,6 +885,8 @@ assert_verified_checkout() {
 case " $* " in
   *" rev-parse HEAD "*) assert_verified_checkout; printf '%s\n' "$manifest_sha"; exit 0 ;;
   *" remote get-url origin "*) assert_verified_checkout; printf '%s\n' "$origin_url"; exit 0 ;;
+  *" status --porcelain=v1 --untracked-files=all "*) assert_verified_checkout; exit 0 ;;
+  *" ls-files --others "*) assert_verified_checkout; exit 0 ;;
   *" ls-remote "*) last=""; for arg in "$@"; do last="$arg"; done; printf '%s\t%s\n' "$TAG_SHA" "$last"; exit 0 ;;
   *) echo "unexpected fake git command: $*" >&2; exit 91 ;;
 esac

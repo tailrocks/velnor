@@ -730,6 +730,18 @@ fn release_changed_paths(
                 "release-admission before commit {before_sha} is unavailable; fetch or restore that exact history and replay the recorded event, never substitute current main"
             )));
         }
+        let ancestry = Command::new("git")
+            .args(["merge-base", "--is-ancestor", before_sha, head_sha])
+            .current_dir(root)
+            .output()
+            .map_err(|error| {
+                GeneratorError::usage(format!("run git merge-base for release admission: {error}"))
+            })?;
+        if !ancestry.status.success() {
+            return Err(GeneratorError::usage(format!(
+                "release-admission before commit {before_sha} is not an ancestor of event head {head_sha}; force-pushed or unrelated history cannot be substituted"
+            )));
+        }
         before_sha.to_owned()
     };
     let diff = git_output(
@@ -1150,6 +1162,171 @@ fn render_verification_task_step(
     )
 }
 
+#[allow(clippy::too_many_lines)]
+fn package_build_script(tasks: &[String]) -> String {
+    let mut script = String::from(
+        r#"set -Eeuo pipefail
+workspace="$GITHUB_WORKSPACE"
+workspace_real="$(cd -- "$workspace" && pwd -P)"
+expected_handoff="$workspace/$PACKAGE_DIR"
+expected_handoff_real="$workspace_real/$PACKAGE_DIR"
+if [[ "$VELNOR_VERIFIED_PACKAGE_DIR" != "$expected_handoff" ]]; then
+  echo "::error::verified package path differs from the declared workspace handoff" >&2
+  exit 1
+fi
+IFS='/' read -r -a handoff_segments <<< "$PACKAGE_DIR"
+last_segment=$((${#handoff_segments[@]} - 1))
+handoff_parent="$workspace_real"
+for index in "${!handoff_segments[@]}"; do
+  candidate="$handoff_parent/${handoff_segments[$index]}"
+  if [[ -L "$candidate" ]]; then
+    echo "::error::package handoff path contains a symlink" >&2
+    exit 1
+  fi
+  if [[ -e "$candidate" ]]; then
+    if [[ ! -d "$candidate" ]]; then
+      echo "::error::package handoff path contains a non-directory entry" >&2
+      exit 1
+    fi
+    if (( index == last_segment )); then
+      echo "::error::package handoff already exists; refusing stale output" >&2
+      exit 1
+    fi
+    resolved_parent="$(cd -- "$candidate" && pwd -P)"
+    case "$resolved_parent/" in
+      "$workspace_real/"*) ;;
+      *) echo "::error::package handoff parent escapes the workspace" >&2; exit 1 ;;
+    esac
+  else
+    mkdir -- "$candidate"
+  fi
+  handoff_parent="$candidate"
+done
+if ! git -C "$VELNOR_SOURCE_CHECKOUT_DIR" check-ignore -q -- "$PACKAGE_DIR"; then
+  echo "::error::declared package handoff must be ignored by the source checkout" >&2
+  exit 1
+fi
+
+actual_commit="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" rev-parse HEAD^{commit})"
+if [[ "$actual_commit" != "$EXPECTED_SOURCE_COMMIT" ]]; then
+  echo "::error::source checkout commit differs from the admitted event commit" >&2
+  exit 1
+fi
+actual_tree="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" rev-parse HEAD^{tree})"
+if [[ "$actual_tree" != "$EXPECTED_SOURCE_TREE" ]]; then
+  echo "::error::source checkout tree differs from the admitted event tree" >&2
+  exit 1
+fi
+source_status="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" status --porcelain=v1 --untracked-files=all -- . ":(exclude)$PACKAGE_DIR")"
+if [[ -n "$source_status" ]]; then
+  echo "::error::source checkout is dirty before package production" >&2
+  printf '%s\n' "$source_status" >&2
+  exit 1
+fi
+
+runner_temp="$RUNNER_TEMP"
+runner_temp_real="$(cd -- "$runner_temp" && pwd -P)"
+case "$runner_temp_real/" in
+  "$workspace_real/"*) echo "::error::package scratch must be outside the source checkout" >&2; exit 1 ;;
+esac
+[[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "::error::package scratch requires numeric run and attempt identities" >&2
+  exit 1
+}
+expected_scratch="$runner_temp/velnor-package-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+if [[ "$VELNOR_PACKAGE_SCRATCH_DIR" != "$expected_scratch" ]]; then
+  echo "::error::package scratch path differs from the run-owned runner-temp path" >&2
+  exit 1
+fi
+if [[ -e "$VELNOR_PACKAGE_SCRATCH_DIR" || -L "$VELNOR_PACKAGE_SCRATCH_DIR" ]]; then
+  echo "::error::package scratch path already exists; refusing to remove a pre-existing path" >&2
+  exit 1
+fi
+mkdir -m 700 -- "$VELNOR_PACKAGE_SCRATCH_DIR"
+scratch_owned=1
+CARGO_TARGET_DIR="$VELNOR_PACKAGE_SCRATCH_DIR/target"
+cleanup_package_scratch() {
+  local status=$?
+  trap - EXIT
+  if (( scratch_owned )); then
+    if ! rm -rf -- "$VELNOR_PACKAGE_SCRATCH_DIR"; then
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup_package_scratch EXIT
+
+write_source_inventory() {
+  local output_file="$1"
+  local path
+  {
+    git -C "$VELNOR_SOURCE_CHECKOUT_DIR" ls-files --others --exclude-standard -z -- .
+    git -C "$VELNOR_SOURCE_CHECKOUT_DIR" ls-files --others --ignored --exclude-standard -z -- .
+  } | LC_ALL=C sort -zu | while IFS= read -r -d '' path; do
+    if [[ "$path" == "$PACKAGE_DIR" || "$path" == "$PACKAGE_DIR/"* ]]; then
+      continue
+    fi
+    printf '%s\0' "$path"
+  done > "$output_file"
+}
+print_source_inventory() {
+  local path
+  while IFS= read -r -d '' path; do
+    printf '  %q\n' "$path" >&2
+  done < "$1"
+}
+source_inventory_before="$VELNOR_PACKAGE_SCRATCH_DIR/source-inventory-before"
+source_inventory_after="$VELNOR_PACKAGE_SCRATCH_DIR/source-inventory-after"
+write_source_inventory "$source_inventory_before"
+if [[ -s "$source_inventory_before" ]]; then
+  echo "::error::source checkout has stale ignored or untracked inputs before package production" >&2
+  print_source_inventory "$source_inventory_before"
+  exit 1
+fi
+export PACKAGE_DIR VELNOR_VERIFIED_PACKAGE_DIR VELNOR_SOURCE_CHECKOUT_DIR CARGO_TARGET_DIR
+export VELNOR_SOURCE_COMMIT VELNOR_SOURCE_REF VELNOR_PACKAGE_SCRATCH_DIR
+"#,
+    );
+    for task in tasks {
+        let _ = writeln!(script, "mise run {}", shell_quote(task));
+    }
+    script.push_str(
+        r#"
+handoff_parent="$workspace_real"
+for segment in "${handoff_segments[@]}"; do
+  candidate="$handoff_parent/$segment"
+  if [[ -L "$candidate" || ! -d "$candidate" ]]; then
+    echo "::error::package producer returned a missing or symlinked handoff component" >&2
+    exit 1
+  fi
+  handoff_parent="$candidate"
+done
+resolved_handoff="$(cd -- "$expected_handoff" && pwd -P)"
+if [[ "$resolved_handoff" != "$expected_handoff_real" ]]; then
+  echo "::error::package producer changed the resolved handoff path" >&2
+  exit 1
+fi
+write_source_inventory "$source_inventory_after"
+if ! cmp -s "$source_inventory_before" "$source_inventory_after"; then
+  echo "::error::package producer changed ignored or untracked source inputs outside the declared handoff" >&2
+  echo "before:" >&2
+  print_source_inventory "$source_inventory_before"
+  echo "after:" >&2
+  print_source_inventory "$source_inventory_after"
+  exit 1
+fi
+source_status="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" status --porcelain=v1 --untracked-files=all -- . ":(exclude)$PACKAGE_DIR")"
+if [[ -n "$source_status" ]]; then
+  echo "::error::package producer changed tracked or untracked source files outside the declared handoff" >&2
+  printf '%s\n' "$source_status" >&2
+  exit 1
+fi
+"#,
+    );
+    script
+}
+
 /// The verified-directory boundary shared by the producer and publisher jobs.
 /// It intentionally checks the downloaded directory again: an artifact or
 /// release may never be trusted merely because its producer job passed.
@@ -1158,7 +1335,52 @@ fn verification_script(spec: &PackageReleaseSpec) -> String {
     let mut script = String::from(
         r#"set -euo pipefail
 dir="$VELNOR_VERIFIED_PACKAGE_DIR"
-test -d "$dir"
+if [[ ! -d "$dir" || -L "$dir" ]]; then
+  echo "::error::verified package directory is missing or a symlink" >&2
+  exit 1
+fi
+workspace="$GITHUB_WORKSPACE"
+expected_root="${VELNOR_PACKAGE_HANDOFF_ROOT:-$workspace}"
+expected_relative="${VELNOR_PACKAGE_HANDOFF_RELATIVE:-$PACKAGE_DIR}"
+handoff_source_commit="${VELNOR_PACKAGE_HANDOFF_SOURCE_COMMIT:-$EXPECTED_SOURCE_COMMIT}"
+if [[ "$expected_root" != /* || -z "$expected_relative" || "$expected_relative" == /* || "$expected_relative" == */ || "$expected_relative" == *//* ]]; then
+  echo "::error::verified package handoff root must be absolute and relative path must be normalized" >&2
+  exit 1
+fi
+if [[ ! "$handoff_source_commit" =~ ^[0-9a-f]{40}$ || "$handoff_source_commit" != "$EXPECTED_SOURCE_COMMIT" ]]; then
+  echo "::error::verified package handoff path is not bound to the expected source commit" >&2
+  exit 1
+fi
+expected_dir="$expected_root/$expected_relative"
+if [[ "$dir" != "$expected_dir" ]]; then
+  echo "::error::verified package path differs from the declared handoff" >&2
+  exit 1
+fi
+expected_root_real="$(cd -- "$expected_root" && pwd -P)"
+IFS='/' read -r -a verified_segments <<< "$expected_relative"
+verified_parent="$expected_root_real"
+for segment in "${verified_segments[@]}"; do
+  if [[ -z "$segment" || "$segment" == . || "$segment" == .. ]]; then
+    echo "::error::verified package relative path contains an invalid component" >&2
+    exit 1
+  fi
+  candidate="$verified_parent/$segment"
+  if [[ -L "$candidate" ]]; then
+    echo "::error::verified package path contains a symlink component" >&2
+    exit 1
+  fi
+  if [[ ! -d "$candidate" ]]; then
+    echo "::error::verified package path contains a missing or non-directory component" >&2
+    exit 1
+  fi
+  verified_parent="$candidate"
+done
+resolved_dir="$(cd -- "$dir" && pwd -P)"
+expected_dir_real="$expected_root_real/$expected_relative"
+if [[ "$resolved_dir" != "$expected_dir_real" ]]; then
+  echo "::error::verified package path does not resolve to the declared handoff" >&2
+  exit 1
+fi
 manifest="$dir/release-manifest.json"
 identity="$dir/identity.json"
 test -s "$manifest"
@@ -1170,7 +1392,9 @@ actual_names="$(mktemp)"
 checksum_names="$(mktemp)"
 expected_supporting_names="$(mktemp)"
 actual_supporting_names="$(mktemp)"
-trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names" "$expected_supporting_names" "$actual_supporting_names"' EXIT
+source_inventory_raw="$(mktemp)"
+source_inventory_filtered="$(mktemp)"
+trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names" "$expected_supporting_names" "$actual_supporting_names" "$source_inventory_raw" "$source_inventory_filtered"' EXIT
 {
   printf '%s\n' "release-manifest.json" "identity.json"
 "#,
@@ -1194,6 +1418,11 @@ if ! cmp -s "$expected_files" "$actual_files"; then
   exit 1
 fi
 source_checkout="${VELNOR_SOURCE_CHECKOUT_DIR:-$GITHUB_WORKSPACE}"
+source_checkout_real="$(cd -- "$source_checkout" && pwd -P)"
+source_handoff_relative=""
+case "$expected_dir_real/" in
+  "$source_checkout_real/"*) source_handoff_relative="${expected_dir_real#"$source_checkout_real"/}" ;;
+esac
 actual_source_commit="$(git -C "$source_checkout" rev-parse HEAD)"
 [[ "$actual_source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source checkout HEAD is not 40 lowercase hex" >&2; exit 1; }
 [ "$actual_source_commit" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::source checkout HEAD does not match the expected source commit" >&2; exit 1; }
@@ -1206,6 +1435,35 @@ case "$source_remote" in
 esac
 actual_source_repository="${actual_source_repository%.git}"
 [ "$actual_source_repository" = "$EXPECTED_SOURCE_REPOSITORY" ] || { echo "::error::source checkout repository does not match the declared repository" >&2; exit 1; }
+source_status_pathspecs=(.)
+if [[ -n "$source_handoff_relative" ]]; then
+  source_status_pathspecs+=(":(exclude)$source_handoff_relative")
+fi
+source_status="$(git -C "$source_checkout" status --porcelain=v1 --untracked-files=all -- "${source_status_pathspecs[@]}")"
+if [[ -n "$source_status" ]]; then
+  echo "::error::source checkout has changes outside the declared package handoff" >&2
+  printf '%s\n' "$source_status" >&2
+  exit 1
+fi
+{
+  git -C "$source_checkout" ls-files --others --exclude-standard -z -- .
+  git -C "$source_checkout" ls-files --others --ignored --exclude-standard -z -- .
+} | LC_ALL=C sort -zu > "$source_inventory_raw"
+while IFS= read -r -d '' path; do
+  if [[ -n "$source_handoff_relative" ]]; then
+    if [[ "$path" == "$source_handoff_relative" || "$path" == "$source_handoff_relative/"* ]]; then
+      continue
+    fi
+  fi
+  printf '%s\0' "$path"
+done < "$source_inventory_raw" > "$source_inventory_filtered"
+if [[ -s "$source_inventory_filtered" ]]; then
+  echo "::error::source checkout has ignored or untracked files outside the declared package handoff" >&2
+  while IFS= read -r -d '' path; do
+    printf '  %q\n' "$path" >&2
+  done < "$source_inventory_filtered"
+  exit 1
+fi
 source_commit="$(jq -er '.source_commit | strings' "$manifest")"
 version="$(jq -er '.version | strings' "$manifest")"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::manifest source_commit is not 40 lowercase hex" >&2; exit 1; }
@@ -1488,7 +1746,7 @@ fn render_workflow(
     let source_commit_expr = github_expression("needs.admission.outputs.head_sha");
     let source_tree_expr = github_expression("needs.admission.outputs.head_tree");
     let build_runtime_setup = format!(
-        "{runtime_setup}      - name: Verify admitted source tree\n        run: |\n          set -euo pipefail\n          actual_tree=\"$(git rev-parse HEAD^{{tree}})\"\n          if [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\n"
+        "{runtime_setup}      - name: Verify admitted source tree\n        run: |\n          set -euo pipefail\n          actual_commit=\"$(git rev-parse HEAD^{{commit}})\"\n          if [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\n          actual_tree=\"$(git rev-parse HEAD^{{tree}})\"\n          if [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\n          source_status=\"$(git status --porcelain=v1 --untracked-files=all -- . \":(exclude)$PACKAGE_DIR\")\"\n          if [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package production\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n"
     );
     let publish_source_commit_expr = github_expression("needs.build.outputs.source_commit");
     let workspace_expr = github_expression("github.workspace");
@@ -1519,15 +1777,18 @@ fn render_workflow(
     let message_yaml = crate::s2::yaml_scalar(&spec.update_commit_message);
     let concurrency_yaml = crate::s2::yaml_scalar(&spec.concurrency_group);
     let source_shell = shell_quote(&spec.source_ref);
+    let package_scratch_expr = format!(
+        "{}/velnor-package-scratch-{}-{}",
+        github_expression("runner.temp"),
+        github_expression("github.run_id"),
+        github_expression("github.run_attempt")
+    );
     let run_name = format!(
         "Package release · {} · {}",
         github_expression("github.event_name"),
         github_expression("github.ref_name")
     );
-    let mut tasks = String::new();
-    for task in &spec.build_tasks {
-        let _ = writeln!(tasks, "          mise run {}", shell_quote(task));
-    }
+    let build_script = indent_script(&package_build_script(&spec.build_tasks), 10);
     let mut attestation_subjects = String::new();
     let mut attested_assets = spec.payloads.clone();
     attested_assets.extend(spec.supporting_assets.iter().cloned());
@@ -1597,7 +1858,7 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n          VELNOR_PACKAGE_SCRATCH_DIR: {package_scratch_expr}\n        run: |\n{build_script}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -1927,6 +2188,13 @@ rolling_tag="$RELEASE_TAG"
 staged_tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
 published_dir="$GITHUB_WORKSPACE/published-package"
 transaction_dir="$(mktemp -d)"
+[[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "::error::rolling handoff requires a lowercase source commit identity" >&2
+  exit 1
+}
+rolling_handoff_relative="$EXPECTED_SOURCE_COMMIT/rolling-published"
+rolling_handoff_root="$transaction_dir/$EXPECTED_SOURCE_COMMIT"
+rolling_published_dir="$rolling_handoff_root/rolling-published"
 rolling_response="$transaction_dir/rolling-response"
 rolling_body="$transaction_dir/rolling.json"
 expected_assets="$transaction_dir/expected-assets"
@@ -2853,10 +3121,13 @@ if ! cmp -s "$expected_assets" "$rolling_published_assets"; then
   echo "::error::rolling release asset set is not exact after publication" >&2
   false
 fi
-rm -rf -- "$transaction_dir/rolling-published"
-mkdir -p "$transaction_dir/rolling-published"
-gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$transaction_dir/rolling-published" --clobber
-export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
+mkdir -- "$rolling_handoff_root"
+mkdir -- "$rolling_published_dir"
+gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rolling_published_dir" --clobber
+export VELNOR_VERIFIED_PACKAGE_DIR="$rolling_published_dir"
+export VELNOR_PACKAGE_HANDOFF_ROOT="$transaction_dir"
+export VELNOR_PACKAGE_HANDOFF_RELATIVE="$rolling_handoff_relative"
+export VELNOR_PACKAGE_HANDOFF_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT"
 "#,
     );
     // Execute the verifier as a foreground Bash child. Its temporary-file
@@ -2870,7 +3141,7 @@ export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
     );
     script.push_str("\nfor payload in \\\n");
     script.push_str(payload_names);
-    script.push_str("do\n  gh attestation verify \"$transaction_dir/rolling-published/$payload\" ");
+    script.push_str("do\n  gh attestation verify \"$rolling_published_dir/$payload\" ");
     script.push_str(verification.attestation_flags);
     script.push_str(
         "\ndone\nif ! assert_rolling_ownership \"$owner_draft\" \"$EXPECTED_SOURCE_COMMIT\" \"$owner_name\" \"$owner_body\" \"$owner_source_commit\"; then\n  echo \"::error::rolling preview ownership changed before lock release; refusing to release the publication lock\" >&2\n  false\nfi\n# Every rolling byte, attestation, and final ownership check is verified. The\n# lock is safe to release; failures before this point retain it for recovery.\nclear_publication_lock_retain\n# cleanup_publication releases the exact lock only after rollback or successful completion.\n",
@@ -3298,6 +3569,9 @@ fn render_publish_job(
         "\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n",
     );
 
+    output.push_str(
+        "      - name: Require empty package handoff destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::package handoff destination already exists\" >&2; exit 1; fi\n",
+    );
     output.push_str("      - name: Download verified package handoff\n        uses: ");
     output.push_str(download);
     output.push_str("\n        with:\n          name: package-release\n          path: package\n          merge-multiple: true\n");
@@ -3352,10 +3626,10 @@ fn render_publish_job(
     let immutable_tag_output = github_expression("steps.publish.outputs.immutable_tag");
     output.push_str("      - name: Download and re-verify published release\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
-    output.push_str("\n          RELEASE_ASSET_TAG: ");
+    output.push_str("\n          PACKAGE_DIR: published-package\n          RELEASE_ASSET_TAG: ");
     output.push_str(&immutable_tag_output);
     output.push_str(
-        "\n        run: |\n          set -euo pipefail\n          rm -rf published-package\n          mkdir -p published-package\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir published-package\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\"\n",
+        "\n        run: |\n          set -euo pipefail\n          published_dir=\"$GITHUB_WORKSPACE/published-package\"\n          if [[ -e \"$published_dir\" || -L \"$published_dir\" ]]; then echo \"::error::published package handoff destination already exists\" >&2; exit 1; fi\n          mkdir -- \"$published_dir\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$published_dir\"\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$published_dir\"\n          export VELNOR_PACKAGE_HANDOFF_ROOT=\"$GITHUB_WORKSPACE\"\n          export VELNOR_PACKAGE_HANDOFF_RELATIVE=\"published-package\"\n          export VELNOR_PACKAGE_HANDOFF_SOURCE_COMMIT=\"$EXPECTED_SOURCE_COMMIT\"\n",
     );
     output.push_str(publish_verify);
     output.push_str(&render_verification_task_step(
@@ -4744,6 +5018,83 @@ gh() {{
 
     #[cfg(unix)]
     #[test]
+    fn rolling_verifier_accepts_source_bound_transaction_handoff_outside_workspace() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let verifier = verification_script(&spec);
+        let path_check_end = verifier
+            .find("manifest=\"$dir/release-manifest.json\"")
+            .expect("verified handoff path preflight");
+        let path_check = &verifier[..path_check_end];
+        let verification = PublishVerification {
+            script: path_check,
+            attestation_flags: "",
+        };
+        let rolling = render_rolling_refresh_script("", "", "", &verification);
+        let handoff_assignments = rolling
+            .find("rolling_handoff_relative=\"$EXPECTED_SOURCE_COMMIT/rolling-published\"")
+            .expect("source-bound rolling path assignment");
+        let assignments_end = rolling[handoff_assignments..]
+            .find("\nrolling_response=")
+            .map(|offset| handoff_assignments + offset)
+            .expect("rolling transaction assignments");
+        let assignments = &rolling[handoff_assignments..assignments_end];
+        let fragment_start = rolling
+            .find("\nmkdir -- \"$rolling_handoff_root\"")
+            .expect("owned rolling handoff creation");
+        let fragment_end = rolling[fragment_start..]
+            .find("\n\nfor payload")
+            .map(|offset| fragment_start + offset)
+            .expect("rolling verifier call end");
+        let fragment = &rolling[fragment_start..fragment_end];
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-rolling-transaction-handoff-{}",
+            crate::unique_suffix()
+        ));
+        let workspace = root.join("workspace");
+        let transaction_dir = root.join("runner-temp").join("transaction");
+        std::fs::create_dir_all(&workspace).expect("create rolling workspace");
+        std::fs::create_dir_all(&transaction_dir).expect("create owned transaction root");
+        let commit = "a".repeat(40);
+        let harness = format!(
+            r#"set -Eeuo pipefail
+GITHUB_WORKSPACE="$TEST_TMPDIR/workspace"
+transaction_dir="$TEST_TMPDIR/runner-temp/transaction"
+EXPECTED_SOURCE_COMMIT={commit}
+rolling_tag=preview
+GITHUB_REPOSITORY=example/project
+PACKAGE_DIR=package
+export GITHUB_WORKSPACE EXPECTED_SOURCE_COMMIT PACKAGE_DIR
+gh() {{ return 0; }}
+rollback() {{ exit "$1"; }}
+{assignments}
+{fragment}
+test -d "$rolling_published_dir"
+"#
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(harness)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run source-bound rolling verifier handoff");
+        assert!(
+            output.status.success(),
+            "rolling handoff verifier rejected its generated transaction path:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(transaction_dir
+            .join(&commit)
+            .join("rolling-published")
+            .is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn generated_checksum_name_verifier_runs_with_host_awk() {
         use std::process::Command;
 
@@ -4869,9 +5220,26 @@ expected_names="$TEST_TMPDIR/expected-names"
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(
+            workflow.contains("          published_dir=\"$GITHUB_WORKSPACE/published-package\""),
+            "{workflow}"
+        );
+        assert!(
             workflow.contains(
-                "          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\""
+                "          if [[ -e \"$published_dir\" || -L \"$published_dir\" ]]; then"
             ),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("          mkdir -- \"$published_dir\""),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("          export VELNOR_VERIFIED_PACKAGE_DIR=\"$published_dir\""),
+            "{workflow}"
+        );
+        assert!(!workflow.contains("rm -rf published-package"), "{workflow}");
+        assert!(
+            !workflow.contains("mkdir -p published-package"),
             "{workflow}"
         );
         assert!(
@@ -5521,8 +5889,9 @@ expected_names="$TEST_TMPDIR/expected-names"
         assert!(
             workflow.contains("gh release download \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\"")
         );
+        assert!(workflow.contains("gh attestation verify \"$rolling_published_dir/$payload\""));
         assert!(workflow
-            .contains("gh attestation verify \"$transaction_dir/rolling-published/$payload\""));
+            .contains("rolling_handoff_relative=\"$EXPECTED_SOURCE_COMMIT/rolling-published\""));
         assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG: preview"));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
