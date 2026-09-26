@@ -668,8 +668,8 @@ mod tests {
         );
         assert_eq!(
             crate::s2::platform::ProductIdentity::for_product(unit, product)
-                .map(|identity| identity.deployment_target.as_str()),
-            Some("26.0"),
+                .map(|identity| identity.deployment_target),
+            Some("26.0".to_owned()),
             "native product identity uses the effective recipe floor"
         );
         assert!(
