@@ -206,10 +206,15 @@ docker_closure = [
 "rust-velnor-tools" = ["config/fleet/**"]
 "rust-velnor-model" = ["schemas/**"]
 
-# Do not add a self `regen-gate` while changing this generator. Its check runs
-# through the pinned D19 renderer, which cannot yet render this branch's static
-# `config/` output. The required PR Policy job uses the same-PR candidate
-# renderer for the exact-tree check after this unit publishes it.
+# Regeneration gate: the workflow crate owns the generated surface, so its
+# verification starts by checking that the checked-in output is current.
+
+[[declare]]
+primitive = "regen-gate"
+units = ["rust-velnor-workflow"]
+
+[declare.args]
+command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."
 
 # Release-side surface: typed native release, rolling preview, and signer.
 
@@ -282,10 +287,6 @@ source = ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml"
 [[static_files]]
 file = ".github/workflows/AGENTS.md"
 source = ".github-gen/sources/workflows-AGENTS.md"
-
-[[static_files]]
-file = "config/fleet/velnor-host.env"
-source = ".github-gen/sources/velnor-host.env"
 
 [[declare]]
 primitive = "release"

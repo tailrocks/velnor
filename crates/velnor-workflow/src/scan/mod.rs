@@ -18,7 +18,7 @@ mod signals;
 mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -31,24 +31,13 @@ use crate::{
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
-#[cfg(test)]
 pub(crate) fn scan_shape(
     root: &Path,
     runners: RunnerMode,
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    scan_shape_with_declared_outputs(root, runners, default_branch, exclude, &BTreeSet::new())
-}
-
-pub(crate) fn scan_shape_with_declared_outputs(
-    root: &Path,
-    runners: RunnerMode,
-    default_branch: &str,
-    exclude: &[String],
-    declared_outputs: &BTreeSet<PathBuf>,
-) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files_with_declared_outputs(root, exclude, declared_outputs)?;
+    let files = file_walk::repository_files(root, exclude)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
