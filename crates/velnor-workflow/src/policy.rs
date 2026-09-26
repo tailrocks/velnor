@@ -1086,7 +1086,11 @@ fn binary_closure(binary: &Path) -> Result<String, String> {
 }
 
 fn binary_report(binary: &Path, flag: &str) -> Result<String, String> {
+    // The binary may be an env-slot candidate built from a pull request.
+    // Its closure/revision report needs no configuration, so never expose
+    // the policy step's ambient credentials or runner metadata.
     let output = Command::new(binary)
+        .env_clear()
         .arg(flag)
         .output()
         .map_err(|error| format!("{}: cannot run `{flag}`: {error}", binary.display()))?;
@@ -1647,7 +1651,15 @@ fn render_and_compare(
     }
     fs::create_dir_all(scratch)
         .map_err(|error| GeneratorError::io("create scratch directory", scratch, &error))?;
+    // Candidate renderers are untrusted PR output. Their inputs are already
+    // bounded to the snapshot below. Preserve only PATH so git-backed scans
+    // retain their tracked-file boundary without credentials or runner data.
+    let path = env::var_os("PATH").ok_or_else(|| {
+        GeneratorError::usage("PATH is unavailable for the hermetic candidate render")
+    })?;
     let output = Command::new(binary)
+        .env_clear()
+        .env("PATH", path)
         .arg(checkout)
         .arg("--output")
         .arg(scratch)
