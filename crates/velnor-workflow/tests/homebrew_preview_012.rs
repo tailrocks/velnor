@@ -987,10 +987,9 @@ fn run_formula_mutation_control(
     stage: &str,
 ) -> Output {
     let fake_brew = control.bin.join("brew");
-    let contents = format!(
-        r##"#!/usr/bin/env bash
+    let contents = r#"#!/usr/bin/env bash
 set -euo pipefail
-case "${{1-}}" in
+case "${1-}" in
   --repository) printf '%s\n' "$GITHUB_WORKSPACE" ;;
   ruby)
     ruby_program="$3"
@@ -999,23 +998,22 @@ case "${{1-}}" in
       printf '%s\n' service >> "$FAKE_BREW_LOG"
       actual_formula_blob="$(git hash-object --no-filters "$FORMULA_FIXTURE")"
       [[ "$actual_formula_blob" == "$EXPECTED_FORMULA_BLOB" ]] || exit 81
-      exec ruby -r "$FORMULARY_STUB" -e "$ruby_program" "${{@:4}}"
+      exec ruby -r "$FORMULARY_STUB" -e "$ruby_program" "${@:4}"
     fi
     export FORMULA_BREW_PHASE=validation
-    exec ruby -e "$ruby_program" "${{@:4}}"
+    exec ruby -e "$ruby_program" "${@:4}"
     ;;
   install|test)
-    printf '%s\n' "${{1-}}" >> "$FAKE_BREW_LOG"
+    printf '%s\n' "${1-}" >> "$FAKE_BREW_LOG"
     actual_formula_blob="$(git hash-object --no-filters "$FORMULA_FIXTURE")"
     [[ "$actual_formula_blob" == "$EXPECTED_FORMULA_BLOB" ]] || exit 81
-    export FORMULA_BREW_PHASE="${{1-}}"
+    export FORMULA_BREW_PHASE="${1-}"
     ruby -e 'load ENV.fetch("FORMULA_FIXTURE")'
     ;;
   *) exit 64 ;;
 esac
-"##
-    );
-    let_executable(&fake_brew, &contents);
+"#;
+    let_executable(&fake_brew, contents);
     let _ = fs::remove_file(&control.log);
     let _ = fs::remove_file(&control.sentinel);
     Command::new("bash")
