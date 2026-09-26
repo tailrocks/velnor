@@ -3421,7 +3421,7 @@ fn render_publish_job(
     output.push_str("\n          VELNOR_VERIFIED_PACKAGE_DIR: ");
     output.push_str(workspace_expr);
     output.push_str("/published-package\n        run: |\n");
-    output.push_str(&indent_script(&render_consumer_identity_check_script(), 10));
+    output.push_str(&indent_script(render_consumer_identity_check_script(), 10));
 
     output.push_str("      - name: Checkout consumer repository\n        uses: ");
     output.push_str(checkout);
@@ -3612,7 +3612,7 @@ contract_fixture = ["tests/contract-fixtures/**"]
         let mut values = args();
         values.insert(
             "production_inputs".to_owned(),
-            toml::Value::Table(Default::default()),
+            toml::Value::Table(toml::map::Map::new()),
         );
 
         let error = parse_release_input_rules(&Args(&values))
