@@ -57,6 +57,21 @@ The schema-1 Swift scanner fails closed for executable Swift products and
 recognized XcodeGen specs because it cannot emit their complete phase and
 selection contracts; use schema 2 for those Apple surfaces.
 
+## Repository-owned static outputs
+
+Use `[[static_files]]` for bytes the repository owns but generation must place
+at another repository path. `source` must be a normalized repository-relative
+path outside `.github/` and `config/`; `file` must be a normalized path under
+one of those generated trees. The generator records and prunes declared output
+paths, excludes them from scans, rejects path collisions and unowned existing
+targets, and refuses symlink traversal.
+
+```toml
+[[static_files]]
+file = "config/generated/example.env"
+source = ".github-gen/sources/example.env"
+```
+
 ## Typed package-release verification hooks
 
 Schema-2 `package-release` declarations may name repository-owned mise tasks in

@@ -526,7 +526,7 @@ fn generated_paths_stay_within_the_output_tree(pipeline: Pipeline) {
     );
     let stderr = String::from_utf8_lossy(&outcome.stderr);
     assert!(
-        stderr.contains("inside `.github/`"),
+        stderr.contains("normalized repository-relative path"),
         "refusal must name the boundary: {stderr}"
     );
     assert!(
@@ -555,14 +555,13 @@ fn reserved_agent_path_spellings_are_rejected(pipeline: Pipeline) {
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     fs::write(&source, "evil\n").unwrap();
 
-    // A redundant separator must not dodge the reserved-path guard: the
-    // comparison is over paths, not strings.
+    // The canonical spelling reaches the renderer's reserved-path guard.
     let config = root.join(".github-gen/velnor-workflow.toml");
     let base = fs::read_to_string(&config).unwrap();
     fs::write(
         &config,
         format!(
-            "{base}\n[[static_files]]\nfile = \".github//AGENTS.md\"\nsource = \".github-gen/sources/evil.md\"\n"
+            "{base}\n[[static_files]]\nfile = \".github/AGENTS.md\"\nsource = \".github-gen/sources/evil.md\"\n"
         ),
     )
     .unwrap();
