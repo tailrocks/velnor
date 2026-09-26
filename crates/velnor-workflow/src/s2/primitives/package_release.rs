@@ -1670,6 +1670,95 @@ printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
     script
 }
 
+fn artifact_signer_validation_script(spec: &PackageReleaseSpec) -> String {
+    let mut script = String::from(
+        r#"set -euo pipefail
+dir="$VELNOR_VERIFIED_PACKAGE_DIR"
+[[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::expected source commit is invalid" >&2; exit 1; }
+if [[ "$PACKAGE_DIR" != package || "$dir" != "$GITHUB_WORKSPACE/package" || ! -d "$dir" || -L "$dir" ]]; then
+  echo "::error::attestation input is not the fixed package directory" >&2
+  exit 1
+fi
+expected_files="$(mktemp)"
+actual_files="$(mktemp)"
+trap 'rm -f -- "$expected_files" "$actual_files"' EXIT
+{
+"#,
+    );
+    for name in release_asset_names(spec) {
+        let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(&name));
+    }
+    script.push_str(
+        r#"} | LC_ALL=C sort > "$expected_files"
+find "$dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$actual_files"
+if find "$dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+  echo "::error::attestation input contains a non-file entry" >&2
+  exit 1
+fi
+if ! cmp -s "$expected_files" "$actual_files"; then
+  echo "::error::attestation input contains an undeclared or missing file" >&2
+  exit 1
+fi
+manifest="$dir/release-manifest.json"
+identity="$dir/identity.json"
+test -s "$manifest"
+test -s "$identity"
+if ! jq -e \
+  --arg schema "$EXPECTED_MANIFEST_SCHEMA" \
+  --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
+  --arg source_ref "$EXPECTED_SOURCE_REF" \
+  --arg commit "$EXPECTED_SOURCE_COMMIT" \
+  'keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"] and
+   .schema == $schema and .source_repository == $repository and
+   .source_ref == $source_ref and .source_commit == $commit and
+   (.assets | type == "array" and all(.[]; type == "object" and keys == ["name","sha256"] and (.sha256 | strings | test("^[0-9a-f]{64}$")))) and
+   (.supporting_assets | type == "array" and all(.[]; type == "object" and keys == ["name","sha256"] and (.sha256 | strings | test("^[0-9a-f]{64}$"))))' "$manifest" >/dev/null; then
+  echo "::error::attestation manifest does not match admitted source identity" >&2
+  exit 1
+fi
+if ! jq -e \
+  --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
+  --arg source_ref "$EXPECTED_SOURCE_REF" \
+  --arg commit "$EXPECTED_SOURCE_COMMIT" \
+  --slurpfile package_manifest "$manifest" \
+  'keys == ["manifest","source_digest","source_ref","source_repository"] and
+   .source_repository == $repository and .source_ref == $source_ref and
+   .source_digest == $commit and .manifest == $package_manifest[0]' "$identity" >/dev/null; then
+  echo "::error::attestation identity does not match manifest and admitted source" >&2
+  exit 1
+fi
+version="$(jq -er '.version | strings' "$manifest")"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-([A-Za-z0-9_-]+)\.[0-9]+\+[0-9a-f]{7}$ ]] || { echo "::error::attestation input version is not source-bound" >&2; exit 1; }
+[[ "${BASH_REMATCH[1]}" == "$VELNOR_PACKAGE_CHANNEL" ]] || { echo "::error::attestation input channel does not match policy" >&2; exit 1; }
+[[ "${version##*+}" == "${EXPECTED_SOURCE_COMMIT:0:7}" ]] || { echo "::error::attestation input version does not bind the admitted SHA" >&2; exit 1; }
+printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+printf 'source_commit=%s\n' "$EXPECTED_SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+"#,
+    );
+    for (field, assets) in [
+        ("assets", &spec.payloads),
+        ("supporting_assets", &spec.supporting_assets),
+    ] {
+        let expected = assets
+            .iter()
+            .map(|name| shell_quote(name))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            script,
+            "jq -r '.{field}[].name' \"$manifest\" | LC_ALL=C sort > \"$actual_files\"\nprintf '%s\\n' {expected} | LC_ALL=C sort > \"$expected_files\"\nif ! cmp -s \"$expected_files\" \"$actual_files\"; then echo \"::error::{field} names differ from declaration\" >&2; exit 1; fi"
+        );
+        for name in assets {
+            let _ = writeln!(
+                script,
+                "name={}\nexpected=\"$(jq -er --arg name \"$name\" '[.{field}[] | select(.name == $name)] | select(length == 1) | .[0].sha256 | select(test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\")\"\nactual=\"$(sha256sum -- \"$dir/$name\" | awk '{{print $1}}')\"\n[[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::attestation input digest mismatch: $name\" >&2; exit 1; }}",
+                shell_quote(name)
+            );
+        }
+    }
+    script
+}
+
 fn release_asset_names(spec: &PackageReleaseSpec) -> Vec<String> {
     let mut names = vec![
         "release-manifest.json".to_owned(),
@@ -1748,9 +1837,18 @@ fn render_workflow(
     let build_runtime_setup = format!(
         "{runtime_setup}      - name: Verify admitted source tree\n        run: |\n          set -euo pipefail\n          actual_commit=\"$(git rev-parse HEAD^{{commit}})\"\n          if [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\n          actual_tree=\"$(git rev-parse HEAD^{{tree}})\"\n          if [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\n          source_status=\"$(git status --porcelain=v1 --untracked-files=all -- . \":(exclude)$PACKAGE_DIR\")\"\n          if [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package production\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n"
     );
-    let publish_source_commit_expr = github_expression("needs.build.outputs.source_commit");
+    let publish_source_commit_expr = github_expression("needs.attest.outputs.source_commit");
+    let candidate_artifact_name_expr = github_expression(
+        "format('package-release-candidate-{0}', needs.admission.outputs.head_sha)",
+    );
+    let verified_artifact_name_expr =
+        github_expression("format('package-release-{0}', steps.verify.outputs.source_commit)");
+    let verified_artifact_download_name_expr =
+        github_expression("format('package-release-{0}', needs.verify.outputs.source_commit)");
+    let attested_artifact_name_expr = github_expression(
+        "format('package-release-attested-{0}', needs.verify.outputs.source_commit)",
+    );
     let workspace_expr = github_expression("github.workspace");
-    let build_verify = indent_script(&verification_script(spec), 10);
     let publish_verify = indent_script(&verification_script(spec), 10);
     let build_verify_tasks = render_verification_task_step(
         "Run repository package verification tasks",
@@ -1763,6 +1861,12 @@ fn render_workflow(
         "needs.admission.outputs.disposition == 'admit' && github.ref == '{}'",
         spec.source_ref
     ));
+    let verify_source_check = indent_script(
+        &format!(
+            "set -euo pipefail\nactual_commit=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{{commit}})\"\nif [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\nactual_tree=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{{tree}})\"\nif [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\nsource_status=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" status --porcelain=v1 --untracked-files=all -- .)\"\nif [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package verification\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n"
+        ),
+        10,
+    );
     let package_dir_yaml = crate::s2::yaml_scalar(&spec.package_dir);
     let package_dir = spec.package_dir.as_str();
     let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
@@ -1797,7 +1901,7 @@ fn render_workflow(
     for name in &attested_assets {
         let _ = writeln!(
             attestation_subjects,
-            "            {workspace_expr}/{package_dir}/{name}"
+            "            {workspace_expr}/package/{name}"
         );
     }
     let mut artifact_upload_paths = String::new();
@@ -1805,6 +1909,13 @@ fn render_workflow(
         let _ = writeln!(
             artifact_upload_paths,
             "            {workspace_expr}/{package_dir}/{name}"
+        );
+    }
+    let mut verified_artifact_upload_paths = String::new();
+    for name in release_asset_names(spec) {
+        let _ = writeln!(
+            verified_artifact_upload_paths,
+            "            {workspace_expr}/package/{name}"
         );
     }
     let mut publish_attestation_targets = String::new();
@@ -1852,13 +1963,31 @@ fn render_workflow(
     output.push('\n');
     let _ = writeln!(
         output,
-        "  build:\n    name: Verify package release\n    needs: admission\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n",
-        github_expression("steps.verify.outputs.version"),
-        github_expression("steps.verify.outputs.source_commit"),
+        "  build:\n    name: Build untrusted package candidate\n    needs: admission\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n"
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n          PACKAGE_RELEASE_SCRATCH_DIR: {package_scratch_expr}\n        run: |\n{build_script}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build package candidate\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n          PACKAGE_RELEASE_SCRATCH_DIR: {package_scratch_expr}\n        run: |\n{build_script}{build_verify_tasks}      - name: Upload untrusted package candidate\n        uses: {upload}\n        with:\n          name: {candidate_artifact_name_expr}\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n"
+    );
+    output.push('\n');
+    let _ = writeln!(
+        output,
+        "  verify:\n    name: Verify package candidate on a fresh runner\n    needs: [admission, build]\n    if: {build_if}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    permissions:\n      contents: read\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{verify_source_check}      - name: Require empty package candidate destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::package candidate destination already exists\" >&2; exit 1; fi\n      - name: Download untrusted package candidate\n        uses: {download}\n        with:\n          name: {candidate_artifact_name_expr}\n          path: package\n          merge-multiple: true\n      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{publish_verify}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: {verified_artifact_name_expr}\n          path: |\n{verified_artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        github_expression("steps.verify.outputs.version"),
+        github_expression("steps.verify.outputs.source_commit"),
+    );
+    output.push('\n');
+    let signer_validation = indent_script(&artifact_signer_validation_script(spec), 10);
+    let signer_source_commit_expr = github_expression("needs.admission.outputs.head_sha");
+    let signer_if = github_expression(&format!(
+        "needs.admission.outputs.disposition == 'admit' && github.ref == '{}'",
+        spec.source_ref
+    ));
+    let _ = writeln!(
+        output,
+        "  attest:\n    name: Attest verified package bytes\n    needs: [admission, verify]\n    if: {signer_if}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/package\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {signer_source_commit_expr}\n    steps:\n      - name: Require empty verified package destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::verified package destination already exists\" >&2; exit 1; fi\n      - name: Download verified package handoff\n        uses: {download}\n        with:\n          name: {verified_artifact_download_name_expr}\n          path: package\n          merge-multiple: true\n      - name: Recheck source-bound package bytes\n        id: verify\n        run: |\n{signer_validation}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload attested package handoff\n        uses: {upload}\n        with:\n          name: {attested_artifact_name_expr}\n          path: |\n{verified_artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        github_expression("steps.verify.outputs.version"),
+        github_expression("steps.verify.outputs.source_commit"),
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -3489,7 +3618,7 @@ fn render_publish_job(
     let mut output = String::new();
     let _ = writeln!(output, "  publish:");
     output.push_str("    name: Publish immutable package and update consumer\n");
-    output.push_str("    needs: build\n");
+    output.push_str("    needs: attest\n");
     output.push_str("    if: ");
     output.push_str(&github_expression(&format!(
         "github.event_name == 'push' && github.ref == '{}'",
@@ -3574,7 +3703,11 @@ fn render_publish_job(
     );
     output.push_str("      - name: Download verified package handoff\n        uses: ");
     output.push_str(download);
-    output.push_str("\n        with:\n          name: package-release\n          path: package\n          merge-multiple: true\n");
+    output.push_str("\n        with:\n          name: ");
+    output.push_str(&github_expression(
+        "format('package-release-attested-{0}', needs.attest.outputs.source_commit)",
+    ));
+    output.push_str("\n          path: package\n          merge-multiple: true\n");
     output.push_str(
         "      - name: Re-verify downloaded handoff\n        id: verify\n        run: |\n",
     );
@@ -5183,7 +5316,7 @@ expected_names="$TEST_TMPDIR/expected-names"
             3
         );
         let producer = workflow
-            .find("Build verified package directory")
+            .find("Build package candidate")
             .expect("producer step");
         let producer_verify = workflow
             .find("Run repository package verification tasks")
@@ -5479,7 +5612,7 @@ expected_names="$TEST_TMPDIR/expected-names"
             .and_then(serde_yaml::Value::as_sequence)
             .expect("build steps");
         for name in [
-            "Build verified package directory",
+            "Build package candidate",
             "Run repository package verification tasks",
         ] {
             let script = build_steps
@@ -7419,8 +7552,8 @@ fi
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(workflow.contains("include-hidden-files: true"));
         let upload_step = workflow
-            .find("Upload verified package handoff")
-            .expect("artifact upload step");
+            .find("Upload untrusted package candidate")
+            .expect("candidate artifact upload step");
         let upload_paths = workflow[upload_step..]
             .split("          include-hidden-files: true")
             .next()

@@ -104,6 +104,80 @@ impl Fixture {
     fn build_job(&self) -> &YamlValue {
         &self.workflow["jobs"]["build"]
     }
+
+    fn verify_job(&self) -> &YamlValue {
+        &self.workflow["jobs"]["verify"]
+    }
+
+    fn attest_job(&self) -> &YamlValue {
+        &self.workflow["jobs"]["attest"]
+    }
+
+    fn publish_job(&self) -> &YamlValue {
+        &self.workflow["jobs"]["publish"]
+    }
+
+    fn fresh_runner(&self, label: &str, source_sha: &str) -> Self {
+        let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let parent = std::env::temp_dir().join(format!(
+            "package-handoff-{label}-fresh-{}-{sequence}",
+            std::process::id()
+        ));
+        let root = parent.join("workspace");
+        let runner_temp = parent.join("runner-temp");
+        fs::create_dir_all(&parent).expect("create fresh runner parent");
+        fs::create_dir_all(&runner_temp).expect("create fresh runner temporary root");
+        fs::create_dir_all(&root).expect("create fresh runner workspace");
+        let source_checkout = root.join("source");
+        let output = Command::new("git")
+            .args(["clone", "--quiet", "--shared"])
+            .arg(&self.root)
+            .arg(&source_checkout)
+            .output()
+            .expect("clone source into fresh runner");
+        assert!(
+            output.status.success(),
+            "clone admitted source into fresh runner failed:\n{}",
+            output_text(&output)
+        );
+        git(
+            &source_checkout,
+            &["checkout", "--quiet", "--detach", source_sha],
+        );
+        git(
+            &source_checkout,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/preview-source.git",
+            ],
+        );
+        Self {
+            root,
+            runner_temp,
+            workflow: self.workflow.clone(),
+            initial_sha: self.initial_sha.clone(),
+        }
+    }
+
+    fn fresh_workspace(&self, label: &str) -> Self {
+        let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let parent = std::env::temp_dir().join(format!(
+            "package-handoff-{label}-workspace-{}-{sequence}",
+            std::process::id()
+        ));
+        let root = parent.join("workspace");
+        let runner_temp = parent.join("runner-temp");
+        fs::create_dir_all(&root).expect("create source-free runner workspace");
+        fs::create_dir_all(&runner_temp).expect("create source-free runner temporary root");
+        Self {
+            root,
+            runner_temp,
+            workflow: self.workflow.clone(),
+            initial_sha: self.initial_sha.clone(),
+        }
+    }
 }
 
 struct EventContext {
@@ -145,6 +219,8 @@ impl EventContext {
 struct StepResult {
     output: Output,
     github_output: PathBuf,
+    github_env: PathBuf,
+    github_path: PathBuf,
     environment: std::collections::BTreeMap<String, String>,
 }
 
@@ -154,8 +230,10 @@ struct PackageRun {
     build_ran: bool,
     source_check: Option<StepResult>,
     build: Option<StepResult>,
+    producer_followup: Option<StepResult>,
     verification: Option<StepResult>,
     checkout_sha: Option<String>,
+    verification_fixture: Option<Fixture>,
 }
 
 impl Drop for Fixture {
@@ -251,7 +329,13 @@ documentation = ["README.md"]
 fn fake_mise_script() -> &'static str {
     r#"#!/bin/bash
 set -euo pipefail
-[[ "${1:-}" == run && "${2:-}" == build-release ]]
+[[ "${1:-}" == run ]]
+if [[ "${2:-}" == verify-release ]]; then
+  printf '%s\n' "${EXPECTED_SOURCE_COMMIT:?}" > "$RUNNER_TEMP/followup-source-commit"
+  jq --version > "$RUNNER_TEMP/followup-jq-version"
+  exit 0
+fi
+[[ "${2:-}" == build-release ]]
 printf '%s\n' "${PACKAGE_RELEASE_SCRATCH_DIR:?}" > "$RUNNER_TEMP/producer-env"
 printf '%s\n' "${PACKAGE_DIR:?}" >> "$RUNNER_TEMP/producer-env"
 printf '%s\n' "${VELNOR_VERIFIED_PACKAGE_DIR:?}" >> "$RUNNER_TEMP/producer-env"
@@ -297,6 +381,10 @@ jq -n \
   > "$VELNOR_VERIFIED_PACKAGE_DIR/identity.json"
 if [[ "${PACKAGE_TEST_STALE_HANDOFF_SIBLING:-}" == "1" ]]; then
   printf 'ignored stale sibling from producer\n' > "${VELNOR_VERIFIED_PACKAGE_DIR%/*}/stale-from-producer"
+fi
+if [[ -n "${PACKAGE_TEST_CANARY_PATH:-}" ]]; then
+  printf 'EXPECTED_SOURCE_COMMIT=%s\n' '0000000000000000000000000000000000000000' >> "$GITHUB_ENV"
+  printf '%s\n' "$PACKAGE_TEST_CANARY_PATH" >> "$GITHUB_PATH"
 fi
 "#
 }
@@ -405,6 +493,10 @@ fn resolve_value(
         ("needs.admission.outputs.disposition", "disposition"),
         ("needs.admission.outputs.head_sha", "head_sha"),
         ("needs.admission.outputs.head_tree", "head_tree"),
+        ("needs.verify.outputs.version", "version"),
+        ("needs.verify.outputs.source_commit", "source_commit"),
+        ("needs.attest.outputs.version", "version"),
+        ("needs.attest.outputs.source_commit", "source_commit"),
     ] {
         if let Some(output) = outputs.get(key) {
             replace(expression, output);
@@ -506,6 +598,53 @@ fn execute_rendered_step_with_extra_environment(
     fake_producer: bool,
     extra_environment: &[(&str, &str)],
 ) -> StepResult {
+    execute_rendered_step_with_updates(
+        fixture,
+        job_name,
+        step_name,
+        event,
+        outputs,
+        fake_producer,
+        extra_environment,
+        &std::collections::BTreeMap::new(),
+        &[],
+    )
+}
+
+fn execute_rendered_step_after_previous(
+    fixture: &Fixture,
+    job_name: &str,
+    step_name: &str,
+    event: &EventContext,
+    outputs: &std::collections::BTreeMap<String, String>,
+    fake_mise: bool,
+    previous: &StepResult,
+) -> StepResult {
+    let (environment_updates, path_updates) = command_file_updates(previous);
+    execute_rendered_step_with_updates(
+        fixture,
+        job_name,
+        step_name,
+        event,
+        outputs,
+        fake_mise,
+        &[],
+        &environment_updates,
+        &path_updates,
+    )
+}
+
+fn execute_rendered_step_with_updates(
+    fixture: &Fixture,
+    job_name: &str,
+    step_name: &str,
+    event: &EventContext,
+    outputs: &std::collections::BTreeMap<String, String>,
+    fake_mise: bool,
+    extra_environment: &[(&str, &str)],
+    environment_updates: &std::collections::BTreeMap<String, String>,
+    path_updates: &[PathBuf],
+) -> StepResult {
     let job = &fixture.workflow["jobs"][job_name];
     let step = named_step(job, step_name);
     let script = step["run"]
@@ -515,6 +654,7 @@ fn execute_rendered_step_with_extra_environment(
     for (key, value) in extra_environment {
         environment.insert((*key).to_owned(), (*value).to_owned());
     }
+    environment.extend(environment_updates.clone());
     let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
     let output_path = fixture
         .runner_temp
@@ -522,12 +662,16 @@ fn execute_rendered_step_with_extra_environment(
     let env_path = fixture
         .runner_temp
         .join(format!("step-env-{}-{sequence}", event.run_id));
+    let path_path = fixture
+        .runner_temp
+        .join(format!("step-path-{}-{sequence}", event.run_id));
     fs::write(&output_path, "").expect("create generated step output file");
     fs::write(&env_path, "").expect("create generated step environment file");
+    fs::write(&path_path, "").expect("create generated step path file");
 
     let fake_bin = fixture.runner_temp.join(format!("step-bin-{sequence}"));
     fs::create_dir_all(&fake_bin).expect("create generated step fake-bin directory");
-    if fake_producer {
+    if fake_mise {
         let producer = fake_bin.join("mise");
         fs::write(&producer, fake_mise_script()).expect("write fake package producer");
         set_executable(&producer);
@@ -541,12 +685,17 @@ fn execute_rendered_step_with_extra_environment(
         .parent()
         .expect("generator executable has a parent directory");
     let current_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut path_parts = vec![
+    let mut path_parts = path_updates
+        .iter()
+        .map(|path| path.as_os_str().to_os_string())
+        .collect::<Vec<_>>();
+    path_parts.extend([
         fake_bin.into_os_string(),
         target_bin.as_os_str().to_os_string(),
-    ];
+    ]);
     path_parts.extend(std::env::split_paths(&current_path).map(PathBuf::into_os_string));
     let path = std::env::join_paths(path_parts).expect("join rendered-step PATH");
+    environment.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
 
     let mut command = Command::new("bash");
     command
@@ -563,13 +712,33 @@ fn execute_rendered_step_with_extra_environment(
         .env("GITHUB_RUN_ATTEMPT", &event.attempt)
         .env("RUNNER_TEMP", &fixture.runner_temp)
         .env("GITHUB_OUTPUT", &output_path)
-        .env("GITHUB_ENV", &env_path);
+        .env("GITHUB_ENV", &env_path)
+        .env("GITHUB_PATH", &path_path);
     let output = command.output().expect("run actual emitted workflow step");
     StepResult {
         output,
         github_output: output_path,
+        github_env: env_path,
+        github_path: path_path,
         environment,
     }
+}
+
+fn command_file_updates(
+    result: &StepResult,
+) -> (std::collections::BTreeMap<String, String>, Vec<PathBuf>) {
+    let environment = fs::read_to_string(&result.github_env)
+        .expect("read generated step environment file")
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    let path = fs::read_to_string(&result.github_path)
+        .expect("read generated step path file")
+        .lines()
+        .map(PathBuf::from)
+        .collect();
+    (environment, path)
 }
 
 fn find_compatibility_script() -> &'static str {
@@ -725,17 +894,197 @@ fn run_package_pipeline_with_producer_environment(
     )
 }
 
-fn assert_build_step_order(job: &YamlValue) {
+fn assert_build_step_order(fixture: &Fixture) {
+    let build = fixture.build_job();
+    let verify = fixture.verify_job();
+    let attest = fixture.attest_job();
     assert!(
-        step_position(job, "Checkout source") < step_position(job, "Verify admitted source tree")
-            && step_position(job, "Verify admitted source tree")
-                < step_position(job, "Build verified package directory")
-            && step_position(job, "Build verified package directory")
+        step_position(build, "Checkout source")
+            < step_position(build, "Verify admitted source tree")
+            && step_position(build, "Verify admitted source tree")
+                < step_position(build, "Build package candidate")
+            && step_position(build, "Build package candidate")
+                < step_position(build, "Run repository package verification tasks")
+            && step_position(build, "Run repository package verification tasks")
+                < step_position(build, "Upload untrusted package candidate"),
+        "build job produces and uploads data after source checks"
+    );
+    assert!(
+        step_position(verify, "Checkout admitted source")
+            < step_position(verify, "Verify admitted source tree")
+            && step_position(verify, "Verify admitted source tree")
+                < step_position(verify, "Require empty package candidate destination")
+            && step_position(verify, "Require empty package candidate destination")
+                < step_position(verify, "Download untrusted package candidate")
+            && step_position(verify, "Download untrusted package candidate")
                 < step_position(
-                    job,
+                    verify,
                     "Verify manifest, identity, checksums, and exact file set"
-                ),
-        "generated build order is checkout, identity check, producer, then verifier"
+                )
+            && step_position(
+                verify,
+                "Verify manifest, identity, checksums, and exact file set"
+            ) < step_position(verify, "Upload verified package handoff"),
+        "fresh verifier checks the admitted source and candidate before handing off verified bytes"
+    );
+
+    let needs = verify["needs"]
+        .as_sequence()
+        .expect("fresh verifier declares producer dependencies")
+        .iter()
+        .filter_map(YamlValue::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(needs, BTreeSet::from(["admission", "build"]));
+    assert_eq!(verify["runs-on"].as_str(), Some("ubuntu-24.04"));
+    let attest_needs = attest["needs"]
+        .as_sequence()
+        .expect("signer dependencies are explicit")
+        .iter()
+        .filter_map(YamlValue::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(attest_needs, BTreeSet::from(["admission", "verify"]));
+    assert_eq!(attest["runs-on"].as_str(), Some("ubuntu-24.04"));
+    let build_permissions = build["permissions"]
+        .as_mapping()
+        .expect("producer permissions are explicit");
+    assert_eq!(build_permissions.len(), 1);
+    assert_eq!(
+        build_permissions.get("contents"),
+        Some(&YamlValue::String("read".to_owned())),
+        "untrusted producer has only source checkout read access, without source-release or tap-write permissions"
+    );
+    let verify_permissions = verify["permissions"]
+        .as_mapping()
+        .expect("fresh verifier permissions are explicit");
+    assert_eq!(verify_permissions.len(), 1);
+    assert_eq!(
+        verify_permissions.get("contents"),
+        Some(&YamlValue::String("read".to_owned())),
+        "fresh verifier has no write or OIDC credential"
+    );
+    let attest_permissions = attest["permissions"]
+        .as_mapping()
+        .expect("signer permissions are explicit");
+    assert_eq!(attest_permissions.len(), 3);
+    for (name, value) in [
+        ("contents", "read"),
+        ("id-token", "write"),
+        ("attestations", "write"),
+    ] {
+        assert_eq!(
+            attest_permissions.get(name),
+            Some(&YamlValue::String(value.to_owned())),
+            "signer permission {name} is minimal"
+        );
+    }
+    let verify_steps = verify["steps"].as_sequence().expect("fresh verifier steps");
+    assert!(
+        verify_steps.iter().all(|step| {
+            step["name"]
+                .as_str()
+                .is_some_and(|name| !name.contains("repository package verification"))
+                && step
+                    .get("run")
+                    .and_then(YamlValue::as_str)
+                    .is_none_or(|script| !script.contains("mise run"))
+        }),
+        "fresh verifier does not execute producer task scripts"
+    );
+    assert!(
+        verify_steps.iter().all(|step| {
+            step["name"]
+                .as_str()
+                .is_some_and(|name| name != "Attest declared package assets")
+                && step
+                    .get("uses")
+                    .and_then(YamlValue::as_str)
+                    .is_none_or(|action| !action.contains("attest"))
+        }),
+        "credential-free verifier does not request OIDC attestations"
+    );
+    let attest_steps = attest["steps"].as_sequence().expect("signer steps");
+    let signer_actions = attest_steps
+        .iter()
+        .filter_map(|step| step.get("uses").and_then(YamlValue::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signer_actions,
+        [
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        ],
+        "OIDC signer invokes only the three pinned artifact and attestation actions"
+    );
+    assert!(
+        attest_steps.iter().all(|step| {
+            let name = step["name"].as_str().unwrap_or_default();
+            let script = step
+                .get("run")
+                .and_then(YamlValue::as_str)
+                .unwrap_or_default();
+            !name.contains("Checkout")
+                && !name.contains("Mise")
+                && !script.contains("mise ")
+                && !script.contains("cargo ")
+                && !script.contains("velnor-workflow")
+                && !script.contains("mise run")
+        }),
+        "OIDC signer has no checkout, source build, package verifier, or candidate task"
+    );
+    assert!(
+        !attest.as_mapping().unwrap().contains_key("secrets")
+            && !attest["env"].as_mapping().unwrap().contains_key("GH_TOKEN"),
+        "OIDC signer has no publish secrets"
+    );
+    assert!(
+        step_position(attest, "Require empty verified package destination")
+            < step_position(attest, "Download verified package handoff")
+            && step_position(attest, "Download verified package handoff")
+                < step_position(attest, "Recheck source-bound package bytes")
+            && step_position(attest, "Recheck source-bound package bytes")
+                < step_position(attest, "Attest declared package assets")
+            && step_position(attest, "Attest declared package assets")
+                < step_position(attest, "Upload attested package handoff"),
+        "signer rechecks verified immutable bytes before attesting and handing off exact files"
+    );
+    assert_eq!(
+        fixture.publish_job()["needs"].as_str(),
+        Some("attest"),
+        "credentialed publisher waits for fresh verification and signer"
+    );
+    let candidate_name =
+        "${{ format('package-release-candidate-{0}', needs.admission.outputs.head_sha) }}";
+    assert_eq!(
+        named_step(build, "Upload untrusted package candidate")["with"]["name"].as_str(),
+        Some(candidate_name),
+        "candidate artifact identity is bound to admitted SHA"
+    );
+    assert_eq!(
+        named_step(verify, "Download untrusted package candidate")["with"]["name"].as_str(),
+        Some(candidate_name),
+        "fresh verifier downloads the exact producer artifact"
+    );
+    assert_eq!(
+        named_step(verify, "Upload verified package handoff")["with"]["name"].as_str(),
+        Some("${{ format('package-release-{0}', steps.verify.outputs.source_commit) }}"),
+        "verified artifact identity is bound to the manifest-verified source SHA"
+    );
+    assert_eq!(
+        named_step(attest, "Download verified package handoff")["with"]["name"].as_str(),
+        Some("${{ format('package-release-{0}', needs.verify.outputs.source_commit) }}"),
+        "signer downloads only the exact fresh-verifier artifact"
+    );
+    assert_eq!(
+        named_step(attest, "Upload attested package handoff")["with"]["name"].as_str(),
+        Some("${{ format('package-release-attested-{0}', needs.verify.outputs.source_commit) }}"),
+        "attested artifact identity is bound to verified source SHA"
+    );
+    assert_eq!(
+        named_step(fixture.publish_job(), "Download verified package handoff")["with"]["name"]
+            .as_str(),
+        Some("${{ format('package-release-attested-{0}', needs.attest.outputs.source_commit) }}"),
+        "publisher downloads only the exact attested artifact"
     );
 }
 
@@ -771,12 +1120,14 @@ fn run_build_pipeline_with_producer_environment(
             build_ran: false,
             source_check: None,
             build: None,
+            producer_followup: None,
             verification: None,
             checkout_sha: None,
+            verification_fixture: None,
         };
     }
 
-    assert_build_step_order(fixture.build_job());
+    assert_build_step_order(fixture);
     let checkout = named_step(fixture.build_job(), "Checkout source");
     let checkout_ref = resolve_value(
         checkout["with"]["ref"]
@@ -822,15 +1173,17 @@ fn run_build_pipeline_with_producer_environment(
             build_ran: false,
             source_check: Some(tree_check),
             build: None,
+            producer_followup: None,
             verification: None,
             checkout_sha: Some(checkout_ref),
+            verification_fixture: None,
         };
     }
 
     let build = execute_rendered_step_with_extra_environment(
         fixture,
         "build",
-        "Build verified package directory",
+        "Build package candidate",
         event,
         &admission_outputs,
         true,
@@ -843,13 +1196,112 @@ fn run_build_pipeline_with_producer_environment(
             build_ran: true,
             source_check: Some(tree_check),
             build: Some(build),
+            producer_followup: None,
             verification: None,
             checkout_sha: Some(checkout_ref),
+            verification_fixture: None,
         };
     }
-    let verification = execute_rendered_step(
+
+    let producer_followup = execute_rendered_step_after_previous(
         fixture,
         "build",
+        "Run repository package verification tasks",
+        event,
+        &admission_outputs,
+        true,
+        &build,
+    );
+    if !producer_followup.output.status.success() {
+        return PackageRun {
+            candidate,
+            admission_outputs,
+            build_ran: true,
+            source_check: Some(tree_check),
+            build: Some(build),
+            producer_followup: Some(producer_followup),
+            verification: None,
+            checkout_sha: Some(checkout_ref),
+            verification_fixture: None,
+        };
+    }
+
+    let verification_fixture = fixture.fresh_runner("verify", &checkout_ref);
+    let verify_checkout = named_step(
+        verification_fixture.verify_job(),
+        "Checkout admitted source",
+    );
+    assert_eq!(
+        verify_checkout["with"]["ref"].as_str(),
+        Some("${{ needs.admission.outputs.head_sha }}"),
+        "fresh verifier checkout is pinned to the admitted source SHA"
+    );
+    assert_eq!(
+        git(
+            &verification_fixture.root.join("source"),
+            &["rev-parse", "HEAD"]
+        ),
+        checkout_ref,
+        "fresh verifier runner is checked out at the same admitted SHA"
+    );
+    let verifier_source_check = execute_rendered_step(
+        &verification_fixture,
+        "verify",
+        "Verify admitted source tree",
+        event,
+        &admission_outputs,
+        false,
+    );
+    if !verifier_source_check.output.status.success() {
+        return PackageRun {
+            candidate,
+            admission_outputs,
+            build_ran: true,
+            source_check: Some(tree_check),
+            build: Some(build),
+            producer_followup: Some(producer_followup),
+            verification: None,
+            checkout_sha: Some(checkout_ref),
+            verification_fixture: Some(verification_fixture),
+        };
+    }
+    let empty_destination = execute_rendered_step(
+        &verification_fixture,
+        "verify",
+        "Require empty package candidate destination",
+        event,
+        &admission_outputs,
+        false,
+    );
+    if !empty_destination.output.status.success() {
+        return PackageRun {
+            candidate,
+            admission_outputs,
+            build_ran: true,
+            source_check: Some(tree_check),
+            build: Some(build),
+            producer_followup: Some(producer_followup),
+            verification: Some(empty_destination),
+            checkout_sha: Some(checkout_ref),
+            verification_fixture: Some(verification_fixture),
+        };
+    }
+    let producer_handoff = PathBuf::from(
+        build
+            .environment
+            .get("VELNOR_VERIFIED_PACKAGE_DIR")
+            .expect("producer job exposes package output directory"),
+    );
+    let verifier_handoff = verification_fixture.root.join("package");
+    let candidate_upload = named_step(fixture.build_job(), "Upload untrusted package candidate");
+    assert!(
+        candidate_upload["with"]["path"].as_str().is_some(),
+        "producer uploads an explicit fixed list of candidate files"
+    );
+    copy_package_assets(&producer_handoff, &verifier_handoff);
+    let verification = execute_rendered_step(
+        &verification_fixture,
+        "verify",
         "Verify manifest, identity, checksums, and exact file set",
         event,
         &admission_outputs,
@@ -861,15 +1313,69 @@ fn run_build_pipeline_with_producer_environment(
         build_ran: true,
         source_check: Some(tree_check),
         build: Some(build),
+        producer_followup: Some(producer_followup),
         verification: Some(verification),
         checkout_sha: Some(checkout_ref),
+        verification_fixture: Some(verification_fixture),
     }
 }
 
-fn verify_handoff_again(fixture: &Fixture, event: &EventContext, run: &PackageRun) -> StepResult {
+fn copy_package_assets(source: &Path, destination: &Path) {
+    fs::create_dir(destination).expect("create downloaded candidate directory");
+    for name in ["release-manifest.json", "identity.json", PAYLOAD, SUMS] {
+        fs::copy(source.join(name), destination.join(name))
+            .unwrap_or_else(|error| panic!("copy candidate asset {name}: {error}"));
+    }
+}
+
+fn reset_package_assets(source: &Path, destination: &Path) {
+    if destination.exists() {
+        fs::remove_dir_all(destination).expect("remove previous signer fixture package");
+    }
+    copy_package_assets(source, destination);
+}
+
+fn assert_signer_rejects(
+    signer_fixture: &Fixture,
+    event: &EventContext,
+    outputs: &std::collections::BTreeMap<String, String>,
+    verified_handoff: &Path,
+    label: &str,
+    expected_error: &str,
+    mutate: impl FnOnce(&Path),
+) {
+    let package = signer_fixture.root.join("package");
+    reset_package_assets(verified_handoff, &package);
+    mutate(&package);
+    let result = execute_rendered_step(
+        signer_fixture,
+        "attest",
+        "Recheck source-bound package bytes",
+        event,
+        outputs,
+        false,
+    );
+    assert_step_failure(&result, label);
+    assert!(
+        output_text(&result.output).contains(expected_error),
+        "{label} failed for the expected reason; expected {expected_error:?}, got: {}",
+        output_text(&result.output)
+    );
+}
+
+fn read_json(path: &Path) -> JsonValue {
+    serde_json::from_slice(&fs::read(path).expect("read JSON fixture"))
+        .expect("fixture file is JSON")
+}
+
+fn verify_handoff_again(_fixture: &Fixture, event: &EventContext, run: &PackageRun) -> StepResult {
+    let verification_fixture = run
+        .verification_fixture
+        .as_ref()
+        .expect("fresh verifier runner exists");
     execute_rendered_step(
-        fixture,
-        "build",
+        verification_fixture,
+        "verify",
         "Verify manifest, identity, checksums, and exact file set",
         event,
         &run.admission_outputs,
@@ -960,13 +1466,21 @@ fn assert_complete_handoff(path: &Path, source_sha: &str) {
 }
 
 fn handoff_path(run: &PackageRun) -> PathBuf {
+    run.verification_fixture
+        .as_ref()
+        .expect("fresh verifier runner exists")
+        .root
+        .join("package")
+}
+
+fn producer_handoff_path(run: &PackageRun) -> PathBuf {
     PathBuf::from(
         run.build
             .as_ref()
             .expect("producer step ran")
             .environment
             .get("VELNOR_VERIFIED_PACKAGE_DIR")
-            .expect("emitted job env defines the handoff directory"),
+            .expect("emitted producer job env defines its package output directory"),
     )
 }
 
@@ -1009,6 +1523,12 @@ fn assert_package_pipeline_success(fixture: &Fixture, run: &PackageRun, expected
         "admitted source tree check",
     );
     assert_step_success(run.build.as_ref().unwrap(), "package producer");
+    assert_step_success(
+        run.producer_followup
+            .as_ref()
+            .expect("producer follow-up task ran"),
+        "producer follow-up verification task",
+    );
     assert_step_success(
         run.verification.as_ref().unwrap(),
         "manifest and identity verification",
@@ -1092,8 +1612,202 @@ fn handoff_survives_producer_exit() {
     let before = fixture.initial_sha.clone();
     let source_sha = fixture.commit_source_change("producer bytes\n", "production source");
     let event = EventContext::push(&before, &source_sha, "7001", "1");
-    let run = run_package_pipeline(&fixture, &event, false);
+    let canary_bin = fixture.runner_temp.join("producer-command-file-canary");
+    fs::create_dir_all(&canary_bin).expect("create producer command-file PATH canary");
+    let canary_jq = canary_bin.join("jq");
+    fs::write(&canary_jq, "#!/bin/bash\nprintf 'CANARY_JQ\\n'\n")
+        .expect("write producer command-file PATH canary");
+    set_executable(&canary_jq);
+    let canary_path = canary_bin.to_string_lossy().into_owned();
+    let run = run_package_pipeline_with_producer_environment(
+        &fixture,
+        &event,
+        false,
+        &[("PACKAGE_TEST_CANARY_PATH", canary_path.as_str())],
+    );
     assert_package_pipeline_success(&fixture, &run, &source_sha);
+    let producer_followup = run.producer_followup.as_ref().unwrap();
+    assert_eq!(
+        producer_followup
+            .environment
+            .get("EXPECTED_SOURCE_COMMIT")
+            .map(String::as_str),
+        Some("0000000000000000000000000000000000000000"),
+        "same-job follow-up receives the producer's real GITHUB_ENV update"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.runner_temp.join("followup-source-commit"))
+            .unwrap()
+            .trim(),
+        "0000000000000000000000000000000000000000"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.runner_temp.join("followup-jq-version"))
+            .unwrap()
+            .trim(),
+        "CANARY_JQ",
+        "same-job follow-up PATH resolves the producer's GITHUB_PATH canary first"
+    );
+    let verification = run.verification.as_ref().unwrap();
+    assert_eq!(
+        verification
+            .environment
+            .get("EXPECTED_SOURCE_COMMIT")
+            .map(String::as_str),
+        Some(source_sha.as_str()),
+        "fresh verifier re-pins source identity from admission"
+    );
+    assert!(
+        !verification.environment["PATH"].contains(&canary_path),
+        "fresh verifier PATH has no producer command-file entries"
+    );
+    assert_step_success(verification, "fresh isolated package verifier");
+    let verified_handoff = handoff_path(&run);
+    let signer_fixture = run
+        .verification_fixture
+        .as_ref()
+        .unwrap()
+        .fresh_workspace("attest");
+    let signer_package = signer_fixture.root.join("package");
+    copy_package_assets(&verified_handoff, &signer_package);
+    let manifest: JsonValue =
+        serde_json::from_slice(&fs::read(signer_package.join("release-manifest.json")).unwrap())
+            .unwrap();
+    let mut signer_outputs = run.admission_outputs.clone();
+    signer_outputs.insert(
+        "version".to_owned(),
+        manifest["version"].as_str().unwrap().to_owned(),
+    );
+    signer_outputs.insert("source_commit".to_owned(), source_sha.clone());
+
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer detects post-verification payload mutation",
+        "attestation input digest mismatch",
+        |package| {
+            fs::write(package.join(PAYLOAD), b"changed after fresh verification\n").unwrap();
+        },
+    );
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer rejects a different admitted source ref",
+        "attestation manifest does not match admitted source identity",
+        |package| {
+            let manifest_path = package.join("release-manifest.json");
+            let mut changed = read_json(&manifest_path);
+            changed["source_ref"] = JsonValue::String("refs/heads/attacker".to_owned());
+            rewrite_json(&manifest_path, &changed);
+        },
+    );
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer rejects a different admitted source SHA",
+        "attestation manifest does not match admitted source identity",
+        |package| {
+            let manifest_path = package.join("release-manifest.json");
+            let mut changed = read_json(&manifest_path);
+            let alternate_sha = if source_sha == "f".repeat(40) {
+                "e".repeat(40)
+            } else {
+                "f".repeat(40)
+            };
+            changed["source_commit"] = JsonValue::String(alternate_sha);
+            rewrite_json(&manifest_path, &changed);
+        },
+    );
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer rejects a version bound to another source identity",
+        "attestation input version does not bind the admitted SHA",
+        |package| {
+            let manifest_path = package.join("release-manifest.json");
+            let mut changed = read_json(&manifest_path);
+            let alternate = if source_sha.starts_with("aaaaaaa") {
+                "bbbbbbb"
+            } else {
+                "aaaaaaa"
+            };
+            changed["version"] = JsonValue::String(format!("1.2.3-preview.7001+{alternate}"));
+            rewrite_json(&manifest_path, &changed);
+            sync_identity_manifest(package, &changed);
+        },
+    );
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer rejects an extra undeclared file",
+        "attestation input contains an undeclared or missing file",
+        |package| fs::write(package.join("undeclared.txt"), b"extra\n").unwrap(),
+    );
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer rejects a missing declared file",
+        "attestation input contains an undeclared or missing file",
+        |package| fs::remove_file(package.join(PAYLOAD)).unwrap(),
+    );
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer rejects a mutated manifest schema",
+        "attestation manifest does not match admitted source identity",
+        |package| {
+            let manifest_path = package.join("release-manifest.json");
+            let mut changed = read_json(&manifest_path);
+            changed["schema"] = JsonValue::String("unapproved.schema".to_owned());
+            rewrite_json(&manifest_path, &changed);
+        },
+    );
+    assert_signer_rejects(
+        &signer_fixture,
+        &event,
+        &signer_outputs,
+        &verified_handoff,
+        "signer rejects a mutated identity record",
+        "attestation identity does not match manifest and admitted source",
+        |package| {
+            let identity_path = package.join("identity.json");
+            let mut changed = read_json(&identity_path);
+            changed["source_repository"] = JsonValue::String("other/repository".to_owned());
+            rewrite_json(&identity_path, &changed);
+        },
+    );
+
+    reset_package_assets(&verified_handoff, &signer_package);
+    let signer = execute_rendered_step(
+        &signer_fixture,
+        "attest",
+        "Recheck source-bound package bytes",
+        &event,
+        &signer_outputs,
+        false,
+    );
+    assert_step_success(&signer, "bytes-only attestation input validation");
+    let signer_values = output_values(&signer.github_output);
+    assert_eq!(signer_values.get("source_commit"), Some(&source_sha));
+    assert_eq!(signer_values.get("version"), signer_outputs.get("version"));
+    assert!(
+        !signer.environment["PATH"].contains(&canary_path),
+        "fresh OIDC signer PATH has no producer command-file entries"
+    );
     assert!(
         producer_was_called(&fixture),
         "the emitted mise task ran as a child process"
@@ -1117,7 +1831,7 @@ fn scratch_cleanup_preserves_output() {
     let first = run_package_pipeline(&fixture, &first_event, false);
     assert_package_pipeline_success(&fixture, &first, &source_sha);
     let first_scratch = scratch_path(&first);
-    let first_handoff = handoff_path(&first);
+    let first_handoff = producer_handoff_path(&first);
     assert!(
         fixture.runner_temp.is_dir(),
         "runner-temp parent was preserved"
@@ -1136,7 +1850,7 @@ fn scratch_cleanup_preserves_output() {
     assert_eq!(fs::read_to_string(&unrelated).unwrap(), "caller-owned\n");
     assert!(fixture.root.is_dir(), "checkout parent was preserved");
 
-    fs::remove_dir_all(handoff_path(&retry)).unwrap();
+    fs::remove_dir_all(producer_handoff_path(&retry)).unwrap();
     let failure_event = EventContext::push(&before, &source_sha, "7100", "3");
     let failed = run_package_pipeline_with_producer_environment(
         &fixture,
@@ -1159,14 +1873,29 @@ fn scratch_cleanup_preserves_output() {
         failed.verification.is_none(),
         "failed producer prevents the generated verifier from running"
     );
-    let partial_handoff = handoff_path(&failed);
+    let partial_handoff = producer_handoff_path(&failed);
     assert!(partial_handoff.starts_with(fixture.root.join("dist")));
     assert_eq!(
         fs::read_to_string(partial_handoff.join("preview-package.tar.gz")).unwrap(),
         "partial package copy\n",
         "failed copy leaves a truncated payload at the declared handoff path"
     );
-    let partial_verification = verify_handoff_again(&fixture, &failure_event, &failed);
+    let partial_verifier = fixture.fresh_runner("partial-verifier", &failure_event.head_sha);
+    let partial_verifier_handoff = partial_verifier.root.join("package");
+    fs::create_dir(&partial_verifier_handoff).unwrap();
+    fs::copy(
+        partial_handoff.join(PAYLOAD),
+        partial_verifier_handoff.join(PAYLOAD),
+    )
+    .unwrap();
+    let partial_verification = execute_rendered_step(
+        &partial_verifier,
+        "verify",
+        "Verify manifest, identity, checksums, and exact file set",
+        &failure_event,
+        &failed.admission_outputs,
+        false,
+    );
     assert_step_failure(&partial_verification, "partial handoff rejection");
     let failed_scratch = scratch_path(&failed);
     assert!(failed_scratch.starts_with(&fixture.runner_temp));
@@ -1213,7 +1942,7 @@ fn queued_sha_is_accepted_after_main_moves() {
     assert_package_pipeline_success(&fixture, &newer_run, &newer);
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), newer);
 
-    fs::remove_dir_all(handoff_path(&newer_run)).unwrap();
+    fs::remove_dir_all(producer_handoff_path(&newer_run)).unwrap();
     let older_run = run_build_pipeline(
         &fixture,
         &older_event,
@@ -1543,7 +2272,7 @@ fn assert_ignored_sibling_is_rejected_before_producer() {
     let producer = execute_rendered_step(
         &before,
         "build",
-        "Build verified package directory",
+        "Build package candidate",
         &before_event,
         &admission_outputs,
         true,
@@ -1579,7 +2308,7 @@ fn assert_ignored_sibling_is_rejected_after_producer() {
     let producer = execute_rendered_step_with_extra_environment(
         &after,
         "build",
-        "Build verified package directory",
+        "Build package candidate",
         &after_event,
         &admission_outputs,
         true,
@@ -1624,22 +2353,6 @@ fn assert_ignored_package_inventory_controls() {
     assert_ignored_sibling_is_rejected_after_producer();
 }
 
-fn rewrite_handoff_payload_consistently(handoff: &Path) {
-    fs::write(
-        handoff.join(PAYLOAD),
-        b"different internally consistent package payload\n",
-    )
-    .unwrap();
-    let payload_digest = sha256(&handoff.join(PAYLOAD));
-    fs::write(handoff.join(SUMS), format!("{payload_digest}  {PAYLOAD}\n")).unwrap();
-    let mut manifest: JsonValue =
-        serde_json::from_slice(&fs::read(handoff.join("release-manifest.json")).unwrap()).unwrap();
-    manifest["assets"][0]["sha256"] = JsonValue::String(payload_digest);
-    manifest["supporting_assets"][0]["sha256"] = JsonValue::String(sha256(&handoff.join(SUMS)));
-    rewrite_json(&handoff.join("release-manifest.json"), &manifest);
-    sync_identity_manifest(handoff, &manifest);
-}
-
 fn assert_handoff_ancestor_symlink_rejected() {
     let fixture = Fixture::new("handoff-ancestor-symlink", "handoff-parent/dist");
     let source_sha = fixture.commit_source_change("ancestor symlink source\n", "production source");
@@ -1647,17 +2360,16 @@ fn assert_handoff_ancestor_symlink_rejected() {
     let run = run_package_pipeline(&fixture, &event, false);
     assert_package_pipeline_success(&fixture, &run, &source_sha);
     let handoff = handoff_path(&run);
-    rewrite_handoff_payload_consistently(&handoff);
-
-    let handoff_parent = handoff.parent().unwrap().to_path_buf();
-    let alternate_parent = fixture.root.join("alternate-parent");
-    fs::rename(&handoff_parent, &alternate_parent).unwrap();
+    let verification_fixture = run.verification_fixture.as_ref().unwrap();
+    let alternate_package = verification_fixture.root.join("alternate-package");
+    fs::rename(&handoff, &alternate_package).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&alternate_parent, &handoff_parent).unwrap();
-    let resolved = fs::canonicalize(&handoff).expect("resolve in-workspace symlink handoff");
-    let expected = fs::canonicalize(alternate_parent.join("dist"))
-        .expect("canonicalize alternate package target");
-    let workspace = fs::canonicalize(&fixture.root).expect("canonicalize fixture workspace");
+    std::os::unix::fs::symlink(&alternate_package, &handoff).unwrap();
+    let resolved = fs::canonicalize(&handoff).expect("resolve in-workspace symlink package");
+    let expected =
+        fs::canonicalize(&alternate_package).expect("canonicalize alternate package target");
+    let workspace = fs::canonicalize(&verification_fixture.root)
+        .expect("canonicalize fresh verifier workspace");
     assert_eq!(resolved, expected);
     assert!(
         resolved.starts_with(workspace),
@@ -1676,17 +2388,12 @@ fn assert_handoff_ancestor_symlink_rejected() {
         "alternate package sidecar has a matching manifest digest"
     );
 
-    // The copied package is locally self-consistent; this assertion is about
-    // the symlinked handoff path, not independent provenance of rehashed bytes.
     let verification = verify_handoff_again(&fixture, &event, &run);
-    assert_step_failure(
-        &verification,
-        "in-workspace handoff ancestor symlink rejection",
-    );
+    assert_step_failure(&verification, "fresh-runner package symlink rejection");
     assert!(
         output_text(&verification.output)
-            .contains("verified package path contains a symlink component"),
-        "verifier rejects the ancestor link before package metadata checks: {}",
+            .contains("verified package directory is missing or a symlink"),
+        "verifier rejects a symlinked package root: {}",
         output_text(&verification.output)
     );
 }
@@ -1706,7 +2413,12 @@ fn assert_checkout_identity_and_file_controls() {
     let origin_run = run_package_pipeline(&wrong_origin, &origin_event, false);
     assert_package_pipeline_success(&wrong_origin, &origin_run, &origin_sha);
     git(
-        &wrong_origin.root,
+        &origin_run
+            .verification_fixture
+            .as_ref()
+            .unwrap()
+            .root
+            .join("source"),
         &[
             "remote",
             "set-url",
@@ -1960,9 +2672,17 @@ fn valid_legacy_output_path_still_works() {
         "legacy producers retain the relative package path from generated YAML"
     );
     let expected_handoff = fixture.root.join("dist/legacy-output");
-    assert_eq!(handoff_path(&run), expected_handoff);
+    assert_eq!(producer_handoff_path(&run), expected_handoff);
+    assert_eq!(
+        handoff_path(&run),
+        run.verification_fixture
+            .as_ref()
+            .unwrap()
+            .root
+            .join("package")
+    );
 
-    let upload = named_step(fixture.build_job(), "Upload verified package handoff");
+    let upload = named_step(fixture.build_job(), "Upload untrusted package candidate");
     let upload_path = resolve_value(
         upload["with"]["path"]
             .as_str()

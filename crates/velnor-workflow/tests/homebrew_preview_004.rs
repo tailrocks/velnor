@@ -581,11 +581,11 @@ fn workflow_environment(
             };
             let resolved = if value == "${{ steps.publish.outputs.immutable_tag }}" {
                 Some(immutable_tag.to_owned())
-            } else if value == "${{ needs.build.outputs.version }}"
+            } else if value == "${{ needs.attest.outputs.version }}"
                 || value == "${{ steps.verify.outputs.version }}"
             {
                 Some(package_version(source_sha))
-            } else if value == "${{ needs.build.outputs.source_commit }}"
+            } else if value == "${{ needs.attest.outputs.source_commit }}"
                 || value == "${{ needs.admission.outputs.head_sha }}"
                 || value == "${{ steps.verify.outputs.source_commit }}"
             {
@@ -1110,14 +1110,14 @@ fn run_published_verification_controlled(request: PublishedVerificationRequest<'
         .expect("publication source checkout inputs");
     assert_eq!(
         mapping_string(source_checkout_with, "ref"),
-        Some("${{ needs.build.outputs.source_commit }}"),
+        Some("${{ needs.attest.outputs.source_commit }}"),
         "publication checkout action must pin the verified build source commit"
     );
     let release_tag_prefix = emitted_release_tag_prefix(fixture);
     for (key, expected) in [
         (
             "EXPECTED_SOURCE_COMMIT",
-            "${{ needs.build.outputs.source_commit }}",
+            "${{ needs.attest.outputs.source_commit }}",
         ),
         ("EXPECTED_SOURCE_REPOSITORY", REPOSITORY),
         ("EXPECTED_SOURCE_REF", "refs/heads/main"),
@@ -1550,7 +1550,7 @@ fn emitted_publisher_source_sha(fixture: &Fixture, event_source_sha: &str) -> St
     let source_binding = mapping_string(job_env, "EXPECTED_SOURCE_COMMIT")
         .expect("publisher's admitted source SHA binding");
     assert!(
-        source_binding.contains("needs.build.outputs.source_commit"),
+        source_binding.contains("needs.attest.outputs.source_commit"),
         "publisher source SHA must resolve from the verified package output: {source_binding}"
     );
     event_source_sha.to_owned()
