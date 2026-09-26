@@ -6618,9 +6618,9 @@ fn generated_files_with_surface(
     for owned in &config.static_files {
         files.insert(PathBuf::from(&owned.path), owned.content.clone());
     }
-    if config.velnor_host_cache.has_overrides() {
+    if let Some(path) = config.velnor_host_cache.generated_output_path() {
         files.insert(
-            PathBuf::from("config/fleet/velnor-host.env"),
+            path,
             config::render_velnor_host_env(&config.velnor_host_cache),
         );
     }
@@ -23339,6 +23339,68 @@ channel = "stable"
             parse_ownership_state(root, &preimage),
             "parse ownership state",
         ))
+    }
+
+    #[test]
+    fn removed_cache_config_prunes_output_then_manual_file_is_scanned() {
+        let root = configured_repository(
+            "schema1-cache-output-prune-and-manual-file",
+            Some(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [cache.velnor]\nbudget_bytes = 53687091200\n",
+            ),
+        );
+        let output = Path::new("config/fleet/velnor-host.env");
+        generate_repository(&root, true);
+        assert!(
+            root.join(output).is_file(),
+            "configured output is generated"
+        );
+
+        must(
+            fs::remove_file(root.join(config::GENERATION_CONFIG_PATH)),
+            "remove cache generation config",
+        );
+        let before_prune = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan stale generated output",
+        );
+        assert!(!before_prune
+            .shape
+            .files()
+            .iter()
+            .any(|file| file == &output.display().to_string()));
+
+        generate_repository(&root, true);
+        assert!(!root.join(output).exists(), "stale output is pruned");
+        let after_prune = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan after pruning stale output",
+        );
+        assert!(!after_prune
+            .shape
+            .files()
+            .iter()
+            .any(|file| file == &output.display().to_string()));
+
+        must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create manual host config directory",
+        );
+        must(
+            fs::write(root.join(output), "MANUALLY_OWNED=value\n"),
+            "write manual host config",
+        );
+        let manual = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan manual host config",
+        );
+        assert!(manual
+            .shape
+            .files()
+            .iter()
+            .any(|file| file == &output.display().to_string()));
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Every file under `.github`, by relative path, so a test can prove the

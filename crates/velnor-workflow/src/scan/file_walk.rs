@@ -10,9 +10,6 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use super::{RepositoryShape, ScanContext};
 use crate::{parent_path, GeneratorError};
 
-/// Generator-owned artifacts must not feed back into the next scan pass.
-const GENERATOR_OWNED_SCAN_FILES: &[&str] = &["config/fleet/velnor-host.env"];
-
 pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
@@ -23,8 +20,13 @@ pub(crate) fn repository_files(
             root.display()
         )));
     }
-    let generator_owned = crate::s2::generator_owned_output_paths(root)
+    let mut generator_owned = crate::s2::generator_owned_output_paths(root)
         .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    if let Some(generation) = crate::config::discover(root)?
+        && let Some(path) = generation.cache_velnor().generated_output_path()
+    {
+        generator_owned.insert(path);
+    }
     // Generation must stay a function of the committed repository, not of the
     // checkout: untracked CI runtime artifacts, scratch files, and the `.git`
     // file of a linked worktree would otherwise enter the scan and make the
@@ -39,11 +41,7 @@ pub(crate) fn repository_files(
         files
     };
     let excludes = exclude_set(exclude)?;
-    files.retain(|file| {
-        !excludes.is_match(file)
-            && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
-            && !generator_owned.contains(Path::new(file))
-    });
+    files.retain(|file| !excludes.is_match(file) && !generator_owned.contains(Path::new(file)));
     files.sort();
     Ok(files)
 }
@@ -481,6 +479,64 @@ mod tests {
         assert!(files.contains(&".github/workflows/forged.yml".to_owned()));
         assert!(!files.contains(&".github/workflows/generated.yml".to_owned()));
         assert!(!files.contains(&crate::s2::OWNERSHIP_STATE.to_owned()));
+    }
+
+    #[test]
+    fn manual_cache_host_env_is_scanned_without_cache_config() {
+        let root = scratch("schema1-manual-host-env-without-config");
+        git(&root, &["init", "-q"]);
+        let path = Path::new("config/fleet/velnor-host.env");
+        must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create manual host config directory",
+        );
+        must(
+            fs::write(root.join(path), "MANUALLY_OWNED=value\n"),
+            "write manual host config",
+        );
+        git(&root, &["add", "config/fleet/velnor-host.env"]);
+        git(&root, &["commit", "-qm", "manual host config"]);
+
+        let files = must(repository_files(&root, &[]), "scan manual host config");
+        assert!(files.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn configured_cache_host_env_is_excluded_from_scan() {
+        let root = scratch("schema1-configured-host-env");
+        git(&root, &["init", "-q"]);
+        let path = Path::new("config/fleet/velnor-host.env");
+        must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create host config directory",
+        );
+        must(
+            fs::write(root.join(path), "GENERATED=value\n"),
+            "write generated host config",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                root.join(crate::config::GENERATION_CONFIG_PATH),
+                "schema = 1\n\n[cache.velnor]\nbudget_bytes = 1\n",
+            ),
+            "write configured host cache",
+        );
+        git(
+            &root,
+            &[
+                "add",
+                ".github-gen/velnor-workflow.toml",
+                "config/fleet/velnor-host.env",
+            ],
+        );
+        git(&root, &["commit", "-qm", "configured host cache"]);
+
+        let files = must(repository_files(&root, &[]), "scan generated host config");
+        assert!(!files.contains(&path.display().to_string()));
     }
 
     #[test]
