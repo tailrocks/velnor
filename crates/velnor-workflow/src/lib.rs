@@ -6487,10 +6487,12 @@ fn generated_files_with_surface(
     for owned in &config.static_files {
         files.insert(PathBuf::from(&owned.path), owned.content.clone());
     }
-    files.insert(
-        PathBuf::from("config/fleet/velnor-host.env"),
-        config::render_velnor_host_env(&config.velnor_host_cache),
-    );
+    if config.velnor_host_cache.emits_host_env() {
+        files.insert(
+            PathBuf::from("config/fleet/velnor-host.env"),
+            config::render_velnor_host_env(&config.velnor_host_cache),
+        );
+    }
     // The agent-instruction file is unconditional: every render owns these
     // exact bytes, even for minimal repositories. A `static_files` row for a
     // generator-owned agent path can never take effect, so it fails closed
@@ -19688,6 +19690,102 @@ channel = "stable"
     }
 
     #[test]
+    fn velnor_host_env_emission_defaults_on_and_obeys_explicit_setting() {
+        const PREFIX: &str = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                            [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                            [cache.velnor]\n";
+        let initial = format!("{PREFIX}budget_bytes = 53687091200\n");
+        let root = configured_repository("cache-host-env-emission", Some(&initial));
+        let host_env = PathBuf::from("config/fleet/velnor-host.env");
+        let default = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan repository with default host env setting",
+        );
+        let files = must(generated_files(&default.config), "generate default files");
+        assert!(files.contains_key(&host_env), "missing preserves output");
+
+        let config_path = root.join(".github-gen/velnor-workflow.toml");
+        for (setting, expected) in [(true, true), (false, false)] {
+            let config = format!("{PREFIX}emit_host_env = {setting}\n");
+            must(fs::write(&config_path, config), "write host env setting");
+            let scanned = must(
+                scan_target(&root, RunnerMode::Both, "main"),
+                "scan configured host env setting",
+            );
+            let files = must(
+                generated_files(&scanned.config),
+                "generate configured files",
+            );
+            assert_eq!(
+                files.contains_key(&host_env),
+                expected,
+                "emit_host_env = {setting}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabling_velnor_host_env_prunes_old_owned_file_and_keeps_scan_stable() {
+        const PREFIX: &str = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                            [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                            [cache.velnor]\n";
+        let enabled = format!("{PREFIX}emit_host_env = true\n");
+        let root = configured_repository("cache-host-env-prune", Some(&enabled));
+        let host_env = PathBuf::from("config/fleet/velnor-host.env");
+        let scanned = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan enabled host env repository",
+        );
+        let files = must(generated_files(&scanned.config), "generate enabled files");
+        assert!(files.contains_key(&host_env));
+        write_generated_test_outputs(&root, &files, false);
+        assert!(root.join(&host_env).is_file());
+
+        let config_path = root.join(".github-gen/velnor-workflow.toml");
+        must(
+            fs::write(&config_path, format!("{PREFIX}emit_host_env = false\n")),
+            "disable host env",
+        );
+        let disabled = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan disabled host env repository",
+        );
+        let disabled_files = must(generated_files(&disabled.config), "generate disabled files");
+        assert!(!disabled_files.contains_key(&host_env));
+        write_generated_test_outputs(&root, &disabled_files, false);
+        assert!(
+            !root.join(&host_env).exists(),
+            "old owned output is removed"
+        );
+        write_generated_test_outputs(&root, &disabled_files, true);
+
+        let owned = must(
+            s2::generator_owned_output_paths(&root),
+            "read reserved generated paths",
+        );
+        assert!(owned.contains(&host_env));
+        let before = must(
+            scan::file_walk::repository_files(&root, &[]),
+            "scan without host env artifact",
+        );
+        must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create fleet directory",
+        );
+        must(
+            fs::write(root.join(&host_env), "stale output"),
+            "write stale host env artifact",
+        );
+        let after = must(
+            scan::file_walk::repository_files(&root, &[]),
+            "scan with reserved host env artifact",
+        );
+        assert_eq!(before, after, "reserved path never changes scan inputs");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn github_lane_save_gates_exclude_untrusted_events() {
         let config = scanned_fixture(RunnerMode::Both);
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
@@ -23045,6 +23143,22 @@ channel = "stable"
             "error must require the renovate declare row: {error}"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_generated_test_outputs(root: &Path, files: &BTreeMap<PathBuf, String>, check: bool) {
+        must(
+            write_generated_with_options(
+                root,
+                files,
+                &generated_symlinks(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                check,
+                false,
+                false,
+            ),
+            "write generated test outputs",
+        );
     }
 
     fn configured_repository(name: &str, config: Option<&str>) -> PathBuf {

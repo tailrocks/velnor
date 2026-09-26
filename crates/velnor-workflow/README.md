@@ -57,6 +57,22 @@ The schema-1 Swift scanner fails closed for executable Swift products and
 recognized XcodeGen specs because it cannot emit their complete phase and
 selection contracts; use schema 2 for those Apple surfaces.
 
+## Velnor fleet host env output
+
+`[cache.velnor]` emits `config/fleet/velnor-host.env` by default so existing
+fleet hosts keep their cache configuration. Set `emit_host_env = false` when
+no Velnor fleet host consumes the file:
+
+```toml
+[cache.velnor]
+emit_host_env = false
+```
+
+The switch is independent of `[workflow].providers`; choose it based on fleet
+host configuration. Regeneration removes a previously generated copy when the
+switch is disabled, and keeps the path reserved during scans so an old copy
+does not alter recorded inputs.
+
 ## Typed package-release verification hooks
 
 Schema-2 `package-release` declarations may name repository-owned mise tasks in

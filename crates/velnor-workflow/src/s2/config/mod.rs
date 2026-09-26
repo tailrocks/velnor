@@ -143,14 +143,25 @@ pub(crate) struct CacheGithubSection {
     pub(crate) mbx_generation_bound: Option<u32>,
 }
 
-/// Velnor host persistent-store budgets (`[cache.velnor]`). Emitted as a
-/// fleet `velnor.env` snippet; never serialized into `.github/ci/project.toml`.
+/// Velnor host persistent-store budgets (`[cache.velnor]`). The section emits
+/// a fleet `velnor.env` snippet by default; `emit_host_env = false` opts out.
+/// It is never serialized into `.github/ci/project.toml`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CacheVelnorSection {
+    /// Whether generation includes `config/fleet/velnor-host.env`. Missing
+    /// preserves the existing host configuration by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) emit_host_env: Option<bool>,
     pub(crate) budget_bytes: Option<u64>,
     pub(crate) producer_window_seconds: Option<u64>,
     pub(crate) mbx_generation_bound: Option<u32>,
+}
+
+impl CacheVelnorSection {
+    pub(crate) fn emits_host_env(&self) -> bool {
+        self.emit_host_env.unwrap_or(true)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -6736,9 +6747,75 @@ mod tests {
         );
         assert_eq!(config.cache_github().budget_bytes, Some(8_589_934_592));
         assert_eq!(config.cache_velnor().budget_bytes, Some(53_687_091_200));
+        assert!(config.cache_velnor().emits_host_env());
+        let mut legacy_value = must(
+            serde_json::to_value(&config),
+            "serialize config as it was before the host env option",
+        );
+        let mut velnor = must(
+            serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
+                legacy_value["cache"]["velnor"].clone(),
+            ),
+            "deserialize Velnor cache config as an object",
+        );
+        assert!(velnor.remove("emit_host_env").is_none());
+        legacy_value["cache"]["velnor"] = serde_json::Value::Object(velnor);
+        let legacy_canonical = must(
+            super::canonical::canonical_value(&legacy_value),
+            "canonicalize config without the new option",
+        );
+        assert_eq!(
+            must(
+                config.canonical_json(),
+                "canonicalize default Velnor config"
+            ),
+            legacy_canonical,
+            "an absent option must retain the prior canonical config"
+        );
+        assert_eq!(
+            must(
+                RepoGenerationConfig::digest(Some(&config)),
+                "digest default Velnor config"
+            ),
+            super::content_digest_bytes(legacy_canonical.as_bytes()),
+            "an absent option must retain the prior config digest"
+        );
         let env = super::render_velnor_host_env(config.cache_velnor());
         assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
         assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
+
+        let disabled = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [cache.velnor]\nemit_host_env = false\n",
+        );
+        assert!(!disabled.cache_velnor().emits_host_env());
+        let disabled_canonical = must(
+            disabled.canonical_json(),
+            "canonicalize disabled Velnor config",
+        );
+        assert!(disabled_canonical.contains("\"emit_host_env\":false"));
+
+        let enabled = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [cache.velnor]\nemit_host_env = true\n",
+        );
+        assert!(enabled.cache_velnor().emits_host_env());
+        let enabled_canonical = must(
+            enabled.canonical_json(),
+            "canonicalize enabled Velnor config",
+        );
+        assert!(enabled_canonical.contains("\"emit_host_env\":true"));
+        assert_ne!(
+            must(
+                RepoGenerationConfig::digest(Some(&disabled)),
+                "digest disabled Velnor config"
+            ),
+            must(
+                RepoGenerationConfig::digest(Some(&enabled)),
+                "digest enabled Velnor config"
+            ),
+            "an explicit setting must be part of the config digest"
+        );
     }
 
     #[test]
@@ -6815,6 +6892,18 @@ mod tests {
         assert!(
             error.contains("unknown field"),
             "typo'd fields must fail closed: {error}"
+        );
+
+        let cache_error = match toml::from_str::<RepoGenerationConfig>(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [cache.velnor]\nemit_host_env_typo = false\n",
+        ) {
+            Ok(_) => String::from("accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            cache_error.contains("unknown field"),
+            "host env option typos must fail closed: {cache_error}"
         );
     }
 
