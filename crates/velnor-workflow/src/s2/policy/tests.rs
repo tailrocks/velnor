@@ -1078,7 +1078,7 @@ fn fake_environment_observing_candidate_renderer(
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then\n  if [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; fi\n  echo {closure}; exit 0\nfi\nif [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; exit 17; fi\ncp -r \"$1/.\" \"$3/\"\n",
+                "#!/bin/sh\nif [ \"$1\" = --closure ]; then\n  if [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; fi\n  echo {closure}; exit 0\nfi\nif [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; exit 17; fi\ncommand -v git >/dev/null 2>&1 || exit 17\ncp -r \"$1/.\" \"$3/\"\n",
                 sentinel.display(),
                 sentinel.display(),
             ),
