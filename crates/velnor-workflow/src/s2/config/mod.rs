@@ -143,14 +143,23 @@ pub(crate) struct CacheGithubSection {
     pub(crate) mbx_generation_bound: Option<u32>,
 }
 
-/// Velnor host persistent-store budgets (`[cache.velnor]`). Emitted as a
-/// fleet `velnor.env` snippet; never serialized into `.github/ci/project.toml`.
+/// Velnor host persistent-store budgets (`[cache.velnor]`). An explicit
+/// override emits the fleet `velnor.env` snippet; never serialized into
+/// `.github/ci/project.toml`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CacheVelnorSection {
     pub(crate) budget_bytes: Option<u64>,
     pub(crate) producer_window_seconds: Option<u64>,
     pub(crate) mbx_generation_bound: Option<u32>,
+}
+
+impl CacheVelnorSection {
+    pub(crate) fn has_overrides(&self) -> bool {
+        self.budget_bytes.is_some()
+            || self.producer_window_seconds.is_some()
+            || self.mbx_generation_bound.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -6760,6 +6769,7 @@ mod tests {
 
     #[test]
     fn cache_sections_parse_and_stay_generator_only() {
+        assert!(!config_for("schema = 2\n").cache_velnor().has_overrides());
         let config = config_for(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [cache.github]\nbudget_bytes = 8589934592\nproducer_window_seconds = 7200\n\
@@ -6768,6 +6778,7 @@ mod tests {
         );
         assert_eq!(config.cache_github().budget_bytes, Some(8_589_934_592));
         assert_eq!(config.cache_velnor().budget_bytes, Some(53_687_091_200));
+        assert!(config.cache_velnor().has_overrides());
         let env = super::render_velnor_host_env(config.cache_velnor());
         assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
         assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
