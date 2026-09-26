@@ -1764,6 +1764,8 @@ fn read_completion_marker(directory: &File) -> Result<Option<bool>, RawStorageEr
 }
 
 #[cfg(unix)]
+// libc exposes these mode constants with platform-dependent integer widths.
+#[allow(clippy::unnecessary_cast)]
 fn quarantine_usage(namespace: &File) -> Result<QuarantineUsage, RawStorageError> {
     let identity = stat_fd(namespace).map_err(storage_io)?;
     if identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
