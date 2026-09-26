@@ -622,6 +622,10 @@ pub enum ValidationPhase {
     Clippy,
     Test,
     Doctest,
+    #[serde(rename = "swift-format")]
+    SwiftFormat,
+    #[serde(rename = "swift-lint")]
+    SwiftLint,
     #[serde(rename = "xcodegen-generate")]
     XcodegenGenerate,
     #[serde(rename = "swift-build")]
@@ -638,12 +642,14 @@ impl ValidationPhase {
     /// lints, tests, doctests, `XcodeGen` generation, Swift builds and
     /// executable runs, then tests. `Check` is prerequisite-only and never
     /// renders a validation step.
-    pub(crate) const RUNNABLE: [Self; 9] = [
+    pub(crate) const RUNNABLE: [Self; 11] = [
         Self::Precondition,
         Self::Fmt,
         Self::Clippy,
         Self::Test,
         Self::Doctest,
+        Self::SwiftFormat,
+        Self::SwiftLint,
         Self::XcodegenGenerate,
         Self::SwiftBuild,
         Self::SwiftRun,
@@ -658,6 +664,8 @@ impl ValidationPhase {
             "clippy" => Self::Clippy,
             "test" => Self::Test,
             "doctest" => Self::Doctest,
+            "swift-format" => Self::SwiftFormat,
+            "swift-lint" => Self::SwiftLint,
             "xcodegen-generate" => Self::XcodegenGenerate,
             "swift-build" => Self::SwiftBuild,
             "swift-run" => Self::SwiftRun,
@@ -676,6 +684,8 @@ impl ValidationPhase {
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doctest => "doctest",
+            Self::SwiftFormat => "swift-format",
+            Self::SwiftLint => "swift-lint",
             Self::XcodegenGenerate => "xcodegen-generate",
             Self::SwiftBuild => "swift-build",
             Self::SwiftRun => "swift-run",
@@ -692,6 +702,8 @@ impl ValidationPhase {
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
             Self::Doctest => "Doctests",
+            Self::SwiftFormat => "Swift format check",
+            Self::SwiftLint => "Swift lint check",
             Self::XcodegenGenerate => "XcodeGen project generation",
             Self::SwiftBuild => "Swift build",
             Self::SwiftRun => "Swift executable runs",
@@ -717,6 +729,8 @@ impl ValidationPhase {
         matches!(
             self,
             Self::Precondition
+                | Self::SwiftFormat
+                | Self::SwiftLint
                 | Self::XcodegenGenerate
                 | Self::SwiftBuild
                 | Self::SwiftRun
@@ -14985,6 +14999,14 @@ channel = "stable"
     #[test]
     fn swift_validation_phases_use_hyphenated_wire_ids() {
         assert_eq!(
+            ValidationPhase::parse("swift-format"),
+            Some(ValidationPhase::SwiftFormat)
+        );
+        assert_eq!(
+            ValidationPhase::parse("swift-lint"),
+            Some(ValidationPhase::SwiftLint)
+        );
+        assert_eq!(
             ValidationPhase::parse("swift-build"),
             Some(ValidationPhase::SwiftBuild)
         );
@@ -14999,6 +15021,8 @@ channel = "stable"
         assert_eq!(ValidationPhase::SwiftBuild.as_str(), "swift-build");
         assert_eq!(ValidationPhase::SwiftRun.as_str(), "swift-run");
         assert_eq!(ValidationPhase::SwiftTest.as_str(), "swift-test");
+        assert_eq!(ValidationPhase::SwiftFormat.as_str(), "swift-format");
+        assert_eq!(ValidationPhase::SwiftLint.as_str(), "swift-lint");
         assert_eq!(
             ValidationPhase::parse("xcodegen-generate"),
             Some(ValidationPhase::XcodegenGenerate)
