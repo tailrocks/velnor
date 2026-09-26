@@ -5521,10 +5521,11 @@ fn audited_pin_script() -> &'static str {
 /// validator's manifest binding. The poll name and the manifest gate both
 /// key off the head closure — the same identity the publisher names the
 /// artifact by and the validator's `wanted` binding checks — so the three
-/// legs rendezvous on one digest. The `--closure` probe runs with
-/// `GH_TOKEN` and `GITHUB_TOKEN` emptied: the probe needs no auth, so the
-/// exec point holds no token even though the API steps above it use the job
-/// token. Fork generator changes fail closed: only same-repository runs
+/// legs rendezvous on one digest. The `--closure` probe runs later in a
+/// token-free policy step. The candidate is untrusted code and can inspect
+/// its parent process, so child-only environment clearing in this
+/// token-bearing acquisition step is not sufficient.
+/// Fork generator changes fail closed: only same-repository runs
 /// are even considered. The same-repository select compares the embedded
 /// `.head_repository.id` object: the runs-list endpoint exposes no
 /// `.head_repository_id` scalar, and selecting on it matches nothing.
@@ -5606,8 +5607,6 @@ fn policy_candidate_step(revision: &str) -> String {
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
-          [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
           echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
 "#,
@@ -20018,10 +20017,6 @@ lockfile = true
             owner.contains("::error::candidate digest mismatch"),
             "a binary whose digest disagrees with the manifest fails closed: {owner}"
         );
-        assert!(
-            owner.contains("\"$reported\" == \"$manifest_closure\""),
-            "the self-report gate requires the binary to report the manifest closure: {owner}"
-        );
         for clause in [
             ".platform == $platform",
             ".repository == $repo",
@@ -20122,20 +20117,20 @@ lockfile = true
         );
     }
 
-    /// The acquire step's `--closure` probe executes the candidate binary in a
-    /// step whose env carries the read-scoped job token for the artifact API
-    /// calls above it. The probe needs no auth, so the invocation prefixes
-    /// both token variables with empty values: the exec point holds no
-    /// token. The values are quoted (`VAR=""`) so shellcheck's SC1007 does
-    /// not flag the prefix assignments as suspicious spacing.
+    /// The acquire step downloads and validates the artifact without executing
+    /// it. Later token-free policy execution checks candidate closure and
+    /// rendered output; child-only environment clearing here would not protect
+    /// the token-bearing parent from inspection by candidate code.
     #[test]
-    fn policy_candidate_closure_probe_holds_no_token() {
+    fn policy_candidate_acquire_does_not_execute_candidate() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
-            owner.contains(
-                "reported=\"$(GH_TOKEN=\"\" GITHUB_TOKEN=\"\" \"$candidate/velnor-workflow\" --closure)\""
-            ),
-            "the candidate probe strips both tokens from its own invocation: {owner}"
+            !owner.contains("reported=\"$(env -i"),
+            "the token-bearing acquire step never executes the candidate: {owner}"
+        );
+        assert!(
+            owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
+            "the verified candidate is handed to later token-free policy execution: {owner}"
         );
     }
 
