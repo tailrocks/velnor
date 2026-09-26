@@ -64,6 +64,7 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
+pub use super::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV;
 /// Names the manifest binding the env-slot candidate binary.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
 /// Names a `velnor-workflow` binary built at the pinned revision.
@@ -1087,6 +1088,8 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
 pub(crate) struct PinnedBinaryLookup {
     /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
     pinned_binary: Option<PathBuf>,
+    /// Candidate renderer, separately bound by its manifest and digest.
+    candidate_binary: Option<PathBuf>,
     /// `PATH`.
     search_path: Option<OsString>,
     /// Where an earlier resolution built the pin.
@@ -1123,6 +1126,7 @@ impl PinnedBinaryLookup {
     ) -> Self {
         Self {
             pinned_binary: getenv(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            candidate_binary: getenv(VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV).map(PathBuf::from),
             search_path: getenv("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
@@ -1553,8 +1557,8 @@ fn render_with_candidate(
         }
     };
     let mut binaries = Vec::new();
-    if let Some(pinned) = &lookup.pinned_binary {
-        binaries.push(pinned.clone());
+    if let Some(candidate) = &lookup.candidate_binary {
+        binaries.push(candidate.clone());
     }
     if let Some(current) = &current_exe
         && !binaries.contains(current)

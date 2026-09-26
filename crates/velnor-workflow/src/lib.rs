@@ -238,6 +238,8 @@ pub(crate) const SOURCE_PROFILE: &str = env!("VELNOR_WORKFLOW_PROFILE");
 /// installing the runtime artifact's policy binary so `--check` never needs
 /// the network.
 pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINARY";
+/// Names the candidate renderer binary validated against the candidate manifest.
+pub const VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_BINARY";
 /// Names the candidate manifest binding the env-slot candidate binary: the
 /// `candidate-manifest.json` the policy job's acquire step downloaded beside
 /// the candidate binary. The `velnor-workflow policy` candidate exception
@@ -5510,7 +5512,7 @@ fn policy_candidate_step(revision: &str) -> String {
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
 "#,
         pin_script = audited_pin_script(),
@@ -18899,8 +18901,12 @@ channel = "stable"
             "the token-bearing acquire step never executes the candidate: {owner}"
         );
         assert!(
-            owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
+            owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"),
             "the verified candidate is handed to later token-free policy execution: {owner}"
+        );
+        assert!(
+            !owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
+            "the candidate is not confused with the declared pin renderer: {owner}"
         );
     }
 

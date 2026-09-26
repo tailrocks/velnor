@@ -1530,7 +1530,7 @@ fn candidate_acquire_exports_bound_product() {
     );
     let env = must(fs::read_to_string(&env_file), "read github env");
     assert!(
-        env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
+        env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
         "the binary exports: {env}"
     );
     assert!(

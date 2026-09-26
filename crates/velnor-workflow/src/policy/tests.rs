@@ -97,6 +97,7 @@ fn lookup(
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
         pinned_binary,
+        candidate_binary: None,
         search_path,
         install_root,
         build_forbidden: true,
@@ -111,7 +112,8 @@ fn lookup_with_manifest(
     candidate_manifest: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary,
+        pinned_binary: None,
+        candidate_binary: pinned_binary,
         search_path,
         install_root,
         build_forbidden: true,
@@ -1300,6 +1302,51 @@ fn bound_candidate_matching_head_tree_is_accepted() {
 
 #[cfg(unix)]
 #[test]
+fn candidate_renderer_does_not_shadow_the_declared_pin() {
+    let (root, head) = closure_fixture("candidate-separate-from-pin");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let candidate_dir = root.join("candidate");
+    let pin_dir = root.join("pin");
+    must(fs::create_dir_all(&candidate_dir), "create candidate dir");
+    must(fs::create_dir_all(&pin_dir), "create pin dir");
+    let candidate = fake_candidate_renderer(&candidate_dir, &wanted);
+    let pin = fake_velnor_workflow(&pin_dir, PIN_A, CLOSURE_A);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &candidate, &wanted, &head);
+    let lookup = lookup_with_manifest(
+        Some(candidate),
+        env::join_paths([&pin_dir]).ok(),
+        root.join("install"),
+        manifest,
+    );
+    let expected = [CLOSURE_A.to_owned()];
+    assert_eq!(
+        must(
+            resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
+            "resolve declared pin independently"
+        ),
+        pin,
+        "the candidate artifact cannot replace a different declared pin"
+    );
+    let scratch = temporary_directory("candidate-separate-scratch");
+    let excludes = std::collections::BTreeSet::new();
+    assert_eq!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "candidate renderer reproduces the tree"
+        )
+        .as_deref(),
+        Some(wanted.as_str())
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
 fn candidate_renderer_receives_no_ambient_environment() {
     assert!(
         env::var_os("HOME").is_some(),
@@ -1538,6 +1585,8 @@ fn from_env_consent_mapping_is_fail_closed() {
     let manifest_env = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| {
         if name == VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV {
             Some(std::ffi::OsString::from("/env/manifest.json"))
+        } else if name == VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV {
+            Some(std::ffi::OsString::from("/env/candidate"))
         } else {
             None
         }
@@ -1545,6 +1594,10 @@ fn from_env_consent_mapping_is_fail_closed() {
     assert_eq!(
         manifest_env.candidate_manifest,
         Some(PathBuf::from("/env/manifest.json"))
+    );
+    assert_eq!(
+        manifest_env.candidate_binary,
+        Some(PathBuf::from("/env/candidate"))
     );
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
     // (also pinned end to end by the `--check` CLI subprocess test in

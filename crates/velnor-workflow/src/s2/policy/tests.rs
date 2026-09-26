@@ -97,6 +97,7 @@ fn lookup(
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
         pinned_binary,
+        candidate_binary: None,
         search_path,
         install_root,
         build_forbidden: true,
@@ -111,7 +112,8 @@ fn lookup_with_manifest(
     candidate_manifest: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary,
+        pinned_binary: None,
+        candidate_binary: pinned_binary,
         search_path,
         install_root,
         build_forbidden: true,
