@@ -750,6 +750,10 @@ pub(crate) struct UnitSection {
     /// `linux-arm64`, or `macos-arm64`. Typed; platforms are never labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     platform: Option<String>,
+    /// A native Homebrew candidate formula check for pull requests. This is
+    /// generation-only and compiles into the Homebrew reusable workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    homebrew_preview: Option<HomebrewPreviewSection>,
     /// Extra environment the unit's jobs export: build flags and product
     /// outputs. Declared as `[units.env]`; replaces nothing, the scan
     /// derives no env of its own.
@@ -771,6 +775,25 @@ pub(crate) struct UnitSection {
     /// Named local Docker build contexts rendered as `--build-context name=path`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     docker_contexts: Vec<DockerContextSection>,
+}
+
+/// The repository-owned, closed candidate formula declaration nested in one
+/// `[[units]]` row.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HomebrewPreviewSection {
+    formula: Option<String>,
+    #[serde(default)]
+    platforms: Vec<crate::s2::provider::HomebrewPlatform>,
+    #[serde(default)]
+    service_required: bool,
+}
+
+fn valid_homebrew_formula_name(formula: &str) -> bool {
+    let mut bytes = formula.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !formula.ends_with('-')
 }
 
 /// One named build product a `[[units]]` row declares: the product's name,
@@ -1364,6 +1387,58 @@ impl UnitSection {
 
     pub(crate) fn platform(&self) -> Option<&str> {
         self.platform.as_deref()
+    }
+
+    /// The validated native candidate formula contract, when declared.
+    ///
+    /// # Errors
+    /// Returns a usage error for an unsafe formula, incomplete/duplicate
+    /// platform matrix, or a repository that is not a Homebrew tap.
+    pub(crate) fn validated_homebrew_preview(
+        &self,
+        id: &str,
+        repository: &str,
+    ) -> Result<Option<crate::s2::HomebrewPreview>, GeneratorError> {
+        let Some(preview) = self.homebrew_preview.as_ref() else {
+            return Ok(None);
+        };
+        let formula = preview.formula.as_deref().unwrap_or_default();
+        if !valid_homebrew_formula_name(formula) {
+            return Err(GeneratorError::usage(format!(
+                "[[units]] {id} homebrew_preview needs a formula basename using lowercase letters, digits, and dashes"
+            )));
+        }
+        let platforms = &preview.platforms;
+        let declared = platforms.iter().copied().collect::<BTreeSet<_>>();
+        if platforms.len() != crate::s2::provider::HomebrewPlatform::ALL.len()
+            || declared.len() != platforms.len()
+            || declared
+                != crate::s2::provider::HomebrewPlatform::ALL
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[units]] {id} homebrew_preview must declare exactly one each of macos-arm64, macos-x64, linux-x64, and linux-arm64"
+            )));
+        }
+        let (owner, tap_repository) = repository.split_once('/').ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "[[units]] {id} homebrew_preview requires `[generator] repository` to identify a Homebrew tap"
+            ))
+        })?;
+        let tap_name = tap_repository
+            .strip_prefix("homebrew-")
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "[[units]] {id} homebrew_preview requires a tap repository named `homebrew-*`, found `{repository}`"
+                ))
+            })?;
+        Ok(Some(crate::s2::HomebrewPreview {
+            tap: format!("{owner}/{tap_name}"),
+            formula: formula.to_owned(),
+            service_required: preview.service_required,
+        }))
     }
 
     pub(crate) fn mbx(&self) -> Option<bool> {

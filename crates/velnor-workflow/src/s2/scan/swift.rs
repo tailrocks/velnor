@@ -1192,6 +1192,7 @@ fn xcodegen_generate_unit(
         env: std::collections::BTreeMap::new(),
         mbx: None,
         prepared_tools: Vec::new(),
+        homebrew_preview: None,
     }
 }
 
@@ -1493,6 +1494,7 @@ fn xcode_scheme_unit(
         env: std::collections::BTreeMap::new(),
         mbx: None,
         prepared_tools: Vec::new(),
+        homebrew_preview: None,
     };
     unit.watch.sort();
     unit.watch.dedup();

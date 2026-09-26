@@ -6452,6 +6452,7 @@ cp "$record" "$out"
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         }
     }
 

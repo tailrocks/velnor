@@ -227,6 +227,73 @@ pub(crate) enum Platform {
     MacosArm64,
 }
 
+/// Native platform required to execute a candidate Homebrew formula. This is
+/// deliberately separate from [`Platform`]: ordinary verification keeps its
+/// existing platform universe, while Homebrew installation checks need all
+/// four supported native hosts.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HomebrewPlatform {
+    MacosArm64,
+    MacosX64,
+    LinuxX64,
+    LinuxArm64,
+}
+
+impl HomebrewPlatform {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::MacosArm64,
+        Self::MacosX64,
+        Self::LinuxX64,
+        Self::LinuxArm64,
+    ];
+
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "macos-arm64",
+            Self::MacosX64 => "macos-x64",
+            Self::LinuxX64 => "linux-x64",
+            Self::LinuxArm64 => "linux-arm64",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "macos-26",
+            Self::MacosX64 => "macos-26-intel",
+            Self::LinuxX64 => "ubuntu-24.04",
+            Self::LinuxArm64 => "ubuntu-24.04-arm",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner_os(self) -> &'static str {
+        match self {
+            Self::MacosArm64 | Self::MacosX64 => "macOS",
+            Self::LinuxX64 | Self::LinuxArm64 => "Linux",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner_arch(self) -> &'static str {
+        match self {
+            Self::MacosArm64 | Self::LinuxArm64 => "ARM64",
+            Self::MacosX64 | Self::LinuxX64 => "X64",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn machine(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "arm64",
+            Self::MacosX64 | Self::LinuxX64 => "x86_64",
+            Self::LinuxArm64 => "aarch64",
+        }
+    }
+}
+
 impl Platform {
     #[must_use]
     #[allow(

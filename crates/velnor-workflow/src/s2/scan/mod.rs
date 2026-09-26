@@ -417,6 +417,7 @@ pub(crate) fn unit(
         env: std::collections::BTreeMap::new(),
         mbx: None,
         prepared_tools: Vec::new(),
+        homebrew_preview: None,
     }
 }
 

@@ -700,6 +700,7 @@ fn analyze_rust_manifests(
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
     }
 
@@ -771,6 +772,7 @@ fn analyze_rust_manifests(
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
     }
 
