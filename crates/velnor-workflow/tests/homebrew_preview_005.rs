@@ -1148,7 +1148,7 @@ fn assert_build_step_order(fixture: &Fixture) {
         3
     );
     let candidate_name =
-        "${{ format('package-release-candidate-{0}', needs.admission.outputs.head_sha) }}";
+        "${{ format('package-release-candidate-{0}-{1}-{2}', needs.admission.outputs.head_sha, github.run_id, github.run_attempt) }}";
     assert_eq!(
         named_step(build, "Upload untrusted package candidate")["with"]["name"].as_str(),
         Some(candidate_name),
@@ -1161,24 +1161,24 @@ fn assert_build_step_order(fixture: &Fixture) {
     );
     assert_eq!(
         named_step(verify, "Upload verified package handoff")["with"]["name"].as_str(),
-        Some("${{ format('package-release-{0}', steps.verify.outputs.source_commit) }}"),
-        "verified artifact identity is bound to the manifest-verified source SHA"
+        Some("${{ format('package-release-{0}-{1}-{2}', steps.verify.outputs.source_commit, github.run_id, github.run_attempt) }}"),
+        "verified artifact identity is bound to the manifest-verified source SHA and current attempt"
     );
     assert_eq!(
         named_step(attest, "Download verified package handoff")["with"]["name"].as_str(),
-        Some("${{ format('package-release-{0}', needs.verify.outputs.source_commit) }}"),
-        "signer downloads only the exact fresh-verifier artifact"
+        Some("${{ format('package-release-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}"),
+        "signer downloads only the exact fresh-verifier artifact from the current attempt"
     );
     assert_eq!(
         named_step(attest, "Upload attested package handoff")["with"]["name"].as_str(),
-        Some("${{ format('package-release-attested-{0}', needs.verify.outputs.source_commit) }}"),
-        "attested artifact identity is bound to verified source SHA"
+        Some("${{ format('package-release-attested-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}"),
+        "attested artifact identity is bound to verified source SHA and current attempt"
     );
     assert_eq!(
         named_step(fixture.publish_job(), "Download verified package handoff")["with"]["name"]
             .as_str(),
-        Some("${{ format('package-release-attested-{0}', needs.attest.outputs.source_commit) }}"),
-        "publisher downloads only the exact attested artifact"
+        Some("${{ format('package-release-attested-{0}-{1}-{2}', needs.attest.outputs.source_commit, github.run_id, github.run_attempt) }}"),
+        "publisher downloads only the exact attested artifact from the current attempt"
     );
 }
 
@@ -2195,6 +2195,148 @@ fn outside_sentinel() -> PathBuf {
     outside
 }
 
+fn evaluate_artifact_selector(expression: &str, event: &EventContext) -> String {
+    let format_call = expression
+        .strip_prefix("${{ format('")
+        .expect("artifact selector is a generated format expression");
+    let (format_string, arguments) = format_call
+        .split_once("', ")
+        .expect("artifact selector has a format string and arguments");
+    let arguments = arguments
+        .strip_suffix(") }}")
+        .expect("artifact selector expression is closed");
+    let arguments = arguments
+        .split(", ")
+        .map(|argument| match argument {
+            "needs.admission.outputs.head_sha"
+            | "steps.verify.outputs.source_commit"
+            | "needs.verify.outputs.source_commit"
+            | "needs.attest.outputs.source_commit" => event.head_sha.as_str(),
+            "github.run_id" => event.run_id.as_str(),
+            "github.run_attempt" => event.attempt.as_str(),
+            unexpected => panic!("unexpected package artifact selector input {unexpected:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    let mut resolved = format_string.to_owned();
+    for (index, value) in arguments.iter().enumerate() {
+        let placeholder = format!("{{{index}}}");
+        assert!(
+            resolved.contains(&placeholder),
+            "artifact selector format string uses {placeholder}"
+        );
+        resolved = resolved.replace(&placeholder, value);
+    }
+    assert!(
+        !resolved.contains(['{', '}']),
+        "artifact selector has no unresolved format placeholders"
+    );
+    resolved
+}
+
+fn assert_retry_artifact_isolation() {
+    let fixture = Fixture::new("retry-artifact-isolation", "dist");
+    let source_sha = fixture.initial_sha.as_str();
+    let first_attempt = EventContext::push(source_sha, source_sha, "7403", "1");
+    let retry_attempt = EventContext::push(source_sha, source_sha, "7403", "2");
+    let handoffs = [
+        (
+            named_step(fixture.build_job(), "Upload untrusted package candidate"),
+            named_step(fixture.verify_job(), "Download untrusted package candidate"),
+            "${{ format('package-release-candidate-{0}-{1}-{2}', needs.admission.outputs.head_sha, github.run_id, github.run_attempt) }}",
+            "${{ format('package-release-candidate-{0}-{1}-{2}', needs.admission.outputs.head_sha, github.run_id, github.run_attempt) }}",
+            "stale candidate bytes",
+            "retry candidate bytes",
+        ),
+        (
+            named_step(fixture.verify_job(), "Upload verified package handoff"),
+            named_step(fixture.attest_job(), "Download verified package handoff"),
+            "${{ format('package-release-{0}-{1}-{2}', steps.verify.outputs.source_commit, github.run_id, github.run_attempt) }}",
+            "${{ format('package-release-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}",
+            "stale verified bytes",
+            "retry verified bytes",
+        ),
+        (
+            named_step(fixture.attest_job(), "Upload attested package handoff"),
+            named_step(fixture.publish_job(), "Download verified package handoff"),
+            "${{ format('package-release-attested-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}",
+            "${{ format('package-release-attested-{0}-{1}-{2}', needs.attest.outputs.source_commit, github.run_id, github.run_attempt) }}",
+            "stale attested bytes",
+            "retry attested bytes",
+        ),
+    ];
+
+    for (
+        upload_step,
+        download_step,
+        expected_upload_expression,
+        expected_download_expression,
+        stale_bytes,
+        retry_bytes,
+    ) in handoffs
+    {
+        let upload_expression = upload_step["with"]["name"]
+            .as_str()
+            .expect("upload step declares exact artifact name");
+        let download_expression = download_step["with"]["name"]
+            .as_str()
+            .expect("download step declares exact artifact name");
+        assert_eq!(upload_expression, expected_upload_expression);
+        assert_eq!(download_expression, expected_download_expression);
+
+        let first_upload_name = evaluate_artifact_selector(upload_expression, &first_attempt);
+        let first_download_name = evaluate_artifact_selector(download_expression, &first_attempt);
+        let retry_upload_name = evaluate_artifact_selector(upload_expression, &retry_attempt);
+        let retry_download_name = evaluate_artifact_selector(download_expression, &retry_attempt);
+        assert_eq!(
+            first_upload_name, first_download_name,
+            "producer and consumer agree on the attempt-1 artifact selector"
+        );
+        assert_eq!(
+            retry_upload_name, retry_download_name,
+            "producer and consumer agree on the retry artifact selector"
+        );
+
+        let previous_attempt_artifacts =
+            std::collections::BTreeMap::from([(first_upload_name.clone(), stale_bytes)]);
+        assert!(
+            first_upload_name != retry_download_name
+                && !previous_attempt_artifacts.contains_key(&retry_download_name),
+            "retry selector must fail closed when only attempt-1 artifact exists"
+        );
+
+        let both_attempts = std::collections::BTreeMap::from([
+            (first_upload_name, stale_bytes),
+            (retry_upload_name, retry_bytes),
+        ]);
+        assert_eq!(
+            both_attempts.get(&retry_download_name).copied(),
+            Some(retry_bytes),
+            "exact retry selector chooses retry bytes even when stale bytes also exist"
+        );
+    }
+
+    let legacy_sha_only_selector =
+        "${{ format('package-release-candidate-{0}', needs.admission.outputs.head_sha) }}";
+    let legacy_first_name = evaluate_artifact_selector(legacy_sha_only_selector, &first_attempt);
+    let legacy_retry_name = evaluate_artifact_selector(legacy_sha_only_selector, &retry_attempt);
+    let legacy_previous_attempt_artifacts =
+        std::collections::BTreeMap::from([(legacy_first_name.clone(), "stale candidate bytes")]);
+    let legacy_is_isolated = legacy_first_name != legacy_retry_name
+        && !legacy_previous_attempt_artifacts.contains_key(&legacy_retry_name);
+    assert!(
+        !legacy_is_isolated,
+        "legacy SHA-only selector is a negative control that must fail retry isolation"
+    );
+    assert_eq!(
+        legacy_previous_attempt_artifacts
+            .get(&legacy_retry_name)
+            .copied(),
+        Some("stale candidate bytes"),
+        "legacy selector would resolve attempt 2 to the stale attempt-1 artifact"
+    );
+}
+
 fn assert_traversal_path_rejected(outside: &Path) {
     let invalid_parent = std::env::temp_dir().join(format!(
         "package-handoff-invalid-{}-{}",
@@ -2743,6 +2885,7 @@ fn unsafe_paths_and_stale_outputs_fail() {
     let outside = outside_sentinel();
     assert_traversal_path_rejected(&outside);
     assert_stale_handoff_rejected();
+    assert_retry_artifact_isolation();
     assert_escaping_symlink_rejected(&outside);
     assert_dirty_source_rejected();
     assert_ignored_package_inventory_controls();

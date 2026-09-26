@@ -1852,15 +1852,19 @@ fn render_workflow(
         "{runtime_setup}      - name: Verify admitted source tree\n        run: |\n          set -euo pipefail\n          actual_commit=\"$(git rev-parse HEAD^{{commit}})\"\n          if [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\n          actual_tree=\"$(git rev-parse HEAD^{{tree}})\"\n          if [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\n          source_status=\"$(git status --porcelain=v1 --untracked-files=all -- . \":(exclude)$PACKAGE_DIR\")\"\n          if [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package production\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n"
     );
     let publish_source_commit_expr = github_expression("needs.attest.outputs.source_commit");
+    // Artifact identity is retry-specific so a rerun cannot select files
+    // left by an earlier attempt. Release identity below remains source-SHA-derived.
     let candidate_artifact_name_expr = github_expression(
-        "format('package-release-candidate-{0}', needs.admission.outputs.head_sha)",
+        "format('package-release-candidate-{0}-{1}-{2}', needs.admission.outputs.head_sha, github.run_id, github.run_attempt)",
     );
-    let verified_artifact_name_expr =
-        github_expression("format('package-release-{0}', steps.verify.outputs.source_commit)");
-    let verified_artifact_download_name_expr =
-        github_expression("format('package-release-{0}', needs.verify.outputs.source_commit)");
+    let verified_artifact_name_expr = github_expression(
+        "format('package-release-{0}-{1}-{2}', steps.verify.outputs.source_commit, github.run_id, github.run_attempt)",
+    );
+    let verified_artifact_download_name_expr = github_expression(
+        "format('package-release-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt)",
+    );
     let attested_artifact_name_expr = github_expression(
-        "format('package-release-attested-{0}', needs.verify.outputs.source_commit)",
+        "format('package-release-attested-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt)",
     );
     let workspace_expr = github_expression("github.workspace");
     let publish_verify = indent_script(&verification_script(spec), 10);
@@ -3917,7 +3921,7 @@ fn render_publish_job(
     output.push_str(download);
     output.push_str("\n        with:\n          name: ");
     output.push_str(&github_expression(
-        "format('package-release-attested-{0}', needs.attest.outputs.source_commit)",
+        "format('package-release-attested-{0}-{1}-{2}', needs.attest.outputs.source_commit, github.run_id, github.run_attempt)",
     ));
     output.push_str("\n          path: package\n          merge-multiple: true\n");
     output.push_str(
