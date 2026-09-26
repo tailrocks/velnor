@@ -143,14 +143,23 @@ pub(crate) struct CacheGithubSection {
     pub(crate) mbx_generation_bound: Option<u32>,
 }
 
-/// Velnor host persistent-store budgets (`[cache.velnor]`). Emitted as a
-/// fleet `velnor.env` snippet; never serialized into `.github/ci/project.toml`.
+/// Velnor host persistent-store budgets (`[cache.velnor]`). An explicit
+/// override emits the fleet `velnor.env` snippet; never serialized into
+/// `.github/ci/project.toml`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CacheVelnorSection {
     pub(crate) budget_bytes: Option<u64>,
     pub(crate) producer_window_seconds: Option<u64>,
     pub(crate) mbx_generation_bound: Option<u32>,
+}
+
+impl CacheVelnorSection {
+    pub(crate) fn has_overrides(&self) -> bool {
+        self.budget_bytes.is_some()
+            || self.producer_window_seconds.is_some()
+            || self.mbx_generation_bound.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -224,6 +233,10 @@ struct WorkflowSection {
     /// never trust gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_providers: Option<Vec<String>>,
+    /// Enables the fail-closed empty-selection proof in generated required
+    /// aggregates. Absent keeps the historical workflow bytes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_selection_proof: Option<bool>,
     // NOTE: no `default_dispatch_providers`. Manual dispatches select the
     // static universe; a dispatch-side provider default would be an
     // alternate-provider input, which the visibility policy forbids. The
@@ -1890,6 +1903,12 @@ impl RepoGenerationConfig {
     /// Whether the generated CI aggregate should be required.
     pub(crate) fn ci_required(&self) -> Option<bool> {
         self.policy.ci_required
+    }
+
+    /// Whether generated required aggregates must prove legitimate empty
+    /// selections instead of allowing an empty caller set to pass vacuously.
+    pub(crate) fn empty_selection_proof(&self) -> Option<bool> {
+        self.workflow.empty_selection_proof
     }
 
     /// Whether every commit must carry a `Signed-off-by` trailer.
@@ -5799,6 +5818,28 @@ mod tests {
     }
 
     #[test]
+    fn workflow_empty_selection_proof_is_optional_and_explicit() {
+        let absent = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(absent.empty_selection_proof(), None);
+        assert!(!must(absent.canonical_json(), "canonicalize absent proof")
+            .contains("empty_selection_proof"));
+
+        let enabled = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nempty_selection_proof = true\n",
+        );
+        assert_eq!(enabled.empty_selection_proof(), Some(true));
+        must(
+            enabled.validate(&[], &[], &BTreeSet::new()),
+            "validate enabled empty-selection proof",
+        );
+
+        let disabled = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nempty_selection_proof = false\n",
+        );
+        assert_eq!(disabled.empty_selection_proof(), Some(false));
+    }
+
+    #[test]
     fn workflow_dispatch_provider_default_is_removed_not_deprecated() {
         let error = must_fail(
             toml::from_str::<RepoGenerationConfig>(
@@ -6728,6 +6769,7 @@ mod tests {
 
     #[test]
     fn cache_sections_parse_and_stay_generator_only() {
+        assert!(!config_for("schema = 2\n").cache_velnor().has_overrides());
         let config = config_for(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [cache.github]\nbudget_bytes = 8589934592\nproducer_window_seconds = 7200\n\
@@ -6736,6 +6778,7 @@ mod tests {
         );
         assert_eq!(config.cache_github().budget_bytes, Some(8_589_934_592));
         assert_eq!(config.cache_velnor().budget_bytes, Some(53_687_091_200));
+        assert!(config.cache_velnor().has_overrides());
         let env = super::render_velnor_host_env(config.cache_velnor());
         assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
         assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
