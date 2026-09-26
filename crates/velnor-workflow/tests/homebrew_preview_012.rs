@@ -86,6 +86,14 @@ fn fixture_with_service_requirement(
     homebrew_preview: Option<&str>,
     service_required: bool,
 ) -> Fixture {
+    fixture_with_env(homebrew_preview, service_required, None)
+}
+
+fn fixture_with_env(
+    homebrew_preview: Option<&str>,
+    service_required: bool,
+    configured_env: Option<&str>,
+) -> Fixture {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let base = std::env::temp_dir().join(format!(
         "velnor-homebrew-preview-012-{}-{}",
@@ -135,12 +143,14 @@ end
             "\n[[units]]\nid = \"homebrew\"\nkind = \"homebrew\"\nhomebrew_preview = {{ formula = \"{FORMULA}\", service_required = {service_required}, platforms = [{value}] }}\n"
         )
     });
+    let unit_env =
+        configured_env.map_or_else(String::new, |values| format!("\n[units.env]\n{values}\n"));
     let config = format!(
         "schema = 2\n\n[generator]\nrepository = \"{REPOSITORY}\"\n\n\
          [workflow]\nproviders = [\"github-hosted\"]\nautomatic_providers = [\"github-hosted\"]\n\
          default_branch = \"main\"\n\n\
          [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
-         [policy]\nci_required = true\n{declaration}\n\
+         [policy]\nci_required = true\n{declaration}{unit_env}\n\
          [[declare]]\nprimitive = \"watch-graph\"\n\
          [declare.args.reads]\nhomebrew = [{{ paths = [\"Formula/{FORMULA}.rb\"], reason = \"candidate formula is the Homebrew install input\", complete = true }}]\n"
     );
@@ -828,6 +838,25 @@ fn run_candidate_brew_step(
     call_log: &std::path::Path,
     fail_subcommand: Option<&str>,
 ) -> Output {
+    run_candidate_brew_step_with_runner_environment(
+        script,
+        formula,
+        fixture,
+        call_log,
+        fail_subcommand,
+        None,
+    )
+}
+
+#[cfg(unix)]
+fn run_candidate_brew_step_with_runner_environment(
+    script: &str,
+    formula: &str,
+    fixture: &Fixture,
+    call_log: &std::path::Path,
+    fail_subcommand: Option<&str>,
+    runner_environment: Option<&str>,
+) -> Output {
     use std::os::unix::fs::PermissionsExt;
 
     let bin = fixture.base.join("candidate-fake-brew-bin");
@@ -844,14 +873,19 @@ fn run_candidate_brew_step(
     permissions.set_mode(0o755);
     fs::set_permissions(&fake_brew, permissions).expect("make fake brew executable");
     let _ = fs::remove_file(call_log);
-    Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .args(["-euo", "pipefail", "-c", script])
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("GITHUB_WORKSPACE", &fixture.root)
         .env("TAP", TAP)
         .env("FORMULA", formula)
         .env("FAKE_BREW_LOG", call_log)
-        .env("FAKE_BREW_FAIL_SUBCOMMAND", fail_subcommand.unwrap_or(""))
+        .env("FAKE_BREW_FAIL_SUBCOMMAND", fail_subcommand.unwrap_or(""));
+    if let Some(runner_environment) = runner_environment {
+        command.env("RUNNER_ENVIRONMENT", runner_environment);
+    }
+    command
         .output()
         .expect("execute generated candidate install/test script with fake brew")
 }
@@ -2278,6 +2312,7 @@ fn required_platforms_are_rendered() {
 
 fn assert_candidate_required_steps(steps: &[YamlValue], file: &str, job_id: &str) {
     for name in [
+        "Require GitHub-hosted candidate runner",
         "Validate candidate pull request identity",
         "Verify Homebrew candidate runner",
         "Checkout candidate tap head",
@@ -2323,6 +2358,18 @@ fn candidate_step_position(steps: &[YamlValue], name: &str, file: &str, job_id: 
 }
 
 fn assert_candidate_step_order(steps: &[YamlValue], file: &str, job_id: &str) -> usize {
+    let hosted_runner = candidate_step_position(
+        steps,
+        "Require GitHub-hosted candidate runner",
+        file,
+        job_id,
+    );
+    let identity = candidate_step_position(
+        steps,
+        "Validate candidate pull request identity",
+        file,
+        job_id,
+    );
     let runner = candidate_step_position(steps, "Verify Homebrew candidate runner", file, job_id);
     let checkout = candidate_step_position(steps, "Checkout candidate tap head", file, job_id);
     let sha = candidate_step_position(steps, "Verify candidate checkout SHA", file, job_id);
@@ -2333,7 +2380,10 @@ fn assert_candidate_step_order(steps: &[YamlValue], file: &str, job_id: &str) ->
         candidate_step_position(steps, "Inspect candidate service declaration", file, job_id);
     let test = candidate_step_position(steps, "Test candidate formula", file, job_id);
     assert!(
-        runner < checkout
+        hosted_runner == 0
+            && hosted_runner < identity
+            && identity < runner
+            && runner < checkout
             && checkout < sha
             && sha < setup
             && setup < path
@@ -2761,6 +2811,125 @@ fn install_and_test_steps_are_present() {
         assert_no_daemon_launch(&content, &file, &job_id);
     }
     assert_service_formula_fixture(&fixture);
+}
+
+#[test]
+fn candidate_install_shadows_inherited_configured_env() {
+    let fixture = fixture_with_env(
+        Some("\"macos-arm64\", \"macos-x64\", \"linux-x64\", \"linux-arm64\""),
+        true,
+        Some("TAP_TOKEN = \"${{ secrets.TAP_TOKEN }}\"\nCUSTOM_SETTING = \"verify-only\""),
+    );
+    generate_ok(&fixture);
+    let generated = workflow(&fixture, "ci-unit-homebrew.yml");
+    let verification = &generated["jobs"]["verify-github-hosted"];
+    let inherited_token = verification
+        .get("env")
+        .and_then(|env| env.get("TAP_TOKEN"))
+        .or_else(|| generated["env"].get("TAP_TOKEN"));
+    assert_eq!(
+        inherited_token.and_then(YamlValue::as_str),
+        Some("${{ secrets.TAP_TOKEN }}"),
+        "normal verification keeps the configured secret expression"
+    );
+    let inherited_setting = verification
+        .get("env")
+        .and_then(|env| env.get("CUSTOM_SETTING"))
+        .or_else(|| generated["env"].get("CUSTOM_SETTING"));
+    assert_eq!(
+        inherited_setting.and_then(YamlValue::as_str),
+        Some("verify-only"),
+        "normal verification keeps ordinary configured env"
+    );
+
+    let candidate = &generated["jobs"]["homebrew-candidate-install"];
+    assert_eq!(
+        candidate["env"]["TAP_TOKEN"].as_str(),
+        Some(""),
+        "candidate install shadows inherited secrets"
+    );
+    assert_eq!(
+        candidate["env"]["CUSTOM_SETTING"].as_str(),
+        Some(""),
+        "candidate install shadows every other inherited configured key"
+    );
+    assert_candidate_formula_environment(candidate);
+    assert_eq!(
+        candidate["env"]["HOMEBREW_NO_AUTO_UPDATE"].as_str(),
+        Some("1")
+    );
+    assert_eq!(
+        candidate["env"]["HOMEBREW_NO_INSTALL_CLEANUP"].as_str(),
+        Some("1")
+    );
+
+    assert_candidate_runner_environment_guard(candidate, &fixture);
+}
+
+fn assert_candidate_runner_environment_guard(candidate: &YamlValue, fixture: &Fixture) {
+    let steps = candidate["steps"]
+        .as_sequence()
+        .expect("candidate job has steps");
+    let runner_guard = steps.first().expect("runner guard is the first step");
+    assert_eq!(
+        yaml_string_field(runner_guard, "name"),
+        Some("Require GitHub-hosted candidate runner")
+    );
+    let runner_script = yaml_string_field(runner_guard, "run")
+        .expect("GitHub-hosted runner guard executes a shell check");
+    assert!(
+        runner_script.contains("RUNNER_ENVIRONMENT") && runner_script.contains("github-hosted"),
+        "candidate formula checks require a hosted runner"
+    );
+    let install_script = steps
+        .iter()
+        .find(|step| yaml_string_field(step, "name") == Some("Install candidate from source"))
+        .and_then(|step| yaml_string_field(step, "run"))
+        .expect("candidate install step runs Homebrew");
+    let guarded_install_script = format!("{runner_script}\n{install_script}");
+    #[cfg(unix)]
+    {
+        let self_hosted_log = fixture.base.join("self-hosted-candidate-brew.log");
+        let self_hosted = run_candidate_brew_step_with_runner_environment(
+            &guarded_install_script,
+            FORMULA,
+            fixture,
+            &self_hosted_log,
+            None,
+            Some("self-hosted"),
+        );
+        assert!(
+            !self_hosted.status.success(),
+            "self-hosted runner fails before candidate formula install"
+        );
+        assert!(
+            !self_hosted_log.exists(),
+            "self-hosted runner never invokes the formula installer"
+        );
+
+        let hosted_log = fixture.base.join("github-hosted-candidate-brew.log");
+        let hosted = run_candidate_brew_step_with_runner_environment(
+            &guarded_install_script,
+            FORMULA,
+            fixture,
+            &hosted_log,
+            None,
+            Some("github-hosted"),
+        );
+        assert!(
+            hosted.status.success(),
+            "GitHub-hosted native runner reaches candidate install"
+        );
+        assert_eq!(
+            fs::read_to_string(hosted_log)
+                .expect("read GitHub-hosted candidate install call")
+                .lines()
+                .collect::<Vec<_>>(),
+            vec![format!(
+                "install --build-from-source --verbose {TAP}/{FORMULA}"
+            )]
+        );
+    }
 }
 
 fn assert_candidate_jobs_have_no_credentials(candidates: &[(String, String, YamlValue)]) {
