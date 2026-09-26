@@ -35,23 +35,28 @@ impl Primitive for RegenGate {
         let mut units = Vec::new();
         for unit in ctx.units {
             let mut unit = (*unit).clone();
-            // The gate runs before anything else, and only once: a declared
-            // command that the unit already carries is left where it is.
-            // Inserting shifts every position, so a unit that gains the gate
-            // drops its phase tags and verifies through the single legacy
-            // step, gate first.
-            if !unit
+            if ctx.precondition_phases_enabled {
+                // The gate runs before anything else and only once. Phased
+                // units retain their existing phase tags; the gate is a
+                // composable precondition instead of a reason to collapse the
+                // unit.
+                unit.prepend_precondition_commands(std::slice::from_ref(&command))?;
+            } else if !unit
                 .pr_commands
                 .iter()
                 .any(|candidate| candidate == &command)
             {
+                // The configured tree still targets a runtime without the
+                // typed precondition phase. Preserve its legacy output until
+                // a later runtime pin promotes the staged capability.
                 unit.pr_commands.insert(0, command.clone());
                 unit.clear_phases();
             }
-            if !unit
-                .full_commands
-                .iter()
-                .any(|candidate| candidate == &command)
+            if !ctx.precondition_phases_enabled
+                && !unit
+                    .full_commands
+                    .iter()
+                    .any(|candidate| candidate == &command)
             {
                 unit.full_commands.insert(0, command.clone());
                 unit.clear_phases();
