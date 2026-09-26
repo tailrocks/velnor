@@ -9148,6 +9148,7 @@ pub(crate) fn generator_owned_output_paths(
 ) -> Result<BTreeSet<PathBuf>, GeneratorError> {
     let state_path = PathBuf::from(OWNERSHIP_STATE);
     let mut paths = BTreeSet::from([state_path.clone()]);
+    reject_managed_symlink_ancestors(root, std::iter::once(&state_path))?;
     let preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
     match parse_ownership_state(root, &preimage)? {
         OwnershipStateFile::Present(state) => paths.extend(state.outputs.into_keys()),
@@ -21198,6 +21199,47 @@ lockfile = true
 
     #[cfg(unix)]
     #[test]
+    fn ownership_scan_rejects_symlinked_sidecar_ancestor_before_reading() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_repository("sidecar-symlink-ancestor");
+        let outside = temporary_directory("sidecar-symlink-target");
+        must(
+            fs::create_dir_all(root.join(".github")),
+            "create managed parent directory",
+        );
+        must(
+            fs::write(
+                outside.join(".github-actions-generator-state"),
+                "not valid state\n",
+            ),
+            "write external sidecar",
+        );
+        must(
+            symlink(&outside, root.join(".github/ci")),
+            "symlink managed sidecar parent",
+        );
+
+        let error = must_some(
+            generator_owned_output_paths(&root).err(),
+            "sidecar scan must reject a symlinked parent",
+        )
+        .to_string();
+        assert!(
+            error.contains("refusing symlinked managed directory"),
+            "sidecar bytes must not be parsed through a symlinked parent: {error}"
+        );
+        assert!(
+            error.contains(&root.join(".github/ci").display().to_string()),
+            "error identifies the symlinked parent: {error}"
+        );
+
+        must(fs::remove_dir_all(root), "remove symlinked repository");
+        must(fs::remove_dir_all(outside), "remove sidecar target");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn config_static_outputs_reject_symlinked_ancestors() {
         use std::os::unix::fs::symlink;
 
@@ -24329,7 +24371,7 @@ lockfile = true
     }
     #[cfg(unix)]
     #[test]
-    fn generation_refuses_symlinked_managed_directory() {
+    fn scan_refuses_symlinked_managed_directory() {
         let root = temporary_repository("symlinked-managed-directory");
         let outside = temporary_directory("symlink-target");
         must(
@@ -24343,19 +24385,15 @@ lockfile = true
             std::os::unix::fs::symlink(&outside, root.join(".github")),
             "create managed directory symlink",
         );
-        let config = must(
+        let error = must_some(
             scan_repository(
                 &root,
                 Some(std::collections::BTreeSet::from([
                     crate::s2::provider::ProviderId::GithubHosted,
                 ])),
-            ),
-            "scan symlinked repository",
-        );
-        let files = must(generated_files(&config), "generate");
-        let error = must_some(
-            write_generated(&root, &files, false, false, true).err(),
-            "symlinked managed directory must be rejected",
+            )
+            .err(),
+            "scan must reject a symlinked managed directory",
         );
         assert!(error
             .to_string()

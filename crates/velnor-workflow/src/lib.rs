@@ -22759,7 +22759,7 @@ channel = "stable"
     }
     #[cfg(unix)]
     #[test]
-    fn generation_refuses_symlinked_managed_directory() {
+    fn scan_refuses_symlinked_managed_directory() {
         let root = temporary_repository("symlinked-managed-directory");
         let outside = temporary_directory("symlink-target");
         must(
@@ -22773,14 +22773,9 @@ channel = "stable"
             std::os::unix::fs::symlink(&outside, root.join(".github")),
             "create managed directory symlink",
         );
-        let config = must(
-            scan_repository(&root, RunnerMode::Github),
-            "scan symlinked repository",
-        );
-        let files = must(generated_files(&config), "generate");
         let error = must_some(
-            write_generated(&root, &files, false, false, true).err(),
-            "symlinked managed directory must be rejected",
+            scan_repository(&root, RunnerMode::Github).err(),
+            "scan must reject a symlinked managed directory",
         );
         assert!(error
             .to_string()
