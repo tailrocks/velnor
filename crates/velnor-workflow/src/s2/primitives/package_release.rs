@@ -1233,23 +1233,23 @@ esac
   echo "::error::package scratch requires numeric run and attempt identities" >&2
   exit 1
 }
-expected_scratch="$runner_temp/velnor-package-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-if [[ "$VELNOR_PACKAGE_SCRATCH_DIR" != "$expected_scratch" ]]; then
+expected_scratch="$runner_temp/package-release-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+if [[ "$PACKAGE_RELEASE_SCRATCH_DIR" != "$expected_scratch" ]]; then
   echo "::error::package scratch path differs from the run-owned runner-temp path" >&2
   exit 1
 fi
-if [[ -e "$VELNOR_PACKAGE_SCRATCH_DIR" || -L "$VELNOR_PACKAGE_SCRATCH_DIR" ]]; then
+if [[ -e "$PACKAGE_RELEASE_SCRATCH_DIR" || -L "$PACKAGE_RELEASE_SCRATCH_DIR" ]]; then
   echo "::error::package scratch path already exists; refusing to remove a pre-existing path" >&2
   exit 1
 fi
-mkdir -m 700 -- "$VELNOR_PACKAGE_SCRATCH_DIR"
+mkdir -m 700 -- "$PACKAGE_RELEASE_SCRATCH_DIR"
 scratch_owned=1
-CARGO_TARGET_DIR="$VELNOR_PACKAGE_SCRATCH_DIR/target"
+CARGO_TARGET_DIR="$PACKAGE_RELEASE_SCRATCH_DIR/target"
 cleanup_package_scratch() {
   local status=$?
   trap - EXIT
   if (( scratch_owned )); then
-    if ! rm -rf -- "$VELNOR_PACKAGE_SCRATCH_DIR"; then
+    if ! rm -rf -- "$PACKAGE_RELEASE_SCRATCH_DIR"; then
       status=1
     fi
   fi
@@ -1276,8 +1276,8 @@ print_source_inventory() {
     printf '  %q\n' "$path" >&2
   done < "$1"
 }
-source_inventory_before="$VELNOR_PACKAGE_SCRATCH_DIR/source-inventory-before"
-source_inventory_after="$VELNOR_PACKAGE_SCRATCH_DIR/source-inventory-after"
+source_inventory_before="$PACKAGE_RELEASE_SCRATCH_DIR/source-inventory-before"
+source_inventory_after="$PACKAGE_RELEASE_SCRATCH_DIR/source-inventory-after"
 write_source_inventory "$source_inventory_before"
 if [[ -s "$source_inventory_before" ]]; then
   echo "::error::source checkout has stale ignored or untracked inputs before package production" >&2
@@ -1285,7 +1285,7 @@ if [[ -s "$source_inventory_before" ]]; then
   exit 1
 fi
 export PACKAGE_DIR VELNOR_VERIFIED_PACKAGE_DIR VELNOR_SOURCE_CHECKOUT_DIR CARGO_TARGET_DIR
-export VELNOR_SOURCE_COMMIT VELNOR_SOURCE_REF VELNOR_PACKAGE_SCRATCH_DIR
+export VELNOR_SOURCE_COMMIT VELNOR_SOURCE_REF PACKAGE_RELEASE_SCRATCH_DIR
 "#,
     );
     for task in tasks {
@@ -1340,9 +1340,9 @@ if [[ ! -d "$dir" || -L "$dir" ]]; then
   exit 1
 fi
 workspace="$GITHUB_WORKSPACE"
-expected_root="${VELNOR_PACKAGE_HANDOFF_ROOT:-$workspace}"
-expected_relative="${VELNOR_PACKAGE_HANDOFF_RELATIVE:-$PACKAGE_DIR}"
-handoff_source_commit="${VELNOR_PACKAGE_HANDOFF_SOURCE_COMMIT:-$EXPECTED_SOURCE_COMMIT}"
+expected_root="${PACKAGE_HANDOFF_ROOT:-$workspace}"
+expected_relative="${PACKAGE_HANDOFF_RELATIVE:-$PACKAGE_DIR}"
+handoff_source_commit="${PACKAGE_HANDOFF_SOURCE_COMMIT:-$EXPECTED_SOURCE_COMMIT}"
 if [[ "$expected_root" != /* || -z "$expected_relative" || "$expected_relative" == /* || "$expected_relative" == */ || "$expected_relative" == *//* ]]; then
   echo "::error::verified package handoff root must be absolute and relative path must be normalized" >&2
   exit 1
@@ -1778,7 +1778,7 @@ fn render_workflow(
     let concurrency_yaml = crate::s2::yaml_scalar(&spec.concurrency_group);
     let source_shell = shell_quote(&spec.source_ref);
     let package_scratch_expr = format!(
-        "{}/velnor-package-scratch-{}-{}",
+        "{}/package-release-scratch-{}-{}",
         github_expression("runner.temp"),
         github_expression("github.run_id"),
         github_expression("github.run_attempt")
@@ -1858,7 +1858,7 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n          VELNOR_PACKAGE_SCRATCH_DIR: {package_scratch_expr}\n        run: |\n{build_script}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n          PACKAGE_RELEASE_SCRATCH_DIR: {package_scratch_expr}\n        run: |\n{build_script}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -3125,9 +3125,9 @@ mkdir -- "$rolling_handoff_root"
 mkdir -- "$rolling_published_dir"
 gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rolling_published_dir" --clobber
 export VELNOR_VERIFIED_PACKAGE_DIR="$rolling_published_dir"
-export VELNOR_PACKAGE_HANDOFF_ROOT="$transaction_dir"
-export VELNOR_PACKAGE_HANDOFF_RELATIVE="$rolling_handoff_relative"
-export VELNOR_PACKAGE_HANDOFF_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT"
+export PACKAGE_HANDOFF_ROOT="$transaction_dir"
+export PACKAGE_HANDOFF_RELATIVE="$rolling_handoff_relative"
+export PACKAGE_HANDOFF_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT"
 "#,
     );
     // Execute the verifier as a foreground Bash child. Its temporary-file
@@ -3629,7 +3629,7 @@ fn render_publish_job(
     output.push_str("\n          PACKAGE_DIR: published-package\n          RELEASE_ASSET_TAG: ");
     output.push_str(&immutable_tag_output);
     output.push_str(
-        "\n        run: |\n          set -euo pipefail\n          published_dir=\"$GITHUB_WORKSPACE/published-package\"\n          if [[ -e \"$published_dir\" || -L \"$published_dir\" ]]; then echo \"::error::published package handoff destination already exists\" >&2; exit 1; fi\n          mkdir -- \"$published_dir\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$published_dir\"\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$published_dir\"\n          export VELNOR_PACKAGE_HANDOFF_ROOT=\"$GITHUB_WORKSPACE\"\n          export VELNOR_PACKAGE_HANDOFF_RELATIVE=\"published-package\"\n          export VELNOR_PACKAGE_HANDOFF_SOURCE_COMMIT=\"$EXPECTED_SOURCE_COMMIT\"\n",
+        "\n        run: |\n          set -euo pipefail\n          published_dir=\"$GITHUB_WORKSPACE/published-package\"\n          if [[ -e \"$published_dir\" || -L \"$published_dir\" ]]; then echo \"::error::published package handoff destination already exists\" >&2; exit 1; fi\n          mkdir -- \"$published_dir\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$published_dir\"\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$published_dir\"\n          export PACKAGE_HANDOFF_ROOT=\"$GITHUB_WORKSPACE\"\n          export PACKAGE_HANDOFF_RELATIVE=\"published-package\"\n          export PACKAGE_HANDOFF_SOURCE_COMMIT=\"$EXPECTED_SOURCE_COMMIT\"\n",
     );
     output.push_str(publish_verify);
     output.push_str(&render_verification_task_step(

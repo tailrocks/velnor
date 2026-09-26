@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 const REPOSITORY: &str = "example/preview-source";
 const SOURCE_REF: &str = "refs/heads/main";
 const MANIFEST_SCHEMA: &str = "example.consumer-manifest-v1";
-const PAYLOAD: &str = "velnor.tar.gz";
+const PAYLOAD: &str = "preview-package.tar.gz";
 const SUMS: &str = "SHA256SUMS";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -47,7 +47,7 @@ impl Fixture {
     fn new(label: &str, package_dir: &str) -> Self {
         let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let parent = std::env::temp_dir().join(format!(
-            "velnor-homebrew-handoff-{label}-{}-{sequence}",
+            "package-handoff-{label}-{}-{sequence}",
             std::process::id()
         ));
         let root = parent.join("source");
@@ -252,24 +252,24 @@ fn fake_mise_script() -> &'static str {
     r#"#!/bin/bash
 set -euo pipefail
 [[ "${1:-}" == run && "${2:-}" == build-release ]]
-printf '%s\n' "${VELNOR_PACKAGE_SCRATCH_DIR:?}" > "$RUNNER_TEMP/producer-env"
+printf '%s\n' "${PACKAGE_RELEASE_SCRATCH_DIR:?}" > "$RUNNER_TEMP/producer-env"
 printf '%s\n' "${PACKAGE_DIR:?}" >> "$RUNNER_TEMP/producer-env"
 printf '%s\n' "${VELNOR_VERIFIED_PACKAGE_DIR:?}" >> "$RUNNER_TEMP/producer-env"
 printf 'called\n' >> "$RUNNER_TEMP/producer-called"
-case "$VELNOR_PACKAGE_SCRATCH_DIR/" in
+case "$PACKAGE_RELEASE_SCRATCH_DIR/" in
   "$RUNNER_TEMP"/*) ;;
   *) echo "scratch is outside runner temp" >&2; exit 91 ;;
 esac
-case "$VELNOR_PACKAGE_SCRATCH_DIR/" in
+case "$PACKAGE_RELEASE_SCRATCH_DIR/" in
   "$GITHUB_WORKSPACE"/*) echo "scratch is inside checkout" >&2; exit 92 ;;
   *) ;;
 esac
-mkdir -p "$VELNOR_PACKAGE_SCRATCH_DIR"
-printf 'disposable build intermediate\n' > "$VELNOR_PACKAGE_SCRATCH_DIR/intermediate"
+mkdir -p "$PACKAGE_RELEASE_SCRATCH_DIR"
+printf 'disposable build intermediate\n' > "$PACKAGE_RELEASE_SCRATCH_DIR/intermediate"
 mkdir -p "$VELNOR_VERIFIED_PACKAGE_DIR"
-printf 'preview payload for %s\n' "$VELNOR_SOURCE_COMMIT" > "$VELNOR_VERIFIED_PACKAGE_DIR/velnor.tar.gz"
-payload_sha="$(sha256sum "$VELNOR_VERIFIED_PACKAGE_DIR/velnor.tar.gz" | awk '{print $1}')"
-printf '%s  %s\n' "$payload_sha" velnor.tar.gz > "$VELNOR_VERIFIED_PACKAGE_DIR/SHA256SUMS"
+printf 'preview payload for %s\n' "$VELNOR_SOURCE_COMMIT" > "$VELNOR_VERIFIED_PACKAGE_DIR/preview-package.tar.gz"
+payload_sha="$(sha256sum "$VELNOR_VERIFIED_PACKAGE_DIR/preview-package.tar.gz" | awk '{print $1}')"
+printf '%s  %s\n' "$payload_sha" preview-package.tar.gz > "$VELNOR_VERIFIED_PACKAGE_DIR/SHA256SUMS"
 sums_sha="$(sha256sum "$VELNOR_VERIFIED_PACKAGE_DIR/SHA256SUMS" | awk '{print $1}')"
 version="0.1.0-${VELNOR_PACKAGE_CHANNEL}.1+${VELNOR_SOURCE_COMMIT:0:7}"
 jq -n \
@@ -278,7 +278,7 @@ jq -n \
   --arg source_ref "$EXPECTED_SOURCE_REF" \
   --arg source_commit "$VELNOR_SOURCE_COMMIT" \
   --arg version "$version" \
-  --arg payload "velnor.tar.gz" \
+  --arg payload "preview-package.tar.gz" \
   --arg payload_sha "$payload_sha" \
   --arg supporting "SHA256SUMS" \
   --arg supporting_sha "$sums_sha" \
@@ -291,7 +291,7 @@ jq -n \
   --slurpfile manifest "$VELNOR_VERIFIED_PACKAGE_DIR/release-manifest.json" \
   '{source_repository:$repository,source_ref:$source_ref,source_digest:$source_digest,manifest:$manifest[0]}' \
   > "$VELNOR_VERIFIED_PACKAGE_DIR/identity.json"
-if [[ "${VELNOR_TEST_STALE_PACKAGE_SIBLING:-}" == "1" ]]; then
+if [[ "${PACKAGE_TEST_STALE_HANDOFF_SIBLING:-}" == "1" ]]; then
   printf 'ignored stale sibling from producer\n' > "${VELNOR_VERIFIED_PACKAGE_DIR%/*}/stale-from-producer"
 fi
 "#
@@ -886,7 +886,7 @@ fn assert_complete_handoff(path: &Path, source_sha: &str) {
         "SHA256SUMS",
         "identity.json",
         "release-manifest.json",
-        "velnor.tar.gz",
+        "preview-package.tar.gz",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -943,7 +943,7 @@ fn scratch_path(run: &PackageRun) -> PathBuf {
         .as_ref()
         .expect("producer step ran")
         .environment
-        .get("VELNOR_PACKAGE_SCRATCH_DIR")
+        .get("PACKAGE_RELEASE_SCRATCH_DIR")
         .expect("emitted job env defines disposable scratch");
     PathBuf::from(raw)
 }
@@ -1280,7 +1280,7 @@ fn unadmitted_dispatch_sha_is_rejected() {
 
 fn outside_sentinel() -> PathBuf {
     let outside = std::env::temp_dir().join(format!(
-        "velnor-homebrew-handoff-outside-{}-{}",
+        "package-handoff-outside-{}-{}",
         std::process::id(),
         NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
     ));
@@ -1291,7 +1291,7 @@ fn outside_sentinel() -> PathBuf {
 
 fn assert_traversal_path_rejected(outside: &Path) {
     let invalid_parent = std::env::temp_dir().join(format!(
-        "velnor-homebrew-handoff-invalid-{}-{}",
+        "package-handoff-invalid-{}-{}",
         std::process::id(),
         NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
     ));
@@ -1413,7 +1413,7 @@ fn assert_ignored_handoff_is_accepted() {
                 "check-ignore",
                 "--quiet",
                 "--",
-                "output/handoff/velnor.tar.gz"
+                "output/handoff/preview-package.tar.gz"
             ]
         ),
         "",
@@ -1508,7 +1508,7 @@ fn assert_ignored_sibling_is_rejected_after_producer() {
         &after_event,
         &admission_outputs,
         true,
-        &[("VELNOR_TEST_STALE_PACKAGE_SIBLING", "1")],
+        &[("PACKAGE_TEST_STALE_HANDOFF_SIBLING", "1")],
     );
     assert_step_failure(&producer, "ignored stale sibling after producer rejection");
     let producer_output = output_text(&producer.output);
