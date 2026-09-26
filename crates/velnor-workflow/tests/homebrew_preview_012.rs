@@ -864,7 +864,7 @@ fn run_candidate_brew_step_with_runner_environment(
     let fake_brew = bin.join("brew");
     fs::write(
         &fake_brew,
-        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"$FAKE_BREW_LOG\"\ncase \"${1-}\" in install|test) ;; *) exit 64 ;; esac\nif [[ \"${FAKE_BREW_FAIL_SUBCOMMAND:-}\" == \"${1-}\" ]]; then exit 23; fi\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\ncase \"${1-}\" in\n  ruby) ;;\n  install|test) printf '%s\\n' \"$*\" >> \"$FAKE_BREW_LOG\"; if [[ \"${FAKE_BREW_FAIL_SUBCOMMAND:-}\" == \"${1-}\" ]]; then exit 23; fi ;;\n  *) exit 64 ;;\nesac\n",
     )
     .expect("write fake brew executable for install/test commands");
     let mut permissions = fs::metadata(&fake_brew)
@@ -881,7 +881,8 @@ fn run_candidate_brew_step_with_runner_environment(
         .env("TAP", TAP)
         .env("FORMULA", formula)
         .env("FAKE_BREW_LOG", call_log)
-        .env("FAKE_BREW_FAIL_SUBCOMMAND", fail_subcommand.unwrap_or(""));
+        .env("FAKE_BREW_FAIL_SUBCOMMAND", fail_subcommand.unwrap_or(""))
+        .env("SERVICE_REQUIRED", "true");
     if let Some(runner_environment) = runner_environment {
         command.env("RUNNER_ENVIRONMENT", runner_environment);
     }
@@ -897,6 +898,191 @@ fn exact_candidate_brew_call(actual: &str, subcommand: &str) -> bool {
         _ => return false,
     };
     actual == expected
+}
+
+#[cfg(unix)]
+fn assert_candidate_path_poisoning_controls(fixture: &Fixture, script: &str) {
+    let attack_workspace = fixture.base.join("candidate-path-attack-workspace");
+    let attack_formula = attack_workspace.join("Formula").join("preview.rb");
+    let github_path = fixture.base.join("candidate-github-path");
+    let trusted_bin = fixture.base.join("candidate-trusted-brew-bin");
+    let rogue_bin = fixture.base.join("candidate-rogue-brew-bin");
+    let formulary_stub = fixture.base.join("candidate-formulary-stub.rb");
+    let trusted_log = fixture.base.join("candidate-trusted-brew.log");
+    let rogue_log = fixture.base.join("candidate-rogue-brew.log");
+    fs::create_dir_all(attack_formula.parent().expect("formula has parent"))
+        .expect("create adversarial formula directory");
+    fs::create_dir_all(&trusted_bin).expect("create trusted fake brew directory");
+    fs::create_dir_all(&rogue_bin).expect("create rogue fake brew directory");
+    fs::write(
+        &attack_formula,
+        r#"File.open(ENV.fetch("GITHUB_PATH"), "a") { |path| path.puts ENV.fetch("FAKE_ROGUE_BREW_BIN") }"#,
+    )
+    .expect("write formula that poisons the runner path command file");
+    fs::write(
+        &formulary_stub,
+        r#"module Formulary
+  FormulaFixture = Struct.new(:path) do
+    def service?; true; end
+  end
+  def self.factory(_name)
+    formula_path = File.realpath(ENV.fetch("FORMULA_FIXTURE"))
+    load formula_path
+    FormulaFixture.new(formula_path)
+  end
+end
+"#,
+    )
+    .expect("write isolated Formulary stub");
+
+    let_executable(
+        &trusted_bin.join("brew"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+case "${1-}" in
+  ruby) exec ruby -r "$FORMULARY_STUB" -e "$3" "${@:4}" ;;
+  install)
+    ruby -e 'load ENV.fetch("FORMULA_FIXTURE")'
+    printf '%s\n' "$*" >> "$FAKE_BREW_LOG"
+    ;;
+  test) printf '%s\n' "$*" >> "$FAKE_BREW_LOG" ;;
+  *) exit 64 ;;
+esac
+"#,
+    );
+    let_executable(
+        &rogue_bin.join("brew"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_ROGUE_BREW_LOG"
+"#,
+    );
+
+    let _ = fs::remove_file(&github_path);
+    let _ = fs::remove_file(&trusted_log);
+    let _ = fs::remove_file(&rogue_log);
+    let trusted_path = format!("{}:/usr/bin:/bin", trusted_bin.display());
+    let combined = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", script])
+        .env("PATH", &trusted_path)
+        .env("GITHUB_WORKSPACE", &attack_workspace)
+        .env("GITHUB_PATH", &github_path)
+        .env("TAP", TAP)
+        .env("FORMULA", FORMULA)
+        .env("FORMULA_FIXTURE", &attack_formula)
+        .env("FORMULARY_STUB", &formulary_stub)
+        .env("FAKE_ROGUE_BREW_BIN", &rogue_bin)
+        .env("FAKE_BREW_LOG", &trusted_log)
+        .env("FAKE_ROGUE_BREW_LOG", &rogue_log)
+        .env("SERVICE_REQUIRED", "true")
+        .output()
+        .expect("run the combined candidate formula step with adversarial formula");
+    assert!(
+        combined.status.success(),
+        "combined candidate step completes with PATH update queued: {}{}",
+        String::from_utf8_lossy(&combined.stdout),
+        String::from_utf8_lossy(&combined.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&trusted_log)
+            .expect("trusted brew records same-step install and test")
+            .lines()
+            .collect::<Vec<_>>(),
+        vec![
+            format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
+            format!("test --verbose {TAP}/{FORMULA}"),
+        ],
+        "formula-written GITHUB_PATH does not replace PATH before the same-step test"
+    );
+    assert!(
+        !rogue_log.exists(),
+        "rogue brew cannot intercept commands before the runner applies GITHUB_PATH"
+    );
+    let additions =
+        fs::read_to_string(&github_path).expect("formula appends rogue directory to GITHUB_PATH");
+    assert!(
+        additions
+            .lines()
+            .any(|path| path == rogue_bin.display().to_string())
+            && additions
+                .lines()
+                .all(|path| path == rogue_bin.display().to_string()),
+        "adversarial formula actually writes the rogue brew directory to the command file"
+    );
+
+    // Negative control: model the former split workflow. The formula-load step
+    // writes GITHUB_PATH; the runner applies it before separate install/test steps.
+    let _ = fs::remove_file(&github_path);
+    let _ = fs::remove_file(&rogue_log);
+    let path_check = ruby_path_check_from_shell(script)
+        .expect("combined script includes the pre-load formula path guard");
+    let old_formula_load_step = format!(
+        "set -euo pipefail\nbrew ruby -e '{path_check}' \"$TAP/$FORMULA\" \"$GITHUB_WORKSPACE/Formula/$FORMULA.rb\" \"$GITHUB_WORKSPACE\""
+    );
+    let formula_load = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", &old_formula_load_step])
+        .env("PATH", &trusted_path)
+        .env("GITHUB_WORKSPACE", &attack_workspace)
+        .env("GITHUB_PATH", &github_path)
+        .env("TAP", TAP)
+        .env("FORMULA", FORMULA)
+        .env("FORMULA_FIXTURE", &attack_formula)
+        .env("FORMULARY_STUB", &formulary_stub)
+        .env("FAKE_ROGUE_BREW_BIN", &rogue_bin)
+        .output()
+        .expect("run former standalone formula-load step");
+    assert!(
+        formula_load.status.success(),
+        "negative-control formula load succeeds: {}{}",
+        String::from_utf8_lossy(&formula_load.stdout),
+        String::from_utf8_lossy(&formula_load.stderr)
+    );
+    let additions =
+        fs::read_to_string(&github_path).expect("negative-control formula load writes GITHUB_PATH");
+    assert!(additions
+        .lines()
+        .any(|path| path == rogue_bin.display().to_string()));
+
+    // GitHub applies each command-file path before the next job step.
+    let applied_path = additions
+        .lines()
+        .rev()
+        .fold(trusted_path, |path, addition| format!("{addition}:{path}"));
+    for subcommand in [
+        format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
+        format!("test --verbose {TAP}/{FORMULA}"),
+    ] {
+        let later_step_script = format!("set -euo pipefail\nbrew {subcommand}");
+        let later_step = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", &later_step_script])
+            .env("PATH", &applied_path)
+            .env("FAKE_ROGUE_BREW_LOG", &rogue_log)
+            .output()
+            .expect("run old separate brew step after applying GITHUB_PATH");
+        assert!(later_step.status.success());
+    }
+    assert_eq!(
+        fs::read_to_string(rogue_log)
+            .expect("old split install and test are hijacked by rogue brew")
+            .lines()
+            .collect::<Vec<_>>(),
+        vec![
+            format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
+            format!("test --verbose {TAP}/{FORMULA}"),
+        ],
+        "negative control proves GITHUB_PATH takes effect between former workflow steps"
+    );
+}
+
+#[cfg(unix)]
+fn let_executable(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(path, contents).expect("write executable fixture");
+    let mut permissions = fs::metadata(path)
+        .expect("read executable fixture permissions")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("mark executable fixture executable");
 }
 
 fn run_runner_probe(
@@ -926,6 +1112,14 @@ fn run_runner_probe(
 fn ruby_path_check_from_shell(script: &str) -> Option<&str> {
     let prefix = "brew ruby -e '";
     let start = script.find(prefix)? + prefix.len();
+    let rest = &script[start..];
+    let end = rest.find("' \"$TAP/$FORMULA\"")?;
+    Some(&rest[..end])
+}
+
+fn ruby_service_check_from_shell(script: &str) -> Option<&str> {
+    let prefix = "brew ruby -e '";
+    let start = script.rfind(prefix)? + prefix.len();
     let rest = &script[start..];
     let end = rest.find("' \"$TAP/$FORMULA\"")?;
     Some(&rest[..end])
@@ -1050,8 +1244,7 @@ fn run_linuxbrew_setup(
 #[cfg(unix)]
 fn assert_valid_formula_loaders(
     path_check_script: &str,
-    service_script: &str,
-    service_guard: &str,
+    service_ruby: &str,
     service_required: bool,
     paths: &FormulaEscapePaths<'_>,
 ) {
@@ -1085,12 +1278,6 @@ fn assert_valid_formula_loaders(
         service_required,
         "service metadata is required for this fixture"
     );
-    assert!(
-        is_service_required_guard(service_guard),
-        "service inspection keeps its typed success-default guard"
-    );
-    let service_ruby = ruby_path_check_from_shell(service_script)
-        .expect("generated service inspection exposes its Ruby program");
     let valid_service = run_formula_service_check(
         service_ruby,
         paths.stub_path,
@@ -1115,7 +1302,7 @@ fn assert_valid_formula_loaders(
 #[cfg(unix)]
 fn assert_direct_formula_symlink_rejected(
     path_check_script: &str,
-    service_script: &str,
+    service_ruby: &str,
     paths: &FormulaEscapePaths<'_>,
     outside_formula: &std::path::Path,
 ) {
@@ -1142,7 +1329,7 @@ fn assert_direct_formula_symlink_rejected(
         "outside formula body is not loaded before direct symlink rejection"
     );
     let direct_service =
-        run_path_then_service_check(path_check_script, service_script, paths, outside_formula);
+        run_path_then_service_check(path_check_script, service_ruby, paths, outside_formula);
     assert!(
         !direct_service.status.success(),
         "combined path and service steps stop at direct symlink path rejection"
@@ -1158,7 +1345,7 @@ fn assert_direct_formula_symlink_rejected(
 #[cfg(unix)]
 fn assert_formula_directory_symlink_rejected(
     path_check_script: &str,
-    service_script: &str,
+    service_ruby: &str,
     paths: &FormulaEscapePaths<'_>,
     outside_root: &std::path::Path,
     outside_formula: &std::path::Path,
@@ -1197,7 +1384,7 @@ fn assert_formula_directory_symlink_rejected(
     );
     let escaped_service = run_path_then_service_check(
         path_check_script,
-        service_script,
+        service_ruby,
         paths,
         &outside_nested_formula,
     );
@@ -1215,8 +1402,7 @@ fn assert_formula_directory_symlink_rejected(
 #[cfg(unix)]
 fn assert_outside_formula_is_rejected_before_loading(
     path_check_script: &str,
-    service_script: &str,
-    service_guard: &str,
+    service_ruby: &str,
     service_required: bool,
     fixture: &Fixture,
 ) {
@@ -1249,22 +1435,16 @@ fn assert_outside_formula_is_rejected_before_loading(
         sentinel: &sentinel,
     };
 
-    assert_valid_formula_loaders(
-        path_check_script,
-        service_script,
-        service_guard,
-        service_required,
-        &paths,
-    );
+    assert_valid_formula_loaders(path_check_script, service_ruby, service_required, &paths);
     assert_direct_formula_symlink_rejected(
         path_check_script,
-        service_script,
+        service_ruby,
         &paths,
         &outside_formula,
     );
     assert_formula_directory_symlink_rejected(
         path_check_script,
-        service_script,
+        service_ruby,
         &paths,
         &outside_root,
         &outside_formula,
@@ -1929,12 +2109,15 @@ fn candidate_checkout_is_the_tested_tap() {
             .expect("candidate tap setup links the candidate checkout");
         let setup_script =
             yaml_string_field(setup, "run").expect("candidate tap setup is a shell step");
-        let formula_path_check = steps
+        let formula_check = steps
             .iter()
-            .find(|step| yaml_string_field(step, "name") == Some("Verify candidate formula path"))
-            .expect("candidate formula path is validated before Homebrew loads it");
-        let formula_path_script = yaml_string_field(formula_path_check, "run")
-            .expect("candidate formula path check is a shell command");
+            .find(|step| {
+                yaml_string_field(step, "name")
+                    == Some("Verify, install, and test candidate formula")
+            })
+            .expect("candidate formula is validated, installed, and tested in one step");
+        let formula_path_script = yaml_string_field(formula_check, "run")
+            .expect("candidate formula check is a shell command");
         assert!(
             setup_script.contains("\"$GITHUB_WORKSPACE/Formula/$FORMULA.rb\"")
                 && setup_script.contains("ln -s \"$GITHUB_WORKSPACE\""),
@@ -2318,9 +2501,7 @@ fn assert_candidate_required_steps(steps: &[YamlValue], file: &str, job_id: &str
         "Checkout candidate tap head",
         "Verify candidate checkout SHA",
         "Set up Homebrew candidate tap",
-        "Verify candidate formula path",
-        "Install candidate from source",
-        "Test candidate formula",
+        "Verify, install, and test candidate formula",
     ] {
         let step = steps
             .iter()
@@ -2374,11 +2555,12 @@ fn assert_candidate_step_order(steps: &[YamlValue], file: &str, job_id: &str) ->
     let checkout = candidate_step_position(steps, "Checkout candidate tap head", file, job_id);
     let sha = candidate_step_position(steps, "Verify candidate checkout SHA", file, job_id);
     let setup = candidate_step_position(steps, "Set up Homebrew candidate tap", file, job_id);
-    let path = candidate_step_position(steps, "Verify candidate formula path", file, job_id);
-    let install = candidate_step_position(steps, "Install candidate from source", file, job_id);
-    let service =
-        candidate_step_position(steps, "Inspect candidate service declaration", file, job_id);
-    let test = candidate_step_position(steps, "Test candidate formula", file, job_id);
+    let formula = candidate_step_position(
+        steps,
+        "Verify, install, and test candidate formula",
+        file,
+        job_id,
+    );
     assert!(
         hosted_runner == 0
             && hosted_runner < identity
@@ -2386,13 +2568,29 @@ fn assert_candidate_step_order(steps: &[YamlValue], file: &str, job_id: &str) ->
             && runner < checkout
             && checkout < sha
             && sha < setup
-            && setup < path
-            && path < install
-            && path < service
-            && install < test,
-        "runner, checkout, tap and formula identity validate before formula loading/install/testing: {file}:{job_id}"
+            && setup < formula,
+        "runner, checkout, and tap identity validate before formula loading/install/testing: {file}:{job_id}"
     );
-    path
+    let formula_script = yaml_string_field(&steps[formula], "run")
+        .expect("candidate formula checks run in one shell step");
+    for command in [
+        "Formulary.factory(ARGV.fetch(0))",
+        "brew install --build-from-source --verbose",
+        "brew test --verbose",
+        "formula.service?",
+    ] {
+        assert!(
+            formula_script.contains(command),
+            "candidate formula validation/install/test/service runs in one terminal step ({command}): {file}:{job_id}"
+        );
+    }
+    assert!(
+        steps.iter().skip(formula + 1).all(|step| {
+            !yaml_string_field(step, "run").is_some_and(|script| script.contains("brew "))
+        }),
+        "no later candidate step invokes Homebrew after formula code can change runner command files: {file}:{job_id}"
+    );
+    formula
 }
 
 fn assert_homebrew_setup_script(setup_script: &str, file: &str, job_id: &str) {
@@ -2589,22 +2787,25 @@ fn candidate_test_script<'script>(
 fn assert_candidate_service_loader(
     steps: &[YamlValue],
     scripts: &[&str],
-    path_position: usize,
+    formula_position: usize,
     file: &str,
     job_id: &str,
-) -> (String, String) {
+) -> String {
     let script = scripts
         .iter()
-        .find(|script| script.contains("brew ruby") && script.contains("service?"))
-        .unwrap_or_else(|| panic!("candidate service metadata is inspected: {file}:{job_id}"));
-    let step = steps
-        .iter()
-        .find(|step| {
-            yaml_string_field(step, "run").is_some_and(|run| run.contains("formula.service?"))
+        .find(|script| {
+            script.contains("brew ruby")
+                && script.contains("service?")
+                && script.contains("brew install --build-from-source")
+                && script.contains("brew test --verbose")
         })
-        .expect("service declaration inspection is a concrete step");
+        .unwrap_or_else(|| {
+            panic!("candidate service metadata shares formula check step: {file}:{job_id}")
+        });
+    let step = &steps[formula_position];
+    assert_eq!(yaml_string_field(step, "run"), Some(*script));
     assert_eq!(
-        yaml_string_field(step, "if"),
+        yaml_string_field(&step["env"], "SERVICE_REQUIRED"),
         Some("${{ fromJSON(inputs.homebrew_preview).service_required }}")
     );
     assert!(
@@ -2613,36 +2814,25 @@ fn assert_candidate_service_loader(
             && script.contains(
                 "abort \"candidate formula has no service declaration\" unless formula.service?"
             )
-            && script.contains("\"$TAP/$FORMULA\""),
-        "exact candidate service DSL is inspected without starting it: {file}:{job_id}"
-    );
-    let service_position = steps
-        .iter()
-        .position(|step| yaml_string_field(step, "run") == Some(*script))
-        .expect("service loader position exists");
-    assert!(
-        path_position < service_position,
-        "path validation precedes every service loader: {file}:{job_id}"
-    );
-    let guard = yaml_string_field(step, "if").expect("service loader has typed guard");
-    let compact = compact_lowercase(guard);
-    assert!(
-        is_service_required_guard(guard)
-            && !compact.contains("always()")
-            && !compact.contains("failure()")
+            && script.contains("\"$TAP/$FORMULA\"")
+            && script.contains("if [[ \"$SERVICE_REQUIRED\" == true ]]; then"),
+        "exact candidate service DSL is inspected without starting it and inside the formula-check terminal step: {file}:{job_id}"
     );
     for (index, step) in steps.iter().enumerate() {
         if yaml_contains(step, "Formulary.factory") && yaml_contains(step, "service?") {
             assert!(
-                index > path_position,
-                "every service loader follows formula path validation: {file}:{job_id}:{index}"
+                index == formula_position,
+                "every formula and service loader shares the guarded candidate terminal step: {file}:{job_id}:{index}"
             );
-            assert!(is_service_required_guard(
-                yaml_string_field(step, "if").expect("service loader has typed guard")
-            ));
         }
     }
-    (script.to_string(), guard.to_owned())
+    let service_ruby = ruby_service_check_from_shell(script)
+        .unwrap_or_else(|| panic!("candidate service Ruby program is present: {file}:{job_id}"));
+    assert!(
+        script.find("brew test --verbose") < script.rfind("brew ruby -e"),
+        "service declaration check follows candidate test in the same terminal step: {file}:{job_id}"
+    );
+    service_ruby.to_owned()
 }
 
 #[cfg(unix)]
@@ -2658,11 +2848,16 @@ fn assert_candidate_install_controls(fixture: &Fixture, job_id: &str, script: &s
     let calls = fs::read_to_string(&log).expect("fake brew records generated install command");
     assert_eq!(
         calls.lines().collect::<Vec<_>>(),
-        vec![format!(
-            "install --build-from-source --verbose {TAP}/{FORMULA}"
-        )]
+        vec![
+            format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
+            format!("test --verbose {TAP}/{FORMULA}"),
+        ]
     );
-    assert!(exact_candidate_brew_call(calls.trim(), "install"));
+    assert!(
+        exact_candidate_brew_call(calls.lines().next().unwrap_or_default(), "install")
+            && exact_candidate_brew_call(calls.lines().nth(1).unwrap_or_default(), "test")
+    );
+    assert_candidate_path_poisoning_controls(fixture, script);
     let failure_log = fixture
         .base
         .join(format!("fake-brew-install-failure-{job_id}.log"));
@@ -2685,7 +2880,9 @@ fn assert_candidate_install_controls(fixture: &Fixture, job_id: &str, script: &s
     assert!(wrong.status.success());
     let wrong_call = fs::read_to_string(&wrong_log).expect("read wrong-formula fake brew control");
     assert!(
-        !exact_candidate_brew_call(wrong_call.trim(), "install"),
+        wrong_call.lines().all(|call| {
+            !exact_candidate_brew_call(call, "install") && !exact_candidate_brew_call(call, "test")
+        }),
         "exact formula oracle rejects another formula"
     );
 }
@@ -2703,9 +2900,15 @@ fn assert_candidate_test_controls(fixture: &Fixture, job_id: &str, script: &str)
     let calls = fs::read_to_string(&log).expect("fake brew records generated test command");
     assert_eq!(
         calls.lines().collect::<Vec<_>>(),
-        vec![format!("test --verbose {TAP}/{FORMULA}")]
+        vec![
+            format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
+            format!("test --verbose {TAP}/{FORMULA}"),
+        ]
     );
-    assert!(exact_candidate_brew_call(calls.trim(), "test"));
+    assert!(
+        exact_candidate_brew_call(calls.lines().next().unwrap_or_default(), "install")
+            && exact_candidate_brew_call(calls.lines().nth(1).unwrap_or_default(), "test")
+    );
     let failure_log = fixture
         .base
         .join(format!("fake-brew-test-failure-{job_id}.log"));
@@ -2719,7 +2922,10 @@ fn assert_candidate_test_controls(fixture: &Fixture, job_id: &str, script: &str)
             .expect("read failing test control")
             .lines()
             .collect::<Vec<_>>(),
-        vec![format!("test --verbose {TAP}/{FORMULA}")]
+        vec![
+            format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
+            format!("test --verbose {TAP}/{FORMULA}"),
+        ]
     );
 }
 
@@ -2792,14 +2998,17 @@ fn install_and_test_steps_are_present() {
         let scripts = candidate_scripts(steps);
         let install_script = candidate_install_script(&scripts, &file, &job_id);
         let test_script = candidate_test_script(&scripts, &file, &job_id);
+        assert_eq!(
+            install_script, test_script,
+            "formula validation, install, test, and service inspection share one step: {file}:{job_id}"
+        );
         let path_check = assert_candidate_formula_path(&job, &content, &scripts, &file, &job_id);
-        let (service_script, service_guard) =
+        let service_ruby =
             assert_candidate_service_loader(steps, &scripts, path_position, &file, &job_id);
         #[cfg(unix)]
         assert_outside_formula_is_rejected_before_loading(
             &path_check,
-            &service_script,
-            &service_guard,
+            &service_ruby,
             service_required,
             &fixture,
         );
@@ -2894,9 +3103,11 @@ fn assert_candidate_runner_environment_guard(candidate: &YamlValue, fixture: &Fi
     );
     let install_script = steps
         .iter()
-        .find(|step| yaml_string_field(step, "name") == Some("Install candidate from source"))
+        .find(|step| {
+            yaml_string_field(step, "name") == Some("Verify, install, and test candidate formula")
+        })
         .and_then(|step| yaml_string_field(step, "run"))
-        .expect("candidate install step runs Homebrew");
+        .expect("candidate install and test step runs Homebrew");
     let guarded_install_script = format!("{runner_script}\n{install_script}");
     #[cfg(unix)]
     {
@@ -2936,9 +3147,10 @@ fn assert_candidate_runner_environment_guard(candidate: &YamlValue, fixture: &Fi
                 .expect("read GitHub-hosted candidate install call")
                 .lines()
                 .collect::<Vec<_>>(),
-            vec![format!(
-                "install --build-from-source --verbose {TAP}/{FORMULA}"
-            )]
+            vec![
+                format!("install --build-from-source --verbose {TAP}/{FORMULA}"),
+                format!("test --verbose {TAP}/{FORMULA}"),
+            ]
         );
     }
 }
@@ -3472,15 +3684,16 @@ fn assert_no_service_candidate() {
             .expect("candidate job has steps")
             .iter()
             .find(|step| {
-                yaml_string_field(step, "run")
-                    .is_some_and(|script| script.contains("formula.service?"))
+                yaml_string_field(step, "name")
+                    == Some("Verify, install, and test candidate formula")
             })
-            .expect("service metadata check remains conditional");
+            .expect("formula checks share one candidate step");
+        let script = yaml_string_field(step, "run").expect("candidate formula step has a script");
         assert!(
-            is_service_required_guard(
-                yaml_string_field(step, "if").expect("optional service check has typed guard")
-            ),
-            "false service flag skips DSL inspection: {file}:{job_id}"
+            yaml_string_field(&step["env"], "SERVICE_REQUIRED")
+                == Some("${{ fromJSON(inputs.homebrew_preview).service_required }}")
+                && script.contains("if [[ \"$SERVICE_REQUIRED\" == true ]]; then"),
+            "false service flag skips DSL inspection inside the single candidate step: {file}:{job_id}"
         );
     }
 }
