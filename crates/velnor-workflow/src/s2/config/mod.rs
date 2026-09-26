@@ -17,7 +17,7 @@ pub(crate) mod canonical;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -159,6 +159,11 @@ impl CacheVelnorSection {
         self.budget_bytes.is_some()
             || self.producer_window_seconds.is_some()
             || self.mbx_generation_bound.is_some()
+    }
+
+    pub(crate) fn generated_output_path(&self) -> Option<PathBuf> {
+        self.has_overrides()
+            .then(|| PathBuf::from("config/fleet/velnor-host.env"))
     }
 }
 
