@@ -9196,15 +9196,12 @@ fn parse_ownership_state(
 ///
 /// Generated-looking bytes are not authority: a handwritten file can forge
 /// the generated header. Scanners therefore omit only outputs recorded by a
-/// valid sidecar, plus the sidecar and the fixed fleet cache artifact.
+/// valid sidecar and the sidecar itself.
 pub(crate) fn generator_owned_output_paths(
     root: &Path,
 ) -> Result<BTreeSet<PathBuf>, GeneratorError> {
     let state_path = PathBuf::from(OWNERSHIP_STATE);
-    let mut paths = BTreeSet::from([
-        state_path.clone(),
-        PathBuf::from("config/fleet/velnor-host.env"),
-    ]);
+    let mut paths = BTreeSet::from([state_path.clone()]);
     let preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
     match parse_ownership_state(root, &preimage)? {
         OwnershipStateFile::Present(state) => paths.extend(state.outputs.into_keys()),
