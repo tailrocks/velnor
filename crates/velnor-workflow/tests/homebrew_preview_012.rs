@@ -2853,6 +2853,17 @@ fn candidate_install_shadows_inherited_configured_env() {
         Some(""),
         "candidate install shadows every other inherited configured key"
     );
+    let candidate_result = &generated["jobs"]["homebrew-candidate-result"];
+    assert_eq!(
+        candidate_result["env"]["TAP_TOKEN"].as_str(),
+        Some(""),
+        "candidate result shadows inherited secrets"
+    );
+    assert_eq!(
+        candidate_result["env"]["CUSTOM_SETTING"].as_str(),
+        Some(""),
+        "candidate result shadows every other inherited configured key"
+    );
     assert_candidate_formula_environment(candidate);
     assert_eq!(
         candidate["env"]["HOMEBREW_NO_AUTO_UPDATE"].as_str(),

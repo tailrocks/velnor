@@ -8124,6 +8124,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             let _ = writeln!(shadowed_env, "      {name}: \"\"");
         }
+        let mut shadowed_result_env = String::new();
+        if !inherited_env.is_empty() {
+            let _ = writeln!(shadowed_result_env, "    env:");
+            for name in inherited_env.keys() {
+                let _ = writeln!(shadowed_result_env, "      {name}: \"\"");
+            }
+        }
         let _ = writeln!(
             output,
             "  homebrew-candidate-install:\n    name: Homebrew candidate · ${{{{ matrix.platform.id }}}}\n    if: ${{{{ github.event_name == 'pull_request' && ({unit_gate}) }}}}\n    runs-on: ${{{{ matrix.platform.runner }}}}\n    timeout-minutes: 120\n    permissions:\n      contents: read\n    strategy:\n      fail-fast: false\n      matrix:\n        platform:"
@@ -8147,7 +8154,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         let _ = writeln!(
             output,
-            "  homebrew-candidate-result:\n    name: Homebrew candidate result\n    if: ${{{{ always() && github.event_name == 'pull_request' && ({unit_gate}) }}}}\n    needs: [homebrew-candidate-install]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    steps:\n      - name: Require every native candidate cell\n        env:\n          CANDIDATE_RESULT: ${{{{ needs.homebrew-candidate-install.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$CANDIDATE_RESULT\" != success ]]; then\n            echo \"Homebrew candidate matrix did not succeed: $CANDIDATE_RESULT\" >&2\n            exit 1\n          fi"
+            "  homebrew-candidate-result:\n    name: Homebrew candidate result\n    if: ${{{{ always() && github.event_name == 'pull_request' && ({unit_gate}) }}}}\n    needs: [homebrew-candidate-install]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions:\n      contents: read\n{shadowed_result_env}    steps:\n      - name: Require every native candidate cell\n        env:\n          CANDIDATE_RESULT: ${{{{ needs.homebrew-candidate-install.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$CANDIDATE_RESULT\" != success ]]; then\n            echo \"Homebrew candidate matrix did not succeed: $CANDIDATE_RESULT\" >&2\n            exit 1\n          fi"
         );
     }
 
