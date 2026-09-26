@@ -31,7 +31,7 @@ struct GitFixture {
 impl GitFixture {
     fn new(label: &str) -> Self {
         let root = std::env::temp_dir().join(format!(
-            "velnor-homebrew-admission-{label}-{}-{}",
+            "package-release-admission-{label}-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -53,14 +53,14 @@ impl GitFixture {
         );
         fixture.write(
             "Cargo.toml",
-            "[workspace]\nmembers = [\"crates/velnorctl\"]\nresolver = \"3\"\n\n[workspace.package]\nedition = \"2024\"\nlicense = \"MIT\"\n",
+            "[workspace]\nmembers = [\"crates/sample-cli\"]\nresolver = \"3\"\n\n[workspace.package]\nedition = \"2024\"\nlicense = \"MIT\"\n",
         );
         fixture.write(
-            "crates/velnorctl/Cargo.toml",
-            "[package]\nname = \"velnorctl\"\nversion = \"0.1.0\"\nedition.workspace = true\n",
+            "crates/sample-cli/Cargo.toml",
+            "[package]\nname = \"sample-cli\"\nversion = \"0.1.0\"\nedition.workspace = true\n",
         );
         fixture.write("rust-toolchain.toml", "[toolchain]\nchannel = \"1.91.1\"\n");
-        fixture.write("crates/velnorctl/src/main.rs", "fn main() {}\n");
+        fixture.write("crates/sample-cli/src/main.rs", "fn main() {}\n");
         fixture.commit_all("fixture base");
         fixture
     }
@@ -310,10 +310,10 @@ build_tasks = ["build-release"]
 verify_tasks = ["verify-release"]
 publication_lock_branch = "package-release-lock"
 package_dir = "dist"
-manifest_schema = "velnor.homebrew-preview-v1"
+manifest_schema = "example.homebrew-preview-v1"
 source_repository = "{REPOSITORY}"
 source_ref = "{SOURCE_REF}"
-payloads = ["velnor.tar.gz"]
+payloads = ["preview-package.tar.gz"]
 supporting_assets = ["SHA256SUMS"]
 channel = "preview"
 release_tag = "preview"
@@ -325,7 +325,7 @@ updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
 
 [declare.args.production_inputs]
-application = ["crates/velnorctl/**"]
+application = ["crates/sample-cli/**"]
 embedded-resources = ["share/**"]
 test-assets = ["tests/fixtures/embedded/**"]
 
@@ -702,7 +702,7 @@ fn assert_nonqualifying_events(fixture: &GitFixture, before: &str, head: &str) {
 fn assert_initial_push_is_admitted() {
     let initial = GitFixture::new("initial-push");
     initial.write(
-        "crates/velnorctl/src/main.rs",
+        "crates/sample-cli/src/main.rs",
         "fn main() { println!(\"initial push\"); }\n",
     );
     let head = initial.commit_all("first source head");
@@ -712,7 +712,7 @@ fn assert_initial_push_is_admitted() {
     assert_eq!(value["disposition"], "admit");
     assert!(changed(
         &value,
-        "crates/velnorctl/src/main.rs",
+        "crates/sample-cli/src/main.rs",
         None,
         "added"
     ));
@@ -720,7 +720,7 @@ fn assert_initial_push_is_admitted() {
         &value,
         "matched_rules",
         "application",
-        "crates/velnorctl/src/main.rs"
+        "crates/sample-cli/src/main.rs"
     ));
 }
 
@@ -729,7 +729,7 @@ fn production_edit_is_admitted() {
     let fixture = GitFixture::new("production-edit");
     let before = fixture.head();
     fixture.write(
-        "crates/velnorctl/src/main.rs",
+        "crates/sample-cli/src/main.rs",
         "fn main() { println!(\"preview\"); }\n",
     );
     // A commit-message keyword cannot turn a production edit into a skip.
@@ -746,7 +746,7 @@ fn production_edit_is_admitted() {
     assert_eq!(value["disposition"], "admit");
     assert!(changed(
         &value,
-        "crates/velnorctl/src/main.rs",
+        "crates/sample-cli/src/main.rs",
         None,
         "modified"
     ));
@@ -754,7 +754,7 @@ fn production_edit_is_admitted() {
         &value,
         "matched_rules",
         "application",
-        "crates/velnorctl/src/main.rs"
+        "crates/sample-cli/src/main.rs"
     ));
     assert_generated_workflow_contract(&fixture);
     assert_nonqualifying_events(&fixture, &before, &head);
@@ -890,24 +890,27 @@ fn docs_and_tests_only_are_skipped() {
 fn complete_diff_handles_renames_and_large_pushes() {
     let fixture = GitFixture::new("large-diff");
     fixture.write(
-        "crates/velnorctl/src/rename-source.rs",
+        "crates/sample-cli/src/rename-source.rs",
         "pub fn stable() {}\n",
     );
-    fixture.write("crates/velnorctl/src/delete-me.rs", "pub fn removed() {}\n");
+    fixture.write(
+        "crates/sample-cli/src/delete-me.rs",
+        "pub fn removed() {}\n",
+    );
     let before = fixture.commit_all("seed rename and delete paths");
 
     fixture.git(&[
         "mv",
-        "crates/velnorctl/src/rename-source.rs",
-        "crates/velnorctl/src/renamed-target.rs",
+        "crates/sample-cli/src/rename-source.rs",
+        "crates/sample-cli/src/renamed-target.rs",
     ]);
-    fixture.remove("crates/velnorctl/src/delete-me.rs");
-    let path_with_control_bytes = "crates/velnorctl/src/tab\tname\nwith-newline.rs";
+    fixture.remove("crates/sample-cli/src/delete-me.rs");
+    let path_with_control_bytes = "crates/sample-cli/src/tab\tname\nwith-newline.rs";
     fixture.write(path_with_control_bytes, "pub fn unusual_name() {}\n");
     // More than GitHub's 300-path filter limit.
     for index in 0..305 {
         fixture.write(
-            &format!("crates/velnorctl/src/bulk-{index:03}.rs"),
+            &format!("crates/sample-cli/src/bulk-{index:03}.rs"),
             &format!("pub const ITEM_{index}: usize = {index};\n"),
         );
     }
@@ -928,18 +931,18 @@ fn complete_diff_handles_renames_and_large_pushes() {
     );
     assert!(changed(
         &value,
-        "crates/velnorctl/src/renamed-target.rs",
-        Some("crates/velnorctl/src/rename-source.rs"),
+        "crates/sample-cli/src/renamed-target.rs",
+        Some("crates/sample-cli/src/rename-source.rs"),
         "renamed"
     ));
     assert!(changed(
         &value,
-        "crates/velnorctl/src/delete-me.rs",
+        "crates/sample-cli/src/delete-me.rs",
         None,
         "deleted"
     ));
     for index in [0, 150, 304] {
-        let path = format!("crates/velnorctl/src/bulk-{index:03}.rs");
+        let path = format!("crates/sample-cli/src/bulk-{index:03}.rs");
         assert!(changed(&value, &path, None, "added"), "missing {path}");
     }
     assert!(changed(&value, path_with_control_bytes, None, "added"));
@@ -961,7 +964,7 @@ fn embedded_resource_and_dependency_are_admitted() {
         "tests/fixtures/embedded/runtime.md",
         "A Markdown resource copied into the package.\n",
     );
-    fixture.write("vendor/runtime/libvelnor.so", "fixture runtime bytes\n");
+    fixture.write("vendor/runtime/libsample.so", "fixture runtime bytes\n");
     let head = fixture.commit_all("change embedded runtime inputs");
 
     let value = parse_success(&fixture.admit(&before, &head));
@@ -983,12 +986,12 @@ fn embedded_resource_and_dependency_are_admitted() {
         &value,
         "matched_dependencies",
         "runtime",
-        "vendor/runtime/libvelnor.so"
+        "vendor/runtime/libsample.so"
     ));
     assert!(changed(&value, "share/templates/help.md", None, "added"));
     assert!(changed(
         &value,
-        "vendor/runtime/libvelnor.so",
+        "vendor/runtime/libsample.so",
         None,
         "added"
     ));
@@ -1021,7 +1024,7 @@ fn embedded_resource_and_dependency_are_admitted() {
     // that a production dependency match admits the candidate.
     let dependency = GitFixture::new("dependency-only");
     let dependency_before = dependency.head();
-    dependency.write("vendor/runtime/libvelnor.so", "changed dependency bytes\n");
+    dependency.write("vendor/runtime/libsample.so", "changed dependency bytes\n");
     let dependency_head = dependency.commit_all("change runtime dependency only");
     let dependency_result = parse_success(&dependency.admit(&dependency_before, &dependency_head));
     assert_eq!(dependency_result["disposition"], "admit");
@@ -1029,7 +1032,7 @@ fn embedded_resource_and_dependency_are_admitted() {
         &dependency_result,
         "matched_dependencies",
         "runtime",
-        "vendor/runtime/libvelnor.so"
+        "vendor/runtime/libsample.so"
     ));
     assert!(dependency_result["matched_rules"]
         .as_array()
@@ -1042,7 +1045,7 @@ fn old_admitted_sha_remains_valid() {
     let fixture = GitFixture::new("replay-stable");
     let before = fixture.head();
     fixture.write(
-        "crates/velnorctl/src/main.rs",
+        "crates/sample-cli/src/main.rs",
         "fn main() { println!(\"A\"); }\n",
     );
     let admitted_head = fixture.commit_all("candidate A");
@@ -1153,7 +1156,7 @@ fn old_admitted_sha_remains_valid() {
 fn invalid_rules_fail_closed() {
     let fixture = GitFixture::new("invalid-rule");
     let invalid = config().replace(
-        "application = [\"crates/velnorctl/**\"]",
+        "application = [\"crates/sample-cli/**\"]",
         "application = [\"../outside/**\"]",
     );
     fixture.write(".github-gen/velnor-workflow.toml", &invalid);
@@ -1171,7 +1174,7 @@ fn invalid_rules_fail_closed() {
 
     let conflicting = config().replace(
         "[declare.args.non_production_inputs]",
-        "[declare.args.non_production_inputs]\napplication-shadow = [\"crates/velnorctl/**\"]",
+        "[declare.args.non_production_inputs]\napplication-shadow = [\"crates/sample-cli/**\"]",
     );
     fixture.write(".github-gen/velnor-workflow.toml", &conflicting);
     let conflict_head = fixture.commit_all("install contradictory release rules");
@@ -1208,9 +1211,9 @@ fn invalid_rules_fail_closed() {
     // A shallow checkout missing the exact before object must fail; it cannot
     // silently substitute the current branch tip.
     let full = GitFixture::new("shallow-history-source");
-    full.write("crates/velnorctl/src/lib.rs", "pub fn api() {}\n");
+    full.write("crates/sample-cli/src/lib.rs", "pub fn api() {}\n");
     let base = full.commit_all("source base");
-    full.write("crates/velnorctl/src/lib.rs", "pub fn api() { }\n");
+    full.write("crates/sample-cli/src/lib.rs", "pub fn api() { }\n");
     let shallow_head = full.commit_all("source head");
     let shallow_success = full.root.with_extension("shallow-two");
     let positive_clone = Command::new("git")
@@ -1260,7 +1263,7 @@ fn invalid_rules_fail_closed() {
     assert_eq!(available_result["disposition"], "admit");
     assert!(changed(
         &available_result,
-        "crates/velnorctl/src/lib.rs",
+        "crates/sample-cli/src/lib.rs",
         None,
         "modified"
     ));

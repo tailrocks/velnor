@@ -267,6 +267,10 @@ esac
 mkdir -p "$PACKAGE_RELEASE_SCRATCH_DIR"
 printf 'disposable build intermediate\n' > "$PACKAGE_RELEASE_SCRATCH_DIR/intermediate"
 mkdir -p "$VELNOR_VERIFIED_PACKAGE_DIR"
+if [[ "${PACKAGE_TEST_FAIL_DURING_COPY:-}" == "1" ]]; then
+  printf 'partial package copy\n' > "$VELNOR_VERIFIED_PACKAGE_DIR/preview-package.tar.gz"
+  exit 77
+fi
 printf 'preview payload for %s\n' "$VELNOR_SOURCE_COMMIT" > "$VELNOR_VERIFIED_PACKAGE_DIR/preview-package.tar.gz"
 payload_sha="$(sha256sum "$VELNOR_VERIFIED_PACKAGE_DIR/preview-package.tar.gz" | awk '{print $1}')"
 printf '%s  %s\n' "$payload_sha" preview-package.tar.gz > "$VELNOR_VERIFIED_PACKAGE_DIR/SHA256SUMS"
@@ -701,13 +705,23 @@ fn run_package_pipeline(
     event: &EventContext,
     dirty_before_tree_check: bool,
 ) -> PackageRun {
+    run_package_pipeline_with_producer_environment(fixture, event, dirty_before_tree_check, &[])
+}
+
+fn run_package_pipeline_with_producer_environment(
+    fixture: &Fixture,
+    event: &EventContext,
+    dirty_before_tree_check: bool,
+    producer_environment: &[(&str, &str)],
+) -> PackageRun {
     let (candidate, admission_outputs) = execute_admission_classifier(fixture, event);
-    run_build_pipeline(
+    run_build_pipeline_with_producer_environment(
         fixture,
         event,
         candidate,
         admission_outputs,
         dirty_before_tree_check,
+        producer_environment,
     )
 }
 
@@ -731,6 +745,24 @@ fn run_build_pipeline(
     candidate: JsonValue,
     admission_outputs: std::collections::BTreeMap<String, String>,
     dirty_before_tree_check: bool,
+) -> PackageRun {
+    run_build_pipeline_with_producer_environment(
+        fixture,
+        event,
+        candidate,
+        admission_outputs,
+        dirty_before_tree_check,
+        &[],
+    )
+}
+
+fn run_build_pipeline_with_producer_environment(
+    fixture: &Fixture,
+    event: &EventContext,
+    candidate: JsonValue,
+    admission_outputs: std::collections::BTreeMap<String, String>,
+    dirty_before_tree_check: bool,
+    producer_environment: &[(&str, &str)],
 ) -> PackageRun {
     if !build_gate_allows(fixture, event, &admission_outputs) {
         return PackageRun {
@@ -795,13 +827,14 @@ fn run_build_pipeline(
         };
     }
 
-    let build = execute_rendered_step(
+    let build = execute_rendered_step_with_extra_environment(
         fixture,
         "build",
         "Build verified package directory",
         event,
         &admission_outputs,
         true,
+        producer_environment,
     );
     if !build.output.status.success() {
         return PackageRun {
@@ -1102,6 +1135,48 @@ fn scratch_cleanup_preserves_output() {
     );
     assert_eq!(fs::read_to_string(&unrelated).unwrap(), "caller-owned\n");
     assert!(fixture.root.is_dir(), "checkout parent was preserved");
+
+    fs::remove_dir_all(handoff_path(&retry)).unwrap();
+    let failure_event = EventContext::push(&before, &source_sha, "7100", "3");
+    let failed = run_package_pipeline_with_producer_environment(
+        &fixture,
+        &failure_event,
+        false,
+        &[("PACKAGE_TEST_FAIL_DURING_COPY", "1")],
+    );
+    assert_eq!(failed.candidate["disposition"], "admit");
+    assert!(
+        failed.build_ran,
+        "admitted source reached the package producer"
+    );
+    assert!(
+        producer_was_called(&fixture),
+        "producer ran before the simulated copy failure"
+    );
+    let producer = failed.build.as_ref().expect("producer step ran");
+    assert_step_failure(producer, "producer interrupted during package copy");
+    assert!(
+        failed.verification.is_none(),
+        "failed producer prevents the generated verifier from running"
+    );
+    let partial_handoff = handoff_path(&failed);
+    assert!(partial_handoff.starts_with(fixture.root.join("dist")));
+    assert_eq!(
+        fs::read_to_string(partial_handoff.join("preview-package.tar.gz")).unwrap(),
+        "partial package copy\n",
+        "failed copy leaves a truncated payload at the declared handoff path"
+    );
+    let partial_verification = verify_handoff_again(&fixture, &failure_event, &failed);
+    assert_step_failure(&partial_verification, "partial handoff rejection");
+    let failed_scratch = scratch_path(&failed);
+    assert!(failed_scratch.starts_with(&fixture.runner_temp));
+    assert!(!failed_scratch.starts_with(&fixture.root));
+    assert!(
+        !failed_scratch.exists(),
+        "producer failure still cleans only its owned scratch directory"
+    );
+    assert!(fixture.runner_temp.is_dir());
+    assert_eq!(fs::read_to_string(&unrelated).unwrap(), "caller-owned\n");
 }
 
 #[test]

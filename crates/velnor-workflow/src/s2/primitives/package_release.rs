@@ -3859,7 +3859,7 @@ contract_fixture = ["tests/contract-fixtures/**"]
         assert!(workflow.contains("name: Admit production release inputs"));
 
         let changes = [crate::s2::reuse::ChangedPath {
-            path: "crates/velnorctl/src/new_module.rs".to_owned(),
+            path: "crates/sample-cli/src/new_module.rs".to_owned(),
             previous: None,
             status: crate::s2::reuse::ChangeKind::Added,
         }];
