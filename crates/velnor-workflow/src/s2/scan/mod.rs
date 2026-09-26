@@ -666,10 +666,10 @@ mod tests {
             "the product exports the recipe's resolved floor: {:?}",
             product.env
         );
-        let identity = crate::s2::platform::ProductIdentity::for_product(unit, product)
-            .expect("native product identity");
         assert_eq!(
-            identity.deployment_target, "26.0",
+            crate::s2::platform::ProductIdentity::for_product(unit, product)
+                .map(|identity| identity.deployment_target.as_str()),
+            Some("26.0"),
             "native product identity uses the effective recipe floor"
         );
         assert!(
