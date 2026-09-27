@@ -5435,10 +5435,6 @@ fn audited_pin_script() -> &'static str {
 /// manifest, digest, and candidate closure, then exports it through the
 /// existing pinned-binary slot plus its manifest. Keep this fragment byte
 /// compatible with the bootstrap workflow until the pin is promoted.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the legacy candidate acquisition shell keeps its provenance gates together"
-)]
 fn policy_candidate_step_legacy(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
