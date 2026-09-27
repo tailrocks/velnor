@@ -29,8 +29,11 @@
 use std::fmt::Write as _;
 
 use super::{Args, Primitive, RenderCtx, Rendered};
+use crate::closure_inputs;
+#[cfg(test)]
+use crate::s2::closure::CLOSURE_PATHS;
 use crate::s2::closure::{
-    product_tag, CI_FEATURES, CLOSURE_PATHS, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
+    product_tag, CI_FEATURES, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
 };
 use crate::s2::{
     config_rust_toolchain, control_plane_gate, workflow_setup_action_repository, yaml_scalar,
@@ -46,6 +49,29 @@ pub(crate) const RUNTIME_PRODUCTS_FILE: &str = "ci-runtime-products.yml";
 /// The producer side-file family and the canonical file it renders.
 pub(crate) const RUNTIME_PRODUCTS_SIDE_FILES: &[(&str, &str)] =
     &[(RUNTIME_PRODUCTS_FILE, super::RUNTIME_PRODUCTS)];
+
+fn producer_closure_paths() -> Result<Vec<String>, GeneratorError> {
+    closure_inputs::closure_paths(
+        include_str!("../../../Cargo.toml"),
+        include_str!("../../../../../Cargo.toml"),
+    )
+    .map_err(GeneratorError::usage)
+}
+
+fn producer_closure_pathspec(paths: &[String]) -> String {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            if index < closure_inputs::BASE_CLOSURE_PATHS.len() {
+                path.clone()
+            } else {
+                format!(":(literal){}", crate::shell_quote(path))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Whether `primitive` renders the runtime-product producer workflow.
 pub(crate) fn is_runtime_products_side(primitive: &str) -> bool {
@@ -184,6 +210,10 @@ pub(crate) fn runtime_products_content(
     let build_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
     let publish_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
     let repository = workflow_setup_action_repository();
+    // Preserve the legacy v1 pathset unless this emitter package declares
+    // the optional local model dependency. Then both publisher resolutions
+    // include the model source subtree.
+    let closure_paths = producer_closure_paths()?;
     let owner = product_owner(repository);
     // The toolchain install is file-driven: the checkout's own
     // `rust-toolchain.toml` — itself a closure input — pins the channel, so a
@@ -332,7 +362,7 @@ jobs:
           head="$(git rev-parse HEAD)"
           [[ "$head" =~ ^[0-9a-f]{{40}}$ ]] || {{ echo "::error::HEAD is not a commit SHA: $head" >&2; exit 1; }}
           listing="$(git ls-tree -r HEAD -- {closure_paths})"
-          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
+{closure_guard}          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
           closure="$(printf '%s\n{closure_footer}' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{{print $1}}')"
           [[ "$closure" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::closure resolution failed" >&2; exit 1; }}
           tag="{tag_prefix}${{closure:0:16}}"
@@ -562,7 +592,11 @@ jobs:
         workflow_file = RUNTIME_PRODUCTS_FILE,
         runtime_home = HOSTED_WORKFLOW_RUNTIME_HOME,
         tag_prefix = PRODUCT_TAG_PREFIX,
-        closure_paths = CLOSURE_PATHS.join(" "),
+        closure_paths = producer_closure_pathspec(&closure_paths),
+        closure_guard = closure_inputs::indent_script(
+            &closure_inputs::producer_closure_validation(&closure_paths, "head"),
+            "          "
+        ),
         closure_footer = closure_footer,
         matrix = matrix,
         manifest_products = manifest_program,
@@ -642,6 +676,50 @@ mod tests {
 
     use super::*;
     use crate::s2::UnitKind;
+
+    #[test]
+    fn dynamic_closure_pathspecs_are_shell_quoted() {
+        let mut paths = closure_inputs::BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        let hostile = "vendor/[glob]* with space;touch sentinel";
+        paths.push(hostile.to_owned());
+        assert!(producer_closure_pathspec(&paths)
+            .ends_with(&format!(":(literal){}", crate::shell_quote(hostile))));
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "producer guard shell syntax must fail the fixture directly"
+    )]
+    #[test]
+    fn producer_closure_guard_checks_dynamic_tree_before_hashing() {
+        let mut paths = closure_inputs::BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        paths.push("vendor/[literal]*".to_owned());
+        let guard = closure_inputs::producer_closure_validation(&paths, "head");
+        assert!(guard.contains("local Cargo dependency tree is missing"));
+        assert!(guard.contains("transitive Cargo path dependency"));
+        assert!(guard.contains("':(literal)vendor/[literal]*'"));
+        let mut bash = must(
+            std::process::Command::new("bash")
+                .args(["-n"])
+                .stdin(std::process::Stdio::piped())
+                .spawn(),
+            "bash is available",
+        );
+        let mut input = bash.stdin.take().expect("bash stdin");
+        std::io::Write::write_all(
+            &mut input,
+            format!("set -euo pipefail\nhead=HEAD\nlisting=x\n{guard}").as_bytes(),
+        )
+        .expect("write guard shell");
+        drop(input);
+        assert!(must(bash.wait(), "check guard syntax").success());
+    }
 
     const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -847,7 +925,11 @@ mod tests {
     fn setup_action_source() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
-        must(fs::read_to_string(&path), "read the setup action source")
+        let source = must(fs::read_to_string(&path), "read the setup action source");
+        must(
+            closure_inputs::render_setup_action(&source),
+            "render the setup action for the active closure",
+        )
     }
 
     #[test]
@@ -914,7 +996,7 @@ mod tests {
     #[test]
     fn closure_shell_matches_the_canonical_form() {
         let content = owner_content(&[]);
-        let pathspec = CLOSURE_PATHS.join(" ");
+        let pathspec = must(producer_closure_paths(), "current manifests parse").join(" ");
         assert!(
             content.contains(&format!("git ls-tree -r HEAD -- {pathspec}")),
             "the closure pathspec derives from CLOSURE_PATHS: {content}"
