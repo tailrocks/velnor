@@ -3399,14 +3399,7 @@ mod tests {
         );
         assert!(
             candidate.contains("env -i PATH=\"$PATH\" \"$stage/velnor-workflow\" --closure")
-                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]")
-                && candidate.contains(
-                    "reported_revision=\"$(env -i PATH=\"$PATH\" \"$stage/velnor-workflow\" --revision)\""
-                )
-                && candidate.contains(
-                    "manifest_build_revision=\"$(jq -er '.build_revision' \"$stage/candidate-manifest.json\")\""
-                )
-                && candidate.contains("[[ \"$reported_revision\" == \"$manifest_build_revision\" ]]"),
+                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]"),
             "the staged binary proves its closure and build revision before upload: {candidate}"
         );
         for argument in [

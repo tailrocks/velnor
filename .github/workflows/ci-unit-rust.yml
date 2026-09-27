@@ -711,7 +711,10 @@ jobs:
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
           reported="$(env -i PATH="$PATH" "$stage/velnor-workflow" --closure)"
           [[ "$reported" == "$head_closure" ]] || { echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }
+          reported_revision="$(env -i PATH="$PATH" "$stage/velnor-workflow" --revision)"
           jq -n --arg profile debug --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}' > "$stage/candidate-manifest.json"
+          manifest_build_revision="$(jq -er '.build_revision' "$stage/candidate-manifest.json")"
+          [[ "$reported_revision" == "$manifest_build_revision" ]] || { echo "::error::candidate reports revision $reported_revision, manifest build_revision $manifest_build_revision" >&2; exit 1; }
           if [[ "$worktree" != "" ]]; then
             git worktree remove --force "$worktree"
             trap - EXIT
@@ -788,3 +791,4 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+
