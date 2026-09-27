@@ -259,9 +259,9 @@ for dependencies in sections:
     /// caller has already fetched the recursive Git tree into `$tree`.
     pub(crate) fn api_shell_resolver(indent: &str) -> String {
         let mut script = String::from(
-            r#"workflow_blob="$(jq -r '.tree[] | select(.path == "crates/velnor-workflow/Cargo.toml") | .sha' <<<"$tree")"
+            r#"manifests="$(mktemp -d)"
+workflow_blob="$(jq -r '.tree[] | select(.path == "crates/velnor-workflow/Cargo.toml") | .sha' <<<"$tree")"
 if [[ "$workflow_blob" != '' ]]; then
-manifests="$(mktemp -d)"
 workspace_blob="$(jq -r '.tree[] | select(.path == "Cargo.toml") | .sha' <<<"$tree")"
 gh api "repos/$PRODUCT_REPOSITORY/git/blobs/$workflow_blob" | jq -er '.content' | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$manifests/workflow.toml"
 if [[ "$workspace_blob" != '' ]]; then
@@ -283,23 +283,28 @@ check_transitive_manifest() { python3 - "$1" "$manifests/workspace.toml" "$2" "$
 import sys, tomllib
 with open(sys.argv[1], 'rb') as source: manifest = tomllib.load(source)
 with open(sys.argv[2], 'rb') as source: workspace = tomllib.load(source)
+dependency_root, manifest_path = sys.argv[3], sys.argv[4]
 workspace_table = workspace.get('workspace', {})
 if not isinstance(workspace_table, dict): raise SystemExit('workspace must be a table')
 workspace_dependencies = workspace_table.get('dependencies', {})
 if not isinstance(workspace_dependencies, dict): raise SystemExit('workspace.dependencies must be a table')
+members = workspace_table.get('members', [])
+if not isinstance(members, list) or not all(isinstance(member, str) for member in members): raise SystemExit('workspace.members must be a string array')
 sections = []
-for name in ('dependencies', 'build-dependencies'):
+for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
     if name in manifest: sections.append(manifest[name])
 target = manifest.get('target', {})
 if not isinstance(target, dict): raise SystemExit('target must be a table')
 for target_table in target.values():
     if not isinstance(target_table, dict): raise SystemExit('target entry must be a table')
-    for name in ('dependencies', 'build-dependencies'):
+    for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
         if name in target_table: sections.append(target_table[name])
 for dependencies in sections:
     if not isinstance(dependencies, dict): raise SystemExit('dependency section must be a table')
     for alias, declaration in dependencies.items():
         if isinstance(declaration, dict) and declaration.get('workspace') is True:
+            if manifest_path != dependency_root + '/Cargo.toml' or dependency_root not in members:
+                raise SystemExit(f'unproven nested workspace inheritance in {manifest_path}')
             declaration = workspace_dependencies.get(alias)
         if isinstance(declaration, str): continue
         if not isinstance(declaration, dict): raise SystemExit(f'invalid Cargo dependency {alias}')
@@ -801,6 +806,9 @@ path = "../native-helper"
             assert!(rendered.contains("import tomllib"));
             assert!(rendered.contains("listing+=$'\\n'\"$dependency_tree\""));
             assert!(rendered.contains("local Cargo dependency contains a symlink"));
+            assert!(rendered.contains("unproven nested workspace inheritance"));
+            assert!(rendered.contains("'dev-dependencies'"));
+            assert!(rendered.contains("manifest_path != dependency_root + '/Cargo.toml'"));
             assert!(rendered.contains("-- \":(literal)$dependency_path\""));
             serde_yaml::from_str::<serde_yaml::Value>(&rendered)
                 .expect("model-aware setup action is valid YAML");
@@ -811,6 +819,14 @@ path = "../native-helper"
             .into_iter()
             .enumerate()
             {
+                if index == 1 {
+                    assert!(
+                        script.find("manifests=\"$(mktemp -d)\"")
+                            < script.find("if [[ \"$workflow_blob\" != '' ]]")
+                    );
+                    assert!(script.contains("else\ndependency_paths='[]'\nfi"));
+                    assert!(script.contains("rm -rf \"$manifests\""));
+                }
                 std::fs::write(format!("/tmp/closure-bridge-resolver-{index}.sh"), &script)
                     .expect("write shell resolver fixture");
                 let mut syntax = std::process::Command::new("bash")

@@ -145,8 +145,12 @@ pub(crate) fn closure_of_tree(
         } else {
             "[workspace]\n".to_owned()
         };
-        closure_inputs::closure_paths(&workflow_manifest, &workspace_manifest)
-            .map_err(GeneratorError::usage)?
+        let paths = closure_inputs::closure_paths(&workflow_manifest, &workspace_manifest)
+            .map_err(GeneratorError::usage)?;
+        for dependency_root in paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len()) {
+            reject_transitive_path_dependencies(repo, rev, dependency_root, &workspace_manifest)?;
+        }
+        paths
     } else {
         // Keep the published v1 pathset for historical revisions before the
         // workflow crate manifest existed.
@@ -186,17 +190,14 @@ pub(crate) fn closure_of_tree(
         .lines()
         .map(str::to_owned)
         .collect();
-    let dependency_paths = paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len());
     if lines.iter().any(|line| {
         line.starts_with("120000 ")
-            && line.split_once('\t').is_some_and(|(_, path)| {
-                dependency_paths.clone().any(|dependency| {
-                    path == dependency || path.starts_with(&format!("{dependency}/"))
-                })
-            })
+            && line
+                .split_once('\t')
+                .is_some_and(|(_, path)| path != "crates/velnor-workflow/CLAUDE.md")
     }) {
         return Err(GeneratorError::usage(format!(
-            "revision {rev} contains a symlink in the source closure"
+            "revision {rev} contains a Cargo/runtime symlink in the source closure"
         )));
     }
     if lines.is_empty() {
@@ -206,6 +207,47 @@ pub(crate) fn closure_of_tree(
         )));
     }
     Ok(canonical_digest(&lines, features, profile))
+}
+
+fn reject_transitive_path_dependencies(
+    repo: &Path,
+    rev: &str,
+    dependency_root: &str,
+    workspace_manifest: &str,
+) -> Result<(), GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-tree", "-r", "--name-only", rev, "--"])
+        .arg(format!(":(literal){dependency_root}"))
+        .output()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "list local dependency tree {dependency_root}: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "list local dependency tree {dependency_root} at {rev} failed"
+        )));
+    }
+    let paths = String::from_utf8_lossy(&output.stdout);
+    for manifest_path in paths.lines().filter(|path| path.ends_with("Cargo.toml")) {
+        let manifest = git_show(repo, rev, manifest_path)?;
+        if closure_inputs::manifest_has_local_dependency(
+            &manifest,
+            workspace_manifest,
+            dependency_root,
+            manifest_path,
+        )
+        .map_err(GeneratorError::usage)?
+        {
+            return Err(GeneratorError::usage(format!(
+                "local dependency tree {dependency_root} contains transitive Cargo path dependency in {manifest_path}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn git_path_exists(repo: &Path, rev: &str, path: &str) -> Result<bool, GeneratorError> {
@@ -637,6 +679,139 @@ mod tests {
             .expect_err("dependency symlink cannot be hidden by a blob digest");
         assert!(error.to_string().contains("symlink"), "{error}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "base symlink fixture failures need direct context"
+    )]
+    #[test]
+    fn closure_rejects_base_symlinks_but_keeps_the_legacy_claude_link() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-s2-base-symlink-{}", crate::unique_suffix()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        std::fs::write(root.join("CLAUDE.md"), "legacy instructions\n").expect("root instructions");
+        std::os::unix::fs::symlink(
+            "../../CLAUDE.md",
+            root.join("crates/velnor-workflow/CLAUDE.md"),
+        )
+        .expect("known workflow instructions symlink");
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "legacy CLAUDE symlink",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        must(
+            closure_of_tree(&root, &rev, "", PROFILE_RELEASE),
+            "known legacy CLAUDE link is allowed",
+        );
+
+        std::fs::remove_file(root.join("Cargo.lock")).expect("remove lockfile");
+        std::os::unix::fs::symlink("UNRELATED.md", root.join("Cargo.lock"))
+            .expect("unsafe base lockfile symlink");
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "unsafe base symlink",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let error = closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
+            .expect_err("base runtime symlink must fail closed");
+        assert!(error.to_string().contains("symlink"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the malformed dependency fixture must name its rejection reason"
+    )]
+    #[test]
+    fn closure_rejects_transitive_path_dependencies_in_optional_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-s2-transitive-path-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        must(
+            std::fs::create_dir_all(root.join("crates/model-helper/src")),
+            "nested helper dirs",
+        );
+        must(
+            std::fs::write(
+                root.join("crates/model-helper/Cargo.toml"),
+                "[package]\nname = \"model-helper\"\nversion = \"0.1.0\"\n",
+            ),
+            "nested helper manifest",
+        );
+        must(
+            std::fs::write(
+                root.join("crates/velnor-model/Cargo.toml"),
+                "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\n[dependencies.model-helper]\npath = \"../model-helper\"\n",
+            ),
+            "model manifest with transitive path dependency",
+        );
+        must(
+            std::fs::write(
+                root.join("crates/model-helper/src/lib.rs"),
+                "pub fn helper() {}\n",
+            ),
+            "nested helper source",
+        );
+        must(
+            std::fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n[dependencies.velnor-model]\npath = \"../velnor-model\"\n",
+            ),
+            "workflow manifest with optional model dependency",
+        );
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "transitive model path dependency",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let error = closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
+            .expect_err("optional model tree rejects transitive path dependencies");
+        assert!(
+            error
+                .to_string()
+                .contains("transitive Cargo path dependency"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
