@@ -455,8 +455,9 @@ pub(crate) fn unit(
 }
 
 /// The typed platform/trust/capability contract the scan derives per kind.
-/// Docker is required by generated Docker builds; language units start without
-/// runner capabilities and detectors add those only from concrete evidence.
+/// Generated Docker builds use Buildx, so Docker units require Docker and the
+/// Buildx/Compose runner capability bundle. Language units start without
+/// Docker-class capabilities; detectors add only their concrete evidence.
 fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
     let trust = TrustReq::UntrustedOk;
     match kind {
@@ -465,6 +466,7 @@ fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
             trust,
             Capabilities {
                 docker: true,
+                buildx_compose: true,
                 ..Capabilities::default()
             },
         ),
@@ -619,16 +621,17 @@ mod tests {
             crate::s2::UnitKind::Docker,
             ".",
             Vec::new(),
-            vec!["docker build --file Dockerfile .".to_owned()],
+            vec!["docker buildx build --file Dockerfile .".to_owned()],
             None,
         );
         assert_eq!(
             crate::s2::provider::Capabilities {
                 docker: true,
+                buildx_compose: true,
                 ..crate::s2::provider::Capabilities::default()
             },
             docker.capabilities,
-            "Dockerfile builds require Docker, not Compose or Testcontainers"
+            "generated Docker Buildx builds require the runner's Buildx/Compose bundle, not Testcontainers"
         );
 
         let mut service = super::unit(crate::s2::UnitKind::Rust, ".", Vec::new(), Vec::new(), None);
