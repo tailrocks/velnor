@@ -11356,7 +11356,10 @@ mod tests {
         assert!(model.contains("import tomllib"));
         assert!(model.contains("listing+=$'\\n'\"$dependency_tree\""));
         assert!(model.contains("local Cargo dependency has no tracked source tree"));
-        assert!(model.contains("PRODUCT_REPOSITORY: tailrocks/velnor"));
+        assert!(model.contains(&format!(
+            "PRODUCT_REPOSITORY: {}",
+            workflow_setup_action_repository()
+        )));
         assert!(model.contains(
             "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
         ));

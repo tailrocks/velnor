@@ -103,9 +103,25 @@ fn self_closure(manifest_dir: &Path) -> Option<String> {
     }
     let listing = String::from_utf8(output.stdout).ok()?;
     let mut lines: Vec<&str> = listing.lines().collect();
-    let has_dependency_symlink = has_dependency_symlink(&lines, &paths[BASE_CLOSURE_PATHS.len()..]);
-    if lines.is_empty() || has_dependency_symlink {
+    if lines.is_empty() || has_unsafe_closure_symlink(&lines) {
         return None;
+    }
+    for dependency_root in &paths[BASE_CLOSURE_PATHS.len()..] {
+        for line in &lines {
+            let Some((_, path)) = line.split_once('\t') else {
+                continue;
+            };
+            if !(path == dependency_root || path.starts_with(&format!("{dependency_root}/")))
+                || !path.ends_with("Cargo.toml")
+            {
+                continue;
+            }
+            let manifest = git(&root, &[&format!("show HEAD:{path}")])?;
+            if manifest_has_local_dependency(&manifest, &workspace_manifest, dependency_root, path)?
+            {
+                return None;
+            }
+        }
     }
     lines.sort_unstable();
     lines.dedup();
@@ -131,15 +147,68 @@ fn self_closure(manifest_dir: &Path) -> Option<String> {
     Some(output)
 }
 
-fn has_dependency_symlink(lines: &[&str], dependencies: &[String]) -> bool {
+fn has_unsafe_closure_symlink(lines: &[&str]) -> bool {
     lines.iter().any(|line| {
         line.starts_with("120000 ")
-            && line.split_once('\t').is_some_and(|(_, path)| {
-                dependencies.iter().any(|dependency| {
-                    path == dependency || path.starts_with(&format!("{dependency}/"))
-                })
-            })
+            && line
+                .split_once('\t')
+                .is_some_and(|(_, path)| path != "crates/velnor-workflow/CLAUDE.md")
     })
+}
+
+fn manifest_has_local_dependency(
+    manifest: &str,
+    workspace: &str,
+    dependency_root: &str,
+    manifest_path: &str,
+) -> Option<bool> {
+    let manifest = toml::from_str::<toml::Value>(manifest).ok()?;
+    let workspace = toml::from_str::<toml::Value>(workspace).ok()?;
+    let workspace_dependencies = match workspace.get("workspace") {
+        Some(value) => match value.as_table()?.get("dependencies") {
+            Some(value) => Some(value.as_table()?),
+            None => None,
+        },
+        None => None,
+    };
+    let workspace_table = workspace.get("workspace")?.as_table()?;
+    let members = match workspace_table.get("members") {
+        Some(members) => Some(
+            members
+                .as_array()?
+                .iter()
+                .map(toml::Value::as_str)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+    for (_, dependencies) in dependency_sections(&manifest)? {
+        for (alias, declaration) in dependencies.as_table()? {
+            if declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true)
+                && (manifest_path != format!("{dependency_root}/Cargo.toml")
+                    || !members
+                        .as_ref()
+                        .is_some_and(|members| members.contains(&dependency_root)))
+            {
+                return None;
+            }
+            let mut declaration = declaration;
+            if !declaration.is_str() && !declaration.is_table() {
+                return None;
+            }
+            if declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                declaration = workspace_dependencies?.get(alias)?;
+                if !declaration.is_str() && !declaration.is_table() {
+                    return None;
+                }
+            }
+            if let Some(path) = declaration.get("path") {
+                path.as_str()?;
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
 }
 
 fn closure_pathspecs(paths: &[String]) -> Vec<String> {
@@ -178,7 +247,10 @@ fn build_closure_paths(workflow: &str, workspace: &str) -> Option<Vec<String>> {
         .iter()
         .map(|path| (*path).to_owned())
         .collect::<Vec<_>>();
-    for (_, deps) in dependency_sections(&workflow)? {
+    for (section, deps) in dependency_sections(&workflow)? {
+        if section == "dev-dependencies" || section.ends_with(".dev-dependencies") {
+            continue;
+        }
         for (alias, declaration) in deps.as_table()? {
             let mut decl = declaration;
             if !decl.is_str() && !decl.is_table() {
@@ -245,7 +317,7 @@ fn build_closure_paths(workflow: &str, workspace: &str) -> Option<Vec<String>> {
 fn dependency_sections(manifest: &toml::Value) -> Option<Vec<(&'static str, &toml::Value)>> {
     let root = manifest.as_table()?;
     let mut sections = Vec::new();
-    for name in ["dependencies", "build-dependencies"] {
+    for name in ["dependencies", "build-dependencies", "dev-dependencies"] {
         if let Some(value) = root.get(name) {
             sections.push((name, value));
         }
@@ -253,7 +325,7 @@ fn dependency_sections(manifest: &toml::Value) -> Option<Vec<(&'static str, &tom
     if let Some(targets) = root.get("target") {
         for value in targets.as_table()?.values() {
             let target = value.as_table()?;
-            for name in ["dependencies", "build-dependencies"] {
+            for name in ["dependencies", "build-dependencies", "dev-dependencies"] {
                 if let Some(value) = target.get(name) {
                     sections.push((name, value));
                 }
@@ -329,7 +401,8 @@ fn is_full_sha(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_closure_paths, closure_pathspecs, has_dependency_symlink, BASE_CLOSURE_PATHS,
+        build_closure_paths, closure_pathspecs, has_unsafe_closure_symlink,
+        manifest_has_local_dependency, BASE_CLOSURE_PATHS,
     };
 
     #[test]
@@ -442,20 +515,51 @@ path = "tools/shared"
 
     #[test]
     fn build_stamp_rejects_dependency_symlinks_but_keeps_legacy_links() {
-        let paths = build_closure_paths(
-            "[dependencies.helper]\npath = \"../helper\"\n",
-            "[workspace]\n",
-        )
-        .expect("valid path dependency");
-        let dependencies = &paths[BASE_CLOSURE_PATHS.len()..];
-        assert!(has_dependency_symlink(
-            &["120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/helper/src/linked.rs"],
-            dependencies,
+        assert!(has_unsafe_closure_symlink(&[
+            "120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/helper/src/linked.rs"
+        ]));
+        assert!(!has_unsafe_closure_symlink(
+            &["120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/CLAUDE.md"]
         ));
-        assert!(!has_dependency_symlink(
-            &["120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/CLAUDE.md"],
-            dependencies,
+        assert!(has_unsafe_closure_symlink(
+            &["120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/src/linked.rs"]
         ));
+    }
+
+    #[test]
+    fn build_stamp_fails_closed_on_transitive_path_dependencies() {
+        let manifest =
+            "[package]\nname = \"helper\"\n[dependencies]\nnested = { path = \"../nested\" }\n";
+        assert_eq!(
+            manifest_has_local_dependency(
+                manifest,
+                "[workspace]\n",
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            ),
+            Some(true)
+        );
+        let inherited =
+            "[package]\nname = \"helper\"\n[dependencies]\nnested = { workspace = true }\n";
+        let workspace = "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nnested = { path = \"crates/nested\" }\n";
+        assert_eq!(
+            manifest_has_local_dependency(
+                inherited,
+                workspace,
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            manifest_has_local_dependency(
+                inherited,
+                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nnested = \"1\"\n",
+                "crates/velnor-model/nested",
+                "crates/velnor-model/nested/Cargo.toml"
+            ),
+            None
+        );
     }
 
     #[test]

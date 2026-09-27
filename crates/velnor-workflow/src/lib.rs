@@ -39,7 +39,6 @@ mod closure_inputs {
         ".cargo",
     ];
 
-    #[cfg(test)]
     pub(crate) const VELNOR_MODEL_PATH: &str = "crates/velnor-model";
 
     const PYTHON_RESOLVER: &str = r#""""TOML dependency probe embedded in the generated setup action."""
@@ -91,7 +90,7 @@ def resolved_path(base, path):
     return "/".join(parts)
 
 
-def local_dependency_paths(workflow, workspace):
+def local_dependency_paths(workflow, workspace, manifest_base="crates/velnor-workflow"):
     workspace_root = table(workspace, "workspace Cargo.toml root")
     workspace_section = workspace_root.get("workspace", {})
     if not isinstance(workspace_section, dict):
@@ -127,7 +126,7 @@ def local_dependency_paths(workflow, workspace):
                 fail(f"{section}.{alias} must be a dependency string or table")
             if path is None:
                 continue
-            base = "" if inherited else "crates/velnor-workflow"
+            base = "" if inherited else manifest_base
             resolved = resolved_path(base, path)
             if not resolved:
                 fail(f"{section}.{alias} resolves to repository root")
@@ -148,6 +147,10 @@ def local_dependency_paths(workflow, workspace):
     return roots
 
 
+def manifest_has_local_dependency(workflow, workspace, manifest_base):
+    return bool(local_dependency_paths(workflow, workspace, manifest_base))
+
+
 try:
     with open(sys.argv[1], "rb") as workflow_file:
         workflow = tomllib.load(workflow_file)
@@ -159,6 +162,37 @@ except (OSError, tomllib.TOMLDecodeError) as error:
     fail(str(error))
 "#;
 
+    const PYTHON_TRANSITIVE_PATH_GUARD: &str = r"import sys, tomllib
+with open(sys.argv[1], 'rb') as source: manifest = tomllib.load(source)
+with open(sys.argv[2], 'rb') as source: workspace = tomllib.load(source)
+dependency_root, manifest_path = sys.argv[3], sys.argv[4]
+workspace_table = workspace.get('workspace', {})
+if not isinstance(workspace_table, dict): raise SystemExit('workspace must be a table')
+workspace_dependencies = workspace_table.get('dependencies', {})
+if not isinstance(workspace_dependencies, dict): raise SystemExit('workspace.dependencies must be a table')
+members = workspace_table.get('members', [])
+if not isinstance(members, list) or not all(isinstance(member, str) for member in members): raise SystemExit('workspace.members must be a string array')
+sections = []
+for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
+    if name in manifest: sections.append(manifest[name])
+target = manifest.get('target', {})
+if not isinstance(target, dict): raise SystemExit('target must be a table')
+for target_table in target.values():
+    if not isinstance(target_table, dict): raise SystemExit('target entry must be a table')
+    for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
+        if name in target_table: sections.append(target_table[name])
+for dependencies in sections:
+    if not isinstance(dependencies, dict): raise SystemExit('dependency section must be a table')
+    for alias, declaration in dependencies.items():
+        if isinstance(declaration, dict) and declaration.get('workspace') is True:
+            if manifest_path != dependency_root + '/Cargo.toml' or dependency_root not in members:
+                raise SystemExit(f'unproven nested workspace inheritance in {manifest_path}')
+            declaration = workspace_dependencies.get(alias)
+        if isinstance(declaration, str): continue
+        if not isinstance(declaration, dict): raise SystemExit(f'invalid Cargo dependency {alias}')
+        if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
+";
+
     /// Whether the emitter's own manifest declares a local path dependency.
     /// This controls generated helper text; legacy trees keep their exact bytes.
     pub(crate) fn current_package_has_model_dependency() -> Result<bool, String> {
@@ -166,7 +200,9 @@ except (OSError, tomllib.TOMLDecodeError) as error:
             .map_err(|error| format!("parse workflow Cargo.toml: {error}"))?;
         let workspace = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml"))
             .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
-        Ok(closure_paths_from_values(&workflow, &workspace)?.len() > BASE_CLOSURE_PATHS.len())
+        Ok(local_dependency_paths(&workflow, &workspace)?
+            .iter()
+            .any(|path| path == VELNOR_MODEL_PATH))
     }
 
     /// Extend the setup action resolver for local dependency aware emitters.
@@ -211,8 +247,10 @@ except (OSError, tomllib.TOMLDecodeError) as error:
             "manifests=\"$(mktemp -d)\"\nif git -C \"${checkout}\" cat-file -e \"${revision}:crates/velnor-workflow/Cargo.toml\" 2>/dev/null; then\ngit -C \"${checkout}\" show \"${revision}:crates/velnor-workflow/Cargo.toml\" > \"$manifests/workflow.toml\"\nif git -C \"${checkout}\" cat-file -e \"${revision}:Cargo.toml\" 2>/dev/null; then git -C \"${checkout}\" show \"${revision}:Cargo.toml\" > \"$manifests/workspace.toml\"; else printf '[workspace]\\n' > \"$manifests/workspace.toml\"; fi\ndependency_paths=\"$(python3 - \"$manifests/workflow.toml\" \"$manifests/workspace.toml\" <<'PY'\n"
         );
         script.push_str(PYTHON_RESOLVER);
+        script.push_str("\nPY\n)\"\nelse\ndependency_paths='[]'\nfi\ncheck_transitive_manifest() { python3 - \"$1\" \"$manifests/workspace.toml\" \"$2\" \"$3\" <<'PY'\n");
+        script.push_str(PYTHON_TRANSITIVE_PATH_GUARD);
         script.push_str(
-            "\nPY\n)\"\nelse\ndependency_paths='[]'\nfi\nwhile IFS= read -r dependency_path; do\n  [[ \"$dependency_path\" != '' ]] || continue\n  dependency_tree=\"$(git -C \"${checkout}\" ls-tree -r \"${revision}\" -- \":(literal)$dependency_path\")\"\n  test \"$dependency_tree\" != '' || { echo \"::error::local Cargo dependency has no tracked source tree: $dependency_path\" >&2; exit 1; }\n  [[ \"$(awk '$1 == 120000 { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \"::error::local Cargo dependency contains a symlink: $dependency_path\" >&2; exit 1; }\n  listing+=$'\\n'\"$dependency_tree\"\ndone < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep=\"\\n\")' <<<\"$dependency_paths\")\nrm -rf \"$manifests\"\n",
+            "\nPY\n}\n[[ \"$(awk -F '\\t' '$1 ~ /^120000 / && $2 != \"crates/velnor-workflow/CLAUDE.md\" { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \"::error::source closure contains a Cargo/runtime symlink\" >&2; exit 1; }\nwhile IFS= read -r dependency_path; do\n  [[ \"$dependency_path\" != '' ]] || continue\n  dependency_tree=\"$(git -C \"${checkout}\" ls-tree -r \"${revision}\" -- \":(literal)$dependency_path\")\"\n  test \"$dependency_tree\" != '' || { echo \"::error::local Cargo dependency has no tracked source tree: $dependency_path\" >&2; exit 1; }\n  [[ \"$(awk '$1 == 120000 { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \"::error::local Cargo dependency contains a symlink: $dependency_path\" >&2; exit 1; }\n  while IFS= read -r manifest_path; do\n    [[ \"$manifest_path\" == */Cargo.toml || \"$manifest_path\" == Cargo.toml ]] || continue\n    git -C \"${checkout}\" show \"${revision}:$manifest_path\" > \"$manifests/dependency.toml\"\n    check_transitive_manifest \"$manifests/dependency.toml\" \"$dependency_path\" \"$manifest_path\"\n  done < <(git -C \"${checkout}\" ls-tree -r --name-only \"${revision}\" -- \":(literal)$dependency_path\")\n  listing+=$'\\n'\"$dependency_tree\"\ndone < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep=\"\\n\")' <<<\"$dependency_paths\")\nrm -rf \"$manifests\"\n",
         );
         indent_script(&script, indent)
     }
@@ -238,17 +276,51 @@ dependency_paths="$(python3 - "$manifests/workflow.toml" "$manifests/workspace.t
         script.push_str(
             r#"PY
 )"
-rm -rf "$manifests"
 else
 dependency_paths='[]'
 fi
+check_transitive_manifest() { python3 - "$1" "$manifests/workspace.toml" "$2" "$3" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as source: manifest = tomllib.load(source)
+with open(sys.argv[2], 'rb') as source: workspace = tomllib.load(source)
+workspace_table = workspace.get('workspace', {})
+if not isinstance(workspace_table, dict): raise SystemExit('workspace must be a table')
+workspace_dependencies = workspace_table.get('dependencies', {})
+if not isinstance(workspace_dependencies, dict): raise SystemExit('workspace.dependencies must be a table')
+sections = []
+for name in ('dependencies', 'build-dependencies'):
+    if name in manifest: sections.append(manifest[name])
+target = manifest.get('target', {})
+if not isinstance(target, dict): raise SystemExit('target must be a table')
+for target_table in target.values():
+    if not isinstance(target_table, dict): raise SystemExit('target entry must be a table')
+    for name in ('dependencies', 'build-dependencies'):
+        if name in target_table: sections.append(target_table[name])
+for dependencies in sections:
+    if not isinstance(dependencies, dict): raise SystemExit('dependency section must be a table')
+    for alias, declaration in dependencies.items():
+        if isinstance(declaration, dict) and declaration.get('workspace') is True:
+            declaration = workspace_dependencies.get(alias)
+        if isinstance(declaration, str): continue
+        if not isinstance(declaration, dict): raise SystemExit(f'invalid Cargo dependency {alias}')
+        if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
+PY
+}
+[[ "$(awk -F '\t' '$1 ~ /^120000 / && $2 != "crates/velnor-workflow/CLAUDE.md" { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
 while IFS= read -r dependency_path; do
   [[ "$dependency_path" != '' ]] || continue
   dependency_tree="$(jq -r --arg path "$dependency_path" '[.tree[] | select(.type != "tree") | select(.path == $path or (.path | startswith($path + "/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
   test "$dependency_tree" != '' || { echo "::error::local Cargo dependency has no tracked source tree: $dependency_path" >&2; exit 1; }
   [[ "$(awk '$1 == "120000" { found=1 } END { print found+0 }' <<<"$dependency_tree")" == 0 ]] || { echo "::error::local Cargo dependency contains a symlink: $dependency_path" >&2; exit 1; }
+  while IFS= read -r manifest_path; do
+    [[ "$manifest_path" == */Cargo.toml || "$manifest_path" == Cargo.toml ]] || continue
+    manifest_blob="$(jq -r --arg path "$manifest_path" '.tree[] | select(.path == $path) | .sha' <<<"$tree")"
+    gh api "repos/$PRODUCT_REPOSITORY/git/blobs/$manifest_blob" | jq -er '.content' | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$manifests/dependency.toml"
+    check_transitive_manifest "$manifests/dependency.toml" "$dependency_path" "$manifest_path"
+  done < <(jq -r --arg root "$dependency_path" '[.tree[] | select(.type == "blob") | select(.path == ($root + "/Cargo.toml") or (.path | startswith($root + "/") and endswith("/Cargo.toml"))) | .path] | sort[]' <<<"$tree")
   listing+=$'\n'"$dependency_tree"
 done < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep="\n")' <<<"$dependency_paths")
+rm -rf "$manifests"
 "#,
         );
         indent_script(&script, indent)
@@ -277,6 +349,69 @@ done < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep="\n")' <<
         let workspace = toml::from_str::<toml::Value>(workspace_manifest)
             .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
         closure_paths_from_values(&workflow, &workspace)
+    }
+
+    pub(crate) fn manifest_has_local_dependency(
+        manifest_text: &str,
+        workspace_text: &str,
+        dependency_root: &str,
+        manifest_path: &str,
+    ) -> Result<bool, String> {
+        let manifest = toml::from_str::<toml::Value>(manifest_text)
+            .map_err(|error| format!("parse dependency Cargo.toml: {error}"))?;
+        let workspace = toml::from_str::<toml::Value>(workspace_text)
+            .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
+        let workspace_dependencies = match workspace.get("workspace") {
+            Some(value) => {
+                let table = value.as_table().ok_or("workspace must be a TOML table")?;
+                match table.get("dependencies") {
+                    Some(value) => Some(
+                        value
+                            .as_table()
+                            .ok_or("workspace.dependencies must be a TOML table")?,
+                    ),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        let workspace_table = workspace
+            .get("workspace")
+            .and_then(toml::Value::as_table)
+            .ok_or("workspace must be a TOML table")?;
+        let members = workspace_table
+            .get("members")
+            .map(|members| {
+                members
+                    .as_array()
+                    .ok_or("workspace.members must be an array")?
+                    .iter()
+                    .map(|member| member.as_str().ok_or("workspace member must be a string"))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        for (section, dependencies) in dependency_sections(&manifest)? {
+            let dependencies = dependencies
+                .as_table()
+                .ok_or_else(|| format!("{section} must be a TOML table"))?;
+            for (alias, declaration) in dependencies {
+                if declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true)
+                    && (manifest_path != format!("{dependency_root}/Cargo.toml")
+                        || !members.contains(&dependency_root))
+                {
+                    return Err(format!(
+                        "unproven nested workspace inheritance in {manifest_path}"
+                    ));
+                }
+                let (_, path, _) =
+                    effective_dependency(alias, declaration, workspace_dependencies, section)?;
+                if path.is_some() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn closure_paths_from_values(
@@ -331,6 +466,9 @@ done < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep="\n")' <<
 
         let mut paths = Vec::new();
         for (section, dependencies) in dependency_sections(workflow)? {
+            if section == "dev-dependencies" || section.ends_with(".dev-dependencies") {
+                continue;
+            }
             let dependencies = dependencies
                 .as_table()
                 .ok_or_else(|| format!("{section} must be a TOML table"))?;
@@ -370,7 +508,7 @@ done < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep="\n")' <<
         let root = manifest
             .as_table()
             .ok_or_else(|| "Cargo.toml root must be a table".to_owned())?;
-        for name in ["dependencies", "build-dependencies"] {
+        for name in ["dependencies", "build-dependencies", "dev-dependencies"] {
             if let Some(value) = root.get(name) {
                 sections.push((name, value));
             }
@@ -383,7 +521,7 @@ done < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep="\n")' <<
                 let target = value
                     .as_table()
                     .ok_or_else(|| format!("target.{target} must be a table"))?;
-                for name in ["dependencies", "build-dependencies"] {
+                for name in ["dependencies", "build-dependencies", "dev-dependencies"] {
                     if let Some(value) = target.get(name) {
                         sections.push((name, value));
                     }
@@ -547,6 +685,38 @@ path = "../native-helper"
                     .map(|path| (*path).to_owned())
                     .collect::<Vec<_>>()
             );
+        }
+
+        #[test]
+        fn transitive_manifest_guard_detects_direct_and_workspace_local_paths() {
+            assert!(manifest_has_local_dependency(
+                "[dependencies]\nhelper = { path = \"../helper\" }\n",
+                ROOT,
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            )
+            .expect("valid local dependency manifest"));
+            assert!(manifest_has_local_dependency(
+                "[dependencies]\nhelper = { workspace = true }\n",
+                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nhelper = { path = \"crates/helper\" }\n",
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            )
+            .expect("valid inherited dependency manifest"));
+            assert!(!manifest_has_local_dependency(
+                "[dependencies]\nserde = { workspace = true }\n",
+                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nserde = \"1\"\n",
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            )
+            .expect("registry workspace dependency"));
+            assert!(manifest_has_local_dependency(
+                "[dependencies]\nserde = { workspace = true }\n",
+                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nserde = \"1\"\n",
+                "crates/velnor-model/nested",
+                "crates/velnor-model/nested/Cargo.toml"
+            )
+            .is_err());
         }
 
         #[test]

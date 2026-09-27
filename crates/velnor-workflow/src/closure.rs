@@ -155,6 +155,14 @@ pub(crate) fn closure_of_tree(
             .map(|path| (*path).to_owned())
             .collect::<Vec<_>>()
     };
+    let workspace_manifest = if git_path_exists(repo, rev, "Cargo.toml")? {
+        git_show(repo, rev, "Cargo.toml")?
+    } else {
+        "[workspace]\n".to_owned()
+    };
+    for dependency_root in paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len()) {
+        reject_transitive_path_dependencies(repo, rev, dependency_root, &workspace_manifest)?;
+    }
     let mut arguments = vec![
         "ls-tree".to_owned(),
         "-r".to_owned(),
@@ -186,15 +194,7 @@ pub(crate) fn closure_of_tree(
         .lines()
         .map(str::to_owned)
         .collect();
-    let dependency_paths = paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len());
-    if lines.iter().any(|line| {
-        line.starts_with("120000 ")
-            && line.split_once('\t').is_some_and(|(_, path)| {
-                dependency_paths.clone().any(|dependency| {
-                    path == dependency || path.starts_with(&format!("{dependency}/"))
-                })
-            })
-    }) {
+    if lines.iter().any(|line| is_unsafe_closure_symlink(line)) {
         return Err(GeneratorError::usage(format!(
             "revision {rev} contains a symlink in the source closure"
         )));
@@ -206,6 +206,50 @@ pub(crate) fn closure_of_tree(
         )));
     }
     Ok(canonical_digest(&lines, features, profile))
+}
+
+fn is_unsafe_closure_symlink(line: &str) -> bool {
+    line.starts_with("120000 ")
+        && line
+            .split_once('\t')
+            .is_some_and(|(_, path)| path != "crates/velnor-workflow/CLAUDE.md")
+}
+
+fn reject_transitive_path_dependencies(
+    repo: &Path,
+    rev: &str,
+    dependency_root: &str,
+    workspace_manifest: &str,
+) -> Result<(), GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-tree", "-r", "--name-only", rev, "--"])
+        .arg(format!(":(literal){dependency_root}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("list dependency tree: {error}")))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "list local dependency tree {dependency_root} at {rev} failed"
+        )));
+    }
+    let paths = String::from_utf8_lossy(&output.stdout);
+    for manifest_path in paths.lines().filter(|path| path.ends_with("Cargo.toml")) {
+        let manifest = git_show(repo, rev, manifest_path)?;
+        if closure_inputs::manifest_has_local_dependency(
+            &manifest,
+            workspace_manifest,
+            dependency_root,
+            manifest_path,
+        )
+        .map_err(GeneratorError::usage)?
+        {
+            return Err(GeneratorError::usage(format!(
+                "local dependency tree {dependency_root} contains transitive Cargo path dependency in {manifest_path}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn git_path_exists(repo: &Path, rev: &str, path: &str) -> Result<bool, GeneratorError> {
@@ -618,9 +662,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[expect(clippy::expect_used, reason = "symlink fixture failures need context")]
+    #[test]
+    fn closure_allows_only_the_known_non_runtime_claude_symlink_in_base_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-base-symlink-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        std::os::unix::fs::symlink(
+            "../../AGENTS.md",
+            root.join("crates/velnor-workflow/CLAUDE.md"),
+        )
+        .expect("known Claude compatibility link");
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "known base symlink",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        must(
+            closure_of_tree(&root, &rev, "", PROFILE_RELEASE),
+            "known Claude symlink remains hash-compatible",
+        );
+        std::os::unix::fs::symlink(
+            "../../../../UNRELATED.md",
+            root.join("crates/velnor-workflow/src/linked.rs"),
+        )
+        .expect("unsafe source symlink");
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "unsafe base symlink",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert!(closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
+            .expect_err("source closure rejects unsafe base symlink")
+            .to_string()
+            .contains("symlink"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the parity test keeps old/new revision proof adjacent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "the nested manifest fixture needs setup and rejection context"
     )]
     #[test]
     fn old_and_dependency_trees_resolve_without_closure_drift() {
@@ -736,6 +846,45 @@ mod tests {
             ),
             dependent_digest,
             "model source edits invalidate dependent workflow products"
+        );
+        std::fs::create_dir_all(root.join("crates/model-helper/src")).expect("nested helper dirs");
+        std::fs::write(
+            root.join("crates/model-helper/Cargo.toml"),
+            "[package]\nname = \"model-helper\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("nested helper manifest");
+        std::fs::write(
+            root.join("crates/model-helper/src/lib.rs"),
+            "pub fn helper() {}\n",
+        )
+        .expect("nested helper source");
+        std::fs::write(
+            root.join("crates/velnor-model/Cargo.toml"),
+            "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\n[dependencies.model-helper]\npath = \"../model-helper\"\n",
+        )
+        .expect("model manifest with transitive path dependency");
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "transitive path dependency",
+            ],
+        );
+        let transitive = git_output(&root, &["rev-parse", "HEAD"]);
+        let error = closure_of_tree(&root, &transitive, "", PROFILE_RELEASE)
+            .expect_err("optional dependency tree rejects transitive Cargo paths");
+        assert!(
+            error
+                .to_string()
+                .contains("transitive Cargo path dependency"),
+            "{error}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
