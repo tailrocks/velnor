@@ -251,12 +251,12 @@ pub(crate) fn github_runner_for_unit<'a>(
 }
 
 /// Whether a configured GitHub-hosted runner is the hosted Velnor runtime
-/// artifact producer's Linux x86_64 executor.
+/// artifact producer's Linux `x86_64` executor.
 ///
-/// The artifact is built on [`crate::POLICY_VALIDATION_RUNNER`] (Linux x86_64).
+/// The artifact is built on [`crate::POLICY_VALIDATION_RUNNER`] (Linux `x86_64`).
 /// Other Ubuntu labels, including `ubuntu-24.04-arm`, do not prove that the
 /// consumer matches the producer, so those jobs bootstrap the runtime.
-pub(crate) fn github_runner_is_linux_x64(runner: &str) -> bool {
+pub(crate) fn uses_linux_x64_runtime_artifact_runner(runner: &str) -> bool {
     runner == crate::POLICY_VALIDATION_RUNNER
 }
 
@@ -704,8 +704,8 @@ pub(crate) fn agreed_env(
 #[cfg(test)]
 mod tests {
     use super::{
-        agreed_env, describe_requirement, executors_for, github_runner_is_linux_x64,
-        is_ffi_crate_type, lane_supports_platform, prepare_command, resolve, valid_env_name,
+        agreed_env, describe_requirement, executors_for, is_ffi_crate_type, lane_supports_platform,
+        prepare_command, resolve, uses_linux_x64_runtime_artifact_runner, valid_env_name,
         valid_env_value, valid_product_input, valid_product_name, valid_task_name, Arch, Executor,
         NamedProduct, Os, PlatformRequirement, Prerequisite, CAP_XCFRAMEWORK, CAP_XCODE,
     };
@@ -949,11 +949,11 @@ mod tests {
 
     #[test]
     fn runtime_artifact_producer_requires_linux_x64_runner_label() {
-        assert!(github_runner_is_linux_x64("ubuntu-24.04"));
-        assert!(!github_runner_is_linux_x64("ubuntu-24.04-arm"));
-        assert!(!github_runner_is_linux_x64("ubuntu-latest"));
-        assert!(!github_runner_is_linux_x64("macos-26"));
-        assert!(!github_runner_is_linux_x64("windows-2025"));
+        assert!(uses_linux_x64_runtime_artifact_runner("ubuntu-24.04"));
+        assert!(!uses_linux_x64_runtime_artifact_runner("ubuntu-24.04-arm"));
+        assert!(!uses_linux_x64_runtime_artifact_runner("ubuntu-latest"));
+        assert!(!uses_linux_x64_runtime_artifact_runner("macos-26"));
+        assert!(!uses_linux_x64_runtime_artifact_runner("windows-2025"));
     }
 
     #[test]

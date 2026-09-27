@@ -6743,7 +6743,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if self.control_plane_lane() != RunnerMode::Github
             || self.runners == RunnerMode::Velnor
             || unit.platform.requires_apple()
-            || !crate::platform::github_runner_is_linux_x64(hosted_runner)
+            || !crate::platform::uses_linux_x64_runtime_artifact_runner(hosted_runner)
         {
             self.render_workflow_runtime_setup(output, lane);
         } else {

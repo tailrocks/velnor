@@ -9704,7 +9704,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 .get(&ProviderId::GithubHosted)
                 .is_some_and(|selector| {
                     selector.runs_on.len() == 1
-                        && crate::platform::github_runner_is_linux_x64(&selector.runs_on[0])
+                        && crate::platform::uses_linux_x64_runtime_artifact_runner(
+                            &selector.runs_on[0],
+                        )
                 });
         if !hosted_linux_selector
             || unit.platform != crate::s2::provider::Platform::LinuxX64
