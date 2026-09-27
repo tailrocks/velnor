@@ -8468,6 +8468,29 @@ mod tests {
     }
 
     #[cfg(feature = "test-support")]
+    fn mock_request_content_length(headers: &[u8]) -> usize {
+        String::from_utf8_lossy(headers)
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn mock_request_content_length_header_name_is_case_insensitive() {
+        assert_eq!(
+            mock_request_content_length(b"POST /upload HTTP/1.1\r\ncontent-length: 17\r\n\r\n"),
+            17
+        );
+    }
+
+    #[cfg(feature = "test-support")]
     #[test]
     fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
         use std::io::{Read, Write};
@@ -8495,13 +8518,7 @@ mod tests {
                         continue;
                     };
                     let headers_end = headers_end + 4;
-                    let content_length = String::from_utf8_lossy(&request[..headers_end])
-                        .lines()
-                        .find_map(|line| {
-                            line.strip_prefix("Content-Length:")
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
+                    let content_length = mock_request_content_length(&request[..headers_end]);
                     if request.len() >= headers_end + content_length {
                         break;
                     }
