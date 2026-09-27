@@ -784,6 +784,7 @@ mod tests {
             cache: &cache,
             nodes: &nodes,
             contracts: &contracts,
+            precondition_phases_enabled: true,
         };
         let workflow_path = root.join("tests/fixtures/github-action-consumer/workflow.yml");
         let valid_workflow = must(
@@ -936,6 +937,7 @@ mod tests {
             cache: ctx.cache,
             nodes: ctx.nodes,
             contracts: ctx.contracts,
+            precondition_phases_enabled: ctx.precondition_phases_enabled,
         };
         let Err(no_action_render) = super::GithubActionFixtures.render(&non_action_ctx, &args)
         else {
