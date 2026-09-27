@@ -30,7 +30,8 @@ branch's validator, regenerates the tree with the generator built at that pin
 and requires a byte-identical result, and evaluates its own semantic rules
 (only the entrypoint on `pull_request_target`; every self-hosted job gated;
 every action SHA-pinned; the entrypoint workflow on `contents: read` and its
-policy job on `actions: read` plus `contents: read`, with no secrets;
+policy job on `contents: read` or `actions: read` plus `contents: read`, with
+no secrets;
 the ruleset's required contexts emitted). Every rule prints `PASS`/`FAIL`
 with a one-line reason. Bump the pin with `velnor-workflow promote --rev HEAD`
 after the last generator change: it verifies the running binary renders with

@@ -20,8 +20,7 @@ jobs:
     timeout-minutes: 20
     # Trust invariant: this job runs the base branch's Stage-0 validator
     # product against the audited tree under pull_request_target. It holds
-    # `actions: read` plus `contents: read`, references no secrets, persists
-    # no credentials,
+    # `contents: read` only, references no secrets, persists no credentials,
     # and never compiles. When the audited tree differs from the declared
     # pin's render, it additionally EXECUTES the PR run's prebuilt
     # candidate generator — PR-built code, same-repository runs only, bound
@@ -30,7 +29,6 @@ jobs:
     # read-only github.token confined to the Acquire/Ruleset API steps,
     # and both candidate exec points tokenless.
     permissions:
-      actions: read
       contents: read
     steps:
       - name: Checkout repository history

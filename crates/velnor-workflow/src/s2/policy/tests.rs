@@ -599,10 +599,10 @@ fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
 }
 
 /// The generated entrypoint holds exactly the privileges the trust argument
-/// in `ci-policy.yml` states: workflow `contents: read`; the policy job uses
-/// `actions: read` plus `contents: read`; no secrets, no persisted
-/// credentials, no deployment environment, one hosted job, and only the
-/// reviewed triggers.
+/// in `ci-policy.yml` states: workflow `contents: read`; the policy job may
+/// use `contents: read` or `actions: read` plus `contents: read`; no secrets,
+/// no persisted credentials, no deployment environment, one hosted job, and
+/// only the reviewed triggers.
 #[test]
 fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let entrypoint = hosted_entrypoint(PIN_A);
@@ -644,17 +644,37 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
 #[test]
 fn entrypoint_audit_accepts_read_only_actions_permission_on_policy_job() {
     let clean = hosted_entrypoint(PIN_A);
-    let root = entrypoint_tree("entrypoint-actions-read", &clean);
+    let legacy_root = entrypoint_tree("entrypoint-legacy-contents-only", &clean);
+    let legacy_audit = must(
+        audit_policy_entrypoint(&legacy_root, &VelnorPolicyContract::default()),
+        "audit legacy entrypoint",
+    );
+    assert!(
+        legacy_audit.trigger.is_empty(),
+        "{:?}",
+        legacy_audit.trigger
+    );
+    assert!(
+        legacy_audit.privileges.is_empty(),
+        "{:?}",
+        legacy_audit.privileges
+    );
+    let _ = fs::remove_dir_all(legacy_root);
+
+    let with_actions = clean.replacen(
+        "    permissions:\n      contents: read\n",
+        "    permissions:\n      actions: read\n      contents: read\n",
+        1,
+    );
+    assert_ne!(clean, with_actions);
+    let root = entrypoint_tree("entrypoint-actions-read", &with_actions);
     let audit = must(
         audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
         "audit actions-read entrypoint",
     );
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
     assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
-    assert!(
-        clean.contains("actions: read\n      contents: read"),
-        "{clean}"
-    );
+    assert!(with_actions.contains("actions: read\n      contents: read"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -704,7 +724,7 @@ fn owner_entrypoint_pin_ignores_variable_references() {
 #[test]
 fn entrypoint_audit_names_each_escalation() {
     let clean = hosted_entrypoint(PIN_A);
-    let cases: [(&str, &str, &str, &str); 7] = [
+    let cases: [(&str, &str, &str, &str); 6] = [
         (
             "write",
             "permissions:\n  contents: read\n\njobs:",
@@ -713,15 +733,9 @@ fn entrypoint_audit_names_each_escalation() {
         ),
         (
             "job-permissions",
-            "    permissions:\n      actions: read\n      contents: read\n",
-            "    permissions:\n      actions: read\n      contents: read\n      id-token: write\n",
-            "permissions must be exactly `actions: read, contents: read`",
-        ),
-        (
-            "legacy-job-permissions",
-            "    permissions:\n      actions: read\n      contents: read\n",
             "    permissions:\n      contents: read\n",
-            "permissions must be exactly `actions: read, contents: read`",
+            "    permissions:\n      contents: read\n      id-token: write\n",
+            "permissions must be exactly `contents: read` or `actions: read, contents: read`",
         ),
         (
             "secret",
