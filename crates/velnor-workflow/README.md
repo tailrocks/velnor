@@ -39,6 +39,13 @@ the pin's own source closure, then stamps the pin and regenerates the whole
 tree in a single commit; `--check` verifies the pinned generator renders the
 tree.
 
+During candidate-renderer bootstrap, the exact legacy D19 pin
+`e988d793937c044275e4086b00856444c60f6ab8` keeps policy workflow output at
+the established byte shape. Promoting `[generator] revision` to the newer
+renderer is the typed opt-in: it enables the hardened candidate-artifact
+handoff and read-only API permissions without adding a config key that the
+legacy validator would reject. The newer pin keeps that mode enabled.
+
 Runtime commands are derived from scanned capabilities, not from config-supplied
 shell arrays. GitHub-hosted execution is the automatic and omitted-dispatch
 default; Velnor runs only when dispatch selects `velnor` or `both`. The binary
