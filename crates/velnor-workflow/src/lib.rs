@@ -5422,14 +5422,18 @@ fn audited_pin_script() -> &'static str {
 /// candidate artifact the Rust unit job packaged, verifies its manifest
 /// bindings and digest, requires the manifest closure to equal the audited
 /// head's candidate closure in full (not just the artifact-name prefix),
-/// and exports the binary as the pinned binary plus its manifest for the
-/// validator's manifest binding. The poll name and the manifest gate both
-/// key off the head closure — the same identity the publisher names the
-/// artifact by and the validator's `wanted` binding checks — so the three
-/// legs rendezvous on one digest. The `--closure` probe runs later in a
-/// token-free policy step. The candidate is untrusted code and can inspect
-/// its parent process, so child-only environment clearing in this
-/// token-bearing acquisition step is not sufficient.
+/// and exports the binary through the existing pinned-binary slot plus its
+/// manifest. This reader-only change lands before the generated writer moves
+/// to the candidate slot, so the base validator remains able to verify this
+/// tree. A later pin promotion and writer migration can switch the export
+/// once this candidate-slot reader is the base validator.
+/// The poll name and the manifest gate both key off the head closure — the
+/// same identity the publisher names the artifact by and the validator's
+/// `wanted` binding checks — so the three legs rendezvous on one digest. The
+/// `--closure` probe runs later in a token-free policy step. The candidate is
+/// untrusted code and can inspect its parent process, so child-only
+/// environment clearing in this token-bearing acquisition step is not
+/// sufficient.
 /// Fork generator changes fail closed: only same-repository runs
 /// are even considered. The same-repository select compares the embedded
 /// `.head_repository.id` object: the runs-list endpoint exposes no
@@ -5501,7 +5505,7 @@ fn policy_candidate_step(revision: &str) -> String {
           rm -rf "$candidate"
           mkdir -p "$candidate"
           gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
           if command -v sha256sum >/dev/null 2>&1; then
             actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
           else

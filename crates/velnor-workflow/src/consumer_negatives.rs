@@ -927,6 +927,7 @@ fn candidate_manifest(fixture: &ConsumerFixture, closure: &str, digest: &str) ->
         "repository": crate::workflow_setup_action_repository(),
         "run_id": "12345678",
         "revision": fixture.revision.as_str(),
+        "build_revision": fixture.revision.as_str(),
         "closure": closure,
         "binary_sha256": digest,
     })
