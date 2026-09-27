@@ -46,7 +46,7 @@ pub(crate) fn validate_repository_tree(root: &Path) -> Result<(), GeneratorError
 /// Make a path absolute while normalizing lexical `.` and `..` components.
 /// No filesystem component is resolved here; that is the job of the explicit
 /// `symlink_metadata` checks below.
-fn absolute_normalized_path(path: &Path) -> Result<PathBuf, GeneratorError> {
+pub(crate) fn absolute_normalized_path(path: &Path) -> Result<PathBuf, GeneratorError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

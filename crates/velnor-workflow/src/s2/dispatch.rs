@@ -171,13 +171,8 @@ fn try_dir_is_schema2(dir: &Path) -> Result<bool, crate::GeneratorError> {
 /// config. This inspects only path ancestors; repository contents remain the
 /// selected pipeline's responsibility.
 fn validate_workflow_root_path(root: &Path) -> Result<(), crate::GeneratorError> {
-    let absolute = if root.is_absolute() {
-        root.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| crate::GeneratorError::io("resolve workflow root", root, &error))?
-            .join(root)
-    };
+    let absolute = super::scan::file_walk::absolute_normalized_path(root)
+        .map_err(|error| crate::GeneratorError::usage(error.to_string()))?;
     let mut current = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -364,6 +359,47 @@ mod tests {
         let target = root.to_string_lossy().into_owned();
         assert!(routes_to_s2(&args(&[target.as_str(), "--plain"])));
         assert!(routes_to_s2(&args(&["generate", target.as_str()])));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn raw_tmp_alias_routes_schema1_after_normalization() {
+        let root = fixture_dir(
+            "raw-tmp-schema1",
+            Some("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n"),
+        );
+        let raw_tmp_root = Path::new("/tmp").join(root.file_name().unwrap_or_default());
+        assert!(
+            !must(
+                try_dir_is_schema2(&raw_tmp_root),
+                "macOS /tmp alias must normalize before root validation"
+            ),
+            "ordinary schema-1 repository remains on schema 1 through /tmp"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn raw_var_alias_routes_schema1_after_normalization() {
+        let root = fixture_dir(
+            "raw-var-schema1",
+            Some("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n"),
+        );
+        let private_var = Path::new("/private/var");
+        let suffix = must(
+            root.strip_prefix(private_var),
+            "macOS temporary fixture must be below /private/var",
+        );
+        let raw_var_root = Path::new("/var").join(suffix);
+        assert!(
+            !must(
+                try_dir_is_schema2(&raw_var_root),
+                "macOS /var alias must normalize before root validation"
+            ),
+            "ordinary schema-1 repository remains on schema 1 through /var"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
