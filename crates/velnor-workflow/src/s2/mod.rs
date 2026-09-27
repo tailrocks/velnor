@@ -6968,12 +6968,7 @@ fn generated_files_with_surface(
         files.entry(path).or_insert(content);
     }
     for owned in &config.static_files {
-        let content = if owned.path == ".github/actions/setup-velnor-workflow/action.yml" {
-            closure_inputs::render_setup_action(&owned.content).map_err(GeneratorError::usage)?
-        } else {
-            owned.content.clone()
-        };
-        files.insert(PathBuf::from(&owned.path), content);
+        files.insert(PathBuf::from(&owned.path), owned.content.clone());
     }
     if config.velnor_host_cache.has_overrides() {
         files.insert(
