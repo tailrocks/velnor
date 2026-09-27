@@ -107,6 +107,9 @@ fn self_closure(manifest_dir: &Path) -> Option<String> {
         return None;
     }
     for dependency_root in &paths[BASE_CLOSURE_PATHS.len()..] {
+        if !has_dependency_root(&lines, dependency_root) {
+            return None;
+        }
         for line in &lines {
             let Some((_, path)) = line.split_once('\t') else {
                 continue;
@@ -156,6 +159,14 @@ fn has_unsafe_closure_symlink(lines: &[&str]) -> bool {
     })
 }
 
+fn has_dependency_root(lines: &[&str], dependency_root: &str) -> bool {
+    lines.iter().any(|line| {
+        line.split_once('\t').is_some_and(|(_, path)| {
+            path == dependency_root || path.starts_with(&format!("{dependency_root}/"))
+        })
+    })
+}
+
 fn manifest_has_local_dependency(
     manifest: &str,
     workspace: &str,
@@ -184,6 +195,14 @@ fn manifest_has_local_dependency(
     };
     for (_, dependencies) in dependency_sections(&manifest)? {
         for (alias, declaration) in dependencies.as_table()? {
+            if declaration
+                .get("workspace")
+                .is_some_and(|value| !value.is_bool())
+                || (declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true)
+                    && declaration.get("path").is_some())
+            {
+                return None;
+            }
             if declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true)
                 && (manifest_path != format!("{dependency_root}/Cargo.toml")
                     || !members
@@ -194,6 +213,12 @@ fn manifest_has_local_dependency(
             }
             let mut declaration = declaration;
             if !declaration.is_str() && !declaration.is_table() {
+                return None;
+            }
+            if declaration
+                .get("package")
+                .is_some_and(|package| !package.is_str())
+            {
                 return None;
             }
             if declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
@@ -254,6 +279,11 @@ fn build_closure_paths(workflow: &str, workspace: &str) -> Option<Vec<String>> {
         for (alias, declaration) in deps.as_table()? {
             let mut decl = declaration;
             if !decl.is_str() && !decl.is_table() {
+                return None;
+            }
+            if decl.get("workspace").is_some_and(|value| !value.is_bool())
+                || decl.get("package").is_some_and(|package| !package.is_str())
+            {
                 return None;
             }
             let mut inherited = false;
@@ -401,7 +431,7 @@ fn is_full_sha(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_closure_paths, closure_pathspecs, has_unsafe_closure_symlink,
+        build_closure_paths, closure_pathspecs, has_dependency_root, has_unsafe_closure_symlink,
         manifest_has_local_dependency, BASE_CLOSURE_PATHS,
     };
 
@@ -527,6 +557,15 @@ path = "tools/shared"
     }
 
     #[test]
+    fn build_stamp_requires_every_selected_dependency_tree() {
+        let lines = [
+            "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/velnor-model/Cargo.toml",
+        ];
+        assert!(has_dependency_root(&lines, "crates/velnor-model"));
+        assert!(!has_dependency_root(&lines, "crates/missing-model"));
+    }
+
+    #[test]
     fn build_stamp_fails_closed_on_transitive_path_dependencies() {
         let manifest =
             "[package]\nname = \"helper\"\n[dependencies]\nnested = { path = \"../nested\" }\n";
@@ -557,6 +596,24 @@ path = "tools/shared"
                 "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nnested = \"1\"\n",
                 "crates/velnor-model/nested",
                 "crates/velnor-model/nested/Cargo.toml"
+            ),
+            None
+        );
+        assert_eq!(
+            manifest_has_local_dependency(
+                "[dependencies]\nnested = { workspace = true, path = \"../shadow\" }\n",
+                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nnested = \"1\"\n",
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            ),
+            None
+        );
+        assert_eq!(
+            manifest_has_local_dependency(
+                "[dependencies]\nnested = { package = 42, path = \"../nested\" }\n",
+                "[workspace]\n",
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
             ),
             None
         );

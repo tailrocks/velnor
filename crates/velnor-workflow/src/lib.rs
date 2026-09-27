@@ -39,6 +39,7 @@ mod closure_inputs {
         ".cargo",
     ];
 
+    #[cfg(test)]
     pub(crate) const VELNOR_MODEL_PATH: &str = "crates/velnor-model";
 
     const PYTHON_RESOLVER: &str = r#""""TOML dependency probe embedded in the generated setup action."""
@@ -105,6 +106,8 @@ def local_dependency_paths(workflow, workspace, manifest_base="crates/velnor-wor
         for alias, declaration in dependencies.items():
             inherited = False
             effective = declaration
+            if isinstance(effective, dict) and 'workspace' in effective and not isinstance(effective['workspace'], bool):
+                fail(f"{section}.{alias}.workspace must be a boolean")
             if isinstance(effective, dict) and effective.get("workspace") is True:
                 if "path" in effective:
                     fail(f"{section}.{alias} sets both workspace and path")
@@ -185,11 +188,19 @@ for dependencies in sections:
     if not isinstance(dependencies, dict): raise SystemExit('dependency section must be a table')
     for alias, declaration in dependencies.items():
         if isinstance(declaration, dict) and declaration.get('workspace') is True:
+            if 'path' in declaration:
+                raise SystemExit(f'conflicting workspace/path dependency: {alias}')
             if manifest_path != dependency_root + '/Cargo.toml' or dependency_root not in members:
                 raise SystemExit(f'unproven nested workspace inheritance in {manifest_path}')
             declaration = workspace_dependencies.get(alias)
+        elif isinstance(declaration, dict) and 'workspace' in declaration and not isinstance(declaration['workspace'], bool):
+            raise SystemExit(f'invalid workspace flag for dependency {alias}')
         if isinstance(declaration, str): continue
         if not isinstance(declaration, dict): raise SystemExit(f'invalid Cargo dependency {alias}')
+        if 'package' in declaration and not isinstance(declaration['package'], str):
+            raise SystemExit(f'invalid package name for dependency {alias}')
+        if 'path' in declaration and not isinstance(declaration['path'], str):
+            raise SystemExit(f'invalid path for dependency {alias}')
         if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
 ";
 
@@ -200,9 +211,43 @@ for dependencies in sections:
             .map_err(|error| format!("parse workflow Cargo.toml: {error}"))?;
         let workspace = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml"))
             .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
-        Ok(local_dependency_paths(&workflow, &workspace)?
-            .iter()
-            .any(|path| path == VELNOR_MODEL_PATH))
+        Ok(!local_dependency_paths(&workflow, &workspace)?.is_empty())
+    }
+
+    /// Shell checks run by runtime-product producers before they mint a
+    /// closure. Keep these checks aligned with Rust and setup-action resolvers.
+    pub(crate) fn producer_closure_validation(paths: &[String], revision: &str) -> String {
+        let dependency_roots = paths.iter().skip(BASE_CLOSURE_PATHS.len());
+        if dependency_roots.clone().next().is_none() {
+            return String::new();
+        }
+        let mut script = String::from(
+            "[[ \"$(awk -F '\\t' '$1 ~ /^120000 / && $2 != \\\"crates/velnor-workflow/CLAUDE.md\\\" { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \\\"::error::source closure contains a Cargo/runtime symlink\\\" >&2; exit 1; }\n",
+        );
+        script.push_str("closure_guard_revision=\"${");
+        script.push_str(revision);
+        script.push_str("}\"\nclosure_guard_dir=\"$(mktemp -d)\"\n");
+        script.push_str("trap 'rm -rf \"$closure_guard_dir\"' EXIT\nif git cat-file -e \"${closure_guard_revision}:Cargo.toml\" 2>/dev/null; then git show \"${closure_guard_revision}:Cargo.toml\" > \"$closure_guard_dir/workspace.toml\"; else printf '[workspace]\\n' > \"$closure_guard_dir/workspace.toml\"; fi\n");
+        for dependency_root in dependency_roots {
+            let pathspec = crate::shell_quote(&format!(":(literal){dependency_root}"));
+            script.push_str("dependency_root=");
+            script.push_str(&crate::shell_quote(dependency_root));
+            script
+                .push_str("\ndependency_tree=\"$(git ls-tree -r \"${closure_guard_revision}\" -- ");
+            script.push_str(&pathspec);
+            script.push_str(")\"\n");
+            script.push_str("test \"$dependency_tree\" != '' || { echo \\\"::error::local Cargo dependency tree is missing: $dependency_root\\\" >&2; exit 1; }\n");
+            script.push_str("[[ \"$(awk '$1 == \\\"120000\\\" { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \\\"::error::local Cargo dependency contains a symlink: $dependency_root\\\" >&2; exit 1; }\n");
+            script.push_str("while IFS= read -r dependency_manifest; do\n  [[ \"$dependency_manifest\" == */Cargo.toml ]] || continue\n  git show \"${closure_guard_revision}:$dependency_manifest\" > \"$closure_guard_dir/dependency.toml\"\n  python3 - \"$closure_guard_dir/dependency.toml\" \"$closure_guard_dir/workspace.toml\" \"$dependency_root\" \"$dependency_manifest\" <<'PY'\n");
+            script.push_str(PYTHON_TRANSITIVE_PATH_GUARD);
+            script.push_str(
+                "\nPY\ndone < <(git ls-tree -r --name-only \"${closure_guard_revision}\" -- ",
+            );
+            script.push_str(&pathspec);
+            script.push_str(")\n");
+        }
+        script.push_str("rm -rf \"$closure_guard_dir\"\n");
+        script
     }
 
     /// Extend the setup action resolver for local dependency aware emitters.
@@ -303,11 +348,19 @@ for dependencies in sections:
     if not isinstance(dependencies, dict): raise SystemExit('dependency section must be a table')
     for alias, declaration in dependencies.items():
         if isinstance(declaration, dict) and declaration.get('workspace') is True:
+            if 'path' in declaration:
+                raise SystemExit(f'conflicting workspace/path dependency: {alias}')
             if manifest_path != dependency_root + '/Cargo.toml' or dependency_root not in members:
                 raise SystemExit(f'unproven nested workspace inheritance in {manifest_path}')
             declaration = workspace_dependencies.get(alias)
+        elif isinstance(declaration, dict) and 'workspace' in declaration and not isinstance(declaration['workspace'], bool):
+            raise SystemExit(f'invalid workspace flag for dependency {alias}')
         if isinstance(declaration, str): continue
         if not isinstance(declaration, dict): raise SystemExit(f'invalid Cargo dependency {alias}')
+        if 'package' in declaration and not isinstance(declaration['package'], str):
+            raise SystemExit(f'invalid package name for dependency {alias}')
+        if 'path' in declaration and not isinstance(declaration['path'], str):
+            raise SystemExit(f'invalid path for dependency {alias}')
         if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
 PY
 }
@@ -331,7 +384,7 @@ rm -rf "$manifests"
         indent_script(&script, indent)
     }
 
-    fn indent_script(script: &str, indent: &str) -> String {
+    pub(crate) fn indent_script(script: &str, indent: &str) -> String {
         let mut output =
             String::with_capacity(script.len() + indent.len() * script.lines().count());
         for line in script.lines() {
@@ -550,6 +603,15 @@ rm -rf "$manifests"
         }
         let mut workspace_inherited = false;
         if let Some(table) = declaration.as_table()
+            && table.contains_key("workspace")
+            && table
+                .get("workspace")
+                .and_then(toml::Value::as_bool)
+                .is_none()
+        {
+            return Err(format!("{section}.{alias}.workspace must be a boolean"));
+        }
+        if let Some(table) = declaration.as_table()
             && table.get("workspace").and_then(toml::Value::as_bool) == Some(true)
         {
             if table.contains_key("path") {
@@ -693,6 +755,23 @@ path = "../native-helper"
         }
 
         #[test]
+        fn dev_only_local_dependency_keeps_legacy_runtime_closure() {
+            let workflow = "[dev-dependencies]\nhelper = { path = \"../../tools/helper\" }\n";
+            assert_eq!(
+                closure_paths(workflow, ROOT).expect("valid dev dependency"),
+                BASE_CLOSURE_PATHS
+                    .iter()
+                    .map(|path| (*path).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            let base = BASE_CLOSURE_PATHS
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect::<Vec<_>>();
+            assert!(producer_closure_validation(&base, "head").is_empty());
+        }
+
+        #[test]
         fn transitive_manifest_guard_detects_direct_and_workspace_local_paths() {
             assert!(manifest_has_local_dependency(
                 "[dependencies]\nhelper = { path = \"../helper\" }\n",
@@ -701,6 +780,20 @@ path = "../native-helper"
                 "crates/velnor-model/Cargo.toml"
             )
             .expect("valid local dependency manifest"));
+            assert!(manifest_has_local_dependency(
+                "[dependencies]\nhelper = { workspace = true, path = \"../shadow\" }\n",
+                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nhelper = \"1\"\n",
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            )
+            .is_err());
+            assert!(manifest_has_local_dependency(
+                "[dependencies]\nhelper = { package = 42, path = \"../helper\" }\n",
+                ROOT,
+                "crates/velnor-model",
+                "crates/velnor-model/Cargo.toml"
+            )
+            .is_err());
             assert!(manifest_has_local_dependency(
                 "[dependencies]\nhelper = { workspace = true }\n",
                 "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nhelper = { path = \"crates/helper\" }\n",

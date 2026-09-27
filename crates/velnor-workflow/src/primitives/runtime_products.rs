@@ -369,7 +369,7 @@ jobs:
           head="$(git rev-parse HEAD)"
           [[ "$head" =~ ^[0-9a-f]{{40}}$ ]] || {{ echo "::error::HEAD is not a commit SHA: $head" >&2; exit 1; }}
           listing="$(git ls-tree -r HEAD -- {closure_paths})"
-          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
+{closure_guard}          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
           closure="$(printf '%s\n{closure_footer}' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{{print $1}}')"
           [[ "$closure" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::closure resolution failed" >&2; exit 1; }}
           tag="{tag_prefix}${{closure:0:16}}"
@@ -515,7 +515,7 @@ jobs:
             exit 0
           fi
           listing="$(git ls-tree -r HEAD -- {closure_paths})"
-          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
+{closure_guard}          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
           tip_closure="$(printf '%s\n{closure_footer}' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{{print $1}}')"
           [[ "$tip_closure" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::closure resolution failed" >&2; exit 1; }}
           if [[ "$tip_closure" == "$CLOSURE" ]]; then
@@ -663,6 +663,10 @@ jobs:
         runtime_home = HOSTED_WORKFLOW_RUNTIME_HOME,
         tag_prefix = PRODUCT_TAG_PREFIX,
         closure_paths = producer_closure_pathspec(&closure_paths),
+        closure_guard = closure_inputs::indent_script(
+            &closure_inputs::producer_closure_validation(&closure_paths, "head"),
+            "          "
+        ),
         closure_footer = closure_footer,
         matrix = matrix,
         manifest_products = manifest_program,
@@ -752,6 +756,38 @@ mod tests {
         paths.push(hostile.to_owned());
         assert!(producer_closure_pathspec(&paths)
             .ends_with(&format!(":(literal){}", crate::shell_quote(hostile))));
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "producer guard shell syntax must fail the fixture directly"
+    )]
+    #[test]
+    fn producer_closure_guard_checks_dynamic_tree_before_hashing() {
+        let mut paths = closure_inputs::BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        paths.push("vendor/[literal]*".to_owned());
+        let guard = closure_inputs::producer_closure_validation(&paths, "head");
+        assert!(guard.contains("local Cargo dependency tree is missing"));
+        assert!(guard.contains("transitive Cargo path dependency"));
+        assert!(guard.contains("':(literal)vendor/[literal]*'"));
+        let mut bash = must(
+            std::process::Command::new("bash")
+                .args(["-n"])
+                .stdin(std::process::Stdio::piped())
+                .spawn(),
+            "bash is available",
+        );
+        let mut input = bash.stdin.take().expect("bash stdin");
+        std::io::Write::write_all(
+            &mut input,
+            format!("set -euo pipefail\nhead=HEAD\nlisting=x\n{guard}").as_bytes(),
+        )
+        .expect("write guard shell");
+        drop(input);
+        assert!(must(bash.wait(), "check guard syntax").success());
     }
     use crate::{RunnerMode, UnitKind};
 

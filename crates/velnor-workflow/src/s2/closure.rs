@@ -232,6 +232,11 @@ fn reject_transitive_path_dependencies(
         )));
     }
     let paths = String::from_utf8_lossy(&output.stdout);
+    if paths.trim().is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "local Cargo dependency tree {dependency_root} is missing at {rev}"
+        )));
+    }
     for manifest_path in paths.lines().filter(|path| path.ends_with("Cargo.toml")) {
         let manifest = git_show(repo, rev, manifest_path)?;
         if closure_inputs::manifest_has_local_dependency(
@@ -811,6 +816,47 @@ mod tests {
                 .contains("transitive Cargo path dependency"),
             "{error}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "missing path dependency fixture must state its fail-closed result"
+    )]
+    #[test]
+    fn closure_rejects_missing_local_dependency_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-s2-missing-dependency-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        must(
+            std::fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n[dependencies.helper]\npath = \"../missing-helper\"\n",
+            ),
+            "workflow manifest with missing local dependency",
+        );
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "missing local dependency",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let error = closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
+            .expect_err("missing local dependency must fail closed");
+        assert!(error.to_string().contains("is missing"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
