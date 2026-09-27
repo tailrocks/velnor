@@ -3,7 +3,7 @@ schema = 2
 [inputs]
 config	1ecc4b21032b46f0
 scan	6263b5825850a315
-generator	70
+generator	71
 [outputs]
 .github/AGENTS.md	02ebb7198c435e9b
 .github/actionlint.yaml	85a2e7172b525ecb

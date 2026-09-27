@@ -366,7 +366,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn raw_tmp_alias_routes_schema1_after_normalization() {
-        let root = fixture_dir(
+        let root = short_fixture_dir(
             "raw-tmp-schema1",
             Some("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n"),
         );
@@ -471,7 +471,9 @@ mod tests {
                 &format!("{label} must fail before routing"),
             );
             assert!(
-                error.to_string().contains("symlinked workflow root path"),
+                error
+                    .to_string()
+                    .contains("symlinked repository root component"),
                 "{label} is named in the refusal: {error}"
             );
             let target = path.to_string_lossy().into_owned();
@@ -480,13 +482,53 @@ mod tests {
                 &format!("{label} must not fall through to schema 1"),
             );
             assert!(
-                error.to_string().contains("symlinked workflow root path"),
+                error
+                    .to_string()
+                    .contains("symlinked repository root component"),
                 "dispatch preserves the root-path refusal: {error}"
             );
         }
 
         let _ = std::fs::remove_file(root_link);
         let _ = std::fs::remove_file(parent_link);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_component_before_parent_reference_fails_dispatch() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_dir("symlink-before-parent", None);
+        let repository = root.join("repo");
+        must(
+            std::fs::create_dir_all(repository.join(".github-gen")),
+            "create routed repository",
+        );
+        must(
+            std::fs::write(
+                repository.join(".github-gen/velnor-workflow.toml"),
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write routed repository config",
+        );
+        let link = root.join("link");
+        must(
+            symlink(root.join("outside"), &link),
+            "create path component symlink",
+        );
+        let aliased_root = link.join("..").join("repo");
+
+        let error = must_fail(
+            try_dir_is_schema2(&aliased_root),
+            "dispatcher must inspect symlinks before collapsing parent components",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("symlinked repository root component"),
+            "error identifies the path component: {error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
