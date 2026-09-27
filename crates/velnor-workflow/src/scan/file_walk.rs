@@ -240,9 +240,18 @@ fn normalize_relative_path(path: &Path) -> Result<String, GeneratorError> {
 pub(crate) fn files_named(files: &[String], name: &str) -> Vec<String> {
     files
         .iter()
-        .filter(|file| file.rsplit('/').next() == Some(name) && !is_test_support_path(file))
+        .filter(|file| {
+            file.rsplit('/').next() == Some(name)
+                && !is_test_support_path(file)
+                && !is_node_modules_path(file)
+        })
         .cloned()
         .collect()
+}
+
+/// Dependency manifests are never project packages, regardless of nesting.
+pub(crate) fn is_node_modules_path(path: &str) -> bool {
+    path.split('/').any(|segment| segment == "node_modules")
 }
 
 /// Cargo target directories hold tests and fixtures, not shippable
@@ -336,7 +345,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
 
 #[cfg(test)]
 mod tests {
-    use super::repository_files;
+    use super::{files_named, repository_files};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -610,6 +619,25 @@ mod tests {
                 "pkg/main.rs".to_owned(),
                 "pkg/target/lib.rlib".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn named_files_keep_web_package_and_ignore_nested_node_modules_manifests() {
+        let files = [
+            "package.json",
+            "web/package.json",
+            "web/node_modules/vite/package.json",
+            "web/node_modules/vite/node_modules/esbuild/package.json",
+            "node_modules/root-package/package.json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            files_named(&files, "package.json"),
+            vec!["package.json".to_owned(), "web/package.json".to_owned()]
         );
     }
 
