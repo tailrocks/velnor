@@ -35,7 +35,14 @@ pub(crate) fn repository_files(
         files
     };
     let excludes = exclude_set(exclude)?;
-    files.retain(|file| !excludes.is_match(file) && !generator_owned.contains(Path::new(file)));
+    // Dependency trees are never repository inputs, regardless of whether a
+    // committed index entry or a physical walk supplied the path. Keep this
+    // boundary here so every detector sees the same filtered file set.
+    files.retain(|file| {
+        !excludes.is_match(file)
+            && !generator_owned.contains(Path::new(file))
+            && !is_node_modules_path(file)
+    });
     files.sort();
     Ok(files)
 }
@@ -182,18 +189,18 @@ fn collect_files(
         if kind.is_symlink() {
             continue;
         }
-        // Parity with the git-index walk, which filters on the leading path
-        // component only: tool-output names stay excluded at the repository
-        // root, but nested content (committed fixtures under a nested `dist/`,
-        // ...) scans like any other input. `.git` metadata is never an input
-        // at any depth — the index never lists it, and a linked worktree's
-        // `.git` pointer file must not enter the scan either.
+        // Parity with the git-index walk, which filters tool output at the
+        // repository root. Dependency trees are excluded at every depth;
+        // committed fixtures under nested `dist/` and similar directories
+        // remain scan inputs. `.git` metadata is never an input at any depth —
+        // the index never lists it, and a linked worktree's `.git` pointer file
+        // must not enter the scan either.
         if name.as_ref() == ".git" {
             continue;
         }
         let at_root = directory == root;
         if kind.is_dir() {
-            if at_root && is_excluded_directory(name.as_ref()) {
+            if name.as_ref() == "node_modules" || at_root && is_excluded_directory(name.as_ref()) {
                 continue;
             }
             collect_files(root, &path, files)?;
@@ -239,9 +246,18 @@ fn normalize_relative_path(path: &Path) -> Result<String, GeneratorError> {
 pub(crate) fn files_named(files: &[String], name: &str) -> Vec<String> {
     files
         .iter()
-        .filter(|file| file.rsplit('/').next() == Some(name) && !is_test_support_path(file))
+        .filter(|file| {
+            file.rsplit('/').next() == Some(name)
+                && !is_test_support_path(file)
+                && !is_node_modules_path(file)
+        })
         .cloned()
         .collect()
+}
+
+/// Dependency manifests are never project packages, regardless of nesting.
+pub(crate) fn is_node_modules_path(path: &str) -> bool {
+    path.split('/').any(|segment| segment == "node_modules")
 }
 
 /// Cargo target directories hold tests and fixtures, not shippable
@@ -335,7 +351,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
 
 #[cfg(test)]
 mod tests {
-    use super::repository_files;
+    use super::{files_named, repository_files};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -404,6 +420,15 @@ mod tests {
             "write tracked file",
         );
         git(&root, &["add", "tracked.txt"]);
+        must(
+            fs::create_dir_all(root.join("web/node_modules/vite")),
+            "create tracked dependency directory",
+        );
+        must(
+            fs::write(root.join("web/node_modules/vite/package.json"), "{}\n"),
+            "write tracked dependency manifest",
+        );
+        git(&root, &["add", "web/node_modules/vite/package.json"]);
         must(
             fs::write(root.join("untracked.txt"), "untracked"),
             "write untracked file",
@@ -588,6 +613,14 @@ mod tests {
             "write nested source",
         );
         must(
+            fs::create_dir_all(root.join("pkg/node_modules/vite")),
+            "create nested dependency directory",
+        );
+        must(
+            fs::write(root.join("pkg/node_modules/vite/package.json"), "{}\n"),
+            "write nested dependency manifest",
+        );
+        must(
             fs::create_dir_all(root.join("pkg/.git/objects")),
             "create nested git directory",
         );
@@ -609,6 +642,25 @@ mod tests {
                 "pkg/main.rs".to_owned(),
                 "pkg/target/lib.rlib".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn named_files_keep_web_package_and_ignore_nested_node_modules_manifests() {
+        let files = [
+            "package.json",
+            "web/package.json",
+            "web/node_modules/vite/package.json",
+            "web/node_modules/vite/node_modules/esbuild/package.json",
+            "node_modules/root-package/package.json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            files_named(&files, "package.json"),
+            vec!["package.json".to_owned(), "web/package.json".to_owned()]
         );
     }
 
