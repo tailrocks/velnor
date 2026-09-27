@@ -926,10 +926,7 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
         let source = must(fs::read_to_string(&path), "read the setup action source");
-        must(
-            closure_inputs::render_setup_action(&source),
-            "render the setup action for the active closure",
-        )
+        closure_inputs::render_setup_action(&source)
     }
 
     #[test]
@@ -1040,11 +1037,11 @@ mod tests {
             "the setup action pathspec end",
         );
         assert!(
-            action_pathspec == "\"${paths[@]}\""
-                && action.contains("paths=(crates/velnor-workflow Cargo.toml Cargo.lock")
-                && action.contains("include_model=false")
-                && action.contains("paths+=(crates/velnor-model)"),
-            "the setup action includes model sources only when the pinned workflow manifest depends on them"
+            action_pathspec == "crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"
+                && action.contains("dependency_paths=\"$(python3")
+                && action.contains("listing+=$'\\n'\"$dependency_tree\"")
+                && !action.contains("include_model=false"),
+            "the setup action resolves extra source roots from the pinned workflow manifest"
         );
         assert!(
             content.contains(&producer_closure_pathspec(&must(

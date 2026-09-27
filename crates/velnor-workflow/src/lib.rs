@@ -252,8 +252,8 @@ for dependencies in sections:
 
     /// Return the complete repository-owned setup action without rewriting it.
     #[cfg(test)]
-    pub(crate) fn render_setup_action(action: &str) -> Result<String, String> {
-        Ok(action.to_owned())
+    pub(crate) fn render_setup_action(action: &str) -> String {
+        action.to_owned()
     }
 
     /// Shell resolver for local-checkout publishers. The target revision is
@@ -682,6 +682,202 @@ rm -rf "$manifests"
 
         const ROOT: &str = "[workspace]\n";
 
+        struct ResolverFixture {
+            root: std::path::PathBuf,
+            repo: std::path::PathBuf,
+            mock_bin: std::path::PathBuf,
+        }
+
+        impl ResolverFixture {
+            fn new() -> Self {
+                use std::os::unix::fs::PermissionsExt;
+
+                let root = std::env::temp_dir().join(format!(
+                    "velnor-resolver-fixture-{}",
+                    crate::unique_suffix()
+                ));
+                let repo = root.join("repo");
+                let mock_bin = root.join("bin");
+                std::fs::create_dir_all(repo.join("crates/velnor-workflow"))
+                    .expect("create workflow crate");
+                std::fs::create_dir_all(repo.join("crates/velnor-model/src"))
+                    .expect("create model crate");
+                std::fs::create_dir_all(&mock_bin).expect("create mock bin");
+                std::fs::write(
+                    repo.join("Cargo.toml"),
+                    "[workspace]\nmembers = [\"crates/velnor-workflow\", \"crates/velnor-model\"]\n",
+                )
+                .expect("write workspace manifest");
+                std::fs::write(
+                    repo.join("crates/velnor-model/Cargo.toml"),
+                    "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\n",
+                )
+                .expect("write model manifest");
+                std::fs::write(
+                    repo.join("crates/velnor-model/src/lib.rs"),
+                    "pub fn model() {}\n",
+                )
+                .expect("write model source");
+                let initial_manifest = "[package]\nname = \"velnor-workflow\"\nversion = \"0.1.0\"\n[dependencies.velnor-model]\npath = \"../velnor-model\"\n";
+                std::fs::write(
+                    repo.join("crates/velnor-workflow/Cargo.toml"),
+                    initial_manifest,
+                )
+                .expect("write workflow manifest");
+                Self::run_git(&repo, &["init", "-q"]);
+                Self::commit(&repo, "valid");
+                let mock_gh = mock_bin.join("gh");
+                std::fs::write(
+                    &mock_gh,
+                    "#!/usr/bin/env python3\nimport base64,json,os,subprocess,sys\nsha=sys.argv[-1].rsplit('/',1)[-1]\nblob=subprocess.check_output(['git','-C',os.environ['CHECKOUT_PATH'],'cat-file','blob',sha])\nprint(json.dumps({'content':base64.b64encode(blob).decode()}))\n",
+                )
+                .expect("write mock gh");
+                std::fs::set_permissions(&mock_gh, std::fs::Permissions::from_mode(0o755))
+                    .expect("make mock gh executable");
+                Self {
+                    root,
+                    repo,
+                    mock_bin,
+                }
+            }
+
+            fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(args)
+                    .output()
+                    .expect("git is available for resolver fixture");
+                assert!(
+                    output.status.success(),
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            }
+
+            fn commit(repo: &std::path::Path, message: &str) {
+                Self::run_git(repo, &["add", "-A"]);
+                Self::run_git(
+                    repo,
+                    &[
+                        "-c",
+                        "user.name=fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                        "commit",
+                        "-m",
+                        message,
+                    ],
+                );
+            }
+
+            fn set_manifest(&self, manifest: Option<&str>) {
+                let workflow_manifest = self.repo.join("crates/velnor-workflow/Cargo.toml");
+                if let Some(manifest) = manifest {
+                    std::fs::write(workflow_manifest, manifest).expect("write target manifest");
+                } else {
+                    std::fs::remove_file(workflow_manifest).expect("remove target manifest");
+                }
+                Self::commit(&self.repo, "fixture");
+            }
+
+            fn api_tree(&self) -> String {
+                let raw = Self::run_git(&self.repo, &["ls-tree", "-r", "--full-tree", "HEAD"]);
+                let entries: Vec<serde_json::Value> = raw
+                    .lines()
+                    .map(|line| {
+                        let (metadata, path) = line.split_once('\t').expect("tree entry path");
+                        let mut fields = metadata.split_whitespace();
+                        serde_json::json!({
+                            "mode": fields.next().expect("tree mode"),
+                            "type": fields.next().expect("tree type"),
+                            "sha": fields.next().expect("tree blob"),
+                            "path": path,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({"truncated": false, "tree": entries}).to_string()
+            }
+
+            fn execute(&self, api: bool, resolver: &str) -> std::process::Output {
+                let revision = Self::run_git(&self.repo, &["rev-parse", "HEAD"]);
+                let mut shell = String::from("set -euo pipefail\n");
+                if api {
+                    shell.push_str("tree=\"$TREE_JSON\"\nlisting=\"\"\n");
+                } else {
+                    shell.push_str("listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n");
+                }
+                shell.push_str(resolver);
+                shell.push_str("printf '%s\\n' \"$listing\"\n");
+                let mut command = std::process::Command::new("bash");
+                command
+                    .args(["-euo", "pipefail", "-c", &shell])
+                    .env("CHECKOUT_PATH", &self.repo)
+                    .env("INSTALL_REV", &revision)
+                    .env("PRODUCT_REPOSITORY", "fixture/repo")
+                    .env(
+                        "PATH",
+                        format!(
+                            "{}:{}",
+                            self.mock_bin.display(),
+                            std::env::var("PATH").expect("PATH")
+                        ),
+                    );
+                if api {
+                    command.env("TREE_JSON", self.api_tree());
+                }
+                command.output().expect("run resolver fixture")
+            }
+        }
+
+        impl Drop for ResolverFixture {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.root).expect("remove resolver fixture");
+            }
+        }
+
+        fn assert_resolver_includes_model_and_fails_closed(api: bool) {
+            let fixture = ResolverFixture::new();
+            let resolver = if api {
+                api_shell_resolver("")
+            } else {
+                local_shell_resolver("INSTALL_REV", "CHECKOUT_PATH", "")
+            };
+            let valid = fixture.execute(api, &resolver);
+            assert!(
+                valid.status.success(),
+                "{}",
+                String::from_utf8_lossy(&valid.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&valid.stdout)
+                    .lines()
+                    .filter(|line| line.ends_with("crates/velnor-model/src/lib.rs"))
+                    .count(),
+                1,
+                "model source must enter the closure once"
+            );
+
+            fixture.set_manifest(None);
+            let missing = fixture.execute(api, &resolver);
+            assert!(!missing.status.success(), "missing manifest fails closed");
+            assert!(
+                String::from_utf8_lossy(&missing.stderr).contains("workflow manifest unavailable")
+            );
+
+            fixture.set_manifest(Some(
+                "[dependencies\nvelnor-model = { path = \"../velnor-model\" }\n",
+            ));
+            let malformed = fixture.execute(api, &resolver);
+            assert!(
+                !malformed.status.success(),
+                "malformed manifest fails closed"
+            );
+            assert!(String::from_utf8_lossy(&malformed.stderr)
+                .contains("closure dependency parse failed"));
+        }
+
         #[test]
         fn ignores_unrelated_model_tree_without_declared_local_dependency() {
             let workflow = "[package]\nname = \"velnor-workflow\"\n[dependencies]\nserde = \"1\"\n";
@@ -856,7 +1052,7 @@ path = "../native-helper"
         #[test]
         fn setup_action_renderer_preserves_repository_owned_bytes() {
             let action = setup_action_fixture();
-            let rendered = render_setup_action(&action).expect("setup action render");
+            let rendered = render_setup_action(&action);
             assert_eq!(rendered, action);
             assert!(rendered.contains("dependency_tree="));
             assert!(rendered.contains("workflow manifest unavailable at $INSTALL_REV"));
@@ -870,7 +1066,7 @@ path = "../native-helper"
         #[test]
         fn dependency_action_source_uses_toml_and_both_revision_sources() {
             let action = setup_action_fixture();
-            let rendered = render_setup_action(&action).expect("setup action render");
+            let rendered = render_setup_action(&action);
             assert_eq!(rendered, action);
             assert!(rendered.contains(
                 "git -C \"$CHECKOUT_PATH\" show \"$INSTALL_REV:crates/velnor-workflow/Cargo.toml\""
@@ -931,202 +1127,13 @@ path = "../native-helper"
         }
 
         #[test]
-        fn local_and_api_resolvers_include_target_model_once_and_fail_closed() {
-            use std::os::unix::fs::PermissionsExt;
+        fn local_resolver_includes_target_model_once_and_fails_closed() {
+            assert_resolver_includes_model_and_fails_closed(false);
+        }
 
-            fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(repo)
-                    .args(args)
-                    .output()
-                    .expect("git is available for resolver fixture");
-                assert!(
-                    output.status.success(),
-                    "git {:?}: {}",
-                    args,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                String::from_utf8_lossy(&output.stdout).trim().to_owned()
-            }
-
-            fn set_manifest(repo: &std::path::Path, manifest: Option<&str>) {
-                let workflow_manifest = repo.join("crates/velnor-workflow/Cargo.toml");
-                if let Some(manifest) = manifest {
-                    std::fs::write(workflow_manifest, manifest).expect("write target manifest");
-                } else {
-                    std::fs::remove_file(workflow_manifest).expect("remove target manifest");
-                }
-                run_git(repo, &["add", "-A"]);
-                run_git(
-                    repo,
-                    &[
-                        "-c",
-                        "user.name=fixture",
-                        "-c",
-                        "user.email=fixture@example.invalid",
-                        "commit",
-                        "-m",
-                        "fixture",
-                    ],
-                );
-            }
-
-            fn api_tree(repo: &std::path::Path) -> String {
-                let raw = run_git(repo, &["ls-tree", "-r", "--full-tree", "HEAD"]);
-                let entries: Vec<serde_json::Value> = raw
-                    .lines()
-                    .map(|line| {
-                        let (metadata, path) = line.split_once('\t').expect("tree entry path");
-                        let mut fields = metadata.split_whitespace();
-                        serde_json::json!({
-                            "mode": fields.next().expect("tree mode"),
-                            "type": fields.next().expect("tree type"),
-                            "sha": fields.next().expect("tree blob"),
-                            "path": path,
-                        })
-                    })
-                    .collect();
-                serde_json::json!({"truncated": false, "tree": entries}).to_string()
-            }
-
-            fn execute(
-                repo: &std::path::Path,
-                mock_bin: &std::path::Path,
-                api: bool,
-                resolver: &str,
-            ) -> std::process::Output {
-                let revision = run_git(repo, &["rev-parse", "HEAD"]);
-                let mut shell = String::from("set -euo pipefail\n");
-                if api {
-                    shell.push_str("tree=\"$TREE_JSON\"\nlisting=\"\"\n");
-                } else {
-                    shell.push_str("listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n");
-                }
-                shell.push_str(resolver);
-                shell.push_str("printf '%s\\n' \"$listing\"\n");
-                let mut command = std::process::Command::new("bash");
-                command
-                    .args(["-euo", "pipefail", "-c", &shell])
-                    .env("CHECKOUT_PATH", repo)
-                    .env("INSTALL_REV", &revision)
-                    .env("PRODUCT_REPOSITORY", "fixture/repo")
-                    .env(
-                        "PATH",
-                        format!(
-                            "{}:{}",
-                            mock_bin.display(),
-                            std::env::var("PATH").expect("PATH")
-                        ),
-                    );
-                if api {
-                    command.env("TREE_JSON", api_tree(repo));
-                }
-                command.output().expect("run resolver fixture")
-            }
-
-            let root = std::env::temp_dir().join(format!(
-                "velnor-resolver-fixture-{}",
-                crate::unique_suffix()
-            ));
-            let repo = root.join("repo");
-            let mock_bin = root.join("bin");
-            std::fs::create_dir_all(repo.join("crates/velnor-workflow"))
-                .expect("create workflow crate");
-            std::fs::create_dir_all(repo.join("crates/velnor-model/src"))
-                .expect("create model crate");
-            std::fs::create_dir_all(&mock_bin).expect("create mock bin");
-            std::fs::write(
-                repo.join("Cargo.toml"),
-                "[workspace]\nmembers = [\"crates/velnor-workflow\", \"crates/velnor-model\"]\n",
-            )
-            .expect("write workspace manifest");
-            std::fs::write(
-                repo.join("crates/velnor-model/Cargo.toml"),
-                "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\n",
-            )
-            .expect("write model manifest");
-            std::fs::write(
-                repo.join("crates/velnor-model/src/lib.rs"),
-                "pub fn model() {}\n",
-            )
-            .expect("write model source");
-            let initial_manifest = "[package]\nname = \"velnor-workflow\"\nversion = \"0.1.0\"\n[dependencies.velnor-model]\npath = \"../velnor-model\"\n";
-            std::fs::write(
-                repo.join("crates/velnor-workflow/Cargo.toml"),
-                initial_manifest,
-            )
-            .expect("write workflow manifest");
-            run_git(&repo, &["init", "-q"]);
-            run_git(&repo, &["add", "-A"]);
-            run_git(
-                &repo,
-                &[
-                    "-c",
-                    "user.name=fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "-m",
-                    "valid",
-                ],
-            );
-
-            let mock_gh = mock_bin.join("gh");
-            std::fs::write(
-                &mock_gh,
-                "#!/usr/bin/env python3\nimport base64,json,os,subprocess,sys\nsha=sys.argv[-1].rsplit('/',1)[-1]\nblob=subprocess.check_output(['git','-C',os.environ['CHECKOUT_PATH'],'cat-file','blob',sha])\nprint(json.dumps({'content':base64.b64encode(blob).decode()}))\n",
-            )
-            .expect("write mock gh");
-            std::fs::set_permissions(&mock_gh, std::fs::Permissions::from_mode(0o755))
-                .expect("make mock gh executable");
-
-            for (api, resolver) in [
-                (
-                    false,
-                    local_shell_resolver("INSTALL_REV", "CHECKOUT_PATH", ""),
-                ),
-                (true, api_shell_resolver("")),
-            ] {
-                let valid = execute(&repo, &mock_bin, api, &resolver);
-                assert!(
-                    valid.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&valid.stderr)
-                );
-                assert_eq!(
-                    String::from_utf8_lossy(&valid.stdout)
-                        .lines()
-                        .filter(|line| line.ends_with("crates/velnor-model/src/lib.rs"))
-                        .count(),
-                    1,
-                    "model source must enter the closure once"
-                );
-
-                set_manifest(&repo, None);
-                let missing = execute(&repo, &mock_bin, api, &resolver);
-                assert!(
-                    !missing.status.success(),
-                    "missing target manifest must fail closed"
-                );
-                assert!(String::from_utf8_lossy(&missing.stderr)
-                    .contains("workflow manifest unavailable"));
-
-                set_manifest(
-                    &repo,
-                    Some("[dependencies\nvelnor-model = { path = \"../velnor-model\" }\n"),
-                );
-                let malformed = execute(&repo, &mock_bin, api, &resolver);
-                assert!(
-                    !malformed.status.success(),
-                    "malformed target manifest must fail closed"
-                );
-                assert!(String::from_utf8_lossy(&malformed.stderr)
-                    .contains("closure dependency parse failed"));
-
-                set_manifest(&repo, Some(initial_manifest));
-            }
-            std::fs::remove_dir_all(root).expect("remove resolver fixture");
+        #[test]
+        fn api_resolver_includes_target_model_once_and_fails_closed() {
+            assert_resolver_includes_model_and_fails_closed(true);
         }
 
         #[test]
@@ -12326,10 +12333,7 @@ mod tests {
         // Both products use the shared closure-input bridge: local revisions
         // inspect tracked manifests, while remote revisions inspect the
         // product tree and its workflow-manifest blob.
-        let action = must(
-            closure_inputs::render_setup_action(&declared_setup_action()),
-            "render setup action with shared resolver",
-        );
+        let action = closure_inputs::render_setup_action(&declared_setup_action());
         for script in [&step, &action] {
             assert!(script.contains("dependency_paths=\"$(python3"), "{script}");
             assert!(

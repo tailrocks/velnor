@@ -386,10 +386,7 @@ fn setup_action_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
     let source = must(fs::read_to_string(&path), "read setup action");
-    must(
-        crate::closure_inputs::render_setup_action(&source),
-        "render setup action for the active closure",
-    )
+    crate::closure_inputs::render_setup_action(&source)
 }
 
 fn dedent(body: &str, indent: usize) -> String {
