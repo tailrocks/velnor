@@ -97,6 +97,7 @@ fn lookup(
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
         pinned_binary,
+        candidate_binary: None,
         search_path,
         install_root,
         build_forbidden: true,
@@ -105,17 +106,33 @@ fn lookup(
 }
 
 fn lookup_with_manifest(
-    pinned_binary: Option<PathBuf>,
+    candidate_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
     install_root: PathBuf,
     candidate_manifest: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary,
+        pinned_binary: None,
+        candidate_binary,
         search_path,
         install_root,
         build_forbidden: true,
         candidate_manifest: Some(candidate_manifest),
+    }
+}
+
+fn candidate_lookup(
+    candidate_binary: Option<PathBuf>,
+    search_path: Option<std::ffi::OsString>,
+    install_root: PathBuf,
+) -> PinnedBinaryLookup {
+    PinnedBinaryLookup {
+        pinned_binary: None,
+        candidate_binary,
+        search_path,
+        install_root,
+        build_forbidden: true,
+        candidate_manifest: None,
     }
 }
 
@@ -764,6 +781,137 @@ fn owner_entrypoint_pin_ignores_variable_references() {
 }
 
 #[test]
+fn owner_policy_resolves_squash_merge_push_to_pr_head() {
+    let job = crate::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
+    });
+    assert!(
+        job.contains("EVENT_NAME: ${{ github.event_name }}")
+            && job.contains("MERGE_SHA: ${{ github.sha }}"),
+        "candidate lookup distinguishes the push event and its squash commit: {job}"
+    );
+    let Some(candidate) = job
+        .split("      - name: Acquire candidate generator product")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("      - name: Resolve required status checks")
+                .next()
+        })
+    else {
+        panic!("owner policy candidate step")
+    };
+    assert!(
+        candidate.contains("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}")
+            && candidate.contains(
+                "PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}"
+            )
+            && !candidate.contains("github.event.pull_request.head.sha || github.sha"),
+        "pull request lookup has no workflow_dispatch fallback: {job}"
+    );
+    assert!(
+        job.contains("actions: read\n      contents: read"),
+        "candidate API access is limited to read-only Actions and contents permissions: {job}"
+    );
+    assert!(
+        job.contains("repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls"),
+        "a main push resolves its associated pull request through the commit API: {job}"
+    );
+    for clause in [
+        ".merge_commit_sha == $merge_sha",
+        ".merged_at != null",
+        ".base.ref == $default_branch",
+        ".base.repo.full_name == $repository",
+        ".head.repo.full_name == $repository",
+    ] {
+        assert!(
+            job.contains(clause),
+            "squash merge resolution requires {clause}: {job}"
+        );
+    }
+    assert!(
+        job.contains("HEAD_SHA=\"$(jq -er '.[0].head_sha' <<<\"$merged_pulls\")\""),
+        "candidate lookup switches to the merged PR head SHA: {job}"
+    );
+    assert!(
+        job.contains("HEAD_REPOSITORY=\"$(jq -er '.[0].head_repository' <<<\"$merged_pulls\")\""),
+        "candidate lookup carries the merged PR head repository: {job}"
+    );
+    assert!(
+        job.contains(".revision == $revision"),
+        "the candidate manifest revision must match the resolved PR head: {job}"
+    );
+}
+
+#[test]
+fn owner_policy_fails_closed_for_direct_push_without_merged_pr() {
+    let job = crate::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
+    });
+    assert!(
+        job.contains(
+            "push $MERGE_SHA is not associated with exactly one merged same-repository pull request"
+        ),
+        "a direct push has no trusted candidate source: {job}"
+    );
+    assert!(
+        job.contains("direct pushes and ambiguous squash merges fail closed")
+            && job.contains("exit 1"),
+        "direct push resolution exits before artifact polling: {job}"
+    );
+    assert!(
+        job.contains(
+            "candidate lookup requires pull_request_target or a squash-merge push, got $EVENT_NAME"
+        ),
+        "unsupported manual events also fail closed: {job}"
+    );
+}
+
+#[test]
+fn owner_policy_rejects_merge_sha_wrong_head_repository_and_revision() {
+    let job = crate::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
+    });
+    assert!(
+        job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA"),
+        "candidate polling is keyed by the resolved PR head: {job}"
+    );
+    assert!(
+        !job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$MERGE_SHA"),
+        "a squash merge SHA is never used as the candidate head: {job}"
+    );
+    assert!(
+        job.contains("HEAD_REPOSITORY=\"$(jq -er '.[0].head_repository' <<<\"$merged_pulls\")\"")
+            && job.contains("$HEAD_REPOSITORY\" == \"$GITHUB_REPOSITORY\""),
+        "a wrong head repository fails closed: {job}"
+    );
+    assert!(
+        job.contains(".repository == $repo") && job.contains(".revision == $revision"),
+        "wrong repository and wrong resolved head revision fail closed: {job}"
+    );
+}
+
+#[test]
 fn entrypoint_audit_names_each_escalation() {
     let clean = hosted_entrypoint(PIN_A);
     let cases: [(&str, &str, &str, &str); 6] = [
@@ -775,9 +923,9 @@ fn entrypoint_audit_names_each_escalation() {
         ),
         (
             "job-permissions",
-            "    permissions:\n      contents: read\n",
-            "    permissions:\n      contents: read\n      id-token: write\n",
-            "permissions must be exactly `contents: read`",
+            "    permissions:\n      actions: read\n      contents: read\n",
+            "    permissions:\n      actions: read\n      contents: read\n      id-token: write\n",
+            "permissions must be exactly `actions: read, contents: read`",
         ),
         (
             "secret",
@@ -1406,7 +1554,7 @@ fn unbound_env_candidate_is_rejected_without_manifest() {
     let scratch = temporary_directory("candidate-unbound-scratch");
     let sentinel = root.join("closure-probed");
     let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    let lookup = lookup(Some(binary), None, root.join("install"));
+    let lookup = candidate_lookup(Some(binary), None, root.join("install"));
     let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
@@ -1545,6 +1693,21 @@ fn from_env_consent_mapping_is_fail_closed() {
     assert_eq!(
         manifest_env.candidate_manifest,
         Some(PathBuf::from("/env/manifest.json"))
+    );
+    let env_slots = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| match name {
+        VELNOR_WORKFLOW_PINNED_BINARY_ENV => Some(std::ffi::OsString::from("/pin/binary")),
+        VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV => Some(std::ffi::OsString::from("/candidate/binary")),
+        _ => None,
+    });
+    assert_eq!(
+        env_slots.pinned_binary,
+        Some(PathBuf::from("/pin/binary")),
+        "the trusted pin slot remains separate from the candidate slot"
+    );
+    assert_eq!(
+        env_slots.candidate_binary,
+        Some(PathBuf::from("/candidate/binary")),
+        "the candidate uses its dedicated env slot"
     );
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
     // (also pinned end to end by the `--check` CLI subprocess test in

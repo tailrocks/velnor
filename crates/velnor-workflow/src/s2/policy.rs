@@ -64,6 +64,9 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
+/// Names the env-slot candidate binary; it is separate from the pinned
+/// policy runtime so an untrusted PR product cannot replace the pin.
+pub use super::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV;
 /// Names the manifest binding the env-slot candidate binary.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
 /// Names a `velnor-workflow` binary built at the pinned revision.
@@ -1087,6 +1090,8 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
 pub(crate) struct PinnedBinaryLookup {
     /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
     pinned_binary: Option<PathBuf>,
+    /// [`VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV`].
+    candidate_binary: Option<PathBuf>,
     /// `PATH`.
     search_path: Option<OsString>,
     /// Where an earlier resolution built the pin.
@@ -1123,6 +1128,7 @@ impl PinnedBinaryLookup {
     ) -> Self {
         Self {
             pinned_binary: getenv(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            candidate_binary: getenv(VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV).map(PathBuf::from),
             search_path: getenv("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
@@ -1553,8 +1559,8 @@ fn render_with_candidate(
         }
     };
     let mut binaries = Vec::new();
-    if let Some(pinned) = &lookup.pinned_binary {
-        binaries.push(pinned.clone());
+    if let Some(candidate) = &lookup.candidate_binary {
+        binaries.push(candidate.clone());
     }
     if let Some(current) = &current_exe
         && !binaries.contains(current)
@@ -2238,8 +2244,9 @@ fn audit_entrypoint_triggers(workflow: &Mapping, audit: &mut EntrypointAudit) {
     }
 }
 
-/// Privileges: `contents: read` at both levels, no secrets, no persisted
-/// credentials, one job on a hosted or trust-gated approved runner.
+/// Privileges: workflow `contents: read`, policy-job `actions: read` plus
+/// `contents: read`, no secrets, no persisted credentials, one job on a
+/// hosted or trust-gated approved runner.
 fn audit_entrypoint_privileges(
     workflow: &Mapping,
     content: &str,
@@ -2269,9 +2276,9 @@ fn audit_entrypoint_privileges(
                     .push(finding(&format!("job {job_id} must be a YAML mapping")));
                 return;
             };
-            if !is_contents_read_only(mapping_value(job, "permissions")) {
+            if !is_policy_job_read_only(mapping_value(job, "permissions")) {
                 audit.privileges.push(finding(&format!(
-                    "job {job_id} permissions must be exactly `contents: read`"
+                    "job {job_id} permissions must be exactly `actions: read, contents: read`"
                 )));
             }
             if mapping_value(job, "environment").is_some() {
@@ -2345,6 +2352,16 @@ fn is_contents_read_only(permissions: Option<&Value>) -> bool {
         .and_then(Value::as_mapping)
         .is_some_and(|permissions| {
             permissions.len() == 1
+                && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
+        })
+}
+
+fn is_policy_job_read_only(permissions: Option<&Value>) -> bool {
+    permissions
+        .and_then(Value::as_mapping)
+        .is_some_and(|permissions| {
+            permissions.len() == 2
+                && mapping_value(permissions, "actions").and_then(Value::as_str) == Some("read")
                 && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
         })
 }
