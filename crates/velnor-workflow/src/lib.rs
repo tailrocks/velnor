@@ -6668,6 +6668,8 @@ pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) candidate_artifact_wiring: bool,
 }
 
+const HOSTED_POLICY_RUNS_ON: &str = "ubuntu-24.04";
+
 /// Shell fragment reading the audited tree's declared generator pin into
 /// `$pin` (fails closed when the tree declares none): `[generator]
 /// revision` first, the entrypoint literal second. Callers treat the pin as
@@ -6974,6 +6976,11 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
+    let runner = if hosted {
+        HOSTED_POLICY_RUNS_ON
+    } else {
+        runner
+    };
     let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
     let ruleset_step = if hosted {
         format!(

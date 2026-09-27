@@ -5573,6 +5573,8 @@ pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) candidate_artifact_wiring: bool,
 }
 
+const HOSTED_POLICY_RUNS_ON: &str = "ubuntu-24.04";
+
 /// Shell fragment reading the audited tree's declared generator pin into
 /// `$pin` (fails closed when the tree declares none): `[generator]
 /// revision` first, the entrypoint literal second. Callers treat the pin as
@@ -5879,6 +5881,11 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
+    let runner = if hosted {
+        HOSTED_POLICY_RUNS_ON
+    } else {
+        runner
+    };
     let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
     let ruleset_step = if hosted {
         format!(
@@ -20649,6 +20656,42 @@ lockfile = true
         assert!(!policy.contains("Mr. Boxington"), "{policy}");
         assert!(!policy.contains("backend: github"), "{policy}");
         assert!(!policy.contains("backend: local"));
+    }
+
+    #[test]
+    fn hosted_policy_uses_linux_when_regular_ci_runner_is_macos() {
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        config.selectors.insert(
+            ProviderId::GithubHosted,
+            provider::ProviderSelector {
+                runs_on: vec!["macos-26".to_owned()],
+            },
+        );
+        let files = must(
+            generated_files(&config),
+            "generate macOS-configured workflows",
+        );
+        let policy = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-policy.yml")),
+            "generated policy workflow",
+        );
+        let pull_request = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
+            "generated regular CI workflow",
+        );
+
+        assert!(
+            policy.contains("runs-on: ubuntu-24.04"),
+            "candidate policy sandbox stays on hosted Linux: {policy}"
+        );
+        assert!(
+            !policy.contains("runs-on: macos-26"),
+            "the policy runner does not inherit regular CI runner config: {policy}"
+        );
+        assert!(
+            pull_request.contains("runs-on: macos-26"),
+            "regular generated CI jobs keep the configured macOS runner: {pull_request}"
+        );
     }
 
     #[test]
