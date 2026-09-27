@@ -12685,7 +12685,8 @@ mod tests {
             "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tCargo.toml",
             "100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tCargo.lock",
             "100644 blob cccccccccccccccccccccccccccccccccccccccc\trust-toolchain.toml",
-            "100644 blob dddddddddddddddddddddddddddddddddddddddd\tcrates/velnor-workflow/src/lib.rs",
+            "100644 blob dddddddddddddddddddddddddddddddddddddddd\tcrates/velnor-workflow/Cargo.toml",
+            "100644 blob 1111111111111111111111111111111111111111\tcrates/velnor-workflow/src/lib.rs",
         ];
         let tree_entries: Vec<String> = listing
             .iter()
@@ -12700,6 +12701,10 @@ mod tests {
                 )
             })
             .chain([
+                "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"ffffffffffffffffffffffffffffffffffffffff\",\"path\":\"crates/velnor-model/Cargo.toml\"}"
+                    .to_owned(),
+                "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"2222222222222222222222222222222222222222\",\"path\":\"crates/velnor-model/src/lib.rs\"}"
+                    .to_owned(),
                 "{\"mode\":\"040000\",\"type\":\"tree\",\"sha\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"path\":\"crates/velnor-workflow/src\"}"
                     .to_owned(),
                 "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"ffffffffffffffffffffffffffffffffffffffff\",\"path\":\"UNRELATED.md\"}"
@@ -12718,8 +12723,40 @@ mod tests {
             ),
             "write stub trees response",
         );
+        for (sha, content) in [
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "W3dvcmtzcGFjZV0KbWVtYmVycyA9IFsiY3JhdGVzL3ZlbG5vci1tb2RlbCJdClt3b3Jrc3BhY2UuZGVwZW5kZW5jaWVzXQpzZXJkZSA9ICIxIgo=",
+            ),
+            (
+                "dddddddddddddddddddddddddddddddddddddddd",
+                "W2RlcGVuZGVuY2llc10KdmVsbm9yLW1vZGVsID0geyBwYXRoID0gIi4uL3ZlbG5vci1tb2RlbCIsIHZlcnNpb24gPSAiMC4xLjAiIH0K",
+            ),
+            (
+                "ffffffffffffffffffffffffffffffffffffffff",
+                "W3BhY2thZ2VdCm5hbWUgPSAidmVsbm9yLW1vZGVsIgp2ZXJzaW9uID0gIjAuMS4wIgpbZGVwZW5kZW5jaWVzXQpzZXJkZS53b3Jrc3BhY2UgPSB0cnVlCg==",
+            ),
+        ] {
+            must(
+                fs::write(
+                    log.join(format!("blob-{sha}.json")),
+                    format!("{{\"content\":\"{content}\"}}"),
+                ),
+                "write stub blob response",
+            );
+        }
+        let mut closure_listing = listing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        closure_listing.extend([
+            "100644 blob ffffffffffffffffffffffffffffffffffffffff\tcrates/velnor-model/Cargo.toml"
+                .to_owned(),
+            "100644 blob 2222222222222222222222222222222222222222\tcrates/velnor-model/src/lib.rs"
+                .to_owned(),
+        ]);
         let closure = closure::canonical_digest(
-            &listing.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            &closure_listing,
             closure::CI_FEATURES,
             closure::PROFILE_RELEASE,
         );
@@ -12760,7 +12797,7 @@ mod tests {
         must(
             fs::write(
                 stubs.join("gh"),
-                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  cat \"$STUB_LOG/trees.json\"\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
+                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  case \"$2\" in\n    */git/blobs/*) blob=\"${2##*/}\"; cat \"$STUB_LOG/blob-$blob.json\";;\n    *) cat \"$STUB_LOG/trees.json\";;\n  esac\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
             ),
             "write stub gh",
         );
@@ -12833,13 +12870,28 @@ mod tests {
             "consumer identity is never consulted: {stderr}"
         );
         let api = must(fs::read_to_string(log.join("gh-api")), "read api log");
-        assert_eq!(
-            api.trim(),
+        let expected_api = [
             format!(
                 "repos/{}/git/trees/{pin}?recursive=1",
                 workflow_setup_action_repository()
             ),
-            "the closure resolves over the product repository API"
+            format!(
+                "repos/{}/git/blobs/dddddddddddddddddddddddddddddddddddddddd",
+                workflow_setup_action_repository()
+            ),
+            format!(
+                "repos/{}/git/blobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                workflow_setup_action_repository()
+            ),
+            format!(
+                "repos/{}/git/blobs/ffffffffffffffffffffffffffffffffffffffff",
+                workflow_setup_action_repository()
+            ),
+        ];
+        assert_eq!(
+            api.lines().collect::<Vec<_>>(),
+            expected_api.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the closure and manifests resolve over the product repository API"
         );
         let git_args = must(fs::read_to_string(log.join("git-args")), "read git log");
         assert!(
