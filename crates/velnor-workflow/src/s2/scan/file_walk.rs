@@ -21,8 +21,17 @@ pub(crate) fn repository_files(
         )));
     }
     let mut generator_owned = crate::s2::generator_owned_output_paths(root)?;
+    let mut static_sources = BTreeSet::new();
     if let Some(generation) = crate::s2::config::discover(root)? {
         crate::s2::config::validate_static_files(generation.static_files())?;
+        static_sources.extend(
+            generation
+                .static_files()
+                .iter()
+                .filter_map(crate::s2::config::StaticFileSection::source)
+                .map(Path::new)
+                .map(Path::to_path_buf),
+        );
         generator_owned.extend(
             generation
                 .static_files()
@@ -32,6 +41,11 @@ pub(crate) fn repository_files(
                 .map(Path::to_path_buf),
         );
     }
+    generator_owned.retain(|owned| {
+        !static_sources
+            .iter()
+            .any(|source| crate::paths_alias_equal(owned, source))
+    });
     // Generation must stay a function of the committed repository, not of the
     // checkout: untracked CI runtime artifacts, scratch files, and the `.git`
     // file of a linked worktree would otherwise enter the scan and make the
@@ -46,7 +60,12 @@ pub(crate) fn repository_files(
         files
     };
     let excludes = exclude_set(exclude)?;
-    files.retain(|file| !excludes.is_match(file) && !generator_owned.contains(Path::new(file)));
+    files.retain(|file| {
+        !excludes.is_match(file)
+            && !generator_owned
+                .iter()
+                .any(|owned| crate::paths_alias_equal(owned, Path::new(file)))
+    });
     files.sort();
     Ok(files)
 }

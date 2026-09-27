@@ -28,7 +28,7 @@ use super::s2::dispatch::dir_is_schema2;
 use super::s2::policy::GENERATION_CONFIG;
 use super::s2::provider::{ProviderId, ProviderSet};
 use super::s2::{
-    ownership_state_content, render_tree, write_generated_with_options, OWNERSHIP_STATE,
+    ownership_state_content, render_tree, write_generated_with_static_sources, OWNERSHIP_STATE,
 };
 use super::{
     create_generator_symlink, is_full_revision, resolve_default_branch, GeneratorError, RunnerMode,
@@ -343,10 +343,11 @@ impl PromotedRender {
     fn write(&self, repo: &Path) -> Result<(), GeneratorError> {
         match self {
             Self::V1(rendered) => {
-                super::write_generated_with_options(
+                super::write_generated_with_static_sources(
                     repo,
                     &rendered.files,
                     &rendered.symlinks,
+                    &rendered.static_sources,
                     &rendered.inputs,
                     false,
                     false,
@@ -356,10 +357,11 @@ impl PromotedRender {
                 Ok(())
             }
             Self::V2(rendered) => {
-                write_generated_with_options(
+                write_generated_with_static_sources(
                     repo,
                     &rendered.files,
                     &rendered.symlinks,
+                    &rendered.static_sources,
                     &rendered.inputs,
                     false,
                     false,

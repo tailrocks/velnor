@@ -1797,7 +1797,7 @@ impl RepoGenerationConfig {
             let Some(file) = row.file.as_deref() else {
                 continue;
             };
-            if !file.starts_with(".github/workflows/") {
+            if !crate::path_alias_starts_with(Path::new(file), Path::new(".github/workflows")) {
                 continue;
             }
             let Some(name) = Path::new(file).file_name().and_then(|name| name.to_str()) else {
@@ -2507,14 +2507,19 @@ pub(crate) fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), Ge
                 "[[static_files]] source must be a normalized repository-relative path, found `{source}`"
             )));
         }
-        if Path::new(source).starts_with(".github") {
+        if crate::path_alias_starts_with(Path::new(source), Path::new(".github")) {
             return Err(GeneratorError::usage(format!(
                 "[[static_files]] source must stay outside generated `.github/`, found `{source}`"
             )));
         }
         let duplicate = rows
             .iter()
-            .filter(|other| other.file.as_deref() == Some(file))
+            .filter(|other| {
+                other
+                    .file
+                    .as_deref()
+                    .is_some_and(|other| paths_overlap(Path::new(other), Path::new(file)))
+            })
             .count();
         if duplicate > 1 {
             return Err(GeneratorError::usage(format!(
@@ -2580,7 +2585,7 @@ fn is_safe_static_output_path(path: &str) -> bool {
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+    crate::paths_alias_overlap(left, right)
 }
 
 /// Reviewer rows render into the generator-owned CODEOWNERS file, whose
@@ -5673,12 +5678,37 @@ mod tests {
             },
         ];
         assert!(validate_static_files(&output_replaces_other_source).is_err());
+
+        let case_alias_source = [StaticFileSection {
+            file: Some("config/runtime/source.env".to_owned()),
+            source: Some("CONFIG/RUNTIME/SOURCE.ENV".to_owned()),
+        }];
+        assert!(validate_static_files(&case_alias_source).is_err());
+
+        let case_alias_outputs = [
+            StaticFileSection {
+                file: Some("config/runtime/generated.env".to_owned()),
+                source: Some(".github-gen/sources/one.env".to_owned()),
+            },
+            StaticFileSection {
+                file: Some("config/RUNTIME/GENERATED.ENV".to_owned()),
+                source: Some(".github-gen/sources/two.env".to_owned()),
+            },
+        ];
+        assert!(validate_static_files(&case_alias_outputs).is_err());
+
+        let case_alias_generated_root = [StaticFileSection {
+            file: Some(".github/CI/.GITHUB-ACTIONS-GENERATOR-STATE".to_owned()),
+            source: Some(".github-gen/sources/three.env".to_owned()),
+        }];
+        assert!(validate_static_files(&case_alias_generated_root).is_err());
     }
 
     #[test]
     fn static_file_sources_cannot_be_taken_from_generated_github_tree() {
         for source in [
             ".github/workflows/input.yml",
+            ".GITHUB/WORKFLOWS/input.yml",
             "./.github/workflows/input.yml",
             "././.github/./workflows/input.yml",
         ] {

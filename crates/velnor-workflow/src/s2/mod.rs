@@ -6610,6 +6610,7 @@ pub(crate) struct RenderedTree {
     pub(crate) config: ProjectConfig,
     pub(crate) files: BTreeMap<PathBuf, String>,
     pub(crate) symlinks: BTreeMap<PathBuf, PathBuf>,
+    pub(crate) static_sources: BTreeSet<PathBuf>,
     pub(crate) inputs: GenerationInputs,
 }
 
@@ -6635,11 +6636,17 @@ pub(crate) fn render_tree(
         }
     }
     let files = generated_files_with_surface(&config, Some(&surface))?;
+    let static_sources = config
+        .static_files
+        .iter()
+        .map(|file| PathBuf::from(&file.source))
+        .collect();
     let inputs = scanned.inputs;
     Ok(RenderedTree {
         config,
         files,
         symlinks: crate::generated_symlinks(),
+        static_sources,
         inputs,
     })
 }
@@ -6668,11 +6675,13 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
     let config = rendered.config;
     let files = rendered.files;
     let symlinks = rendered.symlinks;
+    let static_sources = rendered.static_sources;
     let inputs = rendered.inputs;
-    let outcome = write_generated_with_options(
+    let outcome = write_generated_with_static_sources(
         &output_root,
         &files,
         &symlinks,
+        &static_sources,
         &inputs,
         cli.dry_run,
         cli.check,
@@ -6826,7 +6835,11 @@ fn generated_files_with_surface(
     }
     for owned in &config.static_files {
         let path = PathBuf::from(&owned.path);
-        if files.contains_key(&path) || crate::generated_symlinks().contains_key(&path) {
+        if files
+            .keys()
+            .chain(crate::generated_symlinks().keys())
+            .any(|existing| crate::paths_alias_overlap(existing, &path))
+        {
             return Err(GeneratorError::usage(format!(
                 "[[static_files]] output collides with a generator-owned output: {}",
                 path.display()
@@ -6849,7 +6862,7 @@ fn generated_files_with_surface(
         if config
             .static_files
             .iter()
-            .any(|owned| Path::new(&owned.path) == Path::new(reserved))
+            .any(|owned| crate::paths_alias_equal(Path::new(&owned.path), Path::new(reserved)))
         {
             return Err(GeneratorError::usage(format!(
                 "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
@@ -7538,6 +7551,7 @@ fn write_generated(
     clippy::too_many_arguments,
     reason = "the render passes files, links, and inputs as one explicit write contract"
 )]
+#[cfg(test)]
 pub(crate) fn write_generated_with_options(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -7548,7 +7562,46 @@ pub(crate) fn write_generated_with_options(
     force: bool,
     adopt: bool,
 ) -> Result<WriteOutcome, GeneratorError> {
-    let plan = plan_generated_write_with_options(root, files, symlinks, inputs, adopt)?;
+    write_generated_with_static_sources(
+        root,
+        files,
+        symlinks,
+        &BTreeSet::new(),
+        inputs,
+        dry_run,
+        check,
+        force,
+        adopt,
+    )
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "these independent switches are the stable CLI generation contract"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the render passes files, links, and inputs as one explicit write contract"
+)]
+pub(crate) fn write_generated_with_static_sources(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    static_sources: &BTreeSet<PathBuf>,
+    inputs: &GenerationInputs,
+    dry_run: bool,
+    check: bool,
+    force: bool,
+    adopt: bool,
+) -> Result<WriteOutcome, GeneratorError> {
+    let plan = plan_generated_write_with_static_sources(
+        root,
+        files,
+        symlinks,
+        static_sources,
+        inputs,
+        adopt,
+    )?;
     apply_generated_write_plan(root, files, symlinks, inputs, dry_run, check, force, &plan)
 }
 
@@ -7562,10 +7615,6 @@ fn plan_generated_write(
     plan_generated_write_with_options(root, files, symlinks, inputs, false)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "write-plan assembly has to inspect every recorded output class"
-)]
 fn plan_generated_write_with_options(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -7573,9 +7622,27 @@ fn plan_generated_write_with_options(
     inputs: &GenerationInputs,
     adopt: bool,
 ) -> Result<GeneratedWritePlan, GeneratorError> {
+    plan_generated_write_with_static_sources(root, files, symlinks, &BTreeSet::new(), inputs, adopt)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "write-plan assembly has to inspect every recorded output class"
+)]
+fn plan_generated_write_with_static_sources(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    static_sources: &BTreeSet<PathBuf>,
+    inputs: &GenerationInputs,
+    adopt: bool,
+) -> Result<GeneratedWritePlan, GeneratorError> {
     validate_generated_paths(files, symlinks)?;
     for relative in symlinks.keys() {
-        if files.contains_key(relative) {
+        if files
+            .keys()
+            .any(|existing| crate::paths_alias_equal(existing, relative))
+        {
             return Err(GeneratorError::usage(format!(
                 "generated path is both a file and a symlink: {}",
                 relative.display()
@@ -7628,8 +7695,13 @@ fn plan_generated_write_with_options(
         || ownership_preimage.is_executable()
         || !ownership_preimage
             .has_bytes(ownership_state_content(files, symlinks, inputs).as_bytes());
-    let stale_files =
-        stale_owned_files(root, files, symlinks, ownership.map(|state| &state.outputs))?;
+    let stale_files = stale_owned_files(
+        root,
+        files,
+        symlinks,
+        ownership.map(|state| &state.outputs),
+        static_sources,
+    )?;
     let stale = stale_files
         .iter()
         .map(|file| file.path.clone())
@@ -8755,7 +8827,8 @@ fn reject_managed_symlink_ancestors<'a>(
                 .ancestors()
                 .skip(1)
                 .filter(|ancestor| {
-                    ancestor.starts_with(".github") || ancestor.starts_with("config")
+                    crate::path_alias_starts_with(ancestor, Path::new(".github"))
+                        || crate::path_alias_starts_with(ancestor, Path::new("config"))
                 })
                 .map(Path::to_path_buf),
         );
@@ -9076,6 +9149,7 @@ fn stale_owned_files(
     files: &BTreeMap<PathBuf, String>,
     symlinks: &BTreeMap<PathBuf, PathBuf>,
     ownership: Option<&BTreeMap<PathBuf, u64>>,
+    static_sources: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PlannedFile>, GeneratorError> {
     let Some(ownership) = ownership else {
         return Ok(Vec::new());
@@ -9083,6 +9157,16 @@ fn stale_owned_files(
     let mut stale = Vec::new();
     for (relative, expected) in ownership {
         if files.contains_key(relative) || symlinks.contains_key(relative) {
+            continue;
+        }
+        // A former generated output can become the repository-owned source of
+        // a new static row during an output migration. The source was read
+        // before planning, so deleting it here would make the next run fail.
+        // Treat case aliases as the same path on case-insensitive hosts.
+        if static_sources
+            .iter()
+            .any(|source| crate::paths_alias_overlap(relative, source))
+        {
             continue;
         }
         let path = root.join(relative);
@@ -9341,7 +9425,10 @@ fn parse_digest<'a>(
         let (raw_path, raw_digest) = line.split_once('\t').ok_or_else(invalid)?;
         let relative = managed_relative_path(raw_path)?;
         let digest = u64::from_str_radix(raw_digest, 16).map_err(|_| invalid())?;
-        if state.contains_key(&relative) {
+        if state
+            .keys()
+            .any(|existing| crate::paths_alias_equal(existing, &relative))
+        {
             return Err(GeneratorError::usage(format!(
                 "duplicate generated ownership state entry: {}",
                 path.display()
@@ -9349,7 +9436,7 @@ fn parse_digest<'a>(
         }
         if state
             .keys()
-            .any(|existing| existing.starts_with(&relative) || relative.starts_with(existing))
+            .any(|existing| crate::paths_alias_overlap(existing, &relative))
         {
             return Err(invalid());
         }
@@ -9418,11 +9505,7 @@ fn is_managed_output_path(value: &str) -> bool {
     let output_root = path.starts_with(".github") || path.starts_with("config");
     let has_child = path.components().count() > 1;
     let ownership_state = Path::new(OWNERSHIP_STATE);
-    normalized
-        && output_root
-        && has_child
-        && !path.starts_with(ownership_state)
-        && !ownership_state.starts_with(path)
+    normalized && output_root && has_child && !crate::paths_alias_overlap(path, ownership_state)
 }
 
 fn content_digest(content: &str) -> u64 {
@@ -9484,8 +9567,7 @@ fn validate_generated_paths(
                 relative.display()
             )));
         }
-        if relative.starts_with(ownership_state) || ownership_state.starts_with(relative.as_path())
-        {
+        if crate::paths_alias_overlap(relative, ownership_state) {
             return Err(GeneratorError::usage(format!(
                 "generated output overlaps the ownership state path: {}",
                 relative.display()
@@ -9494,7 +9576,7 @@ fn validate_generated_paths(
     }
     for (index, left) in paths.iter().enumerate() {
         for right in paths.iter().skip(index + 1) {
-            if left.starts_with(right.as_path()) || right.starts_with(left.as_path()) {
+            if crate::paths_alias_overlap(left, right) {
                 return Err(GeneratorError::usage(format!(
                     "generated output paths overlap: {} and {}",
                     left.display(),
