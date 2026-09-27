@@ -657,7 +657,7 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
     assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
     assert!(
-        entrypoint.contains("with no secret references"),
+        entrypoint.contains("references no secrets, persists no credentials, and never compiles."),
         "the trust invariant states the absence honestly: {entrypoint}"
     );
     assert!(!entrypoint.contains("secrets."), "{entrypoint}");
