@@ -54,6 +54,14 @@ owns selection, dependency ordering, policy, release validation, and every
 never imported. The ownership sidecar stays at
 `.github/ci/.github-actions-generator-state`.
 
+Runner capabilities come from concrete scan evidence. Generated Dockerfile
+builds use Docker Buildx, so Docker units require Docker plus the runner's
+bundled Buildx/Compose capability; this does not infer Docker Compose services
+or Testcontainers use. A detected service adds Docker and service readiness.
+Rust units require Docker/Testcontainers when they directly depend on the
+`testcontainers` or `testcontainers-modules` crate. Rust, Gradle, Node, and Bun
+unit kinds alone do not imply a Docker requirement.
+
 Repositories may pin their generation inputs in an optional
 `.github-gen/velnor-workflow.toml` (`schema = 1`): the repository slug, runner
 and branch overrides, scan excludes, policy switches, and `[[declare]]` render
