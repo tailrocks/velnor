@@ -927,6 +927,7 @@ fn candidate_manifest(fixture: &ConsumerFixture, closure: &str, digest: &str) ->
         "repository": crate::workflow_setup_action_repository(),
         "run_id": "12345678",
         "revision": fixture.revision.as_str(),
+        "build_revision": fixture.revision.as_str(),
         "closure": closure,
         "binary_sha256": digest,
     })
@@ -1531,7 +1532,11 @@ fn candidate_acquire_exports_bound_product() {
     let env = must(fs::read_to_string(&env_file), "read github env");
     assert!(
         env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "the binary exports: {env}"
+        "the reader-bootstrap binary export remains on the base slot: {env}"
+    );
+    assert!(
+        !env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
+        "the writer stays on the base slot until the reader pin is promoted: {env}"
     );
     assert!(
         env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),

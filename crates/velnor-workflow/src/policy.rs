@@ -63,6 +63,8 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
+/// Names the env-slot candidate binary.
+pub use super::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV;
 /// Names the manifest binding the env-slot candidate binary.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
 /// Names a `velnor-workflow` binary built at the pinned revision.
@@ -1133,6 +1135,9 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
 pub(crate) struct PinnedBinaryLookup {
     /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
     pinned_binary: Option<PathBuf>,
+    /// [`VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV`]. It is never used to resolve the
+    /// declared pin; candidate rendering consumes it only after manifest proof.
+    candidate_binary: Option<PathBuf>,
     /// `PATH`.
     search_path: Option<OsString>,
     /// Where an earlier resolution built the pin.
@@ -1169,6 +1174,7 @@ impl PinnedBinaryLookup {
     ) -> Self {
         Self {
             pinned_binary: getenv(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            candidate_binary: getenv(VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV).map(PathBuf::from),
             search_path: getenv("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
@@ -1281,13 +1287,14 @@ pub(crate) fn resolve_pinned_binary(
 
 /// The candidate manifest the publisher wrote beside the candidate binary
 /// (`profile`, `platform`, `repository`, `run_id`, `revision`, `closure`,
-/// `binary_sha256`, plus `build_revision`). The consume-side binding uses
-/// only the closure and the digest: `revision` names the PR head the
-/// publisher built for, which a legit older pin may still equal on closure
-/// paths, so closure equality is the content binding.
+/// `binary_sha256`, plus `build_revision`). The consume-side binding uses the
+/// closure, digest, and the candidate binary's `--revision` report: `revision`
+/// names the PR head the publisher built for, while `build_revision` names
+/// the tree that actually produced the bytes.
 #[derive(serde::Deserialize)]
 struct CandidateManifest {
     revision: String,
+    build_revision: String,
     closure: String,
     binary_sha256: String,
 }
@@ -1306,6 +1313,13 @@ fn load_candidate_manifest(path: &Path) -> Result<CandidateManifest, String> {
             "{}: revision {:?} is not a full commit SHA",
             path.display(),
             manifest.revision
+        ));
+    }
+    if !super::is_full_revision(&manifest.build_revision) {
+        return Err(format!(
+            "{}: build_revision {:?} is not a full commit SHA",
+            path.display(),
+            manifest.build_revision
         ));
     }
     if !closure_identity::is_full_closure(&manifest.closure) {
@@ -1591,8 +1605,8 @@ fn render_with_candidate(
         }
     };
     let mut binaries = Vec::new();
-    if let Some(pinned) = &lookup.pinned_binary {
-        binaries.push(pinned.clone());
+    if let Some(candidate) = &lookup.candidate_binary {
+        binaries.push(candidate.clone());
     }
     if let Some(current) = &current_exe
         && !binaries.contains(current)
@@ -1616,6 +1630,12 @@ fn render_with_candidate(
                 continue;
             };
             if digest != bound.binary_sha256 {
+                continue;
+            }
+            let Ok(reported_revision) = binary_revision(&binary) else {
+                continue;
+            };
+            if reported_revision != bound.build_revision {
                 continue;
             }
         }

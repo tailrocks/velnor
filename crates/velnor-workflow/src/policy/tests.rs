@@ -97,6 +97,7 @@ fn lookup(
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
         pinned_binary,
+        candidate_binary: None,
         search_path,
         install_root,
         build_forbidden: true,
@@ -111,11 +112,29 @@ fn lookup_with_manifest(
     candidate_manifest: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
+        candidate_binary: pinned_binary.clone(),
         pinned_binary,
         search_path,
         install_root,
         build_forbidden: true,
         candidate_manifest: Some(candidate_manifest),
+    }
+}
+
+fn lookup_with_slots(
+    pinned_binary: Option<PathBuf>,
+    candidate_binary: Option<PathBuf>,
+    search_path: Option<std::ffi::OsString>,
+    install_root: PathBuf,
+    candidate_manifest: Option<PathBuf>,
+) -> PinnedBinaryLookup {
+    PinnedBinaryLookup {
+        pinned_binary,
+        candidate_binary,
+        search_path,
+        install_root,
+        build_forbidden: true,
+        candidate_manifest,
     }
 }
 
@@ -153,6 +172,37 @@ fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
         "an explicit pointer at the wrong closure is refused, not skipped: {error}"
     );
     assert!(error.contains(PIN_A), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_binary_slot_does_not_replace_the_pinned_binary() {
+    let root = temporary_directory("separate-binary-slots");
+    let pin_dir = root.join("pin");
+    let candidate_dir = root.join("candidate");
+    must(fs::create_dir_all(&pin_dir), "create pin directory");
+    must(
+        fs::create_dir_all(&candidate_dir),
+        "create candidate directory",
+    );
+    let pinned = fake_velnor_workflow(&pin_dir, PIN_A, CLOSURE_A);
+    let candidate = fake_velnor_workflow(&candidate_dir, PIN_B, CLOSURE_B);
+    let lookup = lookup_with_slots(
+        Some(pinned.clone()),
+        Some(candidate),
+        None,
+        root.join("install"),
+        None,
+    );
+    let expected = [CLOSURE_A.to_owned()];
+    assert_eq!(
+        must(
+            resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
+            "pinned slot stays independent from candidate slot"
+        ),
+        pinned
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1137,13 +1187,13 @@ fn cli_requires_the_base_validator_revision() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
+fn fake_candidate_renderer(directory: &Path, revision: &str, closure: &str) -> PathBuf {
     let binary = directory.join("candidate");
     must(
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
+                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
             ),
         ),
         "write fake candidate renderer",
@@ -1161,6 +1211,7 @@ fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
 #[cfg(unix)]
 fn fake_environment_observing_candidate_renderer(
     directory: &Path,
+    revision: &str,
     closure: &str,
     sentinel: &Path,
 ) -> PathBuf {
@@ -1169,7 +1220,7 @@ fn fake_environment_observing_candidate_renderer(
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then\n  if [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; fi\n  echo {closure}; exit 0\nfi\nif [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; exit 17; fi\ncommand -v git >/dev/null 2>&1 || exit 17\ncp -r \"$1/.\" \"$3/\"\n",
+                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then\n  if [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; fi\n  echo {closure}; exit 0\nfi\nif [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; exit 17; fi\ncommand -v git >/dev/null 2>&1 || exit 17\ncp -r \"$1/.\" \"$3/\"\n",
                 sentinel.display(),
                 sentinel.display(),
             ),
@@ -1221,6 +1272,18 @@ fn candidate_manifest_for(
     closure: &str,
     revision: &str,
 ) -> PathBuf {
+    candidate_manifest_for_build_revision(directory, name, binary, closure, revision, revision)
+}
+
+#[cfg(unix)]
+fn candidate_manifest_for_build_revision(
+    directory: &Path,
+    name: &str,
+    binary: &Path,
+    closure: &str,
+    revision: &str,
+    build_revision: &str,
+) -> PathBuf {
     use sha2::Digest as _;
     let bytes = must(fs::read(binary), "read fake binary bytes");
     let mut digest = String::with_capacity(64);
@@ -1237,6 +1300,7 @@ fn candidate_manifest_for(
                 "repository": crate::workflow_setup_action_repository(),
                 "run_id": "123",
                 "revision": revision,
+                "build_revision": build_revision,
                 "closure": closure,
                 "binary_sha256": digest,
             })
@@ -1281,7 +1345,7 @@ fn bound_candidate_matching_head_tree_is_accepted() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-bound-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
+    let binary = fake_candidate_renderer(&root, &head, &wanted);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
@@ -1300,6 +1364,35 @@ fn bound_candidate_matching_head_tree_is_accepted() {
 
 #[cfg(unix)]
 #[test]
+fn candidate_renderer_revision_must_match_manifest_build_revision() {
+    let (root, head) = closure_fixture("candidate-wrong-build-revision");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-wrong-build-revision-scratch");
+    let binary = fake_candidate_renderer(&root, PIN_B, &wanted);
+    let manifest = candidate_manifest_for_build_revision(
+        &root,
+        "candidate-manifest.json",
+        &binary,
+        &wanted,
+        &head,
+        &head,
+    );
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    assert!(must(
+        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        "wrong build revision never proves the candidate",
+    )
+    .is_none());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
 fn candidate_renderer_receives_no_ambient_environment() {
     assert!(
         env::var_os("HOME").is_some(),
@@ -1312,7 +1405,7 @@ fn candidate_renderer_receives_no_ambient_environment() {
     );
     let scratch = temporary_directory("candidate-hermetic-env-scratch");
     let sentinel = root.join("ambient-environment-observed");
-    let binary = fake_environment_observing_candidate_renderer(&root, &wanted, &sentinel);
+    let binary = fake_environment_observing_candidate_renderer(&root, &head, &wanted, &sentinel);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
@@ -1378,7 +1471,7 @@ fn candidate_manifest_for_another_tree_is_rejected() {
     let scratch = temporary_directory("candidate-other-tree-scratch");
     // Self-consistent but for another tree: the binary echoes CLOSURE_A and
     // the manifest binds CLOSURE_A with a matching digest.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
+    let binary = fake_candidate_renderer(&root, &head, CLOSURE_A);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
@@ -1433,7 +1526,7 @@ fn malformed_candidate_manifest_is_rejected() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-malformed-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
+    let binary = fake_candidate_renderer(&root, &head, &wanted);
     let digest = {
         use sha2::Digest as _;
         let bytes = must(fs::read(&binary), "read fake binary bytes");
@@ -1451,13 +1544,18 @@ fn malformed_candidate_manifest_is_rejected() {
                 .to_string(),
         ),
         (
+            "short-build-revision".to_owned(),
+            serde_json::json!({"revision": head, "build_revision": "abc", "closure": wanted, "binary_sha256": digest})
+                .to_string(),
+        ),
+        (
             "short-closure".to_owned(),
-            serde_json::json!({"revision": head, "closure": "abc", "binary_sha256": digest})
+            serde_json::json!({"revision": head, "build_revision": head, "closure": "abc", "binary_sha256": digest})
                 .to_string(),
         ),
         (
             "short-digest".to_owned(),
-            serde_json::json!({"revision": head, "closure": wanted, "binary_sha256": "abc"})
+            serde_json::json!({"revision": head, "build_revision": head, "closure": wanted, "binary_sha256": "abc"})
                 .to_string(),
         ),
     ];
@@ -1546,6 +1644,21 @@ fn from_env_consent_mapping_is_fail_closed() {
         manifest_env.candidate_manifest,
         Some(PathBuf::from("/env/manifest.json"))
     );
+    let slots = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| match name {
+        VELNOR_WORKFLOW_PINNED_BINARY_ENV => Some(std::ffi::OsString::from("/pin/velnor-workflow")),
+        VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV => {
+            Some(std::ffi::OsString::from("/candidate/velnor-workflow"))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        slots.pinned_binary,
+        Some(PathBuf::from("/pin/velnor-workflow"))
+    );
+    assert_eq!(
+        slots.candidate_binary,
+        Some(PathBuf::from("/candidate/velnor-workflow"))
+    );
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
     // (also pinned end to end by the `--check` CLI subprocess test in
     // `velnor_first_ci.rs`, which owns the child's environment).
@@ -1571,7 +1684,7 @@ fn candidate_render_rejects_a_binary_claiming_another_closure() {
     // Valid binding for the audited tree (manifest closure plus the real
     // digest of the binary bytes), but the binary echoes CLOSURE_A: the
     // `--closure` self-report stays as the final tripwire.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
+    let binary = fake_candidate_renderer(&root, &head, CLOSURE_A);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
