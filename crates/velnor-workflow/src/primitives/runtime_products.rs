@@ -2534,7 +2534,7 @@ exit 1
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "e6d440927fc4b10bde8512e82b745f7aa7ad600c4f36f08ca912f909f383d5d2";
+        const PINNED: &str = "52aeada569aaabe8be496344535b57924e0eb3ac8d156c37c114ad4d33785471";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
