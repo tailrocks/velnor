@@ -729,7 +729,9 @@ fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
 }
 
 /// The generated entrypoint holds exactly the privileges the trust argument
-/// in `ci-policy.yml` states: `contents: read` at both levels, no secrets,
+/// in `ci-policy.yml` states: workflow `contents: read`; the policy job may
+/// use `contents: read` or the exact final set `actions: read`, `contents: read`,
+/// and `pull-requests: read`; no secrets,
 /// no persisted credentials, no deployment environment, one hosted job, and
 /// only the reviewed triggers.
 #[test]
@@ -766,6 +768,67 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
             .any(|detail| detail.contains(BASE_REVISION_ENV) && detail.contains(PIN_A)),
         "{:?}",
         drift.details
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn entrypoint_audit_accepts_legacy_or_final_read_permissions_on_policy_job() {
+    let clean = hosted_entrypoint(PIN_A);
+    let legacy_root = entrypoint_tree("entrypoint-legacy-contents-only", &clean);
+    let legacy_audit = must(
+        audit_policy_entrypoint(&legacy_root, &VelnorPolicyContract::default()),
+        "audit legacy entrypoint",
+    );
+    assert!(
+        legacy_audit.trigger.is_empty(),
+        "{:?}",
+        legacy_audit.trigger
+    );
+    assert!(
+        legacy_audit.privileges.is_empty(),
+        "{:?}",
+        legacy_audit.privileges
+    );
+    let _ = fs::remove_dir_all(legacy_root);
+
+    let with_final_permissions = clean.replacen(
+        "    permissions:\n      contents: read\n",
+        "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n",
+        1,
+    );
+    assert_ne!(clean, with_final_permissions);
+    let root = entrypoint_tree("entrypoint-final-read", &with_final_permissions);
+    let audit = must(
+        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+        "audit final-read entrypoint",
+    );
+    assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
+    assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
+    assert!(with_final_permissions
+        .contains("actions: read\n      contents: read\n      pull-requests: read"));
+    let _ = fs::remove_dir_all(root);
+
+    let with_two_permissions = clean.replacen(
+        "    permissions:\n      contents: read\n",
+        "    permissions:\n      actions: read\n      contents: read\n",
+        1,
+    );
+    let root = entrypoint_tree(
+        "entrypoint-actions-and-contents-only",
+        &with_two_permissions,
+    );
+    let audit = must(
+        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+        "audit incomplete final permissions entrypoint",
+    );
+    assert!(
+        audit
+            .privileges
+            .iter()
+            .any(|finding| finding.contains("pull-requests: read")),
+        "two-key permissions must remain rejected: {:?}",
+        audit.privileges
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -827,7 +890,7 @@ fn entrypoint_audit_names_each_escalation() {
             "job-permissions",
             "    permissions:\n      contents: read\n",
             "    permissions:\n      contents: read\n      id-token: write\n",
-            "permissions must be exactly `contents: read`",
+            "permissions must be exactly `contents: read` or `actions: read, contents: read, pull-requests: read`",
         ),
         (
             "secret",
