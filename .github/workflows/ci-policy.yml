@@ -108,8 +108,8 @@ jobs:
           pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
           test "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"
           test "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }
-          base_closure="$(env -u GH_TOKEN velnor-workflow closure --rev="$BASE_PIN")"
-          pin_closure="$(env -u GH_TOKEN velnor-workflow closure --rev="$pin")"
+          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
+          pin_closure="$(velnor-workflow closure --rev="$pin")"
           if [[ "$pin_closure" == "$base_closure" ]]; then
             # Same closure means the running base validator IS the pin's
             # renderer, so --check decides tree==pin-render with no extra
@@ -118,7 +118,7 @@ jobs:
             # stranding the validator with a cleared manifest and a red pin
             # leg. The check output stays visible: on a fall-through it is
             # the diagnosis, on a match it is one line.
-            if env -u GH_TOKEN velnor-workflow --plain --check; then
+            if velnor-workflow --plain --check; then
               echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
               echo "VELNOR_WORKFLOW_CANDIDATE_BINARY=" >> "$GITHUB_ENV"
               echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
@@ -148,8 +148,8 @@ jobs:
           if ! git cat-file -e "$CANDIDATE_SHA^{commit}" 2>/dev/null; then
             git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$CANDIDATE_SHA"
           fi
-          head_candidate="$(env -u GH_TOKEN velnor-workflow closure --rev="$CANDIDATE_SHA" --candidate)"
-          render_candidate="$(env -u GH_TOKEN velnor-workflow closure --rev="$RENDER_SHA" --candidate)"
+          head_candidate="$(velnor-workflow closure --rev="$CANDIDATE_SHA" --candidate)"
+          render_candidate="$(velnor-workflow closure --rev="$RENDER_SHA" --candidate)"
           name="velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"
           deadline=$((SECONDS + 900))
           run_id=""

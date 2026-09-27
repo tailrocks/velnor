@@ -5728,8 +5728,8 @@ fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
           BASE_PIN: {revision}
         run: |
           set -euo pipefail
-{pin_script}          base_closure="$(env -u GH_TOKEN velnor-workflow closure --rev="$BASE_PIN")"
-          pin_closure="$(env -u GH_TOKEN velnor-workflow closure --rev="$pin")"
+{pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
+          pin_closure="$(velnor-workflow closure --rev="$pin")"
           if [[ "$pin_closure" == "$base_closure" ]]; then
             # Same closure means the running base validator IS the pin's
             # renderer, so --check decides tree==pin-render with no extra
@@ -5738,7 +5738,7 @@ fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
             # stranding the validator with a cleared manifest and a red pin
             # leg. The check output stays visible: on a fall-through it is
             # the diagnosis, on a match it is one line.
-            if env -u GH_TOKEN velnor-workflow --plain --check; then
+            if velnor-workflow --plain --check; then
               echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
               echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=" >> "$GITHUB_ENV"
               echo "{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}=" >> "$GITHUB_ENV"
@@ -5768,8 +5768,8 @@ fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
           if ! git cat-file -e "$CANDIDATE_SHA^{{commit}}" 2>/dev/null; then
             git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$CANDIDATE_SHA"
           fi
-          head_candidate="$(env -u GH_TOKEN velnor-workflow closure --rev="$CANDIDATE_SHA" --candidate)"
-          render_candidate="$(env -u GH_TOKEN velnor-workflow closure --rev="$RENDER_SHA" --candidate)"
+          head_candidate="$(velnor-workflow closure --rev="$CANDIDATE_SHA" --candidate)"
+          render_candidate="$(velnor-workflow closure --rev="$RENDER_SHA" --candidate)"
           name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
           deadline=$((SECONDS + 900))
           run_id=""
@@ -20566,7 +20566,7 @@ lockfile = true
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
             owner.contains(
-                "head_candidate=\"$(env -u GH_TOKEN velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
             ),
             "the acquire step derives the candidate from the audited head: {owner}"
         );
@@ -20590,13 +20590,18 @@ lockfile = true
         );
         assert!(
             owner.contains(
-                "render_candidate=\"$(env -u GH_TOKEN velnor-workflow closure --rev=\"$RENDER_SHA\" --candidate)\""
+                "render_candidate=\"$(velnor-workflow closure --rev=\"$RENDER_SHA\" --candidate)\""
             ) && owner.contains("\"$manifest_closure\" == \"$render_candidate\""),
             "a PR artifact whose closure differs from the audited render fails closed: {owner}"
         );
         assert!(
             owner.contains(".build_revision | test(\"^[0-9a-f]{40}$\")"),
             "the manifest binds the binary build revision: {owner}"
+        );
+        assert!(
+            owner.contains("--arg revision \"$CANDIDATE_SHA\"")
+                && owner.contains(".revision == $revision"),
+            "the manifest revision must match the exact head that published the candidate: {owner}"
         );
         assert!(
             owner.contains("update the PR branch/rebuild the candidate after main changes"),
@@ -20649,7 +20654,7 @@ lockfile = true
     fn policy_acquire_same_closure_exit_requires_pin_render_match() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
-            owner.contains("if env -u GH_TOKEN velnor-workflow --plain --check; then"),
+            owner.contains("if velnor-workflow --plain --check; then"),
             "the same-closure branch proves tree==pin-render before exiting: {owner}"
         );
         assert!(
@@ -20669,7 +20674,7 @@ lockfile = true
             "a same-closure render differ falls through instead of exiting: {owner}"
         );
         let check = must_some(
-            owner.find("if env -u GH_TOKEN velnor-workflow --plain --check; then"),
+            owner.find("if velnor-workflow --plain --check; then"),
             "the render gate is present",
         );
         let fork = must_some(
@@ -20677,7 +20682,7 @@ lockfile = true
             "the fork gate is present",
         );
         let head = must_some(
-            owner.find("head_candidate=\"$(env -u GH_TOKEN velnor-workflow closure"),
+            owner.find("head_candidate=\"$(velnor-workflow closure"),
             "the head derivation is present",
         );
         assert!(
@@ -20687,7 +20692,7 @@ lockfile = true
     }
 
     #[test]
-    fn policy_candidate_cli_runs_without_step_token() {
+    fn policy_candidate_execution_is_outside_acquire_token_scope() {
         let owner = hosted_policy_job("abc123");
         let acquire = must_some(
             owner.find("      - name: Acquire candidate generator product\n"),
@@ -20702,15 +20707,28 @@ lockfile = true
             candidate.contains("GH_TOKEN: ${{ github.token }}"),
             "{candidate}"
         );
-        for invocation in candidate.lines().filter(|line| {
-            line.contains("velnor-workflow closure")
-                || line.contains("velnor-workflow --plain --check")
-        }) {
-            assert!(
-                invocation.contains("env -u GH_TOKEN velnor-workflow"),
-                "historical generator invocation must not inherit GH_TOKEN: {invocation}"
-            );
-        }
+        assert!(
+            !candidate.contains("env -u GH_TOKEN velnor-workflow"),
+            "the Acquire step must retain the pin's canonical body: {candidate}"
+        );
+        assert!(
+            !candidate.contains("velnor-workflow policy"),
+            "candidate policy execution must not occur inside the token-bearing acquisition step: {candidate}"
+        );
+        let enforce = must_some(
+            owner.find("      - name: Enforce workflow policy\n"),
+            "candidate policy execution step",
+        );
+        let enforce_tail = &owner[enforce..];
+        let next_step = must_some(
+            enforce_tail["      - name: Enforce workflow policy\n".len()..].find("      - name: "),
+            "step after candidate policy execution",
+        ) + "      - name: Enforce workflow policy\n".len();
+        let enforce = &enforce_tail[..next_step];
+        assert!(
+            enforce.contains("velnor-workflow policy") && !enforce.contains("GH_TOKEN"),
+            "candidate policy execution is in a separate step without the API token: {enforce}"
+        );
     }
 
     /// The acquire step finds the sibling PR run through the runs-list API,
