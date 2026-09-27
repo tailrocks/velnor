@@ -2168,7 +2168,7 @@ fn audit_policy_entrypoint(
         return Ok(audit);
     };
     audit_entrypoint_triggers(workflow, &mut audit);
-    audit_entrypoint_privileges(workflow, &content, velnor_policy, &mut audit);
+    audit_entrypoint_privileges(root, workflow, velnor_policy, &mut audit);
     Ok(audit)
 }
 
@@ -2215,8 +2215,8 @@ fn audit_entrypoint_triggers(workflow: &Mapping, audit: &mut EntrypointAudit) {
 /// `contents: read`, no secrets, no persisted credentials, one job on a
 /// hosted or trust-gated approved runner.
 fn audit_entrypoint_privileges(
+    root: &Path,
     workflow: &Mapping,
-    content: &str,
     velnor_policy: &VelnorPolicyContract,
     audit: &mut EntrypointAudit,
 ) {
@@ -2226,13 +2226,15 @@ fn audit_entrypoint_privileges(
             "workflow permissions must be exactly `contents: read`",
         ));
     }
-    let references_secrets = content.lines().any(|line| line.contains("secrets."));
-    if references_secrets {
+    if mapping_contains_context(workflow, "secrets") {
         audit
             .privileges
-            .push(finding("must not reference `secrets.`"));
+            .push(finding("must not reference the GitHub `secrets` context"));
     }
     for reference in github_token_scope_findings(workflow) {
+        audit.privileges.push(finding(&reference));
+    }
+    for reference in canonical_api_step_findings(root, workflow, velnor_policy) {
         audit.privileges.push(finding(&reference));
     }
     match mapping_value(workflow, "jobs").and_then(Value::as_mapping) {
@@ -2401,6 +2403,47 @@ fn value_contains_github_token(value: &Value) -> bool {
     }
 }
 
+/// Reject a GitHub expression context wherever it appears in the parsed
+/// workflow. The policy entrypoint must not carry secrets at all, so this
+/// deliberately fails closed on every scalar containing the context name:
+/// dotted, bracketed, whitespace-separated, case-variant, serialized, and
+/// indirect expressions are all covered without relying on one spelling.
+fn value_contains_context(value: &Value, context: &str) -> bool {
+    match value {
+        Value::String(value) => contains_context_name(value, context),
+        Value::Mapping(mapping) => mapping_contains_context(mapping, context),
+        Value::Sequence(sequence) => sequence
+            .iter()
+            .any(|value| value_contains_context(value, context)),
+        Value::Tagged(tagged) => value_contains_context(tagged.value(), context),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn mapping_contains_context(mapping: &Mapping, context: &str) -> bool {
+    mapping
+        .keys()
+        .any(|key| contains_context_name(key.as_str(), context))
+        || mapping
+            .values()
+            .any(|value| value_contains_context(value, context))
+}
+
+fn contains_context_name(value: &str, context: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    let bytes = normalized.as_bytes();
+    let mut offset = 0;
+    while let Some(relative) = normalized[offset..].find(context) {
+        let start = offset + relative;
+        let end = start + context.len();
+        if identifier_boundary(bytes, start, end) {
+            return true;
+        }
+        offset = end;
+    }
+    false
+}
+
 /// Recognize every way a workflow expression can obtain the token-bearing
 /// `github` context. Direct dotted access is the generated spelling; indexed
 /// access and passing the root object to a function are rejected because they
@@ -2513,6 +2556,178 @@ fn token_env_is_exact(value: &Value) -> bool {
         key.as_str() == "GH_TOKEN"
             && matches!(value, Value::String(value) if value.trim() == "${{ github.token }}")
     })
+}
+
+/// The token-bearing API steps are a privilege boundary: an arbitrary step
+/// with the generated step's name and `GH_TOKEN` binding could exfiltrate the
+/// read-only token. Compare each such step with the generator's complete
+/// canonical mapping and require one instance, rather than trusting a name
+/// and one environment entry. This also catches a duplicate, renamed, or
+/// body-mutated step before the policy job can run it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "canonical API-step validation keeps its provenance contract together"
+)]
+fn canonical_api_step_findings(
+    root: &Path,
+    workflow: &Mapping,
+    velnor_policy: &VelnorPolicyContract,
+) -> Vec<String> {
+    let Some(jobs) = mapping_value(workflow, "jobs").and_then(Value::as_mapping) else {
+        return Vec::new();
+    };
+    let Some((_, job_value)) = jobs.iter().next() else {
+        return Vec::new();
+    };
+    let Some(job) = job_value.as_mapping() else {
+        return Vec::new();
+    };
+    let Some(steps) = mapping_value(job, "steps").and_then(Value::as_sequence) else {
+        return Vec::new();
+    };
+
+    let generation = match config::discover(root) {
+        Ok(generation) => generation,
+        Err(error) => {
+            return vec![format!(
+                "cannot resolve the canonical API-step contract: {error}"
+            )]
+        }
+    };
+    let repository = generation
+        .as_ref()
+        .and_then(config::RepoGenerationConfig::repository)
+        .unwrap_or_default();
+    let mut declared_ruleset_contexts = generation
+        .as_ref()
+        .map(|generation| generation.ruleset_required_status_checks().to_vec())
+        .filter(|contexts| !contexts.is_empty())
+        .unwrap_or_else(|| {
+            if generation
+                .as_ref()
+                .and_then(config::RepoGenerationConfig::ci_required)
+                .unwrap_or(true)
+            {
+                vec!["ci-required".to_owned()]
+            } else {
+                Vec::new()
+            }
+        });
+    if let Some(generation) = &generation {
+        declared_ruleset_contexts
+            .extend(generation.ruleset_external_status_checks().iter().cloned());
+    }
+    declared_ruleset_contexts.push("Policy".to_owned());
+    declared_ruleset_contexts.sort();
+    declared_ruleset_contexts.dedup();
+    let declared_ruleset_contexts = declared_ruleset_contexts.join(",");
+    let hosted = velnor_policy.runners != "velnor";
+    let expected = if hosted {
+        let Some(revision) = entrypoint_policy_revision(root) else {
+            return vec![format!(
+                "{POLICY_ENTRYPOINT} has no revision for the canonical API-step contract"
+            )];
+        };
+        let Some(runner) = mapping_value(job, "runs-on").and_then(Value::as_str) else {
+            return vec![format!(
+                "{POLICY_ENTRYPOINT}: policy job runs-on must be a scalar to verify canonical API steps"
+            )];
+        };
+        let default_branch = if velnor_policy.default_branch.is_empty() {
+            "main"
+        } else {
+            velnor_policy.default_branch.as_str()
+        };
+        let rendered = super::policy_job(&super::PolicyJobSpec {
+            name: "Policy",
+            revision: &revision,
+            runner,
+            repository,
+            cache_backend: "github",
+            trusted_gate: None,
+            default_branch,
+            declared_ruleset_contexts: &declared_ruleset_contexts,
+        });
+        let document: Value = match serde_yaml::from_str(&format!("jobs:\n{rendered}")) {
+            Ok(document) => document,
+            Err(error) => {
+                return vec![format!(
+                    "cannot parse the canonical API-step contract: {error}"
+                )]
+            }
+        };
+        let Some(canonical_job) = document
+            .as_mapping()
+            .and_then(|document| mapping_value(document, "jobs"))
+            .and_then(Value::as_mapping)
+            .and_then(|jobs| mapping_value(jobs, "policy"))
+            .and_then(Value::as_mapping)
+        else {
+            return vec!["canonical API-step contract contains no policy job".to_owned()];
+        };
+        mapping_value(canonical_job, "steps")
+            .and_then(Value::as_sequence)
+            .map(|steps| {
+                steps
+                    .iter()
+                    .filter(|step| value_contains_github_token(step))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let canonical_names = expected
+        .iter()
+        .filter_map(|step| {
+            mapping_value(step.as_mapping()?, "name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let mut findings = Vec::new();
+    for (expected_step, name) in expected.iter().zip(&canonical_names) {
+        let matching = steps
+            .iter()
+            .filter(|step| {
+                step.as_mapping()
+                    .and_then(|step| mapping_value(step, "name"))
+                    .and_then(Value::as_str)
+                    == Some(name)
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            findings.push(format!(
+                "API step `{name}` must appear exactly once in its canonical structure; found {}",
+                matching.len()
+            ));
+            continue;
+        }
+        if matching[0] != expected_step {
+            findings.push(format!(
+                "API step `{name}` must match its canonical full structure and body"
+            ));
+        }
+    }
+
+    for step in steps {
+        if !value_contains_github_token(step) {
+            continue;
+        }
+        let name = step
+            .as_mapping()
+            .and_then(|step| mapping_value(step, "name"))
+            .and_then(Value::as_str)
+            .unwrap_or("<unnamed>");
+        if !canonical_names.iter().any(|candidate| candidate == name) {
+            findings.push(format!(
+                "`github.token` may only appear in the canonical Acquire/Ruleset API steps; found step `{name}`"
+            ));
+        }
+    }
+    findings
 }
 
 fn is_contents_read_only(permissions: Option<&Value>) -> bool {

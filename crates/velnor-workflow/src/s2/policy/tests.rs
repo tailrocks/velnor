@@ -805,7 +805,7 @@ fn entrypoint_audit_names_each_escalation() {
             "secret",
             "GH_TOKEN: ${{ github.token }}",
             "GH_TOKEN: ${{ secrets.ADMIN_TOKEN }}",
-            "must not reference `secrets.`",
+            "must not reference the GitHub `secrets` context",
         ),
         (
             "credentials",
@@ -886,6 +886,94 @@ fn entrypoint_audit_rejects_obfuscated_github_token_access() {
                 finding.contains("`github.token`") && finding.contains("only be bound as GH_TOKEN")
             }),
             "{name}: token access bypass must fail closed: {:?}",
+            audit.privileges
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn entrypoint_audit_rejects_every_secrets_context_shape() {
+    let clean = hosted_entrypoint(PIN_A);
+    let cases = [
+        ("bracket", "${{ secrets['TOKEN'] }}"),
+        ("whitespace", "${{ secrets  .  TOKEN }}"),
+        ("case", "${{ SeCrEtS.TOKEN }}"),
+        ("serialized", "${{ toJSON(secrets) }}"),
+        ("indirect", "${{ format('{0}', secrets) }}"),
+    ];
+    for (name, expression) in cases {
+        let marker = "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n";
+        assert!(
+            clean.contains(marker),
+            "{name}: fixture lacks workflow marker"
+        );
+        let mutated = clean.replacen(
+            marker,
+            &format!("{marker}          LEAK: {expression}\n"),
+            1,
+        );
+        let root = entrypoint_tree(&format!("entrypoint-secrets-{name}"), &mutated);
+        let audit = must(
+            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+            "audit secrets-context entrypoint",
+        );
+        assert!(
+            audit
+                .privileges
+                .iter()
+                .any(|finding| finding.contains("must not reference the GitHub `secrets` context")),
+            "{name}: secrets context bypass must fail closed: {:?}",
+            audit.privileges
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn entrypoint_audit_requires_unique_canonical_api_token_steps() {
+    let clean = hosted_entrypoint(PIN_A);
+    let marker = "      - name: Resolve required status checks\n";
+    assert!(clean.contains(marker), "fixture lacks ruleset API step");
+    let cases = [
+        (
+            "duplicate",
+            format!("{marker}{marker}"),
+            "must appear exactly once",
+        ),
+        (
+            "renamed",
+            "      - name: Resolve required status checks (copy)\n".to_owned(),
+            "canonical Acquire/Ruleset API steps",
+        ),
+        (
+            "bad-body",
+            "      - name: Resolve required status checks\n".to_owned(),
+            "canonical full structure and body",
+        ),
+    ];
+    for (name, replacement, expected) in cases {
+        let mut mutated = clean.replacen(marker, &replacement, 1);
+        if name == "bad-body" {
+            let body = "          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n";
+            assert!(mutated.contains(body), "fixture lacks canonical API body");
+            mutated = mutated.replacen(
+                body,
+                "          echo \"$GH_TOKEN\" >&2\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n",
+                1,
+            );
+        }
+        let root = entrypoint_tree(&format!("entrypoint-api-step-{name}"), &mutated);
+        let audit = must(
+            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+            "audit API-step entrypoint",
+        );
+        assert!(
+            audit
+                .privileges
+                .iter()
+                .any(|finding| finding.contains(expected)),
+            "{name}: canonical token-step bypass must fail closed: {:?}",
             audit.privileges
         );
         let _ = fs::remove_dir_all(root);
