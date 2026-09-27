@@ -20659,17 +20659,19 @@ lockfile = true
     }
 
     #[test]
-    fn hosted_policy_uses_linux_when_regular_ci_runner_is_macos() {
+    fn hosted_policy_and_control_plane_use_linux_when_app_uses_macos() {
         let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
-        config.selectors.insert(
-            ProviderId::GithubHosted,
-            provider::ProviderSelector {
-                runs_on: vec!["macos-26".to_owned()],
-            },
-        );
+        must_some(
+            config
+                .units
+                .iter_mut()
+                .find(|unit| unit.kind == UnitKind::Rust),
+            "hosted Rust application unit",
+        )
+        .platform = provider::Platform::MacosArm64;
         let files = must(
             generated_files(&config),
-            "generate macOS-configured workflows",
+            "generate macOS application workflows",
         );
         let policy = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-policy.yml")),
@@ -20686,11 +20688,24 @@ lockfile = true
         );
         assert!(
             !policy.contains("runs-on: macos-26"),
-            "the policy runner does not inherit regular CI runner config: {policy}"
+            "the policy runner does not inherit the application's macOS platform: {policy}"
         );
         assert!(
-            pull_request.contains("runs-on: macos-26"),
-            "regular generated CI jobs keep the configured macOS runner: {pull_request}"
+            pull_request.contains("runs-on: ubuntu-24.04"),
+            "hosted CI control jobs stay on Linux: {pull_request}"
+        );
+
+        let rust_unit = must_some(
+            must(
+                WorkflowIr::from_config(&config).render_kind_unit_workflow(UnitKind::Rust, None),
+                "render hosted Rust reusable workflow",
+            ),
+            "hosted Rust reusable workflow",
+        )
+        .1;
+        assert!(
+            rust_unit.contains("runs-on: macos-26"),
+            "application unit jobs keep their configured runner: {rust_unit}"
         );
     }
 
@@ -25842,9 +25857,9 @@ lockfile = true
 
     #[test]
     fn generation_config_supported_overrides_reach_rendered_output() {
-        // The singleton policy admits only the visibility provider's
-        // selector: a public repository overrides the hosted labels, and a
-        // Velnor selector here would be a contradictory rejection.
+        // The visibility provider's selector applies to application jobs.
+        // Hosted control-plane jobs stay on the Linux image used by the
+        // candidate policy sandbox.
         let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ndefault_branch = \"trunk\"\nempty_selection_proof = true\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-test\"]\n\n[policy]\nci_required = false\nactionlint_config_variables_null = true\n";
         let root = configured_repository("generation-overrides", Some(config));
         let scanned = must(
@@ -25891,7 +25906,8 @@ lockfile = true
             files.get(&PathBuf::from(".github/actionlint.yaml")),
             "generated actionlint config",
         );
-        assert!(pull_request.contains("runs-on: ubuntu-test"));
+        assert!(pull_request.contains("runs-on: ubuntu-24.04"));
+        assert!(!pull_request.contains("runs-on: ubuntu-test"));
         let rust_kind = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
             "generated rust kind reusable",

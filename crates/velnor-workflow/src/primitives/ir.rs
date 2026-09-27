@@ -4760,7 +4760,7 @@ impl WorkflowIr {
             RunnerMode::Velnor => self.default_dispatch_runner.as_str(),
             RunnerMode::Both => self.automatic.as_str(),
         };
-        let runner = self.runner_for(self.control_plane_lane());
+        let runner = self.control_plane_runner();
         let dispatch_if = "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure";
         let simulate_if = "github.event_name == 'workflow_dispatch' && inputs.simulate_failure";
         let _ = writeln!(
@@ -5123,11 +5123,12 @@ impl WorkflowIr {
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
+        let runner = self.control_plane_runner();
         let _ = write!(
             output,
             "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n",
             needs.join(", "),
-            self.runner_for(self.control_plane_lane()),
+            runner,
         );
         // The aggregate scores first, the shell verdict re-confirms after:
         // conjunction, so either side failing fails the check. A hosted
@@ -5184,22 +5185,26 @@ impl WorkflowIr {
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         render_required_caller_verdicts(output, &callers);
         if check_name == REQUIRED_CHECK {
-            let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-                format!(
-                    "{} && ({})",
-                    aggregate_job_guard(cancel_in_progress),
-                    self.velnor_control_plane_expression()
-                )
-            } else {
-                aggregate_job_guard(cancel_in_progress).to_owned()
-            };
-            let _ = writeln!(
-                output,
-                "  required:\n    name: {}\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
-                crate::control_job_name("Required"),
-                self.runner_for(self.control_plane_lane())
-            );
+            self.render_required_mirror(output, cancel_in_progress, &runner);
         }
+    }
+
+    fn render_required_mirror(&self, output: &mut String, cancel_in_progress: bool, runner: &str) {
+        let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!(
+                "{} && ({})",
+                aggregate_job_guard(cancel_in_progress),
+                self.velnor_control_plane_expression()
+            )
+        } else {
+            aggregate_job_guard(cancel_in_progress).to_owned()
+        };
+        let _ = writeln!(
+            output,
+            "  required:\n    name: {}\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+            crate::control_job_name("Required"),
+            runner
+        );
     }
 
     pub(crate) fn render_nightly_alert(
@@ -5225,7 +5230,7 @@ impl WorkflowIr {
             output,
             "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
             crate::control_job_name("Nightly red-to-signal"),
-            self.runner_for(self.control_plane_lane())
+            self.control_plane_runner()
         );
         let bad_body = format!(
             r#"          body="{needs_job} result: $NIGHTLY_RESULT
@@ -6728,10 +6733,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
         // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
         // cannot consume a Linux-built plan artifact even when Planning is hosted.
-        // Portable SwiftPM jobs can: they run on the default executor.
+        // The same applies to a portable unit when the repository routes its
+        // hosted lane to macOS or Windows: the artifact is named by the
+        // producer's runner OS, so only an explicitly Ubuntu-routed job may
+        // download it. Keep the unit's configured runner unchanged and set up
+        // the runtime locally on every other hosted executor.
+        let hosted_runner =
+            crate::platform::github_runner_for_unit(&self.github_runner, &self.macos_runner, unit);
         if self.control_plane_lane() != RunnerMode::Github
             || self.runners == RunnerMode::Velnor
             || unit.platform.requires_apple()
+            || !hosted_runner.starts_with("ubuntu-")
         {
             self.render_workflow_runtime_setup(output, lane);
         } else {
@@ -6743,6 +6755,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         match self.automatic {
             RunnerMode::Velnor => RunnerMode::Velnor,
             RunnerMode::Github | RunnerMode::Both => RunnerMode::Github,
+        }
+    }
+
+    fn control_plane_runner(&self) -> String {
+        match self.control_plane_lane() {
+            RunnerMode::Velnor => self.runner_for(RunnerMode::Velnor),
+            // `control_plane_lane` currently maps `Both` to `Github`. Keep
+            // that fallback pinned to the hosted control-plane runner if the
+            // invariant changes, rather than turning generation into a panic.
+            RunnerMode::Github | RunnerMode::Both => {
+                crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
+            }
         }
     }
 
@@ -6819,11 +6843,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         outputs.push("      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned());
         outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
+        let runner = if runners == RunnerMode::Velnor {
+            self.runner_for(runners)
+        } else {
+            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
+        };
         let _ = writeln!(
             output,
             "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          {expected_work_env}: {expected_work_file}\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::control_job_name("Planning"),
-            self.runner_for(runners),
+            runner,
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
@@ -6840,10 +6869,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     pub(crate) fn render_policy(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
         let velnor = runners == RunnerMode::Velnor;
         let gate = velnor.then(|| self.trusted_runner_gate(runners, trusted));
+        let runner = if velnor {
+            self.runner_for(runners)
+        } else {
+            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
+        };
         output.push_str(&crate::policy_job(&crate::PolicyJobSpec {
             name: "Policy",
             revision: &self.workflow_revision,
-            runner: &self.runner_for(runners),
+            runner: &runner,
             repository: &self.repository,
             cache_backend: if velnor { "local" } else { "github" },
             trusted_gate: gate.as_deref(),
@@ -7698,6 +7732,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
+        let control_plane = self.control_plane_lane();
+        let runner = if control_plane == RunnerMode::Velnor {
+            self.runner_for(control_plane)
+        } else {
+            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
+        };
         let no_work_env = if self.empty_selection_proof {
             render_required_no_work_env()
         } else {
@@ -7707,7 +7747,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             output,
             "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
-            self.runner_for(self.control_plane_lane()),
+            runner,
             no_work_env,
             render_required_admission_env(self, &callers),
         );
@@ -7743,7 +7783,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             output,
             "  required:\n    name: {}\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
             crate::control_job_name("Required"),
-            self.runner_for(self.control_plane_lane())
+            runner
         );
     }
 
@@ -7760,7 +7800,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             output,
             "  velnor-lane-admission:\n    name: {}\n    if: ${{{{ {if_expr} }}}}\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Velnor lane omitted for fork\n        run: |\n          echo '::notice::Velnor lane omitted for fork pull request; validating GitHub lane only.'",
             crate::control_job_name("Velnor admission"),
-            self.runner_for(self.control_plane_lane()),
+            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER),
         );
     }
 }
