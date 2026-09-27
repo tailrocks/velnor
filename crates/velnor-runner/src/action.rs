@@ -661,6 +661,9 @@ pub struct DockerActionInvocation {
     pub dockerfile_host: Option<PathBuf>,
     pub action_container_path: String,
     pub inputs: BTreeMap<String, String>,
+    /// `runs.env` from the action manifest, kept separate to preserve its
+    /// precedence below workflow/step environment and effective inputs.
+    pub runs_env: Vec<(String, String)>,
     pub env: Vec<(String, String)>,
     pub entrypoint: Option<String>,
     pub args: Vec<String>,
@@ -784,13 +787,6 @@ impl ResolvedAction {
             ("GITHUB_ACTION_REF".to_string(), self.plan.git_ref.clone()),
         ];
         env.extend(
-            self.metadata
-                .runs
-                .env
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
-        env.extend(
             self.plan
                 .env
                 .iter()
@@ -851,7 +847,14 @@ impl ResolvedAction {
             build_context_host,
             dockerfile_host,
             action_container_path,
-            inputs: self.plan.inputs.clone(),
+            inputs,
+            runs_env: self
+                .metadata
+                .runs
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
             env,
             entrypoint,
             args,

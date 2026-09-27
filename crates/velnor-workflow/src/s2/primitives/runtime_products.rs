@@ -66,7 +66,7 @@ fn producer_closure_pathspec(paths: &[String]) -> String {
             if index < closure_inputs::BASE_CLOSURE_PATHS.len() {
                 path.clone()
             } else {
-                format!(":(literal){}", crate::shell_quote(path))
+                crate::shell_quote(&format!(":(literal){path}"))
             }
         })
         .collect::<Vec<_>>()
@@ -686,7 +686,7 @@ mod tests {
         let hostile = "vendor/[glob]* with space;touch sentinel";
         paths.push(hostile.to_owned());
         assert!(producer_closure_pathspec(&paths)
-            .ends_with(&format!(":(literal){}", crate::shell_quote(hostile))));
+            .ends_with(&crate::shell_quote(&format!(":(literal){hostile}"))));
     }
 
     #[expect(
@@ -996,7 +996,8 @@ mod tests {
     #[test]
     fn closure_shell_matches_the_canonical_form() {
         let content = owner_content(&[]);
-        let pathspec = must(producer_closure_paths(), "current manifests parse").join(" ");
+        let paths = must(producer_closure_paths(), "current manifests parse");
+        let pathspec = producer_closure_pathspec(&paths);
         assert!(
             content.contains(&format!("git ls-tree -r HEAD -- {pathspec}")),
             "the closure pathspec derives from CLOSURE_PATHS: {content}"
@@ -1045,7 +1046,12 @@ mod tests {
                 && action.contains("paths+=(crates/velnor-model)"),
             "the setup action includes model sources only when the pinned workflow manifest depends on them"
         );
-        assert!(content.contains(&CLOSURE_PATHS.join(" ")), "{content}");
+        assert!(
+            content.contains(&producer_closure_pathspec(
+                &producer_closure_paths().unwrap()
+            )),
+            "{content}"
+        );
         let footer = format!(
             "closure-version:{CLOSURE_VERSION}\\nfeatures:{CI_FEATURES}\\nprofile:{PROFILE_RELEASE}\\n"
         );

@@ -714,17 +714,19 @@ pub(crate) fn detect(
                 .iter()
                 .map(|path| format!("test -f {}", shell_quote(path))),
         );
-        let mut action = unit(
-            UnitKind::GithubAction,
-            &source.root,
-            vec![if source.root == "." {
-                "**".to_owned()
-            } else {
-                format!("{}/**", source.root)
-            }],
-            commands,
-            None,
-        );
+        let mut watch = vec![if source.root == "." {
+            "**".to_owned()
+        } else {
+            format!("{}/**", source.root)
+        }];
+        if let Some(metadata) = metadata.as_ref() {
+            watch.extend(local_action_watch_paths(
+                context.root,
+                &metadata.runs,
+                context.files,
+            )?);
+        }
+        let mut action = unit(UnitKind::GithubAction, &source.root, watch, commands, None);
         if source.kind == ActionSourceKind::Dockerfile
             || metadata
                 .as_ref()
@@ -733,6 +735,60 @@ pub(crate) fn detect(
             action.capabilities.docker = true;
         }
         shape.units.push(action);
+    }
+    Ok(())
+}
+
+fn local_action_watch_paths(
+    root: &Path,
+    runs: &ActionRuns,
+    files: &[String],
+) -> Result<Vec<String>, crate::s2::GeneratorError> {
+    let candidates = discover_action_source_candidates(files);
+    let mut visited = BTreeSet::new();
+    let mut watched = BTreeSet::new();
+    collect_local_action_watch_paths(root, runs, files, &candidates, &mut visited, &mut watched)?;
+    Ok(watched
+        .into_iter()
+        .map(|path| format!("{path}/**"))
+        .collect())
+}
+
+fn collect_local_action_watch_paths(
+    root: &Path,
+    runs: &ActionRuns,
+    files: &[String],
+    candidates: &BTreeMap<String, ActionSource>,
+    visited: &mut BTreeSet<String>,
+    watched: &mut BTreeSet<String>,
+) -> Result<(), crate::s2::GeneratorError> {
+    if !runs.using.eq_ignore_ascii_case("composite") {
+        return Ok(());
+    }
+    for step in runs.steps.as_deref().unwrap_or_default() {
+        let Some(reference) = step.uses.as_deref() else {
+            continue;
+        };
+        let Some(dependency_root) = discovered_local_action_root(root, reference)? else {
+            continue;
+        };
+        if !visited.insert(dependency_root.clone()) {
+            continue;
+        }
+        watched.insert(dependency_root.clone());
+        if let Some(source) = candidates.get(&dependency_root)
+            && source.kind == ActionSourceKind::Metadata
+        {
+            let metadata = parse_metadata(root, &source.path)?;
+            collect_local_action_watch_paths(
+                root,
+                &metadata.runs,
+                files,
+                candidates,
+                visited,
+                watched,
+            )?;
+        }
     }
     Ok(())
 }
@@ -3068,6 +3124,10 @@ mod tests {
             "create workspace child action",
         );
         must(
+            fs::create_dir_all(root.join("actions/grandchild")),
+            "create transitive grandchild action",
+        );
+        must(
             fs::write(
                 root.join("actions/parent/action.yml"),
                 "runs:\n  using: composite\n  steps:\n    - uses: ./actions/child\n",
@@ -3077,9 +3137,16 @@ mod tests {
         must(
             fs::write(
                 root.join("actions/child/action.yml"),
-                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo child\n",
+                "runs:\n  using: composite\n  steps:\n    - uses: ./actions/grandchild\n",
             ),
             "write workspace child action metadata",
+        );
+        must(
+            fs::write(
+                root.join("actions/grandchild/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo grandchild\n",
+            ),
+            "write grandchild action metadata",
         );
         let files = must(
             super::super::file_walk::repository_files(&root, &[]),
@@ -3103,8 +3170,38 @@ mod tests {
             super::super::scan_shape_for_tests(&root, &providers(), "main", &[]),
             "scan nested local actions",
         );
-        assert!(shape.units.iter().any(|unit| unit.root == "actions/parent"));
-        assert!(shape.units.iter().any(|unit| unit.root == "actions/child"));
+        let parent = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "actions/parent")
+            .unwrap_or_else(|| panic!("parent action unit missing"));
+        assert!(parent.watch.iter().any(|path| path == "actions/child/**"));
+        assert!(parent
+            .watch
+            .iter()
+            .any(|path| path == "actions/grandchild/**"));
+        for changed in [
+            "actions/child/action.yml",
+            "actions/grandchild/action.yml",
+            "actions/grandchild/helper.sh",
+        ] {
+            assert!(
+                parent.watch.iter().any(|pattern| {
+                    globset::Glob::new(pattern)
+                        .is_ok_and(|glob| glob.compile_matcher().is_match(changed))
+                }),
+                "editing nested helper path {changed} selects its parent consumer"
+            );
+        }
+        let child = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "actions/child")
+            .unwrap_or_else(|| panic!("child action unit missing"));
+        assert!(child
+            .watch
+            .iter()
+            .any(|path| path == "actions/grandchild/**"));
         let _ = fs::remove_dir_all(&root);
     }
 

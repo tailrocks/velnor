@@ -75,7 +75,7 @@ fn producer_closure_pathspec(paths: &[String]) -> String {
             if index < closure_inputs::BASE_CLOSURE_PATHS.len() {
                 path.clone()
             } else {
-                format!(":(literal){}", crate::shell_quote(path))
+                crate::shell_quote(&format!(":(literal){path}"))
             }
         })
         .collect::<Vec<_>>()
@@ -515,7 +515,7 @@ jobs:
             exit 0
           fi
           listing="$(git ls-tree -r HEAD -- {closure_paths})"
-{closure_guard}          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
+{tip_closure_guard}          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
           tip_closure="$(printf '%s\n{closure_footer}' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{{print $1}}')"
           [[ "$tip_closure" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::closure resolution failed" >&2; exit 1; }}
           if [[ "$tip_closure" == "$CLOSURE" ]]; then
@@ -667,6 +667,10 @@ jobs:
             &closure_inputs::producer_closure_validation(&closure_paths, "head"),
             "          "
         ),
+        tip_closure_guard = closure_inputs::indent_script(
+            &closure_inputs::producer_closure_validation(&closure_paths, "tip"),
+            "          "
+        ),
         closure_footer = closure_footer,
         matrix = matrix,
         manifest_products = manifest_program,
@@ -755,7 +759,7 @@ mod tests {
         let hostile = "vendor/[glob]* with space;touch sentinel";
         paths.push(hostile.to_owned());
         assert!(producer_closure_pathspec(&paths)
-            .ends_with(&format!(":(literal){}", crate::shell_quote(hostile))));
+            .ends_with(&crate::shell_quote(&format!(":(literal){hostile}"))));
     }
 
     #[expect(
@@ -1057,7 +1061,7 @@ mod tests {
     #[test]
     fn closure_shell_matches_the_canonical_form() {
         let content = owner_content(&[]);
-        let pathspec = producer_closure_paths().join(" ");
+        let pathspec = producer_closure_pathspec(&producer_closure_paths());
         assert!(
             content.contains(&format!("git ls-tree -r HEAD -- {pathspec}")),
             "the closure pathspec derives from CLOSURE_PATHS: {content}"
@@ -2133,6 +2137,10 @@ mod tests {
             "create the fixture crate",
         );
         must(
+            fs::create_dir_all(root.join("crates/velnor-model")),
+            "create the local model crate",
+        );
+        must(
             fs::create_dir_all(root.join(".cargo")),
             "create the fixture cargo dir",
         );
@@ -2152,9 +2160,16 @@ mod tests {
         must(
             fs::write(
                 root.join("crates/velnor-workflow/Cargo.toml"),
-                "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
+                "[package]\nname = \"velnor-workflow\"\n[dependencies]\nvelnor-model = { path = \"../velnor-model\" }\n",
             ),
             "write fixture workflow manifest",
+        );
+        must(
+            fs::write(
+                root.join("crates/velnor-model/Cargo.toml"),
+                "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\n",
+            ),
+            "write fixture model manifest",
         );
         must(
             fs::write(root.join("Cargo.toml"), "[workspace]\n"),
