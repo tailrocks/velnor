@@ -27,7 +27,6 @@
 //! A tree without git (or a git failure) stamps `unknown` for both values,
 //! which no pinned-revision or closure probe can ever match.
 
-use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -41,7 +40,6 @@ const BASE_CLOSURE_PATHS: &[&str] = &[
     "rust-toolchain",
     ".cargo",
 ];
-const VELNOR_MODEL_PATH: &str = "crates/velnor-model";
 
 /// Closure algorithm version, mirroring `closure::CLOSURE_VERSION`.
 const CLOSURE_VERSION: u8 = 1;
@@ -88,14 +86,29 @@ fn self_closure(manifest_dir: &Path) -> Option<String> {
     let workflow_manifest = git(&root, &["show", "HEAD:crates/velnor-workflow/Cargo.toml"])?;
     let workspace_manifest = git(&root, &["show", "HEAD:Cargo.toml"])?;
     let paths = build_closure_paths(&workflow_manifest, &workspace_manifest)?;
-    let mut arguments = vec!["ls-tree", "-r", "HEAD", "--"];
-    arguments.extend_from_slice(&paths);
-    let listing = git(&root, &arguments)?;
+    let mut arguments = vec![
+        "ls-tree".to_owned(),
+        "-r".to_owned(),
+        "HEAD".to_owned(),
+        "--".to_owned(),
+    ];
+    arguments.extend(closure_pathspecs(&paths));
+    let output = Command::new("git")
+        .current_dir(&root)
+        .args(&arguments)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8(output.stdout).ok()?;
     let mut lines: Vec<&str> = listing.lines().collect();
-    if lines.is_empty() {
+    let has_dependency_symlink = has_dependency_symlink(&lines, &paths[BASE_CLOSURE_PATHS.len()..]);
+    if lines.is_empty() || has_dependency_symlink {
         return None;
     }
     lines.sort_unstable();
+    lines.dedup();
     let mut bytes = Vec::new();
     for line in lines {
         bytes.extend_from_slice(line.as_bytes());
@@ -118,246 +131,136 @@ fn self_closure(manifest_dir: &Path) -> Option<String> {
     Some(output)
 }
 
+fn has_dependency_symlink(lines: &[&str], dependencies: &[String]) -> bool {
+    lines.iter().any(|line| {
+        line.starts_with("120000 ")
+            && line.split_once('\t').is_some_and(|(_, path)| {
+                dependencies.iter().any(|dependency| {
+                    path == dependency || path.starts_with(&format!("{dependency}/"))
+                })
+            })
+    })
+}
+
+fn closure_pathspecs(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            if index < BASE_CLOSURE_PATHS.len() {
+                path.clone()
+            } else {
+                format!(":(literal){path}")
+            }
+        })
+        .collect()
+}
+
 /// Dependency detector for build.rs. Cargo has already parsed these manifests
 /// before invoking the build script. This narrow reader only accepts the
 /// dependency table forms that can select the optional local source path; any
 /// ambiguous model declaration returns `None`, stamping `unknown` instead of
 /// minting a digest that could omit compiled source.
-fn build_closure_paths(workflow: &str, workspace: &str) -> Option<Vec<&'static str>> {
-    let dependencies = dependency_declarations(workflow, false)?;
-    let workspace_dependencies = dependency_declarations(workspace, true)?;
-    let mut includes_model = false;
-    for (alias, declaration) in dependencies {
-        let effective = if declaration.workspace {
-            workspace_dependencies.get(&alias)?
-        } else {
-            &declaration
-        };
-        if effective.package.as_deref().unwrap_or(alias.as_str()) != "velnor-model" {
-            continue;
+fn build_closure_paths(workflow: &str, workspace: &str) -> Option<Vec<String>> {
+    let workflow = toml::from_str::<toml::Value>(workflow).ok()?;
+    let workspace = toml::from_str::<toml::Value>(workspace).ok()?;
+    let workspace_dependencies = match workspace.get("workspace") {
+        Some(value) => {
+            let table = value.as_table()?;
+            match table.get("dependencies") {
+                Some(value) => Some(value.as_table()?),
+                None => None,
+            }
         }
-        let Some(path) = effective.path.as_deref() else {
-            continue;
-        };
-        let base = if declaration.workspace {
-            ""
-        } else {
-            "crates/velnor-workflow"
-        };
-        if normalize_repo_path(base, path)? != VELNOR_MODEL_PATH {
-            return None;
-        }
-        includes_model = true;
-    }
-    if includes_model {
-        let mut paths = BASE_CLOSURE_PATHS.to_vec();
-        paths.push(VELNOR_MODEL_PATH);
-        Some(paths)
-    } else {
-        Some(BASE_CLOSURE_PATHS.to_vec())
-    }
-}
-
-#[derive(Default)]
-struct DependencyDecl {
-    package: Option<String>,
-    path: Option<String>,
-    workspace: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ManifestSection {
-    Ignore,
-    Dependencies,
-    WorkspaceDependencies,
-    DependencyTable,
-}
-
-fn dependency_declarations(
-    manifest: &str,
-    workspace_manifest: bool,
-) -> Option<BTreeMap<String, DependencyDecl>> {
-    let mut declarations = BTreeMap::new();
-    let mut section = ManifestSection::Ignore;
-    let mut table_alias: Option<String> = None;
-    let mut table_decl = DependencyDecl::default();
-
-    for raw_line in manifest.lines() {
-        let raw_trimmed = strip_comment(raw_line)?.trim();
-        if raw_trimmed.is_empty() || raw_trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some(array_header) = raw_trimmed
-            .strip_prefix("[[")
-            .and_then(|header| header.strip_suffix("]]"))
-        {
-            let array_header = array_header.trim();
-            if array_header == "dependencies"
-                || array_header == "build-dependencies"
-                || (array_header.starts_with("target.")
-                    && (array_header.ends_with(".dependencies")
-                        || array_header.ends_with(".build-dependencies")))
+        None => None,
+    };
+    let mut paths = BASE_CLOSURE_PATHS
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<Vec<_>>();
+    for (_, deps) in dependency_sections(&workflow)? {
+        for (alias, declaration) in deps.as_table()? {
+            let mut decl = declaration;
+            if !decl.is_str() && !decl.is_table() {
+                return None;
+            }
+            let mut inherited = false;
+            if decl.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                if decl.get("path").is_some() {
+                    return None;
+                }
+                decl = workspace_dependencies?.get(alias)?;
+                if !decl.is_str() && !decl.is_table() {
+                    return None;
+                }
+                inherited = true;
+            }
+            let Some(path) = decl.get("path") else {
+                continue;
+            };
+            let path = path.as_str()?;
+            let base = if inherited {
+                ""
+            } else {
+                "crates/velnor-workflow"
+            };
+            let path = normalize_repo_path(base, path)?;
+            if path.is_empty() {
+                return None;
+            }
+            if BASE_CLOSURE_PATHS
+                .iter()
+                .any(|base| base.starts_with(&format!("{path}/")))
             {
                 return None;
             }
-            section = ManifestSection::Ignore;
-            continue;
-        }
-        if raw_trimmed.starts_with('[') && raw_trimmed.ends_with(']') {
-            if let Some(alias) = table_alias.take() {
-                declarations.insert(alias, table_decl);
-                table_decl = DependencyDecl::default();
-            }
-            let header = raw_trimmed
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim();
-            section = if workspace_manifest && header == "workspace.dependencies" {
-                ManifestSection::WorkspaceDependencies
-            } else if !workspace_manifest
-                && (header == "dependencies"
-                    || header == "build-dependencies"
-                    || (header.starts_with("target.")
-                        && (header.ends_with(".dependencies")
-                            || header.ends_with(".build-dependencies"))))
-            {
-                ManifestSection::Dependencies
-            } else {
-                ManifestSection::Ignore
-            };
-            if let Some(alias) = dependency_table_alias(header, workspace_manifest) {
-                section = ManifestSection::DependencyTable;
-                table_alias = Some(alias);
-            }
-            continue;
-        }
-        if section == ManifestSection::Ignore {
-            continue;
-        }
-        let line = strip_comment(raw_line)?.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (raw_key, value) = line.split_once('=')?;
-        let key = parse_key(raw_key.trim())?;
-        let value = value.trim();
-        match section {
-            ManifestSection::Dependencies | ManifestSection::WorkspaceDependencies => {
-                declarations.insert(key.clone(), parse_dependency_decl(&key, value)?);
-            }
-            ManifestSection::DependencyTable => match key.as_str() {
-                "package" => table_decl.package = Some(parse_toml_string(value)?),
-                "path" => table_decl.path = Some(parse_toml_string(value)?),
-                "workspace" => table_decl.workspace = value == "true",
-                _ => {}
-            },
-            ManifestSection::Ignore => {}
+            paths.push(path);
         }
     }
-    if let Some(alias) = table_alias {
-        declarations.insert(alias, table_decl);
+    let (base, extras) = paths.split_at(BASE_CLOSURE_PATHS.len());
+    let mut extras = extras.to_vec();
+    extras.sort();
+    extras.dedup();
+    let mut paths = base.to_vec();
+    for path in extras {
+        let covered = BASE_CLOSURE_PATHS.iter().any(|base| {
+            path == *base
+                || path
+                    .strip_prefix(base)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        });
+        let covered_by_dependency = paths[BASE_CLOSURE_PATHS.len()..].iter().any(|root| {
+            path == *root
+                || path
+                    .strip_prefix(root)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        });
+        if !covered && !covered_by_dependency && !paths.contains(&path) {
+            paths.push(path);
+        }
     }
-    Some(declarations)
+    Some(paths)
 }
 
-fn dependency_table_alias(header: &str, workspace_manifest: bool) -> Option<String> {
-    if workspace_manifest {
-        return header
-            .strip_prefix("workspace.dependencies.")
-            .and_then(parse_key);
-    }
-    for marker in ["dependencies.", "build-dependencies."] {
-        if let Some(alias) = header.strip_prefix(marker) {
-            return parse_key(alias);
+fn dependency_sections(manifest: &toml::Value) -> Option<Vec<(&'static str, &toml::Value)>> {
+    let root = manifest.as_table()?;
+    let mut sections = Vec::new();
+    for name in ["dependencies", "build-dependencies"] {
+        if let Some(value) = root.get(name) {
+            sections.push((name, value));
         }
     }
-    for marker in [".dependencies.", ".build-dependencies."] {
-        if let Some((prefix, alias)) = header.rsplit_once(marker)
-            && (prefix.is_empty() || prefix == "target" || prefix.starts_with("target."))
-        {
-            return parse_key(alias);
-        }
-    }
-    None
-}
-
-fn parse_dependency_decl(alias: &str, value: &str) -> Option<DependencyDecl> {
-    if value.starts_with('{') && value.ends_with('}') {
-        let mut declaration = DependencyDecl::default();
-        for field in value[1..value.len() - 1].split(',') {
-            let Some((raw_key, field_value)) = field.split_once('=') else {
-                continue;
-            };
-            let key = parse_key(raw_key.trim())?;
-            let field_value = field_value.trim();
-            match key.as_str() {
-                "package" => declaration.package = Some(parse_toml_string(field_value)?),
-                "path" => declaration.path = Some(parse_toml_string(field_value)?),
-                "workspace" => declaration.workspace = field_value == "true",
-                _ => {}
+    if let Some(targets) = root.get("target") {
+        for value in targets.as_table()?.values() {
+            let target = value.as_table()?;
+            for name in ["dependencies", "build-dependencies"] {
+                if let Some(value) = target.get(name) {
+                    sections.push((name, value));
+                }
             }
         }
-        Some(declaration)
-    } else if value.starts_with('"') || value.starts_with('\'') {
-        Some(DependencyDecl {
-            package: Some(alias.to_owned()),
-            ..DependencyDecl::default()
-        })
-    } else {
-        None
     }
-}
-
-fn parse_key(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.starts_with("\"\"\"") || value.starts_with("'''") {
-        return None;
-    }
-    if value.starts_with('"') || value.starts_with('\'') {
-        let quote = value.chars().next()?;
-        if value.chars().last()? != quote || value.len() < 2 {
-            return None;
-        }
-        return Some(value[1..value.len() - 1].to_owned());
-    }
-    (!value.is_empty()).then(|| value.to_owned())
-}
-
-fn parse_toml_string(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.starts_with("\"\"\"") || value.starts_with("'''") {
-        return None;
-    }
-    let quote = value.chars().next()?;
-    if !matches!(quote, '"' | '\'') || value.chars().last()? != quote || value.len() < 2 {
-        return None;
-    }
-    Some(value[1..value.len() - 1].to_owned())
-}
-
-fn strip_comment(line: &str) -> Option<&str> {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, character) in line.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if character == '\\' && quote == Some('"') {
-            escaped = true;
-            continue;
-        }
-        if matches!(character, '"' | '\'') {
-            if quote == Some(character) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(character);
-            }
-        } else if character == '#' && quote.is_none() {
-            return Some(&line[..index]);
-        }
-    }
-    quote.is_none().then_some(line)
+    Some(sections)
 }
 
 fn normalize_repo_path(base: &str, path: &str) -> Option<String> {
@@ -425,14 +328,19 @@ fn is_full_sha(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_closure_paths, BASE_CLOSURE_PATHS, VELNOR_MODEL_PATH};
+    use super::{
+        build_closure_paths, closure_pathspecs, has_dependency_symlink, BASE_CLOSURE_PATHS,
+    };
 
     #[test]
     fn build_stamp_resolves_renamed_workspace_model_dependency() {
         let workflow = "[dependencies]\nmodel = { workspace = true }\n";
         let workspace = "[workspace]\n[workspace.dependencies]\nmodel = { package = \"velnor-model\", path = \"crates/velnor-model\" }\n";
-        let mut expected = BASE_CLOSURE_PATHS.to_vec();
-        expected.push(VELNOR_MODEL_PATH);
+        let mut expected = BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        expected.push("crates/velnor-model".to_owned());
         assert_eq!(build_closure_paths(workflow, workspace), Some(expected));
     }
 
@@ -443,34 +351,132 @@ mod tests {
     }
 
     #[test]
+    fn build_stamp_fails_closed_on_base_ancestor_and_malformed_declarations() {
+        assert_eq!(
+            build_closure_paths(
+                "[dependencies]\nhelper = { path = \"..\" }\n",
+                "[workspace]\n"
+            ),
+            None
+        );
+        assert_eq!(
+            build_closure_paths("[dependencies]\nhelper = 42\n", "[workspace]\n"),
+            None
+        );
+        assert_eq!(
+            build_closure_paths(
+                "[dependencies]\nhelper = { workspace = true }\n",
+                "[workspace]\ndependencies = 42\n"
+            ),
+            None
+        );
+        assert_eq!(
+            build_closure_paths(
+                "[dependencies]\nhelper = { workspace = true }\n",
+                "[workspace]\n[workspace.dependencies]\nhelper = 42\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn build_stamp_fails_closed_on_dependency_array_of_tables() {
         let workflow = "[[dependencies]]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n";
         assert_eq!(build_closure_paths(workflow, "[workspace]\n"), None);
     }
 
     #[test]
-    fn build_stamp_fails_closed_on_multiline_inline_dependency() {
+    fn build_stamp_parses_multiline_inline_dependency() {
         let workflow = "[dependencies]\nvelnor-model = {\npath = \"../velnor-model\"\n}\n";
-        assert_eq!(build_closure_paths(workflow, "[workspace]\n"), None);
+        assert!(build_closure_paths(workflow, "[workspace]\n")
+            .expect("valid multiline TOML")
+            .contains(&"crates/velnor-model".to_owned()));
     }
 
     #[test]
-    fn build_stamp_handles_commented_headers_and_rejects_triple_quoted_paths() {
+    fn build_stamp_handles_comments_and_triple_quoted_paths() {
         let workflow = "[dependencies] # Cargo dependency table\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\n";
-        let mut expected = BASE_CLOSURE_PATHS.to_vec();
-        expected.push(VELNOR_MODEL_PATH);
+        let mut expected = BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        expected.push("crates/velnor-model".to_owned());
         assert_eq!(
             build_closure_paths(workflow, "[workspace] # root workspace\n"),
             Some(expected)
         );
 
         let triple_quoted = "[dependencies] # Cargo dependency table\nmodel = { package = \"velnor-model\", path = \"\"\"../velnor-model\"\"\" }\n";
-        assert_eq!(build_closure_paths(triple_quoted, "[workspace]\n"), None);
+        assert!(build_closure_paths(triple_quoted, "[workspace]\n")
+            .expect("valid TOML multiline string")
+            .contains(&"crates/velnor-model".to_owned()));
     }
 
     #[test]
     fn build_stamp_checks_all_local_model_aliases() {
-        let workflow = "[dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\nother = { package = \"velnor-model\", path = \"../../outside\" }\n";
+        let workflow = "[dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\nother = { package = \"velnor-model\", path = \"../../../outside\" }\n";
         assert_eq!(build_closure_paths(workflow, "[workspace]\n"), None);
+    }
+
+    #[test]
+    fn build_stamp_uses_toml_dotted_keys_and_all_dependency_kinds() {
+        let workflow = r#"
+[build-dependencies."build.helper"]
+path = "../../tools/helper"
+
+[target.'cfg(unix)'.dependencies.'target.helper']
+path = "../native-helper"
+
+[dependencies]
+shared = { workspace = true }
+"#;
+        let workspace = r#"
+[workspace.dependencies.shared]
+path = "tools/shared"
+"#;
+        let paths = build_closure_paths(workflow, workspace).expect("valid TOML");
+        assert!(paths.contains(&"tools/helper".to_owned()));
+        assert!(paths.contains(&"crates/native-helper".to_owned()));
+        assert!(paths.contains(&"tools/shared".to_owned()));
+    }
+
+    #[test]
+    fn build_stamp_rejects_dependency_symlinks_but_keeps_legacy_links() {
+        let paths = build_closure_paths(
+            "[dependencies.helper]\npath = \"../helper\"\n",
+            "[workspace]\n",
+        )
+        .expect("valid path dependency");
+        let dependencies = &paths[BASE_CLOSURE_PATHS.len()..];
+        assert!(has_dependency_symlink(
+            &["120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/helper/src/linked.rs"],
+            dependencies,
+        ));
+        assert!(!has_dependency_symlink(
+            &["120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/CLAUDE.md"],
+            dependencies,
+        ));
+    }
+
+    #[test]
+    fn build_stamp_collapses_nested_local_dependency_roots() {
+        let workflow = "[dependencies]\nouter = { path = \"../../vendor\" }\ninner = { path = \"../../vendor/inner\" }\n";
+        let paths = build_closure_paths(workflow, "[workspace]\n").expect("valid paths");
+        assert!(paths.contains(&"vendor".to_owned()));
+        assert!(!paths.contains(&"vendor/inner".to_owned()));
+    }
+
+    #[test]
+    fn build_stamp_uses_literal_pathspecs_for_glob_characters() {
+        let mut paths = BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        paths.push("vendor/[literal]*".to_owned());
+        let pathspecs = closure_pathspecs(&paths);
+        assert_eq!(
+            pathspecs.last().map(String::as_str),
+            Some(":(literal)vendor/[literal]*")
+        );
     }
 }

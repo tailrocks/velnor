@@ -11352,12 +11352,14 @@ mod tests {
         assert!(model.contains(
             "git -C \"$CHECKOUT_PATH\" show \"$PINNED_REVISION:crates/velnor-workflow/Cargo.toml\""
         ));
-        assert!(model.contains(
-            "git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-model"
-        ));
+        assert!(model.contains("dependency_tree="));
         assert!(model.contains("import tomllib"));
-        assert!(model.contains("listing+=$'\\n'\"$model_tree\""));
-        assert!(model.contains("velnor-model dependency has no tracked source tree"));
+        assert!(model.contains("listing+=$'\\n'\"$dependency_tree\""));
+        assert!(model.contains("local Cargo dependency has no tracked source tree"));
+        assert!(model.contains("PRODUCT_REPOSITORY: tailrocks/velnor"));
+        assert!(model.contains(
+            "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
+        ));
 
         let start = model
             .find(

@@ -24,9 +24,9 @@ mod closure;
 mod closure_inputs {
     //! Manifest-derived inputs for the workflow runtime source closure.
     //!
-    //! The `velnor-model` subtree belongs to the workflow product only when the
-    //! target revision has a local Cargo dependency on that package. Keeping the
-    //! rule here preserves already-published v1 identities for older revisions.
+    //! Local Cargo path dependencies belong to the workflow product only when
+    //! declared by its manifest. Keeping this rule shared preserves the legacy
+    //! pathset for revisions without local dependencies.
 
     use std::path::{Component, Path};
 
@@ -39,6 +39,7 @@ mod closure_inputs {
         ".cargo",
     ];
 
+    #[cfg(test)]
     pub(crate) const VELNOR_MODEL_PATH: &str = "crates/velnor-model";
 
     const PYTHON_RESOLVER: &str = r#""""TOML dependency probe embedded in the generated setup action."""
@@ -90,7 +91,7 @@ def resolved_path(base, path):
     return "/".join(parts)
 
 
-def uses_local_model(workflow, workspace):
+def local_dependency_paths(workflow, workspace):
     workspace_root = table(workspace, "workspace Cargo.toml root")
     workspace_section = workspace_root.get("workspace", {})
     if not isinstance(workspace_section, dict):
@@ -99,7 +100,8 @@ def uses_local_model(workflow, workspace):
     if not isinstance(workspace_dependencies, dict):
         fail("workspace.dependencies must be a table")
 
-    uses_model = False
+    base_paths = ("crates/velnor-workflow", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain", ".cargo")
+    paths = set()
     for section, dependencies in dependency_sections(workflow):
         for alias, declaration in dependencies.items():
             inherited = False
@@ -123,14 +125,27 @@ def uses_local_model(workflow, workspace):
                     fail(f"{section}.{alias}.path must be a string")
             else:
                 fail(f"{section}.{alias} must be a dependency string or table")
-            if package != "velnor-model" or path is None:
+            if path is None:
                 continue
             base = "" if inherited else "crates/velnor-workflow"
             resolved = resolved_path(base, path)
-            if resolved != "crates/velnor-model":
-                fail(f"local velnor-model dependency resolves to {resolved}")
-            uses_model = True
-    return uses_model
+            if not resolved:
+                fail(f"{section}.{alias} resolves to repository root")
+            if any(resolved == base or resolved.startswith(base + "/") for base in base_paths):
+                continue
+            if any(base.startswith(resolved + "/") for base in base_paths):
+                fail(f"{section}.{alias} dependency path overlaps the base closure")
+            if any(base.startswith(resolved + "/") for base in base_paths):
+                fail(f"{section}.{alias} dependency path overlaps the base closure")
+            paths.add(resolved)
+    roots = []
+    for path in sorted(paths):
+        if any(path == root or path.startswith(root + "/") for root in roots):
+            continue
+        if any(path == root or path.startswith(root + "/") for root in base_paths):
+            continue
+        roots.append(path)
+    return roots
 
 
 try:
@@ -138,24 +153,23 @@ try:
         workflow = tomllib.load(workflow_file)
     with open(sys.argv[2], "rb") as workspace_file:
         workspace = tomllib.load(workspace_file)
-    print("true" if uses_local_model(workflow, workspace) else "false")
+    import json
+    print(json.dumps(local_dependency_paths(workflow, workspace)))
 except (OSError, tomllib.TOMLDecodeError) as error:
     fail(str(error))
 "#;
 
-    /// Whether the emitter's own manifest activates the optional model bridge.
+    /// Whether the emitter's own manifest declares a local path dependency.
     /// This controls generated helper text; legacy trees keep their exact bytes.
     pub(crate) fn current_package_has_model_dependency() -> Result<bool, String> {
-        Ok(closure_paths(
-            include_str!("../Cargo.toml"),
-            include_str!("../../../Cargo.toml"),
-        )?
-        .contains(&VELNOR_MODEL_PATH))
+        let workflow = toml::from_str::<toml::Value>(include_str!("../Cargo.toml"))
+            .map_err(|error| format!("parse workflow Cargo.toml: {error}"))?;
+        let workspace = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml"))
+            .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
+        Ok(closure_paths_from_values(&workflow, &workspace)?.len() > BASE_CLOSURE_PATHS.len())
     }
 
-    /// Extend the setup action's static path resolver only for a dependency-aware
-    /// emitter. The inserted step fetches the two target-revision manifests from
-    /// Git or the tree/blob API, parses TOML, then appends the model subtree.
+    /// Extend the setup action resolver for local dependency aware emitters.
     pub(crate) fn setup_action_with_model_resolver(action: &str) -> Result<String, String> {
         let marker = "        test \"$listing\" != '' || { echo \"::error::revision $INSTALL_REV has no closure inputs\" >&2; exit 1; }\n";
         let mut resolver = String::from(
@@ -194,11 +208,11 @@ except (OSError, tomllib.TOMLDecodeError) as error:
     /// legacy target with no workflow manifest retains the original pathset.
     pub(crate) fn local_shell_resolver(revision: &str, checkout: &str, indent: &str) -> String {
         let mut script = format!(
-            "if git -C \"${checkout}\" cat-file -e \"${revision}:crates/velnor-workflow/Cargo.toml\" 2>/dev/null; then\nmanifests=\"$(mktemp -d)\"\ngit -C \"${checkout}\" show \"${revision}:crates/velnor-workflow/Cargo.toml\" > \"$manifests/workflow.toml\"\nif git -C \"${checkout}\" cat-file -e \"${revision}:Cargo.toml\" 2>/dev/null; then git -C \"${checkout}\" show \"${revision}:Cargo.toml\" > \"$manifests/workspace.toml\"; else printf '[workspace]\\n' > \"$manifests/workspace.toml\"; fi\nmodel_tree=\"$(git -C \"${checkout}\" ls-tree -r \"${revision}\" -- crates/velnor-model)\"\nmodel_dependency=\"$(python3 - \"$manifests/workflow.toml\" \"$manifests/workspace.toml\" <<'PY'\n"
+            "manifests=\"$(mktemp -d)\"\nif git -C \"${checkout}\" cat-file -e \"${revision}:crates/velnor-workflow/Cargo.toml\" 2>/dev/null; then\ngit -C \"${checkout}\" show \"${revision}:crates/velnor-workflow/Cargo.toml\" > \"$manifests/workflow.toml\"\nif git -C \"${checkout}\" cat-file -e \"${revision}:Cargo.toml\" 2>/dev/null; then git -C \"${checkout}\" show \"${revision}:Cargo.toml\" > \"$manifests/workspace.toml\"; else printf '[workspace]\\n' > \"$manifests/workspace.toml\"; fi\ndependency_paths=\"$(python3 - \"$manifests/workflow.toml\" \"$manifests/workspace.toml\" <<'PY'\n"
         );
         script.push_str(PYTHON_RESOLVER);
         script.push_str(
-            "\nPY\n)\"\nelse\nmodel_dependency=false\nfi\nif [[ \"$model_dependency\" == true ]]; then\ntest \"$model_tree\" != '' || { echo \"::error::velnor-model dependency has no tracked source tree\" >&2; exit 1; }\nlisting+=$'\\n'\"$model_tree\"\nfi\n",
+            "\nPY\n)\"\nelse\ndependency_paths='[]'\nfi\nwhile IFS= read -r dependency_path; do\n  [[ \"$dependency_path\" != '' ]] || continue\n  dependency_tree=\"$(git -C \"${checkout}\" ls-tree -r \"${revision}\" -- \":(literal)$dependency_path\")\"\n  test \"$dependency_tree\" != '' || { echo \"::error::local Cargo dependency has no tracked source tree: $dependency_path\" >&2; exit 1; }\n  [[ \"$(awk '$1 == 120000 { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \"::error::local Cargo dependency contains a symlink: $dependency_path\" >&2; exit 1; }\n  listing+=$'\\n'\"$dependency_tree\"\ndone < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep=\"\\n\")' <<<\"$dependency_paths\")\nrm -rf \"$manifests\"\n",
         );
         indent_script(&script, indent)
     }
@@ -217,8 +231,7 @@ gh api "repos/$PRODUCT_REPOSITORY/git/blobs/$workspace_blob" | jq -er '.content'
 else
 printf '[workspace]\n' > "$manifests/workspace.toml"
 fi
-model_tree="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "crates/velnor-model" or (.path | startswith("crates/velnor-model/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
-model_dependency="$(python3 - "$manifests/workflow.toml" "$manifests/workspace.toml" <<'PY'
+dependency_paths="$(python3 - "$manifests/workflow.toml" "$manifests/workspace.toml" <<'PY'
 "#,
         );
         script.push_str(PYTHON_RESOLVER);
@@ -227,12 +240,15 @@ model_dependency="$(python3 - "$manifests/workflow.toml" "$manifests/workspace.t
 )"
 rm -rf "$manifests"
 else
-model_dependency=false
+dependency_paths='[]'
 fi
-if [[ "$model_dependency" == true ]]; then
-test "$model_tree" != '' || { echo "::error::velnor-model dependency has no tracked source tree" >&2; exit 1; }
-listing+=$'\n'"$model_tree"
-fi
+while IFS= read -r dependency_path; do
+  [[ "$dependency_path" != '' ]] || continue
+  dependency_tree="$(jq -r --arg path "$dependency_path" '[.tree[] | select(.type != "tree") | select(.path == $path or (.path | startswith($path + "/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+  test "$dependency_tree" != '' || { echo "::error::local Cargo dependency has no tracked source tree: $dependency_path" >&2; exit 1; }
+  [[ "$(awk '$1 == "120000" { found=1 } END { print found+0 }' <<<"$dependency_tree")" == 0 ]] || { echo "::error::local Cargo dependency contains a symlink: $dependency_path" >&2; exit 1; }
+  listing+=$'\n'"$dependency_tree"
+done < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep="\n")' <<<"$dependency_paths")
 "#,
         );
         indent_script(&script, indent)
@@ -255,41 +271,72 @@ fi
     pub(crate) fn closure_paths(
         workflow_manifest: &str,
         workspace_manifest: &str,
-    ) -> Result<Vec<&'static str>, String> {
+    ) -> Result<Vec<String>, String> {
         let workflow = toml::from_str::<toml::Value>(workflow_manifest)
             .map_err(|error| format!("parse workflow Cargo.toml: {error}"))?;
         let workspace = toml::from_str::<toml::Value>(workspace_manifest)
             .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
-        if uses_local_velnor_model(&workflow, &workspace)? {
-            let mut paths = BASE_CLOSURE_PATHS.to_vec();
-            paths.push(VELNOR_MODEL_PATH);
-            Ok(paths)
-        } else {
-            Ok(BASE_CLOSURE_PATHS.to_vec())
-        }
+        closure_paths_from_values(&workflow, &workspace)
     }
 
-    fn uses_local_velnor_model(
+    fn closure_paths_from_values(
         workflow: &toml::Value,
         workspace: &toml::Value,
-    ) -> Result<bool, String> {
-        let workspace_dependencies = workspace
-            .get("workspace")
-            .and_then(toml::Value::as_table)
-            .and_then(|table| table.get("dependencies"))
-            .and_then(toml::Value::as_table);
+    ) -> Result<Vec<String>, String> {
+        let mut paths = BASE_CLOSURE_PATHS
+            .iter()
+            .map(|p| (*p).to_owned())
+            .collect::<Vec<_>>();
+        let mut dependencies = local_dependency_paths(workflow, workspace)?;
+        dependencies.sort();
+        dependencies.dedup();
+        for path in dependencies {
+            let covered = BASE_CLOSURE_PATHS.iter().any(|base| {
+                path == *base
+                    || path
+                        .strip_prefix(base)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            });
+            let covered_by_dependency = paths[BASE_CLOSURE_PATHS.len()..].iter().any(|root| {
+                path == *root
+                    || path
+                        .strip_prefix(root)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            });
+            if !covered && !covered_by_dependency && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
 
-        let mut uses_model = false;
+    fn local_dependency_paths(
+        workflow: &toml::Value,
+        workspace: &toml::Value,
+    ) -> Result<Vec<String>, String> {
+        let workspace_dependencies = match workspace.get("workspace") {
+            Some(value) => {
+                let table = value.as_table().ok_or("workspace must be a TOML table")?;
+                match table.get("dependencies") {
+                    Some(value) => Some(
+                        value
+                            .as_table()
+                            .ok_or("workspace.dependencies must be a TOML table")?,
+                    ),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+
+        let mut paths = Vec::new();
         for (section, dependencies) in dependency_sections(workflow)? {
             let dependencies = dependencies
                 .as_table()
                 .ok_or_else(|| format!("{section} must be a TOML table"))?;
             for (alias, declaration) in dependencies {
-                let (package, path, workspace_inherited) =
+                let (_package, path, workspace_inherited) =
                     effective_dependency(alias, declaration, workspace_dependencies, section)?;
-                if package.as_deref() != Some("velnor-model") {
-                    continue;
-                }
                 let Some(path) = path else {
                     continue;
                 };
@@ -299,15 +346,21 @@ fi
                     "crates/velnor-workflow"
                 };
                 let resolved = normalize_repo_path(base, &path)?;
-                if resolved != VELNOR_MODEL_PATH {
-                    return Err(format!(
-                    "local velnor-model dependency resolves to {resolved}, expected {VELNOR_MODEL_PATH}"
-                ));
+                if resolved.is_empty() {
+                    return Err(format!("{section}.{alias} resolves to the repository root"));
                 }
-                uses_model = true;
+                if BASE_CLOSURE_PATHS
+                    .iter()
+                    .any(|base| base.starts_with(&format!("{resolved}/")))
+                {
+                    return Err(format!(
+                        "{section}.{alias} dependency path overlaps the base closure"
+                    ));
+                }
+                paths.push(resolved);
             }
         }
-        Ok(uses_model)
+        Ok(paths)
     }
 
     fn dependency_sections(
@@ -347,6 +400,11 @@ fi
         section: &str,
     ) -> Result<(Option<String>, Option<String>, bool), String> {
         let mut declaration = declaration;
+        if !declaration.is_str() && !declaration.is_table() {
+            return Err(format!(
+                "{section}.{alias} must be a dependency string or table"
+            ));
+        }
         let mut workspace_inherited = false;
         if let Some(table) = declaration.as_table()
             && table.get("workspace").and_then(toml::Value::as_bool) == Some(true)
@@ -362,6 +420,11 @@ fi
                     format!("{section}.{alias} inherits a missing workspace dependency")
                 })?;
             workspace_inherited = true;
+            if !declaration.is_str() && !declaration.is_table() {
+                return Err(format!(
+                    "workspace dependency {alias} must be a dependency string or table"
+                ));
+            }
         }
         let table = declaration.as_table();
         let package = table
@@ -443,6 +506,9 @@ fi
             assert_eq!(
                 closure_paths(workflow, ROOT).expect("valid manifests"),
                 BASE_CLOSURE_PATHS
+                    .iter()
+                    .map(|path| (*path).to_owned())
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -454,8 +520,41 @@ fi
             "[package]\nname = \"velnor-workflow\"\n[target.'cfg(unix)'.dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\n",
         ] {
             let paths = closure_paths(workflow, ROOT).expect("valid local model dependency");
-            assert!(paths.contains(&VELNOR_MODEL_PATH));
+            assert!(paths.iter().any(|path| path == VELNOR_MODEL_PATH));
+            }
         }
+
+        #[test]
+        fn includes_generic_dotted_build_and_target_dependencies() {
+            let workflow = r#"
+[build-dependencies."build.helper"]
+path = "../../tools/helper"
+[target.'cfg(unix)'.dependencies.'native.helper']
+path = "../native-helper"
+"#;
+            let paths = closure_paths(workflow, ROOT).expect("valid dependency tables");
+            assert!(paths.contains(&"tools/helper".to_owned()));
+            assert!(paths.contains(&"crates/native-helper".to_owned()));
+        }
+
+        #[test]
+        fn dependency_already_covered_by_base_does_not_activate_resolver() {
+            let workflow = "[dependencies]\nlocal = { path = \".\" }\n";
+            assert_eq!(
+                closure_paths(workflow, ROOT).expect("valid path"),
+                BASE_CLOSURE_PATHS
+                    .iter()
+                    .map(|path| (*path).to_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn collapses_nested_local_dependency_roots() {
+            let workflow = "[dependencies]\nouter = { path = \"../../vendor\" }\ninner = { path = \"../../vendor/inner\" }\n";
+            let paths = closure_paths(workflow, ROOT).expect("valid local paths");
+            assert_eq!(paths.iter().filter(|path| *path == "vendor").count(), 1);
+            assert!(!paths.contains(&"vendor/inner".to_owned()));
         }
 
         #[test]
@@ -464,7 +563,8 @@ fi
             let workspace = "[workspace]\n[workspace.dependencies]\nvelnor-model = { path = \"crates/velnor-model\" }\n";
             assert!(closure_paths(workflow, workspace)
                 .expect("valid workspace inheritance")
-                .contains(&VELNOR_MODEL_PATH));
+                .iter()
+                .any(|path| path == VELNOR_MODEL_PATH));
         }
 
         #[test]
@@ -474,7 +574,8 @@ fi
             let workspace = "[workspace]\n[workspace.dependencies]\nmodel = { package = \"velnor-model\", path = \"crates/velnor-model\" }\n";
             assert!(closure_paths(workflow, workspace)
                 .expect("valid renamed workspace inheritance")
-                .contains(&VELNOR_MODEL_PATH));
+                .iter()
+                .any(|path| path == VELNOR_MODEL_PATH));
         }
 
         #[test]
@@ -482,7 +583,19 @@ fi
             assert!(closure_paths("[dependencies", ROOT).is_err());
             let workflow = "[dependencies]\nvelnor-model = { workspace = true }\n";
             assert!(closure_paths(workflow, ROOT).is_err());
-            let workflow = "[dependencies]\nvelnor-model = { path = \"../../outside\" }\n";
+            assert!(closure_paths("[dependencies]\nhelper = 42\n", ROOT).is_err());
+            assert!(closure_paths("[dependencies]\nhelper = { path = \"..\" }\n", ROOT).is_err());
+            assert!(closure_paths(
+                "[dependencies]\nhelper = { workspace = true }\n",
+                "[workspace]\ndependencies = 42\n"
+            )
+            .is_err());
+            assert!(closure_paths(
+                "[dependencies]\nhelper = { workspace = true }\n",
+                "[workspace]\n[workspace.dependencies]\nhelper = 42\n"
+            )
+            .is_err());
+            let workflow = "[dependencies]\nvelnor-model = { path = \"../../../outside\" }\n";
             assert!(closure_paths(workflow, ROOT).is_err());
             let workflow =
                 "[[dependencies]]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n";
@@ -491,7 +604,8 @@ fi
                 "[dependencies.model]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n";
             assert!(closure_paths(workflow, ROOT)
                 .expect("valid multiline TOML dependency")
-                .contains(&VELNOR_MODEL_PATH));
+                .iter()
+                .any(|path| path == VELNOR_MODEL_PATH));
         }
 
         #[test]
@@ -512,10 +626,12 @@ fi
                 "git -C \"$CHECKOUT_PATH\" show \"$INSTALL_REV:crates/velnor-workflow/Cargo.toml\""
             ));
             assert!(rendered.contains("repos/$PRODUCT_REPOSITORY/git/blobs/$workflow_blob"));
-            assert!(rendered.contains("model_tree=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$INSTALL_REV\" -- crates/velnor-model)\""));
-            assert!(rendered.contains("startswith(\"crates/velnor-model/\")"));
+            assert!(rendered.contains("dependency_tree="));
+            assert!(rendered.contains("startswith($path + \"/\")"));
             assert!(rendered.contains("import tomllib"));
-            assert!(rendered.contains("listing+=$'\\n'\"$model_tree\""));
+            assert!(rendered.contains("listing+=$'\\n'\"$dependency_tree\""));
+            assert!(rendered.contains("local Cargo dependency contains a symlink"));
+            assert!(rendered.contains("-- \":(literal)$dependency_path\""));
             serde_yaml::from_str::<serde_yaml::Value>(&rendered)
                 .expect("model-aware setup action is valid YAML");
             for (index, script) in [
@@ -583,14 +699,17 @@ fi
         ] {
             let output = probe(workflow, ROOT);
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[\"crates/velnor-model\"]");
         }
             let inherited = probe(
             "[dependencies]\nvelnor-model = { workspace = true }\n",
             "[workspace]\n[workspace.dependencies]\nvelnor-model = { path = \"crates/velnor-model\" }\n",
         );
             assert!(inherited.status.success());
-            assert_eq!(String::from_utf8_lossy(&inherited.stdout).trim(), "true");
+            assert_eq!(
+                String::from_utf8_lossy(&inherited.stdout).trim(),
+                "[\"crates/velnor-model\"]"
+            );
             let renamed_inherited = probe(
                 "[dependencies]\nmodel = { workspace = true }\n",
                 "[workspace]\n[workspace.dependencies]\nmodel = { package = \"velnor-model\", path = \"crates/velnor-model\" }\n",
@@ -598,17 +717,17 @@ fi
             assert!(renamed_inherited.status.success());
             assert_eq!(
                 String::from_utf8_lossy(&renamed_inherited.stdout).trim(),
-                "true"
+                "[\"crates/velnor-model\"]"
             );
             let unrelated = probe("[dependencies]\nserde = \"1\"\n", ROOT);
             assert!(unrelated.status.success());
-            assert_eq!(String::from_utf8_lossy(&unrelated.stdout).trim(), "false");
+            assert_eq!(String::from_utf8_lossy(&unrelated.stdout).trim(), "[]");
             for workflow in [
                 "[dependencies]\nvelnor-model = { workspace = true }\n",
-                "[dependencies]\nvelnor-model = { path = \"../../outside\" }\n",
+                "[dependencies]\nvelnor-model = { path = \"../../../outside\" }\n",
                 "[dependencies\nvelnor-model = \"1\"\n",
                 "[[dependencies]]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n",
-                "[dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\nother_model = { package = \"velnor-model\", path = \"../../outside\" }\n",
+                "[dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\nother_model = { package = \"velnor-model\", path = \"../../../outside\" }\n",
             ] {
                 assert!(
                     !probe(workflow, ROOT).status.success(),
@@ -620,7 +739,10 @@ fi
                 ROOT,
             );
             assert!(multiline.status.success());
-            assert_eq!(String::from_utf8_lossy(&multiline.stdout).trim(), "true");
+            assert_eq!(
+                String::from_utf8_lossy(&multiline.stdout).trim(),
+                "[\"crates/velnor-model\"]"
+            );
         }
     }
 }
@@ -11595,9 +11717,9 @@ mod tests {
             "git -C \"$CHECKOUT_PATH\" show \"$PINNED_REVISION:crates/velnor-workflow/Cargo.toml\""
         ));
         assert!(model.contains("gh api \"repos/$PRODUCT_REPOSITORY/git/blobs/$workflow_blob\""));
-        assert!(model.contains("model_tree=\"$(jq -r '[.tree[] | select(.type != \"tree\")"));
-        assert!(model.contains("startswith(\"crates/velnor-model/\")"));
-        assert!(model.contains("listing+=$'\\n'\"$model_tree\""));
+        assert!(model.contains("dependency_paths=\"$(python3 - \"$manifests/workflow.toml\""));
+        assert!(model.contains("startswith($path + \"/\")"));
+        assert!(model.contains("listing+=$'\\n'\"$dependency_tree\""));
         assert!(model.contains("import tomllib"));
 
         let start = model

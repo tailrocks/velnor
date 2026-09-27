@@ -150,10 +150,24 @@ pub(crate) fn closure_of_tree(
     } else {
         // Trees from before the workflow crate manifest existed cannot declare
         // its optional model dependency. Retain their published v1 pathset.
-        closure_inputs::BASE_CLOSURE_PATHS.to_vec()
+        closure_inputs::BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>()
     };
-    let mut arguments = vec!["ls-tree", "-r", rev, "--"];
-    arguments.extend_from_slice(&paths);
+    let mut arguments = vec![
+        "ls-tree".to_owned(),
+        "-r".to_owned(),
+        rev.to_owned(),
+        "--".to_owned(),
+    ];
+    arguments.extend(paths.iter().enumerate().map(|(index, path)| {
+        if index < closure_inputs::BASE_CLOSURE_PATHS.len() {
+            path.clone()
+        } else {
+            format!(":(literal){path}")
+        }
+    }));
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -172,6 +186,19 @@ pub(crate) fn closure_of_tree(
         .lines()
         .map(str::to_owned)
         .collect();
+    let dependency_paths = paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len());
+    if lines.iter().any(|line| {
+        line.starts_with("120000 ")
+            && line.split_once('\t').is_some_and(|(_, path)| {
+                dependency_paths.clone().any(|dependency| {
+                    path == dependency || path.starts_with(&format!("{dependency}/"))
+                })
+            })
+    }) {
+        return Err(GeneratorError::usage(format!(
+            "revision {rev} contains a symlink in the source closure"
+        )));
+    }
     if lines.is_empty() {
         return Err(GeneratorError::usage(format!(
             "revision {rev} has no closure inputs in {}",
@@ -538,6 +565,57 @@ mod tests {
         // unrelated file under a new commit keeps no input, and removing it
         // from the listing is covered by construction (the pathspec).
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "symlink fixture setup failures must be explicit"
+    )]
+    #[test]
+    fn closure_rejects_symlinks_in_local_path_dependency_trees() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-closure-symlink-{}", crate::unique_suffix()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        std::fs::create_dir_all(root.join("crates/helper/src")).expect("helper directories");
+        std::fs::write(
+            root.join("crates/helper/Cargo.toml"),
+            "[package]\nname = \"helper\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("helper manifest");
+        std::fs::write(root.join("crates/helper/src/lib.rs"), "mod linked;\n")
+            .expect("helper source");
+        std::os::unix::fs::symlink(
+            "../../../UNRELATED.md",
+            root.join("crates/helper/src/linked.rs"),
+        )
+        .expect("dependency source symlink");
+        std::fs::write(
+            root.join("crates/velnor-workflow/Cargo.toml"),
+            "[package]\nname = \"velnor-workflow\"\n[dependencies.helper]\npath = \"../helper\"\n",
+        )
+        .expect("workflow dependency manifest");
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "symlink fixture",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let error = closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
+            .expect_err("dependency symlink cannot be hidden by a blob digest");
+        assert!(error.to_string().contains("symlink"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[expect(

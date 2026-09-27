@@ -50,12 +50,27 @@ pub(crate) const RUNTIME_PRODUCTS_FILE: &str = "ci-runtime-products.yml";
 pub(crate) const RUNTIME_PRODUCTS_SIDE_FILES: &[(&str, &str)] =
     &[(RUNTIME_PRODUCTS_FILE, super::RUNTIME_PRODUCTS)];
 
-fn producer_closure_paths() -> Result<Vec<&'static str>, GeneratorError> {
+fn producer_closure_paths() -> Result<Vec<String>, GeneratorError> {
     closure_inputs::closure_paths(
         include_str!("../../../Cargo.toml"),
         include_str!("../../../../../Cargo.toml"),
     )
     .map_err(GeneratorError::usage)
+}
+
+fn producer_closure_pathspec(paths: &[String]) -> String {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            if index < closure_inputs::BASE_CLOSURE_PATHS.len() {
+                path.clone()
+            } else {
+                format!(":(literal){}", crate::shell_quote(path))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether `primitive` renders the runtime-product producer workflow.
@@ -577,7 +592,7 @@ jobs:
         workflow_file = RUNTIME_PRODUCTS_FILE,
         runtime_home = HOSTED_WORKFLOW_RUNTIME_HOME,
         tag_prefix = PRODUCT_TAG_PREFIX,
-        closure_paths = closure_paths.join(" "),
+        closure_paths = producer_closure_pathspec(&closure_paths),
         closure_footer = closure_footer,
         matrix = matrix,
         manifest_products = manifest_program,
@@ -657,6 +672,18 @@ mod tests {
 
     use super::*;
     use crate::s2::UnitKind;
+
+    #[test]
+    fn dynamic_closure_pathspecs_are_shell_quoted() {
+        let mut paths = closure_inputs::BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        let hostile = "vendor/[glob]* with space;touch sentinel";
+        paths.push(hostile.to_owned());
+        assert!(producer_closure_pathspec(&paths)
+            .ends_with(&format!(":(literal){}", crate::shell_quote(hostile))));
+    }
 
     const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 

@@ -59,12 +59,27 @@ pub(crate) const RUNTIME_PRODUCTS_SIDE_FILES: &[(&str, &str)] =
     clippy::expect_used,
     reason = "Cargo has validated both emitter manifests before this build runs"
 )]
-fn producer_closure_paths() -> Vec<&'static str> {
+fn producer_closure_paths() -> Vec<String> {
     closure_inputs::closure_paths(
         include_str!("../../Cargo.toml"),
         include_str!("../../../../Cargo.toml"),
     )
     .expect("the emitter Cargo manifests must resolve the runtime closure")
+}
+
+fn producer_closure_pathspec(paths: &[String]) -> String {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            if index < closure_inputs::BASE_CLOSURE_PATHS.len() {
+                path.clone()
+            } else {
+                format!(":(literal){}", crate::shell_quote(path))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether `primitive` renders the runtime-product producer workflow.
@@ -647,7 +662,7 @@ jobs:
         workflow_file = RUNTIME_PRODUCTS_FILE,
         runtime_home = HOSTED_WORKFLOW_RUNTIME_HOME,
         tag_prefix = PRODUCT_TAG_PREFIX,
-        closure_paths = closure_paths.join(" "),
+        closure_paths = producer_closure_pathspec(&closure_paths),
         closure_footer = closure_footer,
         matrix = matrix,
         manifest_products = manifest_program,
@@ -726,6 +741,18 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[test]
+    fn dynamic_closure_pathspecs_are_shell_quoted() {
+        let mut paths = closure_inputs::BASE_CLOSURE_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        let hostile = "vendor/[glob]* with space;touch sentinel";
+        paths.push(hostile.to_owned());
+        assert!(producer_closure_pathspec(&paths)
+            .ends_with(&format!(":(literal){}", crate::shell_quote(hostile))));
+    }
     use crate::{RunnerMode, UnitKind};
 
     const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
