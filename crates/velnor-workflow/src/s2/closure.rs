@@ -148,13 +148,16 @@ pub(crate) fn closure_of_tree(
         .map_err(|error| {
             GeneratorError::usage(format!("read workflow manifest at {rev}: {error}"))
         })?;
-    let manifest_ok = manifest.status.success();
+    if !manifest.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "revision {rev} has no readable workflow manifest in {}",
+            repo.display()
+        )));
+    }
     let manifest = String::from_utf8_lossy(&manifest.stdout);
-    let uses_model = manifest_ok
-        && manifest.lines().any(|line| {
-            line.trim_start().starts_with("velnor-model")
-                && line.contains("path = \"../velnor-model\"")
-        });
+    let uses_model = manifest.lines().any(|line| {
+        line.trim_start().starts_with("velnor-model") && line.contains("path = \"../velnor-model\"")
+    });
     let mut paths = CLOSURE_PATHS.to_vec();
     if !uses_model {
         paths.retain(|path| *path != "crates/velnor-model");
@@ -226,6 +229,10 @@ mod tests {
             "fixture dirs",
         );
         for (name, content) in [
+            (
+                "crates/velnor-workflow/Cargo.toml",
+                "[package]\nname = \"velnor-workflow\"\n",
+            ),
             ("crates/velnor-workflow/src/Zebra.rs", "zebra\n"),
             ("crates/velnor-workflow/src/apple.rs", "apple\n"),
             ("Cargo.toml", "[workspace]\n"),
@@ -326,6 +333,161 @@ mod tests {
         );
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn closure_of_tree_errors_when_revision_manifest_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-no-manifest-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "fixture",
+            ],
+        );
+        let head = git_output(&root, &["rev-parse", "HEAD"]);
+        must(
+            std::fs::remove_file(root.join("crates/velnor-workflow/Cargo.toml")),
+            "remove workflow manifest",
+        );
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "remove workflow manifest",
+            ],
+        );
+        let missing_manifest = git_output(&root, &["rev-parse", "HEAD"]);
+        let error = closure_of_tree(&root, &missing_manifest, "", PROFILE_RELEASE)
+            .expect_err("missing revision manifest must fail closed");
+        assert!(error.to_string().contains("workflow manifest"));
+        assert!(
+            closure_of_tree(&root, "missing-revision", "", PROFILE_RELEASE).is_err(),
+            "unreadable revision manifest must fail closed"
+        );
+        assert!(
+            closure_of_tree(&root, &head, "", PROFILE_RELEASE).is_ok(),
+            "a revision with its manifest remains readable"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn closure_of_tree_uses_model_manifest_dependency_to_select_model_subtree() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-model-dependency-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        must(
+            std::fs::create_dir_all(root.join("crates/velnor-model/src")),
+            "model dirs",
+        );
+        must(
+            std::fs::write(root.join("crates/velnor-model/src/lib.rs"), "model one\n"),
+            "model source",
+        );
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "no model dependency",
+            ],
+        );
+        let no_model_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let no_model_closure = must(
+            closure_of_tree(&root, &no_model_rev, "", PROFILE_RELEASE),
+            "no-model closure",
+        );
+
+        must(
+            std::fs::write(root.join("crates/velnor-model/src/lib.rs"), "model two\n"),
+            "change unused model source",
+        );
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "change unused model",
+            ],
+        );
+        let no_model_changed_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            must(
+                closure_of_tree(&root, &no_model_changed_rev, "", PROFILE_RELEASE),
+                "no-model changed closure"
+            ),
+            no_model_closure,
+            "old pins without the dependency exclude the model subtree"
+        );
+
+        must(
+            std::fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n\n[dependencies]\nvelnor-model = { path = \"../velnor-model\" }\n",
+            ),
+            "add model dependency",
+        );
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "add model dependency",
+            ],
+        );
+        let model_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let model_closure = must(
+            closure_of_tree(&root, &model_rev, "", PROFILE_RELEASE),
+            "model closure",
+        );
+        assert_ne!(
+            model_closure, no_model_closure,
+            "the current manifest's model dependency includes the model subtree"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
