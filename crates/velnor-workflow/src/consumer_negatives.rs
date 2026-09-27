@@ -749,19 +749,16 @@ impl ConsumerFixture {
                     "spawn fixture base64 encoder",
                 );
                 must(
-                    encoder
-                        .stdin
-                        .take()
-                        .expect("encoder stdin is piped")
-                        .write_all(&contents),
+                    must_some(encoder.stdin.take(), "encoder stdin is piped").write_all(&contents),
                     "encode fixture manifest",
                 );
-                let encoded = must(encoder.wait_with_output(), "wait for base64 encoder");
+                let encoded_manifest_output =
+                    must(encoder.wait_with_output(), "wait for base64 encoder");
                 assert!(
-                    encoded.status.success(),
+                    encoded_manifest_output.status.success(),
                     "fixture manifest encoding succeeds"
                 );
-                let content = String::from_utf8_lossy(&encoded.stdout)
+                let content = String::from_utf8_lossy(&encoded_manifest_output.stdout)
                     .lines()
                     .collect::<String>();
                 let response = serde_json::json!({

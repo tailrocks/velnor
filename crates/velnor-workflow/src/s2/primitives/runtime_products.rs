@@ -1047,9 +1047,10 @@ mod tests {
             "the setup action includes model sources only when the pinned workflow manifest depends on them"
         );
         assert!(
-            content.contains(&producer_closure_pathspec(
-                &producer_closure_paths().unwrap()
-            )),
+            content.contains(&producer_closure_pathspec(&must(
+                producer_closure_paths(),
+                "current closure paths parse"
+            ))),
             "{content}"
         );
         let footer = format!(

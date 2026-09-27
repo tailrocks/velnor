@@ -20035,7 +20035,13 @@ lockfile = true
         let velnor = velnor_policy_job("revision", "[self-hosted, velnor]");
         assert!(!velnor.contains("--pin-build"), "{velnor}");
         assert!(!velnor.contains("--ruleset-contexts"), "{velnor}");
-        assert!(!velnor.contains("gh api"), "{velnor}");
+        assert!(
+            velnor.contains(
+                "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
+            ),
+            "an unavailable pin resolves through the product repository only: {velnor}"
+        );
+        assert!(!velnor.contains("repos/$GITHUB_REPOSITORY/"), "{velnor}");
         let hosted = hosted_policy_job("revision");
         assert!(!hosted.contains("--pin-build"), "{hosted}");
         assert!(

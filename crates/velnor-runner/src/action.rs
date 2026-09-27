@@ -3716,6 +3716,10 @@ runs:
             "INPUT_RENOVATE-IMAGE".into(),
             "ghcr.io/renovatebot/renovate".into()
         )));
+        assert_eq!(
+            invocation.inputs.get("renovate-image").map(String::as_str),
+            Some("ghcr.io/renovatebot/renovate")
+        );
         assert!(invocation
             .env
             .contains(&("LOG_LEVEL".into(), "debug".into())));
@@ -3770,7 +3774,7 @@ runs:
             Some(dockerfile_dir.join("Dockerfile"))
         );
         assert!(invocation
-            .env
+            .runs_env
             .contains(&("RUNS_ENV".into(), "action-value".into())));
         let _ = fs::remove_dir_all(root);
     }

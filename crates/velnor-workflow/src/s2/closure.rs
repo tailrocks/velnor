@@ -485,8 +485,10 @@ mod tests {
         commit_fixture(&root, "fixture without manifest");
         let missing = git_output(&root, &["rev-parse", "HEAD"]);
 
-        let error = closure_of_tree(&root, &missing, "", PROFILE_RELEASE)
-            .expect_err("missing workflow manifest must fail closed");
+        let error = must_some(
+            closure_of_tree(&root, &missing, "", PROFILE_RELEASE).err(),
+            "missing workflow manifest must fail closed",
+        );
         assert!(error
             .to_string()
             .contains("crates/velnor-workflow/Cargo.toml"));
@@ -1058,8 +1060,10 @@ mod tests {
         git_in(&root, &["add", "-A"]);
         git_in(&root, &["commit", "--quiet", "--message", "historic tree"]);
         let revision = git_output(&root, &["rev-parse", "HEAD"]);
-        let error = closure_of_tree(&root, &revision, "", PROFILE_RELEASE)
-            .expect_err("missing manifest must fail closed");
+        let error = must_some(
+            closure_of_tree(&root, &revision, "", PROFILE_RELEASE).err(),
+            "missing manifest must fail closed",
+        );
         assert!(error
             .to_string()
             .contains("crates/velnor-workflow/Cargo.toml"));

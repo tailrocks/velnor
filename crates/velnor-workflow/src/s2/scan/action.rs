@@ -747,7 +747,7 @@ fn local_action_watch_paths(
     let candidates = discover_action_source_candidates(files);
     let mut visited = BTreeSet::new();
     let mut watched = BTreeSet::new();
-    collect_local_action_watch_paths(root, runs, files, &candidates, &mut visited, &mut watched)?;
+    collect_local_action_watch_paths(root, runs, &candidates, &mut visited, &mut watched)?;
     Ok(watched
         .into_iter()
         .map(|path| format!("{path}/**"))
@@ -757,7 +757,6 @@ fn local_action_watch_paths(
 fn collect_local_action_watch_paths(
     root: &Path,
     runs: &ActionRuns,
-    files: &[String],
     candidates: &BTreeMap<String, ActionSource>,
     visited: &mut BTreeSet<String>,
     watched: &mut BTreeSet<String>,
@@ -780,14 +779,7 @@ fn collect_local_action_watch_paths(
             && source.kind == ActionSourceKind::Metadata
         {
             let metadata = parse_metadata(root, &source.path)?;
-            collect_local_action_watch_paths(
-                root,
-                &metadata.runs,
-                files,
-                candidates,
-                visited,
-                watched,
-            )?;
+            collect_local_action_watch_paths(root, &metadata.runs, candidates, visited, watched)?;
         }
     }
     Ok(())
