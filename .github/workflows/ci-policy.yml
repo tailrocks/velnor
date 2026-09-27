@@ -19,15 +19,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Trust invariant: this job runs the base branch's Stage-0 validator
-    # product against the audited tree under pull_request_target. It holds
-    # `contents: read` only, references no secrets, persists no credentials,
-    # and never compiles. When the audited tree differs from the declared
-    # pin's render, it additionally EXECUTES the PR run's prebuilt
-    # candidate generator — PR-built code, same-repository runs only, bound
-    # to the audited tree by manifest closure plus binary digest before
-    # execution — with no secret references, no persisted credentials, the
-    # read-only github.token confined to the Acquire/Ruleset API steps,
-    # and both candidate exec points tokenless.
+    # product against the audited tree under pull_request_target.
+    # Permissions are read-only: `actions: read`, `contents: read`, and
+    # `pull-requests: read` for candidate artifact and ruleset API access.
+    # It references no secrets, persists no credentials, and never compiles.
+    # When the audited tree differs from the declared pin's render, it
+    # additionally EXECUTES the PR run's prebuilt candidate generator —
+    # PR-built code, same-repository runs only, bound to the audited tree by
+    # manifest closure plus binary digest before execution — with no secret
+    # references, no persisted credentials, the read-only github.token
+    # confined to the Acquire/Ruleset API steps, and both candidate exec
+    # points tokenless. The trusted pinned renderer computes candidate
+    # closures in Acquire without executing the candidate binary.
     permissions:
       actions: read
       contents: read
@@ -58,10 +61,40 @@ jobs:
           sparse-checkout: .github/actions/setup-velnor-workflow
           fetch-depth: 1
           persist-credentials: false
+      - name: Resolve audited generator revision
+        id: audited-generator-pin
+        working-directory: policy-checkout
+        env:
+          AUDITED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          read_generator_pin() {
+            git show "$1:.github-gen/velnor-workflow.toml" | awk '
+            /^[[:space:]]*\[generator\][[:space:]]*(#.*)?$/ { in_generator=1; next }
+            /^[[:space:]]*\[/ { in_generator=0 }
+            in_generator && /^[[:space:]]*revision[[:space:]]*=/ {
+              value=$0
+              sub(/^[^=]*=[[:space:]]*"/, "", value)
+              sub(/"[[:space:]]*(#.*)?$/, "", value)
+              print value
+            }
+            '
+          }
+          pin="$(read_generator_pin "$AUDITED_SHA")"
+          base_pin="$(read_generator_pin "$BASE_SHA")"
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::audited tree must declare one full lowercase 40-character [generator].revision" >&2; exit 1; }
+          [[ "$base_pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base tree must declare one full lowercase 40-character [generator].revision" >&2; exit 1; }
+          git cat-file -e "$pin^{commit}"
+          git cat-file -e "$base_pin^{commit}"
+          git merge-base --is-ancestor "$base_pin" "$pin" || { echo "::error::audited generator revision must equal or descend from the base tree's declared generator revision" >&2; exit 1; }
+          git merge-base --is-ancestor "$pin" "$BASE_SHA" || { echo "::error::audited generator revision is not an ancestor of the base commit" >&2; exit 1; }
+          echo "revision=$pin" >> "$GITHUB_OUTPUT"
       - name: Set up Velnor workflow runtime
         uses: ./policy-setup-action/.github/actions/setup-velnor-workflow
         with:
-          rev: 12f9f4b4c90c1ba116f80bc832fc1a279dbb3c95
+          rev: ${{ steps.audited-generator-pin.outputs.revision }}
           checkout-path: ${{ github.workspace }}/policy-checkout
       - name: Acquire candidate generator product
         working-directory: policy-checkout
