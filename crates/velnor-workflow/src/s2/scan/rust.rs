@@ -1330,6 +1330,24 @@ fn linux_target_applies(target: &str) -> CfgTruth {
     {
         return linux_cfg_expression(expression);
     }
+    if target == "x86_64-unknown-linux-gnu" {
+        return CfgTruth::True;
+    }
+    if [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-gnueabihf",
+        "i686-unknown-linux-gnu",
+        "i686-unknown-linux-musl",
+        "x86_64-unknown-linux-gnux32",
+        "x86_64-unknown-linux-musl",
+        "x86_64-unknown-linux-uclibc",
+        "x86_64-pc-linux-gnu",
+    ]
+    .contains(&target)
+    {
+        return CfgTruth::False;
+    }
     if [
         "windows",
         "darwin",
@@ -1344,18 +1362,36 @@ fn linux_target_applies(target: &str) -> CfgTruth {
     {
         return CfgTruth::False;
     }
-    if target.contains("-linux-") {
-        return if target.starts_with("x86_64-") {
-            CfgTruth::True
-        } else {
-            CfgTruth::False
-        };
+    if target.contains("-unknown-linux-")
+        && [
+            "aarch64-",
+            "arm-",
+            "armv",
+            "i386-",
+            "i486-",
+            "i586-",
+            "i686-",
+            "loongarch",
+            "mips",
+            "powerpc",
+            "riscv32",
+            "riscv64",
+            "s390x-",
+            "sparc",
+            "thumbv",
+            "wasm",
+            "xtensa",
+        ]
+        .iter()
+        .any(|architecture| target.starts_with(architecture))
+    {
+        return CfgTruth::False;
     }
     CfgTruth::Unknown
 }
 
 fn dependency_target_applies_to_linux(target: Option<&str>) -> bool {
-    target.is_none_or(|target| linux_target_applies(target) != CfgTruth::False)
+    target.is_none_or(|target| linux_target_applies(target) == CfgTruth::True)
 }
 
 fn strip_toml_comment(line: &str) -> String {
@@ -2777,8 +2813,12 @@ mod tests {
         for target in [
             "cfg(windows)",
             "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "x86_64-unknown-linux-gnux32",
             "cfg(target_env = \"msvc\")",
             "cfg(target_vendor = \"apple\")",
+            "x86_64-custom-os",
+            "x86_64-custom-linux-gnu",
         ] {
             let manifest = format!(
                 "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'{target}'.dev-dependencies]\ntestcontainers = \"0.1\"\n"
@@ -2791,13 +2831,33 @@ mod tests {
             );
         }
 
+        let native_triple = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'x86_64-unknown-linux-gnu'.dev-dependencies]\ntestcontainers = \"0.1\"\n",
+        );
+        assert!(
+            super::dependency_capabilities(&native_triple.dependencies, &[]).testcontainers,
+            "the native LinuxX64 Cargo target triple is known to apply"
+        );
+
         let custom_target = parse_cargo_manifest(
             ".",
             "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'cfg(custom_target)'.dev-dependencies]\ntestcontainers = \"0.1\"\n",
         );
-        assert!(
-            super::dependency_capabilities(&custom_target.dependencies, &[]).testcontainers,
-            "unknown target predicates remain conservative instead of missing Docker use"
+        assert_eq!(
+            super::CfgTruth::Unknown,
+            super::linux_target_applies("cfg(custom_target)"),
+            "unknown custom selectors remain identifiable as unknown"
+        );
+        assert_eq!(
+            super::CfgTruth::Unknown,
+            super::linux_target_applies("x86_64-custom-linux-gnu"),
+            "unrecognized Cargo target triples remain identifiable as unknown"
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            super::dependency_capabilities(&custom_target.dependencies, &[]),
+            "unknown target predicates do not prove Docker use on LinuxX64"
         );
     }
 
