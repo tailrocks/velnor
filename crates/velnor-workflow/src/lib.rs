@@ -11084,6 +11084,10 @@ mod tests {
             ),
             "write stub trees response",
         );
+        must(
+            fs::write(log.join("manifest.json"), "{\"content\":\"\"}\n"),
+            "write stub manifest metadata response",
+        );
         let closure = closure::canonical_digest(
             &listing.iter().map(ToString::to_string).collect::<Vec<_>>(),
             closure::CI_FEATURES,
@@ -11126,7 +11130,7 @@ mod tests {
         must(
             fs::write(
                 stubs.join("gh"),
-                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  case \"$2\" in *contents/*) printf '{\\\"content\\\":\\\"\\\"}\\n';; *) cat \"$STUB_LOG/trees.json\";; esac\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
+                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  case \"$2\" in *contents/*) cat \"$STUB_LOG/manifest.json\";; *) cat \"$STUB_LOG/trees.json\";; esac\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
             ),
             "write stub gh",
         );
