@@ -19837,6 +19837,22 @@ lockfile = true
     }
 
     #[test]
+    fn policy_job_preserves_legacy_permissions_during_bootstrap() {
+        for policy in [
+            hosted_policy_job("abc123"),
+            velnor_policy_job("abc123", "[self-hosted, velnor]"),
+        ] {
+            assert!(
+                policy.contains("    permissions:\n      contents: read\n    steps:\n"),
+                "{policy}"
+            );
+            assert!(!policy.contains(
+                "    permissions:\n      actions: read\n      contents: read\n    steps:\n"
+            ));
+        }
+    }
+
+    #[test]
     fn no_generated_file_passes_pin_build() {
         // `--pin-build` is a local-development escape hatch on both CLIs; no
         // generated file may pass it, or an unprovisioned pin would silently
