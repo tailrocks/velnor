@@ -250,6 +250,16 @@ pub(crate) fn github_runner_for_unit<'a>(
     }
 }
 
+/// Whether a configured GitHub-hosted runner is the hosted Velnor runtime
+/// artifact producer's Linux x86_64 executor.
+///
+/// The artifact is built on [`crate::POLICY_VALIDATION_RUNNER`] (Linux x86_64).
+/// Other Ubuntu labels, including `ubuntu-24.04-arm`, do not prove that the
+/// consumer matches the producer, so those jobs bootstrap the runtime.
+pub(crate) fn github_runner_is_linux_x64(runner: &str) -> bool {
+    runner == crate::POLICY_VALIDATION_RUNNER
+}
+
 /// A named build product one unit produces for others: an `XCFramework`
 /// bundle, a generated header set, a packed archive. `task` is the repository
 /// task that rebuilds it (run through the task runner, never a shell string),
@@ -694,10 +704,10 @@ pub(crate) fn agreed_env(
 #[cfg(test)]
 mod tests {
     use super::{
-        agreed_env, describe_requirement, executors_for, is_ffi_crate_type, lane_supports_platform,
-        prepare_command, resolve, valid_env_name, valid_env_value, valid_product_input,
-        valid_product_name, valid_task_name, Arch, Executor, NamedProduct, Os, PlatformRequirement,
-        Prerequisite, CAP_XCFRAMEWORK, CAP_XCODE,
+        agreed_env, describe_requirement, executors_for, github_runner_is_linux_x64,
+        is_ffi_crate_type, lane_supports_platform, prepare_command, resolve, valid_env_name,
+        valid_env_value, valid_product_input, valid_product_name, valid_task_name, Arch, Executor,
+        NamedProduct, Os, PlatformRequirement, Prerequisite, CAP_XCFRAMEWORK, CAP_XCODE,
     };
     use crate::{
         AnalysisSummary, MaintenanceSpec, RunnerMode, Unit, UnitKind, ValidationPhase,
@@ -935,6 +945,15 @@ mod tests {
         };
         assert!(!x86.satisfies(&requirement));
         assert!(Executor::github_linux().satisfies(&requirement));
+    }
+
+    #[test]
+    fn runtime_artifact_producer_requires_linux_x64_runner_label() {
+        assert!(github_runner_is_linux_x64("ubuntu-24.04"));
+        assert!(!github_runner_is_linux_x64("ubuntu-24.04-arm"));
+        assert!(!github_runner_is_linux_x64("ubuntu-latest"));
+        assert!(!github_runner_is_linux_x64("macos-26"));
+        assert!(!github_runner_is_linux_x64("windows-2025"));
     }
 
     #[test]

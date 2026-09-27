@@ -9694,25 +9694,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             return;
         }
         // Manual dispatch jobs bootstrap the pinned runtime themselves. The
-        // setup acquisition serves every job the Linux-built plan artifact
-        // cannot: Apple jobs, whose executor never matches what the hosted
-        // plan publishes, and Swift jobs, which stay executor-uniform and
-        // set the runtime up wherever they land. A macOS Rust unit (a
-        // `BoltFFI` producer the join forced onto macOS) bootstraps
-        // through the setup action exactly like a Swift unit, while other
-        // Linux units keep the plan download. A non-Linux hosted selector
-        // must also bootstrap locally because the artifact name includes the
-        // producer's runner OS. Collapsed partitions are executor-homogeneous,
-        // so the selector represents the job.
+        // setup acquisition serves every job the Linux x86_64 plan artifact
+        // cannot: ARM and Apple jobs, jobs using another hosted selector, and
+        // Swift jobs, which set the runtime up wherever they land. Collapsed
+        // partitions are executor-homogeneous, so the selector represents
+        // the job.
         let hosted_linux_selector =
             self.selectors
                 .get(&ProviderId::GithubHosted)
                 .is_some_and(|selector| {
-                    selector.runs_on.len() == 1 && selector.runs_on[0].starts_with("ubuntu-")
+                    selector.runs_on.len() == 1
+                        && crate::platform::github_runner_is_linux_x64(&selector.runs_on[0])
                 });
         if !hosted_linux_selector
+            || unit.platform != crate::s2::provider::Platform::LinuxX64
             || unit.kind == UnitKind::Swift
-            || unit.platform == crate::s2::provider::Platform::MacosArm64
         {
             self.render_workflow_runtime_setup(output, provider);
         } else {

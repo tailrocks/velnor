@@ -6734,16 +6734,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
         // cannot consume a Linux-built plan artifact even when Planning is hosted.
         // The same applies to a portable unit when the repository routes its
-        // hosted lane to macOS or Windows: the artifact is named by the
-        // producer's runner OS, so only an explicitly Ubuntu-routed job may
-        // download it. Keep the unit's configured runner unchanged and set up
-        // the runtime locally on every other hosted executor.
+        // hosted lane to another runner: the artifact is produced on a fixed
+        // Linux x86_64 runner, so only that exact executor may download it.
+        // Keep the unit's configured runner unchanged and set up the runtime
+        // locally on every other hosted executor.
         let hosted_runner =
             crate::platform::github_runner_for_unit(&self.github_runner, &self.macos_runner, unit);
         if self.control_plane_lane() != RunnerMode::Github
             || self.runners == RunnerMode::Velnor
             || unit.platform.requires_apple()
-            || !hosted_runner.starts_with("ubuntu-")
+            || !crate::platform::github_runner_is_linux_x64(hosted_runner)
         {
             self.render_workflow_runtime_setup(output, lane);
         } else {
