@@ -29,8 +29,10 @@ proves the pin is reachable from the head and does not regress the base
 branch's validator, regenerates the tree with the generator built at that pin
 and requires a byte-identical result, and evaluates its own semantic rules
 (only the entrypoint on `pull_request_target`; every self-hosted job gated;
-every action SHA-pinned; the entrypoint on `contents: read` with no secrets;
-the ruleset's required contexts emitted). Every rule prints `PASS`/`FAIL`
+every action SHA-pinned; the entrypoint on `contents: read` and its policy job
+on exactly `actions: read`, `contents: read`, and `pull-requests: read`, with
+no secrets; the ruleset's required contexts emitted). Every rule prints
+`PASS`/`FAIL`
 with a one-line reason. Bump the pin with `velnor-workflow promote --rev HEAD`
 after the last generator change: it verifies the running binary renders with
 the pin's own source closure, then stamps the pin and regenerates the whole

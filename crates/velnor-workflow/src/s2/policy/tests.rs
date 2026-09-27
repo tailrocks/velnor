@@ -106,14 +106,14 @@ fn lookup(
 }
 
 fn lookup_with_manifest(
-    pinned_binary: Option<PathBuf>,
+    candidate_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
     install_root: PathBuf,
     candidate_manifest: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        candidate_binary: pinned_binary.clone(),
-        pinned_binary,
+        pinned_binary: None,
+        candidate_binary,
         search_path,
         install_root,
         build_forbidden: true,
@@ -121,20 +121,18 @@ fn lookup_with_manifest(
     }
 }
 
-fn lookup_with_slots(
-    pinned_binary: Option<PathBuf>,
+fn candidate_lookup(
     candidate_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
     install_root: PathBuf,
-    candidate_manifest: Option<PathBuf>,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary,
+        pinned_binary: None,
         candidate_binary,
         search_path,
         install_root,
         build_forbidden: true,
-        candidate_manifest,
+        candidate_manifest: None,
     }
 }
 
@@ -172,37 +170,6 @@ fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
         "an explicit pointer at the wrong closure is refused, not skipped: {error}"
     );
     assert!(error.contains(PIN_A), "{error}");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_binary_slot_does_not_replace_the_pinned_binary() {
-    let root = temporary_directory("separate-binary-slots");
-    let pin_dir = root.join("pin");
-    let candidate_dir = root.join("candidate");
-    must(fs::create_dir_all(&pin_dir), "create pin directory");
-    must(
-        fs::create_dir_all(&candidate_dir),
-        "create candidate directory",
-    );
-    let pinned = fake_velnor_workflow(&pin_dir, PIN_A, CLOSURE_A);
-    let candidate = fake_velnor_workflow(&candidate_dir, PIN_B, CLOSURE_B);
-    let lookup = lookup_with_slots(
-        Some(pinned.clone()),
-        Some(candidate),
-        None,
-        root.join("install"),
-        None,
-    );
-    let expected = [CLOSURE_A.to_owned()];
-    assert_eq!(
-        must(
-            resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
-            "pinned slot stays independent from candidate slot"
-        ),
-        pinned
-    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -623,6 +590,8 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
         "workflow and job level: {entrypoint}"
     );
     assert_eq!(entrypoint.matches("contents: read\n").count(), 2);
+    assert_eq!(entrypoint.matches("${{ github.token }}").count(), 1);
+    assert!(entrypoint.contains("GH_TOKEN: ${{ github.token }}"));
     assert!(entrypoint.contains("  workflow_dispatch:\n"));
     assert!(entrypoint.contains("# Trust invariant:"), "{entrypoint}");
     let pin = entrypoint_pin(&root, PIN_A);
@@ -636,6 +605,30 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
             .any(|detail| detail.contains(BASE_REVISION_ENV) && detail.contains(PIN_A)),
         "{:?}",
         drift.details
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn entrypoint_audit_rejects_incomplete_policy_job_permissions() {
+    let clean = hosted_entrypoint(PIN_A);
+    let incomplete = clean.replacen(
+        "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n",
+        "    permissions:\n      actions: read\n      contents: read\n",
+        1,
+    );
+    let root = entrypoint_tree("entrypoint-incomplete-read", &incomplete);
+    let audit = must(
+        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+        "audit incomplete entrypoint",
+    );
+    assert!(
+        audit
+            .privileges
+            .iter()
+            .any(|finding| finding.contains("pull-requests: read")),
+        "the exact policy permission set must include pull-requests: read: {:?}",
+        audit.privileges
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -684,6 +677,139 @@ fn owner_entrypoint_pin_ignores_variable_references() {
 }
 
 #[test]
+fn owner_policy_resolves_squash_merge_push_to_pr_head() {
+    let job = crate::s2::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::s2::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
+    });
+    assert!(
+        job.contains("EVENT_NAME: ${{ github.event_name }}")
+            && job.contains("MERGE_SHA: ${{ github.sha }}"),
+        "candidate lookup distinguishes the push event and its squash commit: {job}"
+    );
+    let Some(candidate) = job
+        .split("      - name: Acquire candidate generator product")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("      - name: Resolve required status checks")
+                .next()
+        })
+    else {
+        panic!("owner policy candidate step")
+    };
+    assert!(
+        candidate.contains("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}")
+            && candidate.contains(
+                "PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}"
+            )
+            && !candidate.contains("github.event.pull_request.head.sha || github.sha"),
+        "pull request lookup has no workflow_dispatch fallback: {job}"
+    );
+    assert!(
+        job.contains("actions: read\n      contents: read\n      pull-requests: read"),
+        "candidate API access is limited to the exact read-only Actions, contents, and pull-requests permissions: {job}"
+    );
+    assert!(
+        job.contains("repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls"),
+        "a main push resolves its associated pull request through the commit API: {job}"
+    );
+    for clause in [
+        ".merge_commit_sha == $merge_sha",
+        ".merged_at != null",
+        ".base.ref == $default_branch",
+        ".base.repo.full_name == $repository",
+        ".head.repo.full_name == $repository",
+    ] {
+        assert!(
+            job.contains(clause),
+            "squash merge resolution requires {clause}: {job}"
+        );
+    }
+    assert!(
+        job.contains("CANDIDATE_SHA=\"$(jq -er '.[0].head_sha' <<<\"$merged_pulls\")\""),
+        "candidate lookup switches to the merged PR head SHA: {job}"
+    );
+    assert!(
+        job.contains("HEAD_REPOSITORY=\"$(jq -er '.[0].head_repository' <<<\"$merged_pulls\")\""),
+        "candidate lookup carries the merged PR head repository: {job}"
+    );
+    assert!(
+        job.contains(".revision == $revision"),
+        "the candidate manifest revision must match the resolved PR head: {job}"
+    );
+}
+
+#[test]
+fn owner_policy_fails_closed_for_direct_push_without_merged_pr() {
+    let job = crate::s2::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::s2::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
+    });
+    assert!(
+        job.contains(
+            "push $MERGE_SHA is not associated with exactly one merged same-repository pull request"
+        ),
+        "a direct push has no trusted candidate source: {job}"
+    );
+    assert!(
+        job.contains("direct pushes and ambiguous squash merges fail closed")
+            && job.contains("exit 1"),
+        "direct push resolution exits before artifact polling: {job}"
+    );
+    assert!(
+        job.contains(
+            "candidate lookup requires pull_request_target or a squash-merge push, got $EVENT_NAME"
+        ),
+        "unsupported manual events also fail closed: {job}"
+    );
+}
+
+#[test]
+fn owner_policy_rejects_merge_sha_wrong_head_repository_and_revision() {
+    let job = crate::s2::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::s2::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
+    });
+    assert!(
+        job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA"),
+        "candidate polling is keyed by the resolved PR head: {job}"
+    );
+    assert!(
+        !job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$MERGE_SHA"),
+        "a squash merge SHA is never used as the candidate head: {job}"
+    );
+    assert!(
+        job.contains("HEAD_REPOSITORY=\"$(jq -er '.[0].head_repository' <<<\"$merged_pulls\")\"")
+            && job.contains("$HEAD_REPOSITORY\" == \"$GITHUB_REPOSITORY\""),
+        "a wrong head repository fails closed: {job}"
+    );
+    assert!(
+        job.contains(".repository == $repo")
+            && job.contains(".revision == $revision")
+            && job.contains(".build_revision | test"),
+        "wrong repository, resolved head revision, and build revision fail closed: {job}"
+    );
+}
+
+#[test]
 fn entrypoint_audit_names_each_escalation() {
     let clean = hosted_entrypoint(PIN_A);
     let cases: [(&str, &str, &str, &str); 6] = [
@@ -695,15 +821,15 @@ fn entrypoint_audit_names_each_escalation() {
         ),
         (
             "job-permissions",
-            "    permissions:\n      contents: read\n",
-            "    permissions:\n      contents: read\n      id-token: write\n",
-            "permissions must be exactly `contents: read`",
+            "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n",
+            "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n      id-token: write\n",
+            "permissions must be exactly `actions: read, contents: read, pull-requests: read`",
         ),
         (
             "secret",
             "GH_TOKEN: ${{ github.token }}",
             "GH_TOKEN: ${{ secrets.ADMIN_TOKEN }}",
-            "must not reference `secrets.`",
+            "must not reference the GitHub `secrets` context",
         ),
         (
             "credentials",
@@ -736,6 +862,143 @@ fn entrypoint_audit_names_each_escalation() {
         assert!(
             findings.iter().any(|finding| finding.contains(expected)),
             "{name}: expected a finding containing {expected:?}, got {findings:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn entrypoint_audit_rejects_obfuscated_github_token_access() {
+    let clean = hosted_entrypoint(PIN_A);
+    let cases = [
+        (
+            "bracket-single",
+            "GH_TOKEN: ${{ github.token }}",
+            "GH_TOKEN: ${{ github['token'] }}",
+        ),
+        (
+            "bracket-double",
+            "GH_TOKEN: ${{ github.token }}",
+            "GH_TOKEN: ${{ github[\"token\"] }}",
+        ),
+        (
+            "bracket-indirect",
+            "GH_TOKEN: ${{ github.token }}",
+            "GH_TOKEN: ${{ github[format('token')] }}",
+        ),
+        (
+            "serialized-context",
+            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n",
+            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n          LEAK: ${{ toJSON(github) }}\n",
+        ),
+        (
+            "indirect-context",
+            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n",
+            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n          LEAK: ${{ format('{0}', github) }}\n",
+        ),
+    ];
+    for (name, from, to) in cases {
+        assert!(clean.contains(from), "{name}: fixture lacks {from:?}");
+        let mutated = clean.replacen(from, to, 1);
+        let root = entrypoint_tree(&format!("entrypoint-token-{name}"), &mutated);
+        let audit = must(
+            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+            "audit obfuscated token entrypoint",
+        );
+        assert!(
+            audit.privileges.iter().any(|finding| {
+                finding.contains("`github.token`") && finding.contains("only be bound as GH_TOKEN")
+            }),
+            "{name}: token access bypass must fail closed: {:?}",
+            audit.privileges
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn entrypoint_audit_rejects_every_secrets_context_shape() {
+    let clean = hosted_entrypoint(PIN_A);
+    let cases = [
+        ("bracket", "${{ secrets['TOKEN'] }}"),
+        ("whitespace", "${{ secrets  .  TOKEN }}"),
+        ("case", "${{ SeCrEtS.TOKEN }}"),
+        ("serialized", "${{ toJSON(secrets) }}"),
+        ("indirect", "${{ format('{0}', secrets) }}"),
+    ];
+    for (name, expression) in cases {
+        let marker = "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n";
+        assert!(
+            clean.contains(marker),
+            "{name}: fixture lacks workflow marker"
+        );
+        let mutated = clean.replacen(
+            marker,
+            &format!("{marker}          LEAK: {expression}\n"),
+            1,
+        );
+        let root = entrypoint_tree(&format!("entrypoint-secrets-{name}"), &mutated);
+        let audit = must(
+            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+            "audit secrets-context entrypoint",
+        );
+        assert!(
+            audit
+                .privileges
+                .iter()
+                .any(|finding| finding.contains("must not reference the GitHub `secrets` context")),
+            "{name}: secrets context bypass must fail closed: {:?}",
+            audit.privileges
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn entrypoint_audit_requires_unique_canonical_api_token_steps() {
+    let clean = hosted_entrypoint(PIN_A);
+    let marker = "      - name: Resolve required status checks\n";
+    assert!(clean.contains(marker), "fixture lacks ruleset API step");
+    let cases = [
+        (
+            "duplicate",
+            format!("{marker}{marker}"),
+            "must appear exactly once",
+        ),
+        (
+            "renamed",
+            "      - name: Resolve required status checks (copy)\n".to_owned(),
+            "canonical Acquire/Ruleset API steps",
+        ),
+        (
+            "bad-body",
+            "      - name: Resolve required status checks\n".to_owned(),
+            "canonical full structure and body",
+        ),
+    ];
+    for (name, replacement, expected) in cases {
+        let mut mutated = clean.replacen(marker, &replacement, 1);
+        if name == "bad-body" {
+            let body = "          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n";
+            assert!(mutated.contains(body), "fixture lacks canonical API body");
+            mutated = mutated.replacen(
+                body,
+                "          echo \"$GH_TOKEN\" >&2\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n",
+                1,
+            );
+        }
+        let root = entrypoint_tree(&format!("entrypoint-api-step-{name}"), &mutated);
+        let audit = must(
+            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+            "audit API-step entrypoint",
+        );
+        assert!(
+            audit
+                .privileges
+                .iter()
+                .any(|finding| finding.contains(expected)),
+            "{name}: canonical token-step bypass must fail closed: {:?}",
+            audit.privileges
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -1096,7 +1359,7 @@ fn cli_requires_the_base_validator_revision() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-fn fake_candidate_renderer(directory: &Path, revision: &str, closure: &str) -> PathBuf {
+fn fake_candidate_renderer(directory: &Path, closure: &str, revision: &str) -> PathBuf {
     let binary = directory.join("candidate");
     must(
         fs::write(
@@ -1118,10 +1381,32 @@ fn fake_candidate_renderer(directory: &Path, revision: &str, closure: &str) -> P
 }
 
 #[cfg(unix)]
+fn fake_mutating_candidate_renderer(directory: &Path, closure: &str, revision: &str) -> PathBuf {
+    let binary = directory.join("candidate-mutating");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\nprintf 'tampered\\n' > \"$1/crates/velnor-workflow/src/lib.rs\"\n"
+            ),
+        ),
+        "write mutating fake candidate renderer",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "mark mutating fake candidate renderer executable",
+        );
+    }
+    binary
+}
+
+#[cfg(unix)]
 fn fake_environment_observing_candidate_renderer(
     directory: &Path,
-    revision: &str,
     closure: &str,
+    revision: &str,
     sentinel: &Path,
 ) -> PathBuf {
     let binary = directory.join("candidate-env");
@@ -1161,6 +1446,36 @@ fn closure_fixture(name: &str) -> (PathBuf, String) {
     (root, head)
 }
 
+#[cfg(unix)]
+fn squash_fixture(name: &str, main_touches_closure: bool) -> (PathBuf, String, String) {
+    let root = temporary_directory(name);
+    git_ok(&root, &["init", "-q", "-b", "main"]);
+    write(
+        &root.join("crates/velnor-workflow/src/lib.rs"),
+        "pub fn f() {}\n",
+    );
+    write(&root.join("Cargo.toml"), "[workspace]\n");
+    write(&root.join("Cargo.lock"), "# base-lock\n");
+    write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
+    commit(&root, "base");
+    git_ok(&root, &["checkout", "-q", "-b", "pr"]);
+    write(
+        &root.join("crates/velnor-workflow/src/lib.rs"),
+        "pub fn f() { println!(\"pr\"); }\n",
+    );
+    let pr_head = commit(&root, "pr generator change");
+    git_ok(&root, &["checkout", "-q", "main"]);
+    if main_touches_closure {
+        write(&root.join("Cargo.lock"), "# main-lock\n");
+    } else {
+        write(&root.join("main-only.txt"), "main change\n");
+    }
+    commit(&root, "main change");
+    git_ok(&root, &["merge", "--squash", "--no-commit", "pr"]);
+    let merge = commit(&root, "squash merge");
+    (root, pr_head, merge)
+}
+
 // NOTE: `candidate_render_is_accepted_only_from_a_head_authentic_binary` was
 // deleted here. It asserted that an env-slot binary is accepted when its
 // `--closure` stdout echoes the wanted closure — but that expectation WAS
@@ -1181,11 +1496,11 @@ fn candidate_manifest_for(
     closure: &str,
     revision: &str,
 ) -> PathBuf {
-    candidate_manifest_for_build_revision(directory, name, binary, closure, revision, revision)
+    candidate_manifest_for_with_build_revision(directory, name, binary, closure, revision, revision)
 }
 
 #[cfg(unix)]
-fn candidate_manifest_for_build_revision(
+fn candidate_manifest_for_with_build_revision(
     directory: &Path,
     name: &str,
     binary: &Path,
@@ -1209,8 +1524,8 @@ fn candidate_manifest_for_build_revision(
                 "repository": crate::s2::workflow_setup_action_repository(),
                 "run_id": "123",
                 "revision": revision,
-                "build_revision": build_revision,
                 "closure": closure,
+                "build_revision": build_revision,
                 "binary_sha256": digest,
             })
             .to_string(),
@@ -1254,7 +1569,7 @@ fn bound_candidate_matching_head_tree_is_accepted() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-bound-scratch");
-    let binary = fake_candidate_renderer(&root, &head, &wanted);
+    let binary = fake_candidate_renderer(&root, &wanted, &head);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
@@ -1273,27 +1588,225 @@ fn bound_candidate_matching_head_tree_is_accepted() {
 
 #[cfg(unix)]
 #[test]
-fn candidate_renderer_revision_must_match_manifest_build_revision() {
-    let (root, head) = closure_fixture("candidate-wrong-build-revision");
+fn candidate_render_cannot_mutate_authoritative_checkout() {
+    let (root, head) = closure_fixture("candidate-immutable-source");
+    let wanted = must(
+        crate::s2::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of fixture",
+    );
+    let original = must(
+        fs::read(root.join("crates/velnor-workflow/src/lib.rs")),
+        "read authoritative source before candidate",
+    );
+    let artifacts = temporary_directory("candidate-immutable-source-artifacts");
+    let binary = fake_mutating_candidate_renderer(&artifacts, &wanted, &head);
+    let manifest = candidate_manifest_for(
+        &artifacts,
+        "candidate-manifest.json",
+        &binary,
+        &wanted,
+        &head,
+    );
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let scratch = temporary_directory("candidate-immutable-source-scratch");
+    let excludes = std::collections::BTreeSet::new();
+    assert_eq!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "candidate mutation is isolated from authoritative checkout",
+        )
+        .as_deref(),
+        Some(wanted.as_str())
+    );
+    assert_eq!(
+        must(
+            fs::read(root.join("crates/velnor-workflow/src/lib.rs")),
+            "read authoritative source after candidate",
+        ),
+        original,
+        "candidate writes stay inside the immutable source snapshot"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(artifacts);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn squash_merge_with_closure_clean_main_accepts_pr_candidate() {
+    let (root, pr_head, merge) = squash_fixture("candidate-squash-clean", false);
+    let head_closure = must(
+        crate::s2::closure::candidate_closure_of_tree(&root, &pr_head),
+        "PR head candidate closure",
+    );
+    let merge_closure = must(
+        crate::s2::closure::candidate_closure_of_tree(&root, &merge),
+        "squash merge candidate closure",
+    );
+    assert_eq!(head_closure, merge_closure);
+    let scratch = temporary_directory("candidate-squash-clean-scratch");
+    let binary = fake_candidate_renderer(&root, &head_closure, &merge);
+    let manifest = candidate_manifest_for_with_build_revision(
+        &root,
+        "candidate-manifest.json",
+        &binary,
+        &head_closure,
+        &pr_head,
+        &merge,
+    );
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    assert_eq!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "bound squash candidate renders the merge tree",
+        )
+        .as_deref(),
+        Some(head_closure.as_str())
+    );
+    assert!(scratch.join("main-only.txt").is_file());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn shallow_squash_merge_fetches_pr_head_before_candidate_closure() {
+    let (origin, pr_head, merge) = squash_fixture("candidate-squash-shallow", false);
+    let shallow = temporary_directory("candidate-squash-shallow-checkout");
+    let _ = fs::remove_dir_all(&shallow);
+    let origin_url = format!("file://{}", origin.display());
+    git_ok(
+        &origin,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            "--single-branch",
+            "--branch",
+            "main",
+            &origin_url,
+            &shallow.display().to_string(),
+        ],
+    );
+    assert_eq!(git_ok(&shallow, &["rev-parse", "HEAD"]), merge);
+    assert!(
+        !commit_exists(&shallow, &pr_head),
+        "a depth-1 merge checkout starts without the PR head object"
+    );
+
+    // This is the exact fetch the trusted acquire step performs before it
+    // derives the candidate artifact name. The policy consumer then has the
+    // PR-head object needed to recompute the manifest's bound closure.
+    git_ok(&shallow, &["fetch", "--no-tags", &origin_url, &pr_head]);
+    assert!(
+        commit_exists(&shallow, &pr_head),
+        "fetching the resolved PR head makes its commit object available"
+    );
+
+    let closure = must(
+        crate::s2::closure::candidate_closure_of_tree(&origin, &pr_head),
+        "PR head candidate closure",
+    );
+    let artifacts = temporary_directory("candidate-squash-shallow-artifacts");
+    let binary = fake_candidate_renderer(&artifacts, &closure, &merge);
+    let manifest = candidate_manifest_for_with_build_revision(
+        &artifacts,
+        "candidate-manifest.json",
+        &binary,
+        &closure,
+        &pr_head,
+        &merge,
+    );
+    let lookup = lookup_with_manifest(Some(binary), None, artifacts.join("install"), manifest);
+    let scratch = temporary_directory("candidate-squash-shallow-scratch");
+    let excludes = std::collections::BTreeSet::new();
+    assert_eq!(
+        must(
+            render_with_candidate(&shallow, &shallow, &scratch, "main", &excludes, &lookup,),
+            "fetched PR-head candidate renders the shallow merge checkout",
+        )
+        .as_deref(),
+        Some(closure.as_str())
+    );
+    assert!(scratch.join("main-only.txt").is_file());
+
+    let _ = fs::remove_dir_all(origin);
+    let _ = fs::remove_dir_all(shallow);
+    let _ = fs::remove_dir_all(artifacts);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn squash_merge_with_closure_changed_main_fails_before_candidate_execution() {
+    let (root, pr_head, merge) = squash_fixture("candidate-squash-lock", true);
+    let head_closure = must(
+        crate::s2::closure::candidate_closure_of_tree(&root, &pr_head),
+        "PR head candidate closure",
+    );
+    let merge_closure = must(
+        crate::s2::closure::candidate_closure_of_tree(&root, &merge),
+        "squash merge candidate closure",
+    );
+    assert_ne!(head_closure, merge_closure);
+    let scratch = temporary_directory("candidate-squash-lock-scratch");
+    let sentinel = root.join("candidate-executed");
+    let binary = fake_probed_candidate_renderer(&root, &head_closure, &sentinel);
+    let manifest = candidate_manifest_for(
+        &root,
+        "candidate-manifest.json",
+        &binary,
+        &head_closure,
+        &pr_head,
+    );
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    let error = must_fail(
+        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        "a PR-head candidate cannot render a merge with changed closure inputs",
+    )
+    .to_string();
+    assert!(
+        error.contains("differs from audited render revision"),
+        "{error}"
+    );
+    assert!(
+        error.contains("update the PR branch/rebuild the candidate"),
+        "{error}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "closure mismatch fails before candidate execution"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_binary_revision_must_match_manifest_build_revision() {
+    let (root, head) = closure_fixture("candidate-build-revision");
     let wanted = must(
         crate::s2::closure::candidate_closure_of_tree(&root, &head),
         "candidate closure of the fixture",
     );
-    let scratch = temporary_directory("candidate-wrong-build-revision-scratch");
-    let binary = fake_candidate_renderer(&root, PIN_B, &wanted);
-    let manifest = candidate_manifest_for_build_revision(
+    let scratch = temporary_directory("candidate-build-revision-scratch");
+    let binary = fake_candidate_renderer(&root, &wanted, &head);
+    let manifest = candidate_manifest_for_with_build_revision(
         &root,
         "candidate-manifest.json",
         &binary,
         &wanted,
         &head,
-        &head,
+        PIN_A,
     );
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
     let excludes = std::collections::BTreeSet::new();
     assert!(must(
         render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-        "wrong build revision never proves the candidate",
+        "build revision mismatch does not prove a candidate",
     )
     .is_none());
     let _ = fs::remove_dir_all(root);
@@ -1314,7 +1827,7 @@ fn candidate_renderer_receives_no_ambient_environment() {
     );
     let scratch = temporary_directory("candidate-hermetic-env-scratch");
     let sentinel = root.join("ambient-environment-observed");
-    let binary = fake_environment_observing_candidate_renderer(&root, &head, &wanted, &sentinel);
+    let binary = fake_environment_observing_candidate_renderer(&root, &wanted, &head, &sentinel);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
@@ -1380,7 +1893,7 @@ fn candidate_manifest_for_another_tree_is_rejected() {
     let scratch = temporary_directory("candidate-other-tree-scratch");
     // Self-consistent but for another tree: the binary echoes CLOSURE_A and
     // the manifest binds CLOSURE_A with a matching digest.
-    let binary = fake_candidate_renderer(&root, &head, CLOSURE_A);
+    let binary = fake_candidate_renderer(&root, CLOSURE_A, &head);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
@@ -1408,7 +1921,7 @@ fn unbound_env_candidate_is_rejected_without_manifest() {
     let scratch = temporary_directory("candidate-unbound-scratch");
     let sentinel = root.join("closure-probed");
     let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    let lookup = lookup(Some(binary), None, root.join("install"));
+    let lookup = candidate_lookup(Some(binary), None, root.join("install"));
     let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
@@ -1435,7 +1948,7 @@ fn malformed_candidate_manifest_is_rejected() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-malformed-scratch");
-    let binary = fake_candidate_renderer(&root, &head, &wanted);
+    let binary = fake_candidate_renderer(&root, &wanted, &head);
     let digest = {
         use sha2::Digest as _;
         let bytes = must(fs::read(&binary), "read fake binary bytes");
@@ -1453,18 +1966,13 @@ fn malformed_candidate_manifest_is_rejected() {
                 .to_string(),
         ),
         (
-            "short-build-revision".to_owned(),
-            serde_json::json!({"revision": head, "build_revision": "abc", "closure": wanted, "binary_sha256": digest})
-                .to_string(),
-        ),
-        (
             "short-closure".to_owned(),
-            serde_json::json!({"revision": head, "build_revision": head, "closure": "abc", "binary_sha256": digest})
+            serde_json::json!({"revision": head, "closure": "abc", "binary_sha256": digest})
                 .to_string(),
         ),
         (
             "short-digest".to_owned(),
-            serde_json::json!({"revision": head, "build_revision": head, "closure": wanted, "binary_sha256": "abc"})
+            serde_json::json!({"revision": head, "closure": wanted, "binary_sha256": "abc"})
                 .to_string(),
         ),
     ];
@@ -1553,20 +2061,20 @@ fn from_env_consent_mapping_is_fail_closed() {
         manifest_env.candidate_manifest,
         Some(PathBuf::from("/env/manifest.json"))
     );
-    let slots = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| match name {
-        VELNOR_WORKFLOW_PINNED_BINARY_ENV => Some(std::ffi::OsString::from("/pin/velnor-workflow")),
-        VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV => {
-            Some(std::ffi::OsString::from("/candidate/velnor-workflow"))
-        }
+    let env_slots = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| match name {
+        VELNOR_WORKFLOW_PINNED_BINARY_ENV => Some(std::ffi::OsString::from("/pin/binary")),
+        VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV => Some(std::ffi::OsString::from("/candidate/binary")),
         _ => None,
     });
     assert_eq!(
-        slots.pinned_binary,
-        Some(PathBuf::from("/pin/velnor-workflow"))
+        env_slots.pinned_binary,
+        Some(PathBuf::from("/pin/binary")),
+        "the trusted pin slot remains separate from the candidate slot"
     );
     assert_eq!(
-        slots.candidate_binary,
-        Some(PathBuf::from("/candidate/velnor-workflow"))
+        env_slots.candidate_binary,
+        Some(PathBuf::from("/candidate/binary")),
+        "the candidate uses its dedicated env slot"
     );
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
     // (also pinned end to end by the `--check` CLI subprocess test in
@@ -1593,7 +2101,7 @@ fn candidate_render_rejects_a_binary_claiming_another_closure() {
     // Valid binding for the audited tree (manifest closure plus the real
     // digest of the binary bytes), but the binary echoes CLOSURE_A: the
     // `--closure` self-report stays as the final tripwire.
-    let binary = fake_candidate_renderer(&root, &head, CLOSURE_A);
+    let binary = fake_candidate_renderer(&root, CLOSURE_A, &head);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
