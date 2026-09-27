@@ -137,19 +137,16 @@ fn workflow_root_argument(arguments: &[OsString]) -> Option<PathBuf> {
 
 /// Whether `dir` carries a generation config declaring `schema = 2`. A
 /// missing or unparsable config is not schema 2; the pipelines' own schema
-/// gates report the real error.
+/// gates report the real error. Full repository preflight belongs to the
+/// selected pipeline, after routing.
 pub(crate) fn dir_is_schema2(dir: &Path) -> bool {
-    // Promotion still has a boolean routing API. An invalid physical tree
-    // must take the strict S2 path so it cannot fall through to the legacy
-    // renderer, which could read repository-controlled config before its own
-    // preflight. The dispatch bridge uses `try_dir_is_schema2` and preserves
-    // the concrete error for CLI callers.
+    // Promotion still has a boolean routing API. An invalid config path must
+    // take the strict S2 path so it cannot fall through to the legacy renderer.
+    // The selected pipeline owns full physical-tree preflight.
     try_dir_is_schema2(dir).unwrap_or(true)
 }
 
 fn try_dir_is_schema2(dir: &Path) -> Result<bool, crate::GeneratorError> {
-    super::scan::file_walk::validate_repository_tree(dir)
-        .map_err(|error| crate::GeneratorError::usage(error.to_string()))?;
     let config_path = dir.join(super::config::GENERATION_CONFIG_PATH);
     validate_generation_config_path(dir, &config_path)?;
     let text = match std::fs::read_to_string(&config_path) {
@@ -169,19 +166,31 @@ fn try_dir_is_schema2(dir: &Path) -> Result<bool, crate::GeneratorError> {
     }
 }
 
-/// Reject a symlink in the path to the generation config before the dispatch
-/// peek reads it. The repository preflight permits confined links elsewhere in
-/// a tree, but this file is a routing authority and must be a regular file at
-/// its declared path.
+/// Validate only the generation config's path components and type before the
+/// dispatch peek reads it. This file is a routing authority and must be a
+/// regular file at its declared path; unrelated repository entries are left
+/// for the selected pipeline's full preflight.
 fn validate_generation_config_path(
     root: &Path,
     config_path: &Path,
 ) -> Result<(), crate::GeneratorError> {
-    for path in [root.join(".github-gen"), config_path.to_path_buf()] {
+    for (path, expected_type) in [
+        (root.join(".github-gen"), "directory"),
+        (config_path.to_path_buf(), "regular file"),
+    ] {
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(crate::GeneratorError::usage(format!(
                     "refusing symlinked generation config path: {}",
+                    path.display()
+                )));
+            }
+            Ok(metadata)
+                if (expected_type == "directory" && !metadata.file_type().is_dir())
+                    || (expected_type == "regular file" && !metadata.file_type().is_file()) =>
+            {
+                return Err(crate::GeneratorError::usage(format!(
+                    "generation config path must be a {expected_type}: {}",
                     path.display()
                 )));
             }
@@ -244,6 +253,21 @@ mod tests {
         root
     }
 
+    fn short_fixture_dir(name: &str, config: Option<&str>) -> PathBuf {
+        let root = PathBuf::from("/tmp").join(format!("vw-dsp-{}-{name}", crate::unique_suffix()));
+        must(
+            std::fs::create_dir_all(root.join(".github-gen")),
+            "create short dispatch fixture",
+        );
+        if let Some(config) = config {
+            must(
+                std::fs::write(root.join(".github-gen/velnor-workflow.toml"), config),
+                "write short dispatch fixture config",
+            );
+        }
+        root
+    }
+
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
@@ -281,6 +305,62 @@ mod tests {
         let target = root.to_string_lossy().into_owned();
         assert!(routes_to_s2(&args(&[target.as_str(), "--plain"])));
         assert!(routes_to_s2(&args(&["generate", target.as_str()])));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema2_dispatch_ignores_unrelated_special_files_and_dangling_links() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let root = short_fixture_dir(
+            "unrelated-physical-entries",
+            Some("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n"),
+        );
+        let listener = must(
+            UnixListener::bind(root.join("unrelated-socket")),
+            "create unrelated special file",
+        );
+        must(
+            symlink("missing-target", root.join("unrelated-dangling-link")),
+            "create unrelated dangling symlink",
+        );
+
+        let target = root.to_string_lossy().into_owned();
+        assert!(
+            routes_to_s2(&args(&[target.as_str()])),
+            "dispatch reads the schema config without walking unrelated entries"
+        );
+        assert!(
+            crate::s2::scan::file_walk::validate_repository_tree(&root).is_err(),
+            "the S2 pipeline still owns and rejects full-tree preflight failures"
+        );
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_generation_config_is_rejected_without_reading_it() {
+        use std::os::unix::net::UnixListener;
+
+        let root = short_fixture_dir("special-config", None);
+        let config_path = root.join(super::super::config::GENERATION_CONFIG_PATH);
+        let listener = must(
+            UnixListener::bind(&config_path),
+            "create special generation config",
+        );
+        let error = must_fail(
+            try_dir_is_schema2(&root),
+            "special generation config must be rejected",
+        );
+        assert!(
+            error.to_string().contains("regular file"),
+            "error identifies the config file type: {error}"
+        );
+        drop(listener);
         let _ = std::fs::remove_dir_all(root);
     }
 
