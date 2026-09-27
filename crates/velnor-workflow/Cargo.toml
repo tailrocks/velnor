@@ -38,6 +38,7 @@ tui = ["dep:crossterm", "dep:ratatui", "dep:termrock"]
 
 [build-dependencies]
 sha2 = { workspace = true }
+toml = { workspace = true }
 
 # Contract tests prove emitted `install_args` pass the runner's own lock gate.
 # Dev-only: the shipped generator never links the runner.
