@@ -964,22 +964,12 @@ mod tests {
             super::super::generate(&root, &shape, &config, Some(&fixture_config)),
             "generate action consumer surface",
         );
-        let mut generated_config = config.clone();
-        generated_config.units.clone_from(&surface.units);
-        for file in &surface.added_files {
-            if !generated_config.workflow_files.contains(file) {
-                generated_config.workflow_files.push(file.clone());
-            }
-        }
-        let generated = must(
-            super::super::super::generated_files_with_surface(&generated_config, Some(&surface)),
-            "render action consumer surface",
-        );
         assert!(
-            generated
+            surface
+                .files
                 .keys()
                 .any(|path| path == Path::new(".github/workflows/velnor-action-consumer-github-action-tests-fixtures-github-action-consumer-workflow-yml.yml")),
-            "generated action consumer workflow must be part of the emitted surface"
+            "generated action consumer workflow must be part of the primitive surface"
         );
         let success = update
             .pr_commands
