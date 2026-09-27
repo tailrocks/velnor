@@ -11166,9 +11166,9 @@ mod tests {
             "policy must retain the candidate acquisition path: {policy}"
         );
         assert!(
-                policy.contains(
-                "head_candidate=\"$(env -u GH_TOKEN velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
-                ),
+            policy.contains(
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
+            ),
             "candidate verification must remain anchored to the resolved PR head: {policy}"
             );
     }
