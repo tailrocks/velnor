@@ -16,7 +16,7 @@ pub(crate) mod canonical;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -794,9 +794,6 @@ struct PolicySection {
     action_pin_admission: Option<String>,
     /// Emit `config-variables: null` in the generated actionlint config.
     actionlint_config_variables_null: Option<bool>,
-    /// Workflow basenames skipped by `velnor-workflow policy` until migrated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    exclude_workflows: Vec<String>,
 }
 
 impl RenovateSection {
@@ -1832,31 +1829,20 @@ impl RepoGenerationConfig {
         &self.policy.ruleset_external_status_checks
     }
 
-    /// Workflow basenames excluded from static policy validation.
-    pub(crate) fn policy_exclude_workflows(&self) -> &[String] {
-        &self.policy.exclude_workflows
-    }
-
-    /// Explicit policy excludes plus every owned static workflow file.
-    pub(crate) fn effective_policy_exclude_workflows(&self) -> BTreeSet<String> {
-        let mut excludes = self
-            .policy_exclude_workflows()
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        for row in &self.static_files {
-            let Some(file) = row.file.as_deref() else {
-                continue;
-            };
-            if !file.starts_with(".github/workflows/") {
-                continue;
-            }
-            let Some(name) = Path::new(file).file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            excludes.insert(name.to_owned());
+    /// Prove the security entrypoint remains in the rendered, audited
+    /// workflow surface and cannot be replaced by a static output.
+    pub(crate) fn validate_policy_entrypoint_ownership(&self) -> Result<(), GeneratorError> {
+        validate_workflow_files(self.workflow.files.as_deref())?;
+        if let Some((file, reserved)) = self.static_files.iter().find_map(|static_file| {
+            let file = static_file.file.as_deref()?;
+            let reserved = crate::generator_owned_static_file_path(file)?;
+            Some((file, reserved))
+        }) {
+            return Err(GeneratorError::usage(format!(
+                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path (configured as `{file}`)"
+            )));
         }
-        excludes
+        Ok(())
     }
 
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
@@ -1918,7 +1904,7 @@ impl RepoGenerationConfig {
             self.workflow.package_update_channels.as_ref(),
             package_update_blocks,
         )?;
-        validate_workflow_files(self.workflow.files.as_deref())?;
+        self.validate_policy_entrypoint_ownership()?;
         validate_units(&self.units, mise_lock_keys)?;
         validate_unit_references(
             &self.units,
@@ -2001,6 +1987,7 @@ fn validate_declare_row(row: &DeclareRow, unit_ids: &[String]) -> Result<(), Gen
     // declares none.
     if let Some(file) = row.file.as_deref() {
         validate_workflow_file_name(file)?;
+        reject_generator_owned_workflow_name(file, "[[declare]] file", false)?;
     }
     for unit in &row.units {
         if !unit_ids.iter().any(|candidate| candidate == unit) {
@@ -2029,7 +2016,13 @@ fn validate_workflow_file_name(file: &str) -> Result<(), GeneratorError> {
             .file_stem()
             .is_some_and(|stem| !stem.is_empty());
     if valid {
-        return Ok(());
+        let generated_path = format!(".github/workflows/{file}");
+        if crate::path_spelling_is_supported(&generated_path) {
+            return Ok(());
+        }
+        return Err(GeneratorError::usage(format!(
+            "generated workflow file uses an unsupported path spelling: {file}"
+        )));
     }
     Err(GeneratorError::usage(format!(
         "[[declare]] file must be a bare `.yml` workflow file name: {file}"
@@ -2276,8 +2269,39 @@ fn validate_workflow_files(files: Option<&[String]>) -> Result<(), GeneratorErro
             "[workflow] files must not be empty; omit the list to keep the generator's default surface",
         ));
     }
-    for file in files {
+    for (index, file) in files.iter().enumerate() {
         validate_workflow_file_name(file)?;
+        if let Some(previous) = files[..index]
+            .iter()
+            .find(|previous| crate::path_spellings_alias(previous, file))
+        {
+            return Err(GeneratorError::usage(format!(
+                "[workflow] files names `{previous}` and `{file}`, which alias on a case-insensitive filesystem"
+            )));
+        }
+        reject_generator_owned_workflow_name(file, "[workflow] files", true)?;
+    }
+    if !files.iter().any(|file| file == "ci-policy.yml") {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] files must include `ci-policy.yml`: `{}` is a required policy enforcement entrypoint",
+            crate::CI_POLICY_WORKFLOW
+        )));
+    }
+    Ok(())
+}
+
+fn reject_generator_owned_workflow_name(
+    file: &str,
+    owner: &str,
+    allow_canonical: bool,
+) -> Result<(), GeneratorError> {
+    if crate::generator_owned_workflow_name(file) == Some(crate::CI_POLICY_WORKFLOW)
+        && (!allow_canonical || file != "ci-policy.yml")
+    {
+        return Err(GeneratorError::usage(format!(
+            "{owner} must name the policy enforcement entrypoint exactly as `ci-policy.yml`; `{file}` aliases `{}`",
+            crate::CI_POLICY_WORKFLOW
+        )));
     }
     Ok(())
 }
@@ -2552,9 +2576,24 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] file must be a repository-relative path inside `.github/`, found `{file}`"
             )));
         }
+        if !crate::path_spelling_is_supported(file) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] file uses an unsupported generated path spelling: {file}"
+            )));
+        }
         if !is_contained_repository_path(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
+            )));
+        }
+        if starts_with_generated_github_tree(source) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source must stay outside `.github/`, found `{source}`"
+            )));
+        }
+        if let Some(reserved) = crate::generator_owned_static_file_path(file) {
+            return Err(GeneratorError::usage(format!(
+                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
             )));
         }
         let duplicate = rows
@@ -2568,6 +2607,141 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
         }
     }
     Ok(())
+}
+
+/// Resolve a declared static-file source to an immutable repository-local
+/// regular file.
+///
+/// Lexical validation alone cannot protect the read: a repository-controlled
+/// symlink in a parent directory or at the final path can redirect it into
+/// generated `.github/` state or outside the repository. Confined symlinks
+/// remain valid when their resolved target is a regular file outside the
+/// generated tree. Callers must read the returned canonical path, rather than
+/// the original spelling, so validation and the read operate on the same
+/// resolved object.
+pub(crate) fn validate_static_file_source(
+    root: &Path,
+    source: &str,
+) -> Result<PathBuf, GeneratorError> {
+    if !is_contained_repository_path(source) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must be a repository-relative path, found `{source}`"
+        )));
+    }
+    if starts_with_generated_github_tree(source) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must stay outside `.github/`, found `{source}`"
+        )));
+    }
+    if let Some(directory) = scanner_pruned_directory(Path::new(source)) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must stay inside the scanner input: `{source}` is under pruned directory `{directory}`"
+        )));
+    }
+
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|error| GeneratorError::io("inspect repository root", root, &error))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "repository root for static file source must be a real directory: {}",
+            root.display()
+        )));
+    }
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| GeneratorError::io("resolve repository root", root, &error))?;
+
+    let path = canonical_root.join(source);
+    let resolved = fs::canonicalize(&path).map_err(|error| {
+        GeneratorError::io("resolve declared static file source", &path, &error)
+    })?;
+    let relative = resolved.strip_prefix(&canonical_root).map_err(|_| {
+        GeneratorError::usage(format!(
+            "[[static_file]] source resolves outside the repository: `{source}`"
+        ))
+    })?;
+    if let Some(directory) = scanner_pruned_directory(relative) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must stay inside the scanner input: `{source}` resolves under pruned directory `{directory}`"
+        )));
+    }
+    if starts_with_generated_github_path(relative) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source resolves into generated `.github/` state: `{source}`"
+        )));
+    }
+    let metadata = fs::metadata(&resolved).map_err(|error| {
+        GeneratorError::io("inspect resolved static file source", &resolved, &error)
+    })?;
+    if !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must resolve to a regular file: `{source}`"
+        )));
+    }
+    validate_static_source_in_scanner(root, relative)?;
+    Ok(resolved)
+}
+
+/// The scanner never treats tool output, dependency trees, or VCS metadata as
+/// repository inputs. Keep static passthrough sources on that same boundary so
+/// an unreviewed build result cannot become generated workflow input.
+fn scanner_pruned_directory(path: &Path) -> Option<&'static str> {
+    let mut components = path.components();
+    let first = components.next();
+    let Component::Normal(first) = first? else {
+        return None;
+    };
+    let first = first.to_str()?;
+    for directory in [
+        ".git",
+        ".output",
+        "target",
+        "node_modules",
+        ".build",
+        ".gradle",
+        ".terraform",
+        "dist",
+        "coverage",
+    ] {
+        if crate::path_spellings_alias(first, directory) {
+            return Some(directory);
+        }
+    }
+    for component in components {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        let component = component.to_str()?;
+        for directory in [".git", "node_modules"] {
+            if crate::path_spellings_alias(component, directory) {
+                return Some(directory);
+            }
+        }
+    }
+    None
+}
+
+/// The scanner's file set is the single source of truth for repository input:
+/// it applies the Git index boundary, scanner-pruned roots, dependency
+/// filtering, generator-owned output filtering, and `[scan] exclude` rows.
+fn validate_static_source_in_scanner(root: &Path, relative: &Path) -> Result<(), GeneratorError> {
+    let generation = discover(root)?;
+    let excludes = match generation.as_ref() {
+        Some(generation) => generation.scan_exclude()?,
+        None => &[],
+    };
+    let files = crate::scan::file_walk::repository_files(root, excludes)?;
+    let relative = relative.to_str().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "[[static_file]] source path is not valid UTF-8: {}",
+            relative.display()
+        ))
+    })?;
+    if files.iter().any(|file| file == relative) {
+        return Ok(());
+    }
+    Err(GeneratorError::usage(format!(
+        "[[static_file]] source must be a scanner input file: `{relative}`"
+    )))
 }
 
 /// Reviewer rows render into the generator-owned CODEOWNERS file, whose
@@ -2627,6 +2801,21 @@ fn validate_reviewers(rows: &[ReviewerSection]) -> Result<(), GeneratorError> {
 
 fn is_contained_github_path(path: &str) -> bool {
     is_contained_repository_path(path) && Path::new(path).starts_with(".github/")
+}
+
+fn starts_with_generated_github_tree(path: &str) -> bool {
+    starts_with_generated_github_path(Path::new(path))
+}
+
+fn starts_with_generated_github_path(path: &Path) -> bool {
+    let mut components = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir));
+    matches!(
+        components.next(),
+        Some(Component::Normal(component))
+            if component.to_string_lossy().eq_ignore_ascii_case(".github")
+    )
 }
 
 fn is_contained_repository_path(path: &str) -> bool {
@@ -4254,6 +4443,493 @@ mod tests {
             toml::from_str::<RepoGenerationConfig>(text),
             "parse config under test",
         )
+    }
+
+    #[test]
+    fn policy_entrypoint_is_required_in_the_rendered_surface() {
+        let missing = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nfiles = [\"ci-pr.yml\"]\n",
+        );
+        let error = must_fail(
+            missing.validate(&[], &[], &BTreeSet::new()),
+            "a custom workflow surface must retain the policy entrypoint",
+        );
+        assert!(
+            error.to_string().contains("must include `ci-policy.yml`"),
+            "{error}"
+        );
+
+        let alias = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nfiles = [\"ci-pr.yml\", \"CI-POLICY.yml\"]\n",
+        );
+        let error = must_fail(
+            alias.validate(&[], &[], &BTreeSet::new()),
+            "a workflow alias must not claim the policy entrypoint",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("must name the policy enforcement entrypoint exactly"),
+            "{error}"
+        );
+
+        let duplicate = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nfiles = [\"ci-pr.yml\", \"CI-PR.yml\", \"ci-policy.yml\"]\n",
+        );
+        let error = must_fail(
+            duplicate.validate(&[], &[], &BTreeSet::new()),
+            "workflow output aliases must fail on case-insensitive filesystems",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("alias on a case-insensitive filesystem"),
+            "{error}"
+        );
+
+        let valid = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nfiles = [\"ci-pr.yml\", \"ci-policy.yml\"]\n",
+        );
+        must(
+            valid.validate(&[], &[], &BTreeSet::new()),
+            "canonical policy entrypoint remains a valid custom workflow surface",
+        );
+    }
+
+    #[test]
+    fn reserved_policy_workflow_outputs_reject_exact_case_and_nfkc_aliases() {
+        for file in ["ci-policy.yml", "CI-POLICY.yml", "ci－policy.yml"] {
+            let static_output = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/{file}\"\nsource = \".github-gen/sources/action.yml\"\n"
+            ));
+            let error = must_fail(
+                static_output.validate(&[], &[], &BTreeSet::new()),
+                "static output must not claim the policy workflow",
+            );
+            assert!(
+                error.to_string().contains("generator owns this path"),
+                "{file}: {error}"
+            );
+
+            let declared_output = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[declare]]\nprimitive = \"static-workflow\"\nfile = \"{file}\"\n"
+            ));
+            let error = must_fail(
+                declared_output.validate(&[], &[], &BTreeSet::new()),
+                "declared output must not claim the policy workflow",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must name the policy enforcement entrypoint exactly"),
+                "{file}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_output_spellings_are_rejected_before_rendering() {
+        let invalid_static_files = [
+            ".github/workflows/ci-pоlicy.yml",
+            ".github/workfl~1/ci-custom.yml",
+            ".github/workflows/ci-custom.yml.",
+            ".github/workflows/ci-custom.yml ",
+            ".github/workflows/ci:custom.yml",
+            ".github/workflows/CON.yml",
+            ".github/workflows/ci-pol~1.yml",
+        ];
+        for file in invalid_static_files {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \"{file}\"\nsource = \".github-gen/sources/action.yml\"\n"
+            ));
+            assert!(
+                config.validate(&[], &[], &BTreeSet::new()).is_err(),
+                "unsupported static output spelling must fail: {file}"
+            );
+        }
+
+        let invalid_workflow_files = [
+            "ci-pоlicy.yml",
+            "ci-pol~1.yml",
+            "ci-custom.yml.",
+            "ci-custom.yml ",
+            "ci:custom.yml",
+            "CON.yml",
+        ];
+        for file in invalid_workflow_files {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-pr.yml\", \"{file}\", \"ci-policy.yml\"]\n"
+            ));
+            assert!(
+                config.validate(&[], &[], &BTreeSet::new()).is_err(),
+                "unsupported workflow output spelling must fail: {file}"
+            );
+        }
+
+        for file in ["ci-pоlicy.yml", "ci-pol~1.yml", "ci:custom.yml", "CON.yml"] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[declare]]\nprimitive = \"static-workflow\"\nfile = \"{file}\"\n"
+            ));
+            assert!(
+                config.validate(&[], &[], &BTreeSet::new()).is_err(),
+                "unsupported declared output spelling must fail: {file}"
+            );
+        }
+
+        let valid = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-pr.yml\", \"ci-policy.yml\"]\n",
+        );
+        must(
+            valid.validate(&[], &[], &BTreeSet::new()),
+            "canonical policy workflow spelling remains valid",
+        );
+    }
+
+    #[test]
+    fn static_file_sources_stay_outside_github_tree() {
+        for source in [".github/notes.txt", "./.github/notes.txt"] {
+            let error = must_fail(
+                validate_static_files(&[StaticFileSection {
+                    file: Some(".github/custom.yml".to_owned()),
+                    source: Some(source.to_owned()),
+                }]),
+                "static sources under .github must be rejected",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("source must stay outside `.github/`"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_file_source_resolution_accepts_a_regular_repository_file() {
+        let root = scanned_root("static-source-regular");
+        let source = root.join(".github-gen/sources/action.yml");
+        let source_parent = must(
+            source.parent().ok_or("source parent missing"),
+            "source parent",
+        );
+        must(
+            fs::create_dir_all(source_parent),
+            "create static source parent",
+        );
+        must(fs::write(&source, "name: example\n"), "write static source");
+
+        let resolved = must(
+            validate_static_file_source(&root, ".github-gen/sources/action.yml"),
+            "resolve regular static source",
+        );
+        let canonical_source = must(fs::canonicalize(&source), "canonicalize regular source");
+        assert_eq!(resolved, canonical_source);
+        must(
+            fs::remove_dir_all(root),
+            "remove regular static source fixture",
+        );
+    }
+
+    #[test]
+    fn static_file_source_resolution_rejects_scanner_pruned_paths() {
+        let root = scanned_root("static-source-pruned");
+        for (source, contents) in [
+            (".git/config", "[core]\n"),
+            ("target/generated.txt", "target\n"),
+            ("dist/generated.txt", "dist\n"),
+            ("node_modules/pkg/generated.txt", "dependency\n"),
+            (".output/generated.txt", "output\n"),
+        ] {
+            let path = root.join(source);
+            let parent = must(
+                path.parent().ok_or("source parent missing"),
+                "source parent",
+            );
+            must(fs::create_dir_all(parent), "create pruned source parent");
+            must(fs::write(&path, contents), "write pruned source");
+            let error = must_fail(
+                validate_static_file_source(&root, source),
+                "scanner-pruned static source must fail",
+            );
+            assert!(
+                error.to_string().contains("pruned directory"),
+                "{source}: {error}"
+            );
+        }
+        must(fs::remove_dir_all(root), "remove pruned source fixture");
+    }
+
+    #[test]
+    fn static_file_source_resolution_rejects_declared_scan_excludes() {
+        let root = scanned_root("static-source-excluded");
+        let config_dir = root.join(".github-gen");
+        must(
+            fs::create_dir_all(&config_dir),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                config_dir.join("velnor-workflow.toml"),
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[scan]\nexclude = [\"ignored-output/**\"]\n",
+            ),
+            "write generation config with scan exclusion",
+        );
+        let source = root.join("ignored-output/generated.txt");
+        let source_parent = must(
+            source.parent().ok_or("source parent missing"),
+            "source parent",
+        );
+        must(
+            fs::create_dir_all(source_parent),
+            "create excluded source directory",
+        );
+        must(fs::write(&source, "ignored\n"), "write excluded source");
+        let error = must_fail(
+            validate_static_file_source(&root, "ignored-output/generated.txt"),
+            "declared scan exclusion must reject static source",
+        );
+        assert!(error.to_string().contains("scanner input file"), "{error}");
+        must(fs::remove_dir_all(root), "remove excluded source fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_file_source_resolution_rejects_untracked_git_paths() {
+        use std::os::unix::fs::symlink;
+
+        let root = scanned_root("static-source-untracked");
+        let status = must(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["init", "--quiet"])
+                .status(),
+            "initialize static source fixture repository",
+        );
+        assert!(status.success(), "git init failed: {status}");
+        let tracked = root.join(".github-gen/tracked.txt");
+        let tracked_parent = must(
+            tracked.parent().ok_or("tracked source parent missing"),
+            "tracked source parent",
+        );
+        must(
+            fs::create_dir_all(tracked_parent),
+            "create tracked source directory",
+        );
+        must(fs::write(&tracked, "tracked\n"), "write tracked source");
+        must(
+            fs::write(root.join(".gitignore"), "ignored-output/\n"),
+            "write source ignore rules",
+        );
+        let add = must(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args([
+                    "add",
+                    "--",
+                    "Cargo.toml",
+                    "rust-toolchain.toml",
+                    ".github-gen/tracked.txt",
+                    ".gitignore",
+                ])
+                .status(),
+            "stage tracked source fixture files",
+        );
+        assert!(add.success(), "git add failed: {add}");
+        let resolved = must(
+            validate_static_file_source(&root, ".github-gen/tracked.txt"),
+            "tracked static source must remain valid",
+        );
+        assert_eq!(
+            resolved,
+            must(fs::canonicalize(&tracked), "canonicalize tracked source")
+        );
+
+        let source = root.join("ignored-output/generated.txt");
+        let source_parent = must(
+            source.parent().ok_or("source parent missing"),
+            "source parent",
+        );
+        must(
+            fs::create_dir_all(source_parent),
+            "create ignored output directory",
+        );
+        must(fs::write(&source, "ignored\n"), "write ignored output");
+        let error = must_fail(
+            validate_static_file_source(&root, "ignored-output/generated.txt"),
+            "untracked static source must fail",
+        );
+        assert!(error.to_string().contains("scanner input file"), "{error}");
+        must(
+            symlink("ignored-output/generated.txt", root.join("ignored-link")),
+            "link to ignored output",
+        );
+        let error = must_fail(
+            validate_static_file_source(&root, "ignored-link"),
+            "symlink to untracked static source must fail",
+        );
+        assert!(error.to_string().contains("scanner input file"), "{error}");
+        must(fs::remove_dir_all(root), "remove untracked source fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_file_source_resolution_rejects_symlink_redirects() {
+        use std::os::unix::fs::symlink;
+
+        let root = scanned_root("static-file-source-resolution");
+        let workflows = root.join(".github/workflows");
+        must(
+            fs::create_dir_all(&workflows),
+            "create generated workflow tree",
+        );
+        must(
+            fs::write(workflows.join("ci-policy.yml"), "name: policy\n"),
+            "write generated policy workflow",
+        );
+        let assets = root.join("assets");
+        must(
+            fs::create_dir_all(&assets),
+            "create static source directory",
+        );
+        let valid_source = assets.join("source.txt");
+        must(
+            fs::write(&valid_source, "valid\n"),
+            "write valid static source",
+        );
+        must(
+            symlink("assets/source.txt", root.join("valid-link")),
+            "create confined static source link",
+        );
+        let resolved = must(
+            validate_static_file_source(&root, "valid-link"),
+            "confined static source link must resolve",
+        );
+        assert_eq!(
+            resolved,
+            must(fs::canonicalize(&valid_source), "canonicalize valid source")
+        );
+
+        must(
+            symlink(
+                ".github/workflows/ci-policy.yml",
+                root.join("policy-file-link"),
+            ),
+            "create policy workflow source link",
+        );
+        let error = must_fail(
+            validate_static_file_source(&root, "policy-file-link"),
+            "a final symlink into generated policy state must fail",
+        );
+        assert!(error.to_string().contains("generated `.github/` state"));
+
+        must(
+            symlink(".github/workflows", root.join("policy-directory-link")),
+            "create policy workflow parent link",
+        );
+        let error = must_fail(
+            validate_static_file_source(&root, "policy-directory-link/ci-policy.yml"),
+            "a parent symlink into generated policy state must fail",
+        );
+        assert!(error.to_string().contains("generated `.github/` state"));
+
+        let outside = root.with_extension("static-source-outside");
+        let _ = fs::remove_dir_all(&outside);
+        must(
+            fs::create_dir_all(&outside),
+            "create outside source directory",
+        );
+        let outside_source = outside.join("source.txt");
+        must(
+            fs::write(&outside_source, "outside\n"),
+            "write outside source",
+        );
+        must(
+            symlink(&outside_source, root.join("outside-link")),
+            "create external static source link",
+        );
+        let error = must_fail(
+            validate_static_file_source(&root, "outside-link"),
+            "an external static source link must fail",
+        );
+        assert!(error.to_string().contains("outside the repository"));
+
+        must(fs::remove_dir_all(root), "remove static source fixture");
+        must(
+            fs::remove_dir_all(outside),
+            "remove outside static source fixture",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_file_source_resolution_rejects_dangling_and_special_files() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let root = PathBuf::from(format!(
+            "/tmp/velnor-static-source-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(&root),
+            "create invalid static source root",
+        );
+        let dangling = root.join("dangling-source");
+        must(
+            symlink("missing-action.yml", &dangling),
+            "create dangling static source",
+        );
+        let error = must_fail(
+            validate_static_file_source(&root, "dangling-source"),
+            "dangling static source must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("resolve declared static file source"),
+            "{error}"
+        );
+        must(fs::remove_file(&dangling), "remove dangling static source");
+
+        let socket_path = root.join("socket-source");
+        let socket = must(
+            UnixListener::bind(&socket_path),
+            "create static source socket",
+        );
+        let error = must_fail(
+            validate_static_file_source(&root, "socket-source"),
+            "special static source must fail",
+        );
+        assert!(
+            error.to_string().contains("must resolve to a regular file"),
+            "{error}"
+        );
+
+        drop(socket);
+        must(fs::remove_file(socket_path), "remove static source socket");
+        must(
+            fs::remove_dir_all(root),
+            "remove invalid static source fixture",
+        );
+    }
+
+    #[test]
+    fn policy_exclude_workflows_is_rejected_as_an_unknown_field() {
+        let result = toml::from_str::<RepoGenerationConfig>(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\nexclude_workflows = [\"ci-main.yml\"]\n",
+        );
+        assert!(result.is_err(), "removed policy exclusion must not parse");
+        let Err(error) = result else { return };
+        assert!(
+            error.to_string().contains("unknown field")
+                && error.to_string().contains("exclude_workflows"),
+            "{error}"
+        );
     }
 
     #[test]
