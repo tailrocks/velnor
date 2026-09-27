@@ -14228,16 +14228,22 @@ path-only = { path = "../path-only" }
                     name: "core".to_owned(),
                     package_name: None,
                     path: None,
+                    workspace: true,
+                    target: None,
                 },
                 CargoDependency {
                     name: "core-alias".to_owned(),
                     package_name: Some("core".to_owned()),
                     path: Some("../core".to_owned()),
+                    workspace: false,
+                    target: None,
                 },
                 CargoDependency {
                     name: "path-only".to_owned(),
                     package_name: None,
                     path: Some("../path-only".to_owned()),
+                    workspace: false,
+                    target: None,
                 },
             ]
         );
