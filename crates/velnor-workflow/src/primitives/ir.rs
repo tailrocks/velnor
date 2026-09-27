@@ -1534,7 +1534,7 @@ mod tests {
         assert!(
             candidate.contains("use_unit_binary=false")
                 && candidate.contains(
-                    "if [[ \"$(target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
+                    "if [[ \"$(env -i PATH=\"$PATH\" target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
                 )
                 && candidate.contains("if [[ \"$use_unit_binary\" == true ]]; then"),
             "the fast path reuses the checks' binary only when it already reports the head closure (the checks may build wider features): {candidate}"
@@ -1547,6 +1547,12 @@ mod tests {
         assert!(
             candidate.contains("cargo build --locked -p velnor-workflow"),
             "the slow build pins the lockfile and the generator package: {candidate}"
+        );
+        assert!(
+            candidate.contains(
+                "env -i PATH=\"$PATH\" cargo build --locked -p velnor-workflow --manifest-path"
+            ),
+            "the candidate build clears runner environment before executing PR build scripts: {candidate}"
         );
         assert!(
             candidate.contains("--manifest-path \"$worktree/crates/velnor-workflow/Cargo.toml\""),
@@ -1578,9 +1584,16 @@ mod tests {
             "the slow path records the head as the build revision: {candidate}"
         );
         assert!(
-            candidate.contains("\"$stage/velnor-workflow\" --closure")
-                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]"),
-            "the staged binary proves the head closure before upload: {candidate}"
+            candidate.contains("env -i PATH=\"$PATH\" \"$stage/velnor-workflow\" --closure")
+                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]")
+                && candidate.contains(
+                    "reported_revision=\"$(env -i PATH=\"$PATH\" \"$stage/velnor-workflow\" --revision)\""
+                )
+                && candidate.contains(
+                    "manifest_build_revision=\"$(jq -er '.build_revision' \"$stage/candidate-manifest.json\")\""
+                )
+                && candidate.contains("[[ \"$reported_revision\" == \"$manifest_build_revision\" ]]"),
+            "the staged binary proves its closure and build revision before upload: {candidate}"
         );
         for argument in [
             "--arg profile debug",
@@ -2794,7 +2807,9 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 /// the manifest the policy consumer verifies (`profile`, `platform`,
 /// `repository`, `run_id`, `revision` = PR-head SHA, `closure` = head
 /// candidate closure, `build_revision` = tree the binary compiled from,
-/// `binary_sha256`). The publish step uploads both files under the name the
+/// `binary_sha256`). The slow build clears the runner environment before
+/// invoking Cargo, so PR build scripts receive only the executable search path.
+/// The publish step uploads both files under the name the
 /// policy derives the same way (`velnor-workflow-candidate-<closure16>-<os>-<arch>`).
 ///
 /// Both steps carry the pull-request same-repo gate directly after their name
@@ -2843,7 +2858,7 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
             # profile stamps, so only reuse their binary when it already
             # reports the head closure; otherwise fall through to a clean
             # default-features build below.
-            if [[ "$(target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
+            if [[ "$(env -i PATH="$PATH" target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
               use_unit_binary=true
             fi
           fi
@@ -2855,7 +2870,7 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
             rm -rf "$worktree"
             git worktree add --detach "$worktree" "$PR_HEAD"
             trap 'git worktree remove --force "$worktree"' EXIT
-            cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
+            env -i PATH="$PATH" cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
             binary="$worktree/target/debug/velnor-workflow"
             build_rev="$PR_HEAD"
           fi
@@ -2864,9 +2879,12 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           mkdir -p "$stage"
           install -m 0755 "$binary" "$stage/velnor-workflow"
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
-          reported="$("$stage/velnor-workflow" --closure)"
+          reported="$(env -i PATH="$PATH" "$stage/velnor-workflow" --closure)"
           [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }}
+          reported_revision="$(env -i PATH="$PATH" "$stage/velnor-workflow" --revision)"
           jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+          manifest_build_revision="$(jq -er '.build_revision' "$stage/candidate-manifest.json")"
+          [[ "$reported_revision" == "$manifest_build_revision" ]] || {{ echo "::error::candidate reports revision $reported_revision, manifest build_revision $manifest_build_revision" >&2; exit 1; }}
           if [[ "$worktree" != "" ]]; then
             git worktree remove --force "$worktree"
             trap - EXIT
