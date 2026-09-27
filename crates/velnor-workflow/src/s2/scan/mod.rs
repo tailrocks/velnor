@@ -455,36 +455,27 @@ pub(crate) fn unit(
 }
 
 /// The typed platform/trust/capability contract the scan derives per kind.
-/// Detectors refine capabilities afterwards (services imply container
-/// readiness); the contract never invents a requirement the kind cannot prove.
+/// Docker is required by generated Docker builds; language units start without
+/// runner capabilities and detectors add those only from concrete evidence.
 fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
     let trust = TrustReq::UntrustedOk;
     match kind {
-        // A SwiftPM package is portable: it verifies wherever its toolchain
-        // provisions. Only Xcode scheme work and XCFramework consumers carry
-        // the Apple need, which the Swift detector overlays afterwards.
-        UnitKind::Swift => (Platform::LinuxX64, trust, Capabilities::default()),
         UnitKind::Docker => (
             Platform::LinuxX64,
             trust,
             Capabilities {
                 docker: true,
-                buildx_compose: true,
                 ..Capabilities::default()
             },
         ),
-        UnitKind::Rust | UnitKind::Gradle | UnitKind::Node | UnitKind::Bun => (
-            Platform::LinuxX64,
-            trust,
-            Capabilities {
-                docker: true,
-                testcontainers: true,
-                ..Capabilities::default()
-            },
-        ),
-        UnitKind::OpenTofu | UnitKind::Homebrew | UnitKind::Docs => {
-            (Platform::LinuxX64, trust, Capabilities::default())
-        }
+        UnitKind::Swift
+        | UnitKind::Rust
+        | UnitKind::Gradle
+        | UnitKind::Node
+        | UnitKind::Bun
+        | UnitKind::OpenTofu
+        | UnitKind::Homebrew
+        | UnitKind::Docs => (Platform::LinuxX64, trust, Capabilities::default()),
     }
 }
 
@@ -606,6 +597,57 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
         }
+    }
+
+    #[test]
+    fn language_kinds_do_not_infer_docker_and_services_add_only_proven_needs() {
+        for kind in [
+            crate::s2::UnitKind::Rust,
+            crate::s2::UnitKind::Gradle,
+            crate::s2::UnitKind::Node,
+            crate::s2::UnitKind::Bun,
+        ] {
+            let unit = super::unit(kind, ".", Vec::new(), Vec::new(), None);
+            assert_eq!(
+                crate::s2::provider::Capabilities::default(),
+                unit.capabilities,
+                "{kind:?} kind alone is not Docker evidence"
+            );
+        }
+
+        let docker = super::unit(
+            crate::s2::UnitKind::Docker,
+            ".",
+            Vec::new(),
+            vec!["docker build --file Dockerfile .".to_owned()],
+            None,
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities {
+                docker: true,
+                ..crate::s2::provider::Capabilities::default()
+            },
+            docker.capabilities,
+            "Dockerfile builds require Docker, not Compose or Testcontainers"
+        );
+
+        let mut service = super::unit(crate::s2::UnitKind::Rust, ".", Vec::new(), Vec::new(), None);
+        service.services.push(crate::s2::UnitService {
+            name: "postgres".to_owned(),
+            image: "postgres:18".to_owned(),
+            env: Vec::new(),
+            ports: vec!["5432:5432".to_owned()],
+            options: String::new(),
+        });
+        super::refresh_service_capabilities(&mut service);
+        assert_eq!(
+            crate::s2::provider::Capabilities {
+                docker: true,
+                services_with_readiness: true,
+                ..crate::s2::provider::Capabilities::default()
+            },
+            service.capabilities
+        );
     }
 
     #[test]
