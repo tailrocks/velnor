@@ -588,6 +588,120 @@ fn s2_reserved_agent_path_spellings_are_rejected() {
     reserved_agent_path_spellings_are_rejected(Pipeline::S2);
 }
 
+fn reserved_policy_path_spellings_are_rejected(pipeline: Pipeline) {
+    for (index, file) in [
+        ".github/workflows/ci-policy.yml",
+        ".github//workflows/ci-policy.yml",
+        ".github/workflows/./ci-policy.yml",
+        ".github/workflows/CI-POLICY.yml",
+        ".github/WORKFLOWS/ci-policy.yml",
+        ".github/workflow\u{017f}/ci-policy.yml",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = minimal_root(&format!("{}-reserved-policy-{index}", pipeline.name()));
+        write_config(pipeline, &root);
+        let output = output_for(&root);
+        let _ = fs::remove_dir_all(&output);
+        fs::create_dir_all(output.join(".github/workflows")).unwrap();
+        let existing_policy = output.join(".github/workflows/ci-policy.yml");
+        fs::write(&existing_policy, "preserve existing policy\n").unwrap();
+        let source = root.join(".github-gen/sources/policy.yml");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "name: untrusted replacement\n").unwrap();
+
+        let config = root.join(".github-gen/velnor-workflow.toml");
+        let base = fs::read_to_string(&config).unwrap();
+        fs::write(
+            &config,
+            format!(
+                "{base}\n[[static_files]]\nfile = \"{file}\"\nsource = \".github-gen/sources/policy.yml\"\n"
+            ),
+        )
+        .unwrap();
+        let outcome = run_generate(&root, &output, true);
+        assert!(
+            !outcome.status.success(),
+            "security-owned policy path spelling `{file}` must fail"
+        );
+        let stderr = String::from_utf8_lossy(&outcome.stderr);
+        assert!(
+            stderr.contains("generator owns this path")
+                && stderr.contains(".github/workflows/ci-policy.yml"),
+            "refusal must identify the reserved policy workflow: {stderr}"
+        );
+        assert_eq!(
+            fs::read_to_string(&existing_policy).unwrap(),
+            "preserve existing policy\n",
+            "rejection must not overwrite the existing policy entrypoint"
+        );
+    }
+}
+
+#[test]
+fn v1_reserved_policy_path_spellings_are_rejected() {
+    reserved_policy_path_spellings_are_rejected(Pipeline::V1);
+}
+
+#[test]
+fn s2_reserved_policy_path_spellings_are_rejected() {
+    reserved_policy_path_spellings_are_rejected(Pipeline::S2);
+}
+
+fn unicode_policy_path_alias_is_rejected_with_entrypoint_rendered(pipeline: Pipeline) {
+    let root = minimal_root(&format!("{}-reserved-policy-unicode", pipeline.name()));
+    write_config(pipeline, &root);
+    let output = output_for(&root);
+    let _ = fs::remove_dir_all(&output);
+    let source = root.join(".github-gen/sources/policy.yml");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, "name: untrusted replacement\n").unwrap();
+
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let base = fs::read_to_string(&config).unwrap();
+    let base = base.replacen(
+        "[workflow]\n",
+        "[workflow]\nfiles = [\"ci-pr.yml\", \"ci-policy.yml\"]\n",
+        1,
+    );
+    assert!(
+        base.contains("files = [\"ci-pr.yml\", \"ci-policy.yml\"]"),
+        "fixture workflow surface must render ci-policy.yml"
+    );
+    fs::write(
+        &config,
+        format!(
+            "{base}\n[[static_files]]\nfile = \".github/workflow\u{017f}/ci-policy.yml\"\nsource = \".github-gen/sources/policy.yml\"\n"
+        ),
+    )
+    .unwrap();
+
+    let outcome = run_generate(&root, &output, true);
+    assert!(
+        !outcome.status.success(),
+        "a Unicode filesystem alias must fail even when the canonical workflow is omitted"
+    );
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(
+        stderr.contains("generator owns this path")
+            && stderr.contains(".github/workflows/ci-policy.yml"),
+        "refusal must identify the canonical policy workflow: {stderr}"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(output);
+}
+
+#[test]
+fn v1_unicode_policy_path_alias_is_rejected_when_entrypoint_is_omitted() {
+    unicode_policy_path_alias_is_rejected_with_entrypoint_rendered(Pipeline::V1);
+}
+
+#[test]
+fn s2_unicode_policy_path_alias_is_rejected_when_entrypoint_is_omitted() {
+    unicode_policy_path_alias_is_rejected_with_entrypoint_rendered(Pipeline::S2);
+}
+
 #[cfg(unix)]
 fn set_readonly(path: &Path, readonly: bool) {
     use std::os::unix::fs::PermissionsExt as _;

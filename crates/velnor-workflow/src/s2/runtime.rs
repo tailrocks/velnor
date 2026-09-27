@@ -551,7 +551,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 if let Some(entries_path) = options.get("entries") {
                     cache_budget_report(entries_path)?;
                 } else {
-                    println!("{}", retention_policy_for_plan().total_bytes);
+                    println!("{}", retention_policy_for_plan()?.total_bytes);
                 }
                 return Ok(true);
             }
@@ -719,16 +719,27 @@ fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, Gen
 
 /// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
 /// when present, otherwise the generator default.
-fn retention_policy_for_plan() -> RetentionPolicy {
-    let discovered = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| crate::s2::config::discover(&cwd).ok().flatten());
+fn retention_policy_for_plan() -> Result<RetentionPolicy, GeneratorError> {
+    let root = std::env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve repository root: {error}")))?;
+    retention_policy_for_root(&root)
+}
+
+fn retention_policy_for_root(root: &Path) -> Result<RetentionPolicy, GeneratorError> {
+    // Config discovery follows the repository tree. Validate the physical
+    // boundary first so a symlinked or special-file config cannot be read and
+    // an invalid discovery cannot silently fall back to defaults.
+    crate::s2::scan::file_walk::validate_repository_tree(root)?;
+    let discovered = crate::s2::config::discover(root)?;
     let policy = discovered
         .as_ref()
         .map_or_else(RetentionPolicy::default_policy, |config| {
             RetentionPolicy::from_config(config.cache_github())
         });
-    retention_policy_with_declared_tools(policy, discovered.as_ref())
+    Ok(retention_policy_with_declared_tools(
+        policy,
+        discovered.as_ref(),
+    ))
 }
 
 /// Extend a retention policy with the prepared-tools class when the
@@ -1074,7 +1085,8 @@ fn append_step_output(path: &Path, text: &str) -> std::io::Result<()> {
 /// Emit per-class totals and headroom for the maintenance budget step.
 fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
     let entries = read_cache_entries(entries_path)?;
-    let report = budget_report(&entries, &retention_policy_for_plan());
+    let policy = retention_policy_for_plan()?;
+    let report = budget_report(&entries, &policy);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &report)
@@ -1122,7 +1134,8 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
             .as_secs()
             .cast_signed(),
     };
-    let plan = plan_evictions(&entries, &retention_policy_for_plan(), now_epoch);
+    let policy = retention_policy_for_plan()?;
+    let plan = plan_evictions(&entries, &policy, now_epoch);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &plan)
@@ -9491,6 +9504,39 @@ workspace_check = true
             policy.classes.len(),
             RetentionPolicy::default_policy().classes.len() + 1
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_policy_rejects_a_symlinked_generation_config_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-runtime-policy-root-{}",
+            crate::unique_suffix()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "velnor-runtime-policy-outside-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::create_dir_all(&root), "create policy root");
+        must(fs::create_dir_all(&outside), "create external config root");
+        must(
+            fs::write(outside.join("velnor-workflow.toml"), "schema = 2\n"),
+            "write external generation config",
+        );
+        must(
+            std::os::unix::fs::symlink(&outside, root.join(".github-gen")),
+            "link external generation config root",
+        );
+
+        let error = must_fail(
+            retention_policy_for_root(&root),
+            "a symlinked generation config tree must fail closed",
+        );
+        assert!(error.to_string().contains("symlink"), "{error}");
+        assert!(error.to_string().contains("escapes"), "{error}");
+
+        must(fs::remove_dir_all(&root), "remove policy root");
+        must(fs::remove_dir_all(&outside), "remove external config root");
     }
 
     #[test]

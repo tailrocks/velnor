@@ -12,6 +12,9 @@
     reason = "a test whose setup fails should panic loudly"
 )]
 
+#[path = "common/git_fixture.rs"]
+mod git_fixture;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -60,6 +63,7 @@ fn minimal_root(name: &str) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/minimal-rust");
     let root = unique_dir(name).join("fixture");
     copy_tree(&source, &root);
+    git_fixture::initialize_git_fixture(&root);
     root
 }
 
@@ -76,6 +80,7 @@ fn generate(root: &Path, extra: &[&str]) -> Generated {
 /// Regenerate into an existing output tree without `--force`: a current tree
 /// is a no-op success, so this proves repeat generation has no conflicts.
 fn regenerate_into(output: &Path, root: &Path, extra: &[&str]) {
+    git_fixture::commit_fixture(root);
     let mut args = vec!["--plain", "--default-branch", "main", "--output"];
     let output = output.to_str().unwrap();
     args.push(output);
@@ -128,6 +133,7 @@ fn assert_retargeted_link_is_refused(root: &Path, output: &Path, extra: &[&str])
 }
 
 fn check(root: &Path, output: &Path, extra: &[&str]) {
+    git_fixture::commit_fixture(root);
     let mut args = vec!["--plain", "--check", "--default-branch", "main", "--output"];
     args.push(output.to_str().unwrap());
     args.extend_from_slice(extra);
@@ -298,6 +304,7 @@ fn v1_richer_repo_emits_identical_agent_files() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-workspace");
     let root = unique_dir("v1-rich").join("fixture");
     copy_tree(&source, &root);
+    git_fixture::initialize_git_fixture(&root);
     let extra = ["--runners", "both"];
     let generated = generate(&root, &extra);
     assert_agent_files(&generated.output);
@@ -308,6 +315,7 @@ fn s2_richer_repo_emits_identical_agent_files() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures-s2/polyglot");
     let root = unique_dir("s2-rich").join("fixture");
     copy_tree(&source, &root);
+    git_fixture::initialize_git_fixture(&root);
     write_schema2_config(&root);
     let extra: [&str; 0] = [];
     let generated = generate(&root, &extra);

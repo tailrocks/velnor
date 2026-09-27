@@ -39,7 +39,11 @@ const RUNTIME_COMMANDS: &[&str] = &[
 /// the schema-1 path. `None` means "not a schema-2 invocation".
 pub(crate) fn run_if_s2() -> Option<Result<(), crate::GeneratorError>> {
     let arguments: Vec<OsString> = env::args_os().skip(1).collect();
-    if wants_s2(&arguments) {
+    let routes_to_s2 = match wants_s2(&arguments) {
+        Ok(routes_to_s2) => routes_to_s2,
+        Err(error) => return Some(Err(error)),
+    };
+    if routes_to_s2 {
         // Both error types carry a single message string, so the bridge maps
         // across the pipeline boundary without losing context.
         Some(super::run_from_env().map_err(|error| crate::GeneratorError::usage(error.to_string())))
@@ -48,7 +52,7 @@ pub(crate) fn run_if_s2() -> Option<Result<(), crate::GeneratorError>> {
     }
 }
 
-fn wants_s2(arguments: &[OsString]) -> bool {
+fn wants_s2(arguments: &[OsString]) -> Result<bool, crate::GeneratorError> {
     // `visibility` is schema-agnostic evidence plumbing; it always stays on
     // the schema-1 path, which owns the subcommand for both pipelines.
     if arguments
@@ -56,10 +60,10 @@ fn wants_s2(arguments: &[OsString]) -> bool {
         .and_then(|value| value.to_str())
         .is_some_and(|command| command == "visibility")
     {
-        return false;
+        return Ok(false);
     }
     if has_providers_flag(arguments) {
-        return true;
+        return Ok(true);
     }
     if let Some(command) = arguments.first().and_then(|value| value.to_str())
         && RUNTIME_COMMANDS.contains(&command)
@@ -79,35 +83,38 @@ fn has_providers_flag(arguments: &[OsString]) -> bool {
 /// Runtime subcommands operate on the working directory (or the policy
 /// `--workflow-root`), never on a generator target. `version` and `closure`
 /// print build constants shared by both pipelines, so they stay put.
-fn wants_s2_runtime(command: &str, arguments: &[OsString]) -> bool {
+fn wants_s2_runtime(command: &str, arguments: &[OsString]) -> Result<bool, crate::GeneratorError> {
     if command == "version" || command == "closure" {
-        return false;
+        return Ok(false);
     }
     if command == "policy"
         && let Some(root) = workflow_root_argument(arguments)
-        && dir_is_schema2(&root)
+        && try_dir_is_schema2(&root)?
     {
-        return true;
+        return Ok(true);
     }
-    env::current_dir().is_ok_and(|root| dir_is_schema2(&root))
+    match env::current_dir() {
+        Ok(root) => try_dir_is_schema2(&root),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Generator invocations route on the resolved target: a local directory
 /// whose generation config declares `schema = 2`. Anything else (a remote
 /// target, an unparsable command line) stays on the schema-1 path, which
 /// reports the real error.
-fn wants_s2_generator(arguments: &[OsString]) -> bool {
+fn wants_s2_generator(arguments: &[OsString]) -> Result<bool, crate::GeneratorError> {
     let Ok(cli) = crate::Cli::parse_args(arguments.to_vec()) else {
-        return false;
+        return Ok(false);
     };
     let candidate = PathBuf::from(&cli.target);
     let Ok(source) = crate::RepositorySource::parse_with_candidate_path(&cli.target, candidate)
     else {
-        return false;
+        return Ok(false);
     };
     match source {
-        crate::RepositorySource::Local(path) => dir_is_schema2(&path),
-        crate::RepositorySource::GitHub { .. } => false,
+        crate::RepositorySource::Local(path) => try_dir_is_schema2(&path),
+        crate::RepositorySource::GitHub { .. } => Ok(false),
     }
 }
 
@@ -132,16 +139,64 @@ fn workflow_root_argument(arguments: &[OsString]) -> Option<PathBuf> {
 /// missing or unparsable config is not schema 2; the pipelines' own schema
 /// gates report the real error.
 pub(crate) fn dir_is_schema2(dir: &Path) -> bool {
-    if !dir.is_dir() {
-        return false;
-    }
-    let Ok(text) = std::fs::read_to_string(dir.join(".github-gen/velnor-workflow.toml")) else {
-        return false;
+    // Promotion still has a boolean routing API. An invalid physical tree
+    // must take the strict S2 path so it cannot fall through to the legacy
+    // renderer, which could read repository-controlled config before its own
+    // preflight. The dispatch bridge uses `try_dir_is_schema2` and preserves
+    // the concrete error for CLI callers.
+    try_dir_is_schema2(dir).unwrap_or(true)
+}
+
+fn try_dir_is_schema2(dir: &Path) -> Result<bool, crate::GeneratorError> {
+    super::scan::file_walk::validate_repository_tree(dir)
+        .map_err(|error| crate::GeneratorError::usage(error.to_string()))?;
+    let config_path = dir.join(super::config::GENERATION_CONFIG_PATH);
+    validate_generation_config_path(dir, &config_path)?;
+    let text = match std::fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(crate::GeneratorError::io(
+                "read generation config",
+                &config_path,
+                &error,
+            ));
+        }
     };
     match text.parse::<toml::Table>() {
-        Ok(table) => table.get("schema").and_then(toml::Value::as_integer) == Some(2),
-        Err(_) => false,
+        Ok(table) => Ok(table.get("schema").and_then(toml::Value::as_integer) == Some(2)),
+        Err(_) => Ok(false),
     }
+}
+
+/// Reject a symlink in the path to the generation config before the dispatch
+/// peek reads it. The repository preflight permits confined links elsewhere in
+/// a tree, but this file is a routing authority and must be a regular file at
+/// its declared path.
+fn validate_generation_config_path(
+    root: &Path,
+    config_path: &Path,
+) -> Result<(), crate::GeneratorError> {
+    for path in [root.join(".github-gen"), config_path.to_path_buf()] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(crate::GeneratorError::usage(format!(
+                    "refusing symlinked generation config path: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(crate::GeneratorError::io(
+                    "inspect generation config path",
+                    &path,
+                    &error,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -156,6 +211,17 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need an explicit failure when an expected error is absent"
+    )]
+    fn must_fail<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(_) => panic!("{context}: expected an error"),
+            Err(error) => error,
         }
     }
 
@@ -182,10 +248,14 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    fn routes_to_s2(arguments: &[OsString]) -> bool {
+        must(wants_s2(arguments), "schema dispatch preflight")
+    }
+
     #[test]
     fn providers_flag_routes_schema2_without_a_target() {
-        assert!(wants_s2(&args(&["--providers", "github-hosted"])));
-        assert!(wants_s2(&args(&["--providers=github-hosted"])));
+        assert!(routes_to_s2(&args(&["--providers", "github-hosted"])));
+        assert!(routes_to_s2(&args(&["--providers=github-hosted"])));
     }
 
     #[test]
@@ -198,7 +268,7 @@ mod tests {
         // Target detection keeps the typed parser in control; it then rejects
         // the unknown schema-1 option fail-closed. Do not depend on the cargo
         // test harness CWD being the repository root.
-        assert!(wants_s2(&args(&[target.as_str(), "--runners", "both"])));
+        assert!(routes_to_s2(&args(&[target.as_str(), "--runners", "both"])));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -209,8 +279,8 @@ mod tests {
             Some("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n"),
         );
         let target = root.to_string_lossy().into_owned();
-        assert!(wants_s2(&args(&[target.as_str(), "--plain"])));
-        assert!(wants_s2(&args(&["generate", target.as_str()])));
+        assert!(routes_to_s2(&args(&[target.as_str(), "--plain"])));
+        assert!(routes_to_s2(&args(&["generate", target.as_str()])));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -221,8 +291,12 @@ mod tests {
             Some("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n"),
         );
         let target = root.to_string_lossy().into_owned();
-        assert!(!wants_s2(&args(&[target.as_str(), "--plain"])));
-        assert!(!wants_s2(&args(&[target.as_str(), "--runners", "both"])));
+        assert!(!routes_to_s2(&args(&[target.as_str(), "--plain"])));
+        assert!(!routes_to_s2(&args(&[
+            target.as_str(),
+            "--runners",
+            "both"
+        ])));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -230,14 +304,59 @@ mod tests {
     fn missing_config_stays_schema1() {
         let root = fixture_dir("noconfig", None);
         let target = root.to_string_lossy().into_owned();
-        assert!(!wants_s2(&args(&[target.as_str()])));
+        assert!(!routes_to_s2(&args(&[target.as_str()])));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_generation_config_fails_dispatch_preflight() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_dir("symlinked-config", None);
+        let source = root.join("config-source.toml");
+        let config_path = root.join(crate::s2::config::GENERATION_CONFIG_PATH);
+        must(
+            std::fs::write(
+                &source,
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write symlink target",
+        );
+        must(symlink(&source, &config_path), "create symlinked config");
+
+        let error = must_fail(
+            try_dir_is_schema2(&root),
+            "symlinked config must be rejected",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("symlinked generation config path"),
+            "error identifies the routing path: {error}"
+        );
+        let target = root.to_string_lossy().into_owned();
+        let error = must_fail(
+            wants_s2(&args(&[target.as_str()])),
+            "dispatch must propagate the preflight failure",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("symlinked generation config path"),
+            "dispatch preserves the preflight error: {error}"
+        );
+        assert!(
+            dir_is_schema2(&root),
+            "the boolean promotion facade routes invalid trees to strict S2"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn remote_target_stays_schema1_without_the_flag() {
-        assert!(!wants_s2(&args(&["example/fixture", "--plain"])));
-        assert!(!wants_s2(&args(&[
+        assert!(!routes_to_s2(&args(&["example/fixture", "--plain"])));
+        assert!(!routes_to_s2(&args(&[
             "https://github.com/example/fixture",
             "--plain"
         ])));
@@ -250,12 +369,12 @@ mod tests {
             Some("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n"),
         );
         let path = root.to_string_lossy().into_owned();
-        assert!(wants_s2(&args(&[
+        assert!(routes_to_s2(&args(&[
             "policy",
             "--workflow-root",
             path.as_str()
         ])));
-        assert!(wants_s2(&args(&[
+        assert!(routes_to_s2(&args(&[
             "policy",
             format!("--workflow-root={path}").as_str()
         ])));
@@ -264,8 +383,8 @@ mod tests {
 
     #[test]
     fn version_and_closure_stay_put() {
-        assert!(!wants_s2(&args(&["version"])));
-        assert!(!wants_s2(&args(&["closure"])));
+        assert!(!routes_to_s2(&args(&["version"])));
+        assert!(!routes_to_s2(&args(&["closure"])));
     }
 
     #[test]

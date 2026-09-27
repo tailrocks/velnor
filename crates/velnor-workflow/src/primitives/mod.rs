@@ -1204,6 +1204,7 @@ pub(crate) fn generate(
             &row.args(),
         )?;
         for (path, content) in rendered.files {
+            crate::reject_reserved_policy_output(&path, &format!("primitive `{}`", row.primitive))?;
             if files.insert(path.clone(), content).is_some() {
                 return Err(GeneratorError::usage(format!(
                     "two declared primitives both render {}",
@@ -1241,6 +1242,9 @@ pub(crate) fn generate(
         }
     }
     added_files.sort();
+    for path in files.keys() {
+        crate::reject_reserved_policy_output(path, "primitive surface output")?;
+    }
     Ok(Surface {
         files,
         units,
@@ -1877,6 +1881,57 @@ mod tests {
         }
         let unique = ids.iter().collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), ids.len(), "duplicate primitive id");
+    }
+
+    /// Primitive output cannot claim the base-owned policy entrypoint through
+    /// an exact, case, or Unicode compatibility spelling.
+    #[test]
+    fn primitive_output_rejects_reserved_policy_aliases() {
+        for path in [
+            crate::CI_POLICY_WORKFLOW,
+            ".github/workflows/CI-POLICY.yml",
+            ".github/workflows/ｃｉ-ｐｏｌｉｃｙ.yml",
+            ".github\\workflows\\ci-policy.yml",
+            ".github/workflows/ci-policy.yml. ",
+            ".github/workflows/CI-POL~1.YML",
+        ] {
+            let error = match crate::reject_reserved_policy_output(
+                std::path::Path::new(path),
+                "primitive `test`",
+            ) {
+                Ok(()) => panic!("{path}: reserved policy alias unexpectedly accepted"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(crate::CI_POLICY_WORKFLOW), "{error}");
+            assert!(error.contains("generator-owned"), "{error}");
+        }
+        assert!(crate::reject_reserved_policy_output(
+            std::path::Path::new(".github/workflows/ci-main.yml"),
+            "primitive `test`",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn primitive_output_rejects_unsafe_generated_path_spellings() {
+        for path in [
+            ".github/workfl~1/ci-policy.yml",
+            ".github/workflows/ci-policy.yml:ads",
+            ".github/workflows/CON.txt",
+            ".github/workflows/CONIN$.txt",
+        ] {
+            let error = match crate::reject_reserved_policy_output(
+                std::path::Path::new(path),
+                "primitive `test`",
+            ) {
+                Ok(()) => panic!("{path}: unsafe path spelling unexpectedly accepted"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("unsupported generated path spelling"),
+                "{error}"
+            );
+        }
     }
 
     /// An unknown primitive is a usage error that names what is known.

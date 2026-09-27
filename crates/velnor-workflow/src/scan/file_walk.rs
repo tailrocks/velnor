@@ -1,8 +1,9 @@
 //! File walk and repository-path helpers shared by every detector.
 
 use std::collections::BTreeSet;
+use std::env;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -14,12 +15,7 @@ pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
 ) -> Result<Vec<String>, GeneratorError> {
-    if !root.is_dir() {
-        return Err(GeneratorError::usage(format!(
-            "not a repository directory: {}",
-            root.display()
-        )));
-    }
+    validate_scan_root(root)?;
     let generator_owned = crate::s2::generator_owned_output_paths(root)
         .map_err(|error| GeneratorError::usage(error.to_string()))?;
     // Generation must stay a function of the committed repository, not of the
@@ -46,6 +42,196 @@ pub(crate) fn repository_files(
     });
     files.sort();
     Ok(files)
+}
+
+/// Validate the tree before any scanner or generation-config reader follows a
+/// repository path. The walk uses `symlink_metadata` so it never mistakes a
+/// link for its target while checking the tree; link targets are resolved only
+/// for the confined-target check below.
+///
+/// Links to regular files or directories inside `root` are valid repository
+/// inputs. A dangling or escaping link would let a later direct reader inspect
+/// bytes outside the repository, and a special file could block or provide a
+/// device-backed read, so both fail closed. The preflight uses the same
+/// boundary as the physical walk: root-level tool/output directories and
+/// `.git`/`node_modules` at every depth are outside the scan boundary.
+pub(crate) fn validate_scan_root(root: &Path) -> Result<(), GeneratorError> {
+    let root = absolute_normalized_path(root)?;
+    reject_symlinked_root_components(&root)?;
+    let root_metadata = fs::symlink_metadata(&root)
+        .map_err(|error| GeneratorError::io("inspect repository root", &root, &error))?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(GeneratorError::usage(format!(
+            "refusing symlinked repository root: {}",
+            root.display()
+        )));
+    }
+    if !root_metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "repository root is not a directory: {}",
+            root.display()
+        )));
+    }
+    let canonical_root = normalize_macos_system_alias(
+        root.canonicalize()
+            .map_err(|error| GeneratorError::io("canonicalize repository root", &root, &error))?,
+    );
+    validate_scan_directory(&root, &canonical_root, &root)
+}
+
+/// Make a path absolute while normalizing lexical `.` and `..` components.
+/// No filesystem component is resolved here; explicit `symlink_metadata`
+/// checks below enforce the no-follow boundary.
+fn absolute_normalized_path(path: &Path) -> Result<PathBuf, GeneratorError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("read current directory: {error}")))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(_) | Component::Prefix(_) | Component::RootDir => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    Ok(normalize_macos_system_alias(normalized))
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_macos_system_alias(path: PathBuf) -> PathBuf {
+    for (alias, target) in [
+        (Path::new("/var"), Path::new("/private/var")),
+        (Path::new("/tmp"), Path::new("/private/tmp")),
+    ] {
+        if let Ok(suffix) = path.strip_prefix(alias) {
+            return target.join(suffix);
+        }
+    }
+    path
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_macos_system_alias(path: PathBuf) -> PathBuf {
+    path
+}
+
+/// Check every root path component without allowing a symlinked parent to
+/// redirect the root outside the caller's intended tree.
+fn reject_symlinked_root_components(root: &Path) -> Result<(), GeneratorError> {
+    let mut current = PathBuf::new();
+    for component in root.components() {
+        current.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            GeneratorError::io("inspect repository root component", &current, &error)
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(GeneratorError::usage(format!(
+                "refusing symlinked repository root component: {}",
+                current.display()
+            )));
+        }
+        if !metadata.is_dir() {
+            return Err(GeneratorError::usage(format!(
+                "repository root component is not a directory: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_scan_directory(
+    root: &Path,
+    canonical_root: &Path,
+    directory: &Path,
+) -> Result<(), GeneratorError> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read repository directory", directory, &error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            GeneratorError::io("read repository directory entry", directory, &error)
+        })?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("inspect repository entry", &path, &error))?;
+        let at_root = directory == root;
+
+        if metadata.file_type().is_symlink() {
+            if is_scan_pruned_directory(&name, at_root) {
+                return Err(GeneratorError::usage(format!(
+                    "repository excluded directory must not be a symlink: {}",
+                    path.display()
+                )));
+            }
+            validate_confined_symlink(&path, canonical_root)?;
+            continue;
+        }
+
+        if metadata.is_dir() {
+            if is_scan_pruned_directory(&name, at_root) {
+                continue;
+            }
+            validate_scan_directory(root, canonical_root, &path)?;
+        } else if !metadata.is_file() {
+            return Err(GeneratorError::usage(format!(
+                "repository contains a special file: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_confined_symlink(path: &Path, canonical_root: &Path) -> Result<(), GeneratorError> {
+    let target = fs::read_link(path)
+        .map_err(|error| GeneratorError::io("read repository symlink", path, &error))?;
+    let canonical_target =
+        normalize_macos_system_alias(fs::canonicalize(path).map_err(|error| {
+            GeneratorError::usage(format!(
+                "repository symlink is dangling or unreadable: {} -> {} ({error})",
+                path.display(),
+                target.display()
+            ))
+        })?);
+    if !canonical_target.starts_with(canonical_root) {
+        return Err(GeneratorError::usage(format!(
+            "repository symlink escapes the repository: {} -> {}",
+            path.display(),
+            target.display()
+        )));
+    }
+    let metadata = fs::symlink_metadata(&canonical_target).map_err(|error| {
+        GeneratorError::io(
+            "inspect repository symlink target",
+            &canonical_target,
+            &error,
+        )
+    })?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "repository symlink targets a special file: {} -> {}",
+            path.display(),
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+fn is_scan_pruned_directory(name: &std::ffi::OsStr, at_root: bool) -> bool {
+    let name = name.to_string_lossy();
+    name == ".git" || name == "node_modules" || at_root && is_excluded_directory(&name)
 }
 
 fn exclude_set(patterns: &[String]) -> Result<GlobSet, GeneratorError> {
@@ -352,7 +538,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
 
 #[cfg(test)]
 mod tests {
-    use super::{files_named, repository_files};
+    use super::{files_named, repository_files, validate_scan_root};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -391,6 +577,23 @@ mod tests {
                 .unwrap_or_default()
         ));
         must(fs::create_dir_all(&root), "create scratch directory");
+        root
+    }
+
+    fn short_scratch(name: &str) -> PathBuf {
+        let base = if Path::new("/private/tmp").is_dir() {
+            PathBuf::from("/private/tmp")
+        } else {
+            PathBuf::from("/tmp")
+        };
+        let root = base.join(format!(
+            "vfw-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        must(fs::create_dir_all(&root), "create short scratch directory");
         root
     }
 
@@ -646,6 +849,108 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_external_links_inside_nested_build_directories() {
+        use std::os::unix::fs::symlink;
+
+        for directory in ["dist", "target"] {
+            let root = short_scratch(&format!("nested-{directory}-external"));
+            let outside = short_scratch(&format!("nested-{directory}-external-target"));
+            must(
+                fs::create_dir_all(root.join(format!("pkg/{directory}"))),
+                "create nested build directory",
+            );
+            must(
+                fs::write(outside.join("secret.txt"), "outside\n"),
+                "write external target",
+            );
+            must(
+                symlink(&outside, root.join(format!("pkg/{directory}/escape"))),
+                "create external nested build link",
+            );
+
+            let error = must_fail(
+                validate_scan_root(&root),
+                "external nested build link must fail scan preflight",
+            );
+            assert!(
+                error.contains("escapes the repository"),
+                "unexpected error: {error}"
+            );
+
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(outside);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_dangling_links_inside_nested_build_directories() {
+        use std::os::unix::fs::symlink;
+
+        for directory in ["dist", "target"] {
+            let root = short_scratch(&format!("nested-{directory}-dangling"));
+            must(
+                fs::create_dir_all(root.join(format!("pkg/{directory}"))),
+                "create nested build directory",
+            );
+            must(
+                symlink(
+                    "missing.txt",
+                    root.join(format!("pkg/{directory}/dangling")),
+                ),
+                "create dangling nested build link",
+            );
+
+            let error = must_fail(
+                validate_scan_root(&root),
+                "dangling nested build link must fail scan preflight",
+            );
+            assert!(error.contains("dangling"), "unexpected error: {error}");
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_special_links_inside_nested_build_directories() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        for (directory, hidden_directory) in [("dist", "target"), ("target", "dist")] {
+            let root = short_scratch(&format!("nested-{directory}-special"));
+            let nested = root.join(format!("pkg/{directory}"));
+            let hidden = root.join(hidden_directory).join("special.sock");
+            must(fs::create_dir_all(&nested), "create nested build directory");
+            must(
+                fs::create_dir_all(must(
+                    hidden.parent().ok_or("hidden socket parent"),
+                    "hidden socket parent",
+                )),
+                "create hidden special target directory",
+            );
+            let listener = must(UnixListener::bind(&hidden), "create special target");
+            must(
+                symlink(
+                    format!("../../{hidden_directory}/special.sock"),
+                    nested.join("special-link"),
+                ),
+                "create nested build link to special target",
+            );
+
+            let error = must_fail(
+                validate_scan_root(&root),
+                "nested build link to a special target must fail scan preflight",
+            );
+            assert!(error.contains("special file"), "unexpected error: {error}");
+
+            drop(listener);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
     #[test]
     fn named_files_keep_web_package_and_ignore_nested_node_modules_manifests() {
         let files = [
@@ -667,7 +972,256 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn tracked_walks_skip_files_below_symlinked_parent_directories() {
+    fn scan_preflight_rejects_an_external_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("external-parent");
+        let outside = short_scratch("external-parent-target");
+        must(
+            fs::write(outside.join("secret.txt"), "outside\n"),
+            "write external target",
+        );
+        must(
+            symlink(&outside, root.join("linked")),
+            "create external parent symlink",
+        );
+
+        let error = must_fail(
+            validate_scan_root(&root),
+            "external symlinked parent must fail scan preflight",
+        );
+        assert!(
+            error.contains("escapes the repository"),
+            "unexpected error: {error}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_a_symlinked_git_metadata_entry() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("symlinked-git");
+        let outside = short_scratch("symlinked-git-target");
+        must(
+            symlink(&outside, root.join(".git")),
+            "create symlinked git metadata entry",
+        );
+        let error = must_fail(
+            validate_scan_root(&root),
+            "symlinked git metadata must fail scan preflight",
+        );
+        assert!(
+            error.contains("excluded directory must not be a symlink"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_a_symlinked_skipped_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("symlinked-skipped-directory");
+        let outside = short_scratch("symlinked-skipped-target");
+        must(
+            symlink(&outside, root.join("target")),
+            "create symlinked skipped directory",
+        );
+        let error = must_fail(
+            validate_scan_root(&root),
+            "symlinked skipped directory must fail scan preflight",
+        );
+        assert!(
+            error.contains("excluded directory must not be a symlink"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_confined_symlinks_at_pruned_boundaries() {
+        use std::os::unix::fs::symlink;
+
+        for name in [".git", "target", "node_modules"] {
+            let root = short_scratch("confined-pruned-link");
+            must(
+                fs::create_dir(root.join("real-target")),
+                "create confined pruned target",
+            );
+            must(
+                symlink("real-target", root.join(name)),
+                "create confined pruned symlink",
+            );
+            let error = must_fail(
+                validate_scan_root(&root),
+                "confined symlink at a pruned boundary must fail",
+            );
+            assert!(
+                error.contains("excluded directory must not be a symlink"),
+                "unexpected error for {name}: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_allows_confined_symlinks_to_files_and_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("confined-links");
+        must(
+            fs::create_dir_all(root.join("real/nested")),
+            "create confined target directory",
+        );
+        must(
+            fs::write(root.join("real/file.txt"), "inside\n"),
+            "write confined target file",
+        );
+        must(
+            fs::write(root.join("real/nested/deep.txt"), "deep\n"),
+            "write confined nested target file",
+        );
+        must(
+            symlink("real/file.txt", root.join("file-link")),
+            "create confined file symlink",
+        );
+        must(
+            symlink("real", root.join("directory-link")),
+            "create confined directory symlink",
+        );
+
+        must(
+            validate_scan_root(&root),
+            "confined regular symlinks must pass scan preflight",
+        );
+        let files = must(repository_files(&root, &[]), "scan confined symlink tree");
+        assert!(files.contains(&"real/file.txt".to_owned()));
+        assert!(!files.contains(&"file-link".to_owned()));
+        assert!(!files.contains(&"directory-link".to_owned()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_dangling_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("dangling-link");
+        must(
+            symlink("missing.txt", root.join("dangling")),
+            "create dangling symlink",
+        );
+        let error = must_fail(
+            validate_scan_root(&root),
+            "dangling symlink must fail scan preflight",
+        );
+        assert!(error.contains("dangling"), "unexpected error: {error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_symlink_loops() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("symlink-loop");
+        must(
+            symlink("loop-b", root.join("loop-a")),
+            "create first loop link",
+        );
+        must(
+            symlink("loop-a", root.join("loop-b")),
+            "create second loop link",
+        );
+        let error = must_fail(
+            validate_scan_root(&root),
+            "symlink loop must fail scan preflight",
+        );
+        assert!(
+            error.contains("dangling or unreadable"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_special_files() {
+        use std::os::unix::net::UnixListener;
+
+        let root = short_scratch("special-file");
+        let socket = root.join("control.sock");
+        let _listener = must(UnixListener::bind(&socket), "create special socket");
+        let error = must_fail(
+            validate_scan_root(&root),
+            "special file must fail scan preflight",
+        );
+        assert!(error.contains("special file"), "unexpected error: {error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_a_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("root-link");
+        let target = short_scratch("root-target");
+        must(
+            symlink(&target, root.join("repository")),
+            "create symlinked root",
+        );
+        let error = must_fail(
+            validate_scan_root(&root.join("repository")),
+            "symlinked root must fail scan preflight",
+        );
+        assert!(
+            error.contains("repository root"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preflight_rejects_a_symlinked_root_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let outside = short_scratch("root-ancestor-target");
+        let launch = short_scratch("root-ancestor-launch");
+        let root = outside.join("repository");
+        must(fs::create_dir_all(&root), "create root ancestor target");
+        must(
+            symlink(&outside, launch.join("redirect")),
+            "create symlinked root ancestor",
+        );
+        let redirected_root = launch.join("redirect/repository");
+        let error = must_fail(
+            validate_scan_root(&redirected_root),
+            "symlinked root ancestor must fail scan preflight",
+        );
+        assert!(
+            error.contains("root component"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(outside);
+        let _ = fs::remove_dir_all(launch);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_walk_rejects_external_symlinked_parent_directories() {
         use std::os::unix::fs::symlink;
 
         let root = scratch("symlinked-tracked-parent");
@@ -709,8 +1263,14 @@ mod tests {
             "symlink action script parent",
         );
 
-        let scanned = must(repository_files(&root, &[]), "skip symlinked tracked file");
-        assert!(!scanned.contains(&"actions/foo/scripts/main.js".to_owned()));
+        let error = must_fail(
+            repository_files(&root, &[]),
+            "external symlinked tracked parent must fail preflight",
+        );
+        assert!(
+            error.contains("escapes the repository"),
+            "unexpected error: {error}"
+        );
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);

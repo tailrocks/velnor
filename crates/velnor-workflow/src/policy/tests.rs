@@ -8,6 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+
 use super::*;
 use crate::{PolicyJobSpec, ProjectConfig, RunnerMode};
 
@@ -39,6 +42,24 @@ fn temporary_directory(name: &str) -> PathBuf {
     root
 }
 
+#[cfg(unix)]
+fn restore_writable_tree(root: &Path) {
+    let metadata = must(fs::symlink_metadata(root), "inspect tree entry");
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    if metadata.is_dir() {
+        for entry in must(fs::read_dir(root), "read tree directory") {
+            let entry = must(entry, "read tree entry");
+            restore_writable_tree(&entry.path());
+        }
+        must(
+            fs::set_permissions(root, fs::Permissions::from_mode(0o755)),
+            "restore directory permissions",
+        );
+    }
+}
+
 fn write(path: &Path, content: &str) {
     if let Some(parent) = path.parent() {
         must(fs::create_dir_all(parent), "create parent directory");
@@ -59,7 +80,6 @@ fn fake_velnor_workflow(directory: &Path, revision: &str, closure: &str) -> Path
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake velnor-workflow executable",
@@ -81,7 +101,6 @@ fn fake_legacy_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake legacy velnor-workflow executable",
@@ -351,6 +370,51 @@ fn generation_config(revision: &str) -> String {
     )
 }
 
+fn ownership_state_with_outputs(outputs: &[&str]) -> String {
+    let mut state = String::from(
+        "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t66\n[outputs]\n",
+    );
+    for output in outputs {
+        state.push_str(output);
+        state.push_str("\t0000000000000000\n");
+    }
+    state
+}
+
+#[cfg(unix)]
+fn removed_static_row_fixture(name: &str) -> (PathBuf, String, String) {
+    let root = temporary_directory(name);
+    git_ok(&root, &["init", "-q", "-b", "main"]);
+    write(
+        &root.join(GENERATION_CONFIG),
+        "schema = 1\n\n[workflow]\nfiles = [\"ci-policy.yml\"]\n\n[[static_files]]\nfile = \".github/workflows/ci-static.yml\"\nsource = \".github-gen/ci-static.yml\"\n",
+    );
+    write(
+        &root.join(".github-gen/ci-static.yml"),
+        "name: Static workflow\non: workflow_dispatch\njobs: {}\n",
+    );
+    write(
+        &root.join(".github/workflows/ci-static.yml"),
+        "name: Former generated workflow\non: workflow_dispatch\njobs: {}\n",
+    );
+    write(
+        &root.join(".github/ci/.github-actions-generator-state"),
+        &ownership_state_with_outputs(&[".github/workflows/ci-static.yml"]),
+    );
+    let base = commit(&root, "base owns static workflow");
+
+    write(
+        &root.join(GENERATION_CONFIG),
+        "schema = 1\n\n[workflow]\nfiles = [\"ci-policy.yml\"]\n\n[policy]\nexclude_workflows = [\"ci-ſtatic.yml\"]\n",
+    );
+    write(
+        &root.join(".github/ci/.github-actions-generator-state"),
+        &ownership_state_with_outputs(&[]),
+    );
+    let head = commit(&root, "remove static row and add obsolete exclusion");
+    (root, base, head)
+}
+
 /// History: `validator` (the base branch's pin) → `pin` → `head`. The pin
 /// descends from the validator, so the chain advances.
 #[test]
@@ -497,7 +561,6 @@ fn fake_pin_renderer(directory: &Path, revision: &str, closure: &str) -> PathBuf
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake pinned renderer executable",
@@ -564,7 +627,6 @@ fn checkout_arm_self_fetches_the_pin_in_a_shallow_clone() {
             &shallow,
             &pin,
             "main",
-            &BTreeSet::new(),
             &lookup,
             &checkout_source(&shallow),
         ),
@@ -581,6 +643,28 @@ fn checkout_arm_self_fetches_the_pin_in_a_shallow_clone() {
     let _ = fs::remove_dir_all(origin);
     let _ = fs::remove_dir_all(shallow);
     let _ = fs::remove_dir_all(bin);
+}
+
+#[cfg(unix)]
+#[test]
+fn removed_static_row_with_obsolete_exclusion_is_rejected_before_rendering() {
+    let (root, base, head) = removed_static_row_fixture("removed-static-exclusion");
+    let candidate_config = must(
+        fs::read_to_string(root.join(GENERATION_CONFIG)),
+        "read candidate config",
+    );
+    assert!(!candidate_config.contains("[[static_files]]"));
+    assert!(candidate_config.contains("exclude_workflows = [\"ci-ſtatic.yml\"]"));
+    assert!(root.join(".github/workflows/ci-static.yml").is_file());
+    let error = must_fail(
+        DeclaredTree::read(&root),
+        "reject obsolete exclusion before rendering",
+    );
+    let message = error.to_string();
+    assert!(message.contains("exclude_workflows"), "{message}");
+    assert_eq!(git_ok(&root, &["rev-parse", "HEAD"]), head);
+    assert_ne!(base, head);
+    let _ = fs::remove_dir_all(root);
 }
 
 /// A pin the remote cannot provide fails closed naming the pin, the checkout's
@@ -1318,6 +1402,295 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     let _ = fs::remove_dir_all(ungated);
 }
 
+#[test]
+fn static_and_policy_workflows_are_audited_with_all_other_workflows() {
+    let root = velnor_tree("workflow-audit", &gated_trusted_job());
+    let generation_config = root.join(GENERATION_CONFIG);
+    let base = must(
+        fs::read_to_string(&generation_config),
+        "read generation config",
+    );
+    write(
+        &generation_config,
+        &format!(
+            "{base}\n\n[[static_files]]\nfile = \".github/workflows/ci-static.yml\"\nsource = \".github-gen/ci-static.yml\"\n"
+        ),
+    );
+    let unpinned = "name: Workflow\non:\n  workflow_dispatch:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n";
+    write(&root.join(".github-gen/ci-static.yml"), unpinned);
+    write(&root.join(".github/workflows/ci-static.yml"), unpinned);
+    write(
+        &root.join(".github/workflows/ci-old.yml"),
+        "name: Old workflow\non:\n  pull_request_target:\n    types: [opened]\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n",
+    );
+    write(
+        &root.join(".github/workflows/ci-invalid.yml"),
+        "name: Invalid workflow\non: pull_request_target\non: workflow_dispatch\n",
+    );
+    write(
+        &root.join(POLICY_ENTRYPOINT),
+        "name: Policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  policy:\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n    steps:\n      - uses: actions/checkout@v4\n",
+    );
+
+    let audit = must(audit_workflows(&root), "audit workflow tree");
+    for workflow in ["ci-static.yml", "ci-policy.yml"] {
+        assert!(
+            audit.actions.iter().any(|finding| {
+                finding.contains(workflow) && finding.contains("not a full SHA pin")
+            }),
+            "semantic audit must include {workflow}: {:?}",
+            audit.actions
+        );
+    }
+    assert_eq!(
+        audit.pull_request_target.len(),
+        1,
+        "{:?}",
+        audit.pull_request_target
+    );
+    assert!(
+        audit
+            .pull_request_target
+            .iter()
+            .any(|finding| finding.contains("ci-old.yml")),
+        "all workflows must be checked for pull_request_target: {:?}",
+        audit.pull_request_target
+    );
+    assert!(
+        audit.structure.iter().any(|finding| {
+            finding.contains("ci-invalid.yml") && finding.contains("parse workflow")
+        }),
+        "an invalid workflow must fail closed: {:?}",
+        audit.structure
+    );
+    assert!(
+        !audit
+            .pull_request_target
+            .iter()
+            .any(|finding| finding.contains("ci-policy.yml")),
+        "the policy entrypoint alone is admitted to pull_request_target"
+    );
+    assert!(
+        audit
+            .actions
+            .iter()
+            .any(|finding| finding.contains("ci-old.yml") && finding.contains("not a full SHA pin")),
+        "all workflows must receive action-pin checks: {:?}",
+        audit.actions
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn workflow_audit_rejects_symlinked_roots_and_files() {
+    use std::os::unix::fs::symlink;
+
+    let root = velnor_tree("workflow-audit-symlink-github", &gated_trusted_job());
+    let target = temporary_directory("workflow-audit-symlink-github-target");
+    must(
+        fs::create_dir_all(target.join("workflows")),
+        "create symlinked workflow target",
+    );
+    must(
+        fs::remove_dir_all(root.join(".github")),
+        "remove workflow root",
+    );
+    must(
+        symlink(&target, root.join(".github")),
+        "create symlinked workflow root",
+    );
+    let error = must_fail(
+        audit_workflows(&root),
+        "audit must reject a symlinked .github root",
+    )
+    .to_string();
+    assert!(error.contains("symlinked workflow root"), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(target);
+
+    let root = velnor_tree("workflow-audit-symlink-workflows", &gated_trusted_job());
+    let target = temporary_directory("workflow-audit-symlink-workflows-target");
+    must(
+        fs::remove_dir_all(root.join(".github/workflows")),
+        "remove workflow directory",
+    );
+    must(
+        symlink(&target, root.join(".github/workflows")),
+        "create symlinked workflow directory",
+    );
+    let error = must_fail(
+        audit_workflows(&root),
+        "audit must reject a symlinked workflows directory",
+    )
+    .to_string();
+    assert!(error.contains("symlinked workflow directory"), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(target);
+
+    let root = velnor_tree("workflow-audit-symlink-file", &gated_trusted_job());
+    let target = temporary_directory("workflow-audit-symlink-file-target");
+    write(
+        &target.join("external.yml"),
+        "name: External\non:\n  workflow_dispatch:\n",
+    );
+    must(
+        symlink(
+            target.join("external.yml"),
+            root.join(".github/workflows/aaa-external.yml"),
+        ),
+        "create symlinked workflow file",
+    );
+    let error = must_fail(
+        audit_workflows(&root),
+        "audit must reject a symlinked workflow file",
+    )
+    .to_string();
+    assert!(error.contains("symlink"), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(target);
+}
+
+#[cfg(unix)]
+#[test]
+fn declared_pin_rejects_a_symlinked_policy_entrypoint() {
+    use std::os::unix::fs::symlink;
+
+    let root = velnor_tree("declared-pin-symlink-entrypoint", &gated_trusted_job());
+    let target = temporary_directory("declared-pin-symlink-entrypoint-target");
+    write(&target.join("ci-policy.yml"), &hosted_entrypoint(PIN_B));
+    must(
+        fs::remove_file(root.join(POLICY_ENTRYPOINT)),
+        "remove policy entrypoint",
+    );
+    must(
+        symlink(target.join("ci-policy.yml"), root.join(POLICY_ENTRYPOINT)),
+        "create symlinked policy entrypoint",
+    );
+    let error = must_fail(
+        DeclaredTree::read(&root),
+        "declared pin must reject a symlinked policy entrypoint",
+    )
+    .to_string();
+    assert!(error.contains("symlink"), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(target);
+}
+
+#[cfg(unix)]
+#[test]
+fn policy_rejects_a_symlinked_or_special_generation_config_before_reading_it() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    let root = velnor_tree("policy-generation-config-symlink", &gated_trusted_job());
+    let target = temporary_directory("policy-generation-config-symlink-target");
+    write(&target.join("velnor-workflow.toml"), "this is not TOML\n");
+    let config_path = root.join(GENERATION_CONFIG);
+    must(fs::remove_file(&config_path), "remove generation config");
+    must(
+        symlink(target.join("velnor-workflow.toml"), &config_path),
+        "create symlinked generation config",
+    );
+    let error = must_fail(
+        DeclaredTree::read(&root),
+        "policy must reject an escaping generation-config symlink",
+    )
+    .to_string();
+    assert!(error.contains("escapes the repository"), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(target);
+
+    let root = PathBuf::from("/tmp").join(format!(
+        "vw-pgen-special-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    must(
+        fs::create_dir_all(root.join(".github-gen")),
+        "create short generation-config root",
+    );
+    let config_path = root.join(GENERATION_CONFIG);
+    let listener = must(
+        UnixListener::bind(&config_path),
+        "create special generation config",
+    );
+    let error = must_fail(
+        DeclaredTree::read(&root),
+        "policy must reject a special generation config",
+    )
+    .to_string();
+    assert!(error.contains("special file"), "{error}");
+    drop(listener);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn evaluate_rejects_a_symlinked_checkout_before_policy_reads() {
+    use std::os::unix::fs::symlink;
+
+    let target = velnor_tree("evaluate-symlinked-root-target", &gated_trusted_job());
+    let link = temporary_directory("evaluate-symlinked-root-link");
+    must(fs::remove_dir_all(&link), "remove link placeholder");
+    must(symlink(&target, &link), "create symlinked checkout root");
+    let options = PolicyOptions {
+        root: link.clone(),
+        head_sha: None,
+        base_sha: None,
+        base_revision: PIN_A.to_owned(),
+        ruleset_contexts: None,
+        build_pin: false,
+        candidate_manifest: None,
+    };
+    let error = must_fail(
+        evaluate(&options),
+        "policy must reject a symlinked checkout before config discovery",
+    )
+    .to_string();
+    assert!(error.contains("symlinked repository root"), "{error}");
+    must(fs::remove_file(&link), "remove symlinked checkout root");
+    let _ = fs::remove_dir_all(target);
+}
+
+#[test]
+fn policy_preflight_rejects_a_missing_or_aliased_policy_entrypoint() {
+    let root = velnor_tree("policy-entrypoint-preflight", &gated_trusted_job());
+    let config_path = root.join(GENERATION_CONFIG);
+    let base = must(
+        fs::read_to_string(&config_path),
+        "read generation config for policy preflight",
+    );
+
+    write(
+        &config_path,
+        &base.replace("[workflow]\n", "[workflow]\nfiles = [\"ci-pr.yml\"]\n"),
+    );
+    let error = must_fail(
+        DeclaredTree::read(&root),
+        "policy preflight must reject an omitted entrypoint",
+    )
+    .to_string();
+    assert!(error.contains("must include `ci-policy.yml`"), "{error}");
+
+    write(
+        &config_path,
+        &format!(
+            "{base}\n[[static_files]]\nfile = \".github/workflowſ/ci-policy.yml\"\nsource = \".github-gen/policy.yml\"\n"
+        ),
+    );
+    let error = must_fail(
+        DeclaredTree::read(&root),
+        "policy preflight must reject a static alias of its entrypoint",
+    )
+    .to_string();
+    assert!(error.contains("generator owns this path"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
 /// The dual-lane Velnor gate admits a lane-selecting dispatch on any ref —
 /// dispatch authorship is write-authorized — and keeps admitting the older
 /// ref-gated dispatch shapes for trees rendered before lane admission.
@@ -1508,7 +1881,6 @@ fn fake_candidate_renderer(directory: &Path, closure: &str, revision: &str) -> P
         "write fake candidate renderer",
     );
     {
-        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake candidate renderer executable",
@@ -1524,7 +1896,7 @@ fn fake_mutating_candidate_renderer(directory: &Path, closure: &str, revision: &
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\nprintf 'tampered\\n' > \"$1/crates/velnor-workflow/src/lib.rs\"\n"
+                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\nprintf 'tampered\\n' > \"$1/crates/velnor-workflow/src/lib.rs\" 2>/dev/null || true\n"
             ),
         ),
         "write mutating fake candidate renderer",
@@ -1551,15 +1923,13 @@ fn fake_environment_observing_candidate_renderer(
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then\n  if [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; fi\n  echo {closure}; exit 0\nfi\nif [ \"${{HOME+x}}\" = x ] || [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" = x ]; then touch \"{}\"; exit 17; fi\ncommand -v git >/dev/null 2>&1 || exit 17\ncp -r \"$1/.\" \"$3/\"\n",
-                sentinel.display(),
+                "#!/bin/sh\nsafe_env() {{ [ \"${{HOME-}}\" = /tmp ] && [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" != x ]; }}\nif [ \"$1\" = --revision ]; then safe_env || echo invalid; safe_env && echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then safe_env || echo invalid; safe_env && echo {closure}; exit 0; fi\nsafe_env || {{ touch \"{}\"; exit 17; }}\ncp -R \"$1/.github\" \"$3/\"\n",
                 sentinel.display(),
             ),
         ),
         "write environment-observing candidate renderer",
     );
     {
-        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark environment-observing candidate renderer executable",
@@ -1680,29 +2050,112 @@ fn candidate_manifest_for_with_build_revision(
     manifest
 }
 
-/// A fake candidate renderer that records every `--closure` probe in
-/// `sentinel`, so tests can prove the binary was never executed at all.
+/// A fake candidate renderer whose matching closure and tree output would be
+/// accepted if the digest or manifest gate mistakenly allowed execution.
 #[cfg(unix)]
 fn fake_probed_candidate_renderer(directory: &Path, closure: &str, sentinel: &Path) -> PathBuf {
     let binary = directory.join("candidate");
+    let sentinel = sentinel.display();
     must(
         fs::write(
             &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then touch \"{}\"; echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n",
-                sentinel.display()
-            ),
+            format!("#!/bin/sh\ntouch '{sentinel}'\nif [ \"$1\" = --revision ]; then echo {}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -R \"$1/.\" \"$3/\"\n", crate::GENERATOR_REVISION),
         ),
         "write fake probed candidate renderer",
     );
     {
-        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake probed candidate renderer executable",
         );
     }
     binary
+}
+
+#[cfg(unix)]
+fn fake_absolute_path_probe_candidate(
+    directory: &Path,
+    revision: &str,
+    closure: &str,
+    protected_path: &Path,
+) -> PathBuf {
+    let binary = directory.join("candidate-absolute-path-probe");
+    let protected = protected_path.display();
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\n/bin/sleep 60 &\nprotected='{protected}'\npipe_probe() {{\n  /usr/bin/dd if=/dev/zero bs=1048576 count=16 of=\"/proc/$PPID/fd/1\" 2>/dev/null || true\n  /usr/bin/dd if=/dev/zero bs=1048576 count=16 of=\"/proc/$PPID/fd/2\" 2>/dev/null || true\n}}\nprobe() {{\n  if [ -r \"$protected\" ]; then cat \"$protected\"; else printf '%s\\n' \"$2\"; fi\n  mkdir -p \"$(dirname \"$protected\")\" 2>/dev/null || true\n  printf '%s\\n' 'candidate mutation' > \"$protected\" 2>/dev/null || true\n}}\nif [ \"$1\" = --revision ]; then pipe_probe; probe unused {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then pipe_probe; probe unused {closure}; exit 0; fi\nroot=\"$1\"; shift\n[ \"$1\" = --output ] || exit 3\noutput=\"$2\"\nmkdir -p \"$output\"\npipe_probe\nif [ -r \"$protected\" ]; then cat \"$protected\" > \"$output/leaked-secret.txt\"; fi\nmkdir -p \"$(dirname \"$protected\")\" 2>/dev/null || true\nprintf '%s\\n' 'candidate mutation' > \"$protected\" 2>/dev/null || true\ncp -R \"$root/.github\" \"$output/\"\n"
+            ),
+        ),
+        "write absolute-path probing candidate",
+    );
+    must(
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+        "mark absolute-path candidate executable",
+    );
+    binary
+}
+
+#[cfg(unix)]
+fn fake_candidate_with_late_mutating_descendant(
+    directory: &Path,
+    revision: &str,
+    closure: &str,
+) -> PathBuf {
+    let binary = directory.join("candidate-late-descendant");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = --revision ]; then echo {revision}; exit 0; fi
+if [ "$1" = --closure ]; then echo {closure}; exit 0; fi
+root="$1"; shift
+[ "$1" = --output ] || exit 3
+output="$2"
+mkdir -p "$output"
+/usr/bin/setsid /bin/sh -c 'parent=$1; output=$2; while kill -0 "$parent" 2>/dev/null; do /bin/sleep 0.01; done; /bin/sleep 0.25; while :; do printf late > "$output/late-file"; done' candidate-descendant "$$" "$output" >/dev/null 2>&1 &
+cp -R "$root/.github" "$output/"
+"#
+            ),
+        ),
+        "write candidate with a late-mutating descendant",
+    );
+    must(
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+        "mark late-mutating candidate executable",
+    );
+    binary
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_descendant_cannot_mutate_render_after_parent_exits() {
+    let (root, head) = closure_fixture("candidate-late-descendant");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-late-descendant-scratch");
+    let binary = fake_candidate_with_late_mutating_descendant(&root, &head, &wanted);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    assert_eq!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
+            "candidate with a late descendant reproduces the tree",
+        )
+        .as_deref(),
+        Some(wanted.as_str())
+    );
+    assert!(
+        !scratch.join("late-file").exists(),
+        "a detached candidate descendant must be killed before output collection"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
 }
 
 #[cfg(unix)]
@@ -1718,10 +2171,9 @@ fn bound_candidate_matching_head_tree_is_accepted() {
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     assert_eq!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             "bound candidate reproduces the tree",
         )
         .as_deref(),
@@ -1754,10 +2206,9 @@ fn candidate_render_cannot_mutate_authoritative_checkout() {
     );
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
     let scratch = temporary_directory("candidate-immutable-source-scratch");
-    let excludes = std::collections::BTreeSet::new();
     assert_eq!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             "candidate mutation is isolated from authoritative checkout",
         )
         .as_deref(),
@@ -1800,10 +2251,9 @@ fn squash_merge_with_closure_clean_main_accepts_pr_candidate() {
         &merge,
     );
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     assert_eq!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             "bound squash candidate renders the merge tree",
         )
         .as_deref(),
@@ -1866,10 +2316,9 @@ fn shallow_squash_merge_fetches_pr_head_before_candidate_closure() {
     );
     let lookup = lookup_with_manifest(Some(binary), None, artifacts.join("install"), manifest);
     let scratch = temporary_directory("candidate-squash-shallow-scratch");
-    let excludes = std::collections::BTreeSet::new();
     assert_eq!(
         must(
-            render_with_candidate(&shallow, &shallow, &scratch, "main", &excludes, &lookup,),
+            render_with_candidate(&shallow, &shallow, &scratch, "main", &lookup,),
             "fetched PR-head candidate renders the shallow merge checkout",
         )
         .as_deref(),
@@ -1907,9 +2356,8 @@ fn squash_merge_with_closure_changed_main_fails_before_candidate_execution() {
         &pr_head,
     );
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     let error = must_fail(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        render_with_candidate(&root, &root, &scratch, "main", &lookup),
         "a PR-head candidate cannot render a merge with changed closure inputs",
     )
     .to_string();
@@ -1948,9 +2396,8 @@ fn candidate_binary_revision_must_match_manifest_build_revision() {
         PIN_A,
     );
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     assert!(must(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        render_with_candidate(&root, &root, &scratch, "main", &lookup),
         "build revision mismatch does not prove a candidate",
     )
     .is_none());
@@ -1976,18 +2423,65 @@ fn candidate_renderer_receives_no_ambient_environment() {
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     assert_eq!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             "hermetic candidate reproduces the tree",
         )
         .as_deref(),
         Some(wanted.as_str())
     );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_probe_and_render_cannot_read_or_mutate_absolute_checkout_paths() {
+    let (root, head) = closure_fixture("candidate-absolute-path-sandbox");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let protected = root.join("validator-only-secret.txt");
+    let secret = b"validator-only-secret\n";
+    must(
+        fs::write(&protected, secret),
+        "write privileged checkout marker",
+    );
+    let scratch = temporary_directory("candidate-absolute-path-scratch");
+    let binary = fake_absolute_path_probe_candidate(&root, &head, &wanted, &protected);
+    assert_eq!(
+        must(
+            binary_revision(&binary),
+            "isolated candidate revision probe"
+        ),
+        head
+    );
+    assert_eq!(
+        must(binary_closure(&binary), "isolated candidate closure probe"),
+        wanted
+    );
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    assert_eq!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
+            "isolated candidate reproduces the tree",
+        )
+        .as_deref(),
+        Some(wanted.as_str()),
+        "candidate metadata probes cannot read the host secret"
+    );
+    assert_eq!(
+        must(fs::read(&protected), "read privileged checkout marker"),
+        secret,
+        "candidate metadata and render cannot mutate an absolute checkout path"
+    );
     assert!(
-        !sentinel.exists(),
-        "candidate closure and render probes must not inherit HOME or Actions credentials"
+        !scratch.join("leaked-secret.txt").exists(),
+        "candidate render cannot read the host secret through an absolute path"
     );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
@@ -2002,7 +2496,7 @@ fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-lying-scratch");
-    let sentinel = root.join("closure-probed");
+    let sentinel = root.join("candidate-executed");
     let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
     // Bind the manifest to *other* bytes, so the binary echoes the wanted
     // closure but its digest misses.
@@ -2010,10 +2504,9 @@ fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
     must(fs::write(&other, "different bytes"), "write decoy bytes");
     let manifest = candidate_manifest_for(&root, "candidate-manifest.json", &other, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             "digest mismatch never errors, it simply does not prove",
         )
         .is_none(),
@@ -2021,10 +2514,209 @@ fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
     );
     assert!(
         !sentinel.exists(),
-        "the digest gate fires before any execution, not even `--closure`"
+        "digest mismatch must precede candidate probes"
     );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_snapshot_preflight_rejects_external_dangling_and_looping_links() {
+    use std::os::unix::fs::symlink;
+
+    let outside = temporary_directory("snapshot-link-outside");
+    write(&outside.join("secret.txt"), "secret\n");
+    let external_root = temporary_directory("snapshot-link-external");
+    must(
+        symlink(outside.join("secret.txt"), external_root.join("leak")),
+        "create external symlink",
+    );
+    let error = must_fail(
+        validate_and_seal_snapshot(&external_root),
+        "external absolute symlink must fail",
+    )
+    .to_string();
+    assert!(error.contains("escapes the immutable snapshot"), "{error}");
+
+    let dangling_root = temporary_directory("snapshot-link-dangling");
+    must(
+        symlink("missing.txt", dangling_root.join("dangling")),
+        "create dangling symlink",
+    );
+    let error = must_fail(
+        validate_and_seal_snapshot(&dangling_root),
+        "dangling symlink must fail",
+    )
+    .to_string();
+    assert!(
+        error.contains("resolve candidate source symlink"),
+        "{error}"
+    );
+
+    let loop_root = temporary_directory("snapshot-link-loop");
+    must(
+        symlink("second", loop_root.join("first")),
+        "create first loop symlink",
+    );
+    must(
+        symlink("first", loop_root.join("second")),
+        "create second loop symlink",
+    );
+    let error = must_fail(
+        validate_and_seal_snapshot(&loop_root),
+        "looping symlink must fail",
+    )
+    .to_string();
+    assert!(
+        error.contains("resolve candidate source symlink"),
+        "{error}"
+    );
+
+    for root in [external_root, dangling_root, loop_root, outside] {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn immutable_snapshot_rejects_a_symlink_destination() {
+    use std::os::unix::fs::symlink;
+
+    let (root, head) = closure_fixture("snapshot-symlink-destination");
+    let parent = temporary_directory("snapshot-symlink-destination-parent");
+    let target = temporary_directory("snapshot-symlink-destination-target");
+    let destination = parent.join("source");
+    must(
+        symlink(&target, &destination),
+        "create symlink snapshot destination",
+    );
+    let error = must_fail(
+        immutable_git_snapshot(&root, &head, &destination),
+        "snapshot extraction must reject a symlink destination",
+    )
+    .to_string();
+    assert!(error.contains("already exists"), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(parent);
+    let _ = fs::remove_dir_all(target);
+}
+
+#[cfg(unix)]
+#[test]
+fn immutable_snapshot_is_bound_to_the_requested_revision() {
+    let (root, first) = closure_fixture("snapshot-revision-binding");
+    write(
+        &root.join("crates/velnor-workflow/src/lib.rs"),
+        "pub fn f() { println!(\"new\"); }\n",
+    );
+    write(&root.join("new-at-head.txt"), "new\n");
+    let second = commit(&root, "second fixture revision");
+    assert_ne!(first, second);
+
+    let snapshot_parent = temporary_directory("snapshot-revision-binding-output");
+    let snapshot = snapshot_parent.join("snapshot");
+    must(
+        immutable_git_snapshot(&root, &first, &snapshot),
+        "materialize the requested historical revision",
+    );
+    assert_eq!(
+        must(
+            fs::read_to_string(snapshot.join("crates/velnor-workflow/src/lib.rs")),
+            "read historical source",
+        ),
+        "pub fn f() {}\n"
+    );
+    assert!(
+        !snapshot.join("new-at-head.txt").exists(),
+        "snapshot must not silently archive the mutable checkout HEAD"
+    );
+    restore_writable_tree(&snapshot);
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(snapshot_parent);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_snapshot_preflight_allows_confined_directory_links_and_seals_tree() {
+    use std::os::unix::fs::symlink;
+
+    let root = temporary_directory("snapshot-confined-directory-link");
+    write(&root.join("target/config.toml"), "key = true\n");
+    write(&root.join("target/readme.txt"), "read me\n");
+    must(
+        symlink("target", root.join("alias")),
+        "create confined directory symlink",
+    );
+    must(
+        symlink("target/readme.txt", root.join("readme-link")),
+        "create confined file symlink",
+    );
+    must(
+        validate_and_seal_snapshot(&root),
+        "confined directory symlink is safe",
+    );
+    assert!(must(fs::metadata(&root), "inspect sealed test root")
+        .permissions()
+        .readonly());
+    assert!(must(
+        fs::metadata(root.join("target/config.toml")),
+        "inspect sealed test file",
+    )
+    .permissions()
+    .readonly());
+    cleanup_snapshot(&root);
+    assert!(
+        !root.exists(),
+        "sealed snapshot cleanup must remove the tree"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_snapshot_preflight_rejects_special_files() {
+    use std::os::unix::net::UnixListener;
+
+    let root = PathBuf::from("/tmp").join(format!(
+        "vw-policy-special-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    must(
+        fs::create_dir_all(&root),
+        "create short-path special-file root",
+    );
+    let listener = must(
+        UnixListener::bind(root.join("socket")),
+        "create socket special file",
+    );
+    let error = must_fail(validate_and_seal_snapshot(&root), "special files must fail").to_string();
+    assert!(error.contains("non-regular entry"), "{error}");
+    drop(listener);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_snapshot_preflight_rejects_symlinked_policy_roots() {
+    use std::os::unix::fs::symlink;
+
+    let root = temporary_directory("snapshot-policy-root-link");
+    write(&root.join("source/ci.yml"), "name: policy\n");
+    must(
+        symlink("source", root.join(".github")),
+        "create linked GitHub root",
+    );
+    let error = must_fail(
+        validate_and_seal_snapshot(&root),
+        "symlinked policy root must fail",
+    )
+    .to_string();
+    assert!(error.contains("symlinked policy path: .github"), "{error}");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(unix)]
@@ -2042,9 +2734,8 @@ fn candidate_manifest_for_another_tree_is_rejected() {
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     let error = must_fail(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        render_with_candidate(&root, &root, &scratch, "main", &lookup),
         "manifest for another tree",
     )
     .to_string();
@@ -2067,18 +2758,13 @@ fn unbound_env_candidate_is_rejected_without_manifest() {
     let sentinel = root.join("closure-probed");
     let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
     let lookup = candidate_lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             "missing manifest never errors, it disables the env slot",
         )
         .is_none(),
         "an env-slot binary without a manifest is never the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "an unbound env-slot binary is skipped, never executed"
     );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
@@ -2126,9 +2812,8 @@ fn malformed_candidate_manifest_is_rejected() {
         must(fs::write(&manifest, body), "write malformed manifest");
         let lookup =
             lookup_with_manifest(Some(binary.clone()), None, root.join("install"), manifest);
-        let excludes = std::collections::BTreeSet::new();
         let error = must_fail(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             &format!("malformed manifest {name}"),
         )
         .to_string();
@@ -2250,10 +2935,9 @@ fn candidate_render_rejects_a_binary_claiming_another_closure() {
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &lookup),
             "foreign closure never errors, it simply does not prove",
         )
         .is_none(),
@@ -2269,9 +2953,8 @@ fn candidate_render_is_unavailable_without_git_history() {
     let scratch = temporary_directory("candidate-nogit-scratch");
     let binary = root.join("missing");
     let lookup = lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
     assert!(must(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        render_with_candidate(&root, &root, &scratch, "main", &lookup),
         "no checkout, no candidate",
     )
     .is_none());
@@ -2470,31 +3153,6 @@ fn tree_comparison_names_every_drift_class() {
     );
 }
 
-#[test]
-fn exclude_hatch_covers_top_level_workflows_only() {
-    let excludes = BTreeSet::from(["hand.yml".to_owned()]);
-    assert!(
-        is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &excludes),
-        "a named top-level workflow is excluded"
-    );
-    assert!(
-        !is_excluded_workflow(Path::new(".github/workflows/other.yml"), &excludes),
-        "an unnamed workflow is not excluded"
-    );
-    assert!(
-        !is_excluded_workflow(Path::new(".github/workflows/nested/hand.yml"), &excludes),
-        "a nested path never matches the hatch"
-    );
-    assert!(
-        !is_excluded_workflow(Path::new(".github/notes.txt"), &excludes),
-        "a non-workflow path never matches the hatch"
-    );
-    assert!(
-        !is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &BTreeSet::new()),
-        "no excludes means no hatch"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn tree_collection_never_follows_symlinks() {
@@ -2551,12 +3209,120 @@ fn tree_collection_never_follows_symlinks() {
     let _ = fs::remove_dir_all(outside);
 }
 
+#[cfg(unix)]
+#[test]
+fn stat_rejects_a_symlinked_parent_before_reading_the_child() {
+    let root = temporary_directory("tree-parent-symlink");
+    let outside = temporary_directory("tree-parent-symlink-outside");
+    write(&outside.join("child.txt"), "external bytes\n");
+    link(&outside, &root.join("link"));
+
+    assert_eq!(
+        must(
+            stat_tree_entry(&root.join("link/child.txt")),
+            "stat a child below a symlink"
+        ),
+        None,
+        "a symlinked parent is treated as absent; its target bytes never enter the comparison"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
+
+#[cfg(unix)]
+fn link(target: &Path, link: &Path) {
+    must(
+        std::os::unix::fs::symlink(target, link),
+        "create test symlink",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn confined_render_symlink_compares_clean() {
+    let rendered = temporary_directory("render-symlink-confined");
+    let tree = temporary_directory("render-symlink-confined-tree");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    write(&tree.join(".github/AGENTS.md"), "agents\n");
+    link(Path::new("AGENTS.md"), &rendered.join(".github/CLAUDE.md"));
+    link(Path::new("AGENTS.md"), &tree.join(".github/CLAUDE.md"));
+    let differences = must(
+        compare_rendered_tree(&rendered, &tree),
+        "a confined in-render symlink compares by target",
+    );
+    assert!(
+        differences.is_empty(),
+        "confined symlink must compare clean: {differences:?}"
+    );
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn render_symlink_escaping_its_root_is_an_error() {
+    let rendered = temporary_directory("render-symlink-escape");
+    let outside = temporary_directory("render-symlink-escape-outside");
+    let secret = outside.join("secret.txt");
+    write(&secret, "outside\n");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    link(&secret, &rendered.join(".github/CLAUDE.md"));
+    let tree = temporary_directory("render-symlink-escape-tree");
+    let error = must_fail(
+        compare_rendered_tree(&rendered, &tree),
+        "a render symlink outside its root",
+    )
+    .to_string();
+    assert!(error.contains("escapes its root"), "{error}");
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(outside);
+    let _ = fs::remove_dir_all(tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_render_symlink_is_an_error() {
+    let rendered = temporary_directory("render-symlink-dangling");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    link(Path::new("MISSING.md"), &rendered.join(".github/CLAUDE.md"));
+    let tree = temporary_directory("render-symlink-dangling-tree");
+    let error = must_fail(
+        compare_rendered_tree(&rendered, &tree),
+        "a dangling render symlink",
+    )
+    .to_string();
+    assert!(error.contains("dangles"), "{error}");
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn render_symlink_to_directory_is_an_error() {
+    let rendered = temporary_directory("render-symlink-directory");
+    write(&rendered.join(".github/AGENTS.md"), "agents\n");
+    must(
+        fs::create_dir_all(rendered.join(".github/nested")),
+        "create in-render directory",
+    );
+    link(Path::new("nested"), &rendered.join(".github/CLAUDE.md"));
+    let tree = temporary_directory("render-symlink-directory-tree");
+    let error = must_fail(
+        compare_rendered_tree(&rendered, &tree),
+        "a render symlink to a directory",
+    )
+    .to_string();
+    assert!(error.contains("does not name a file"), "{error}");
+    let _ = fs::remove_dir_all(rendered);
+    let _ = fs::remove_dir_all(tree);
+}
+
 fn declared_tree(required_checks: &[&str]) -> DeclaredTree {
     DeclaredTree {
         pin: None,
         repository: None,
         default_branch: "main".to_owned(),
-        excludes: BTreeSet::new(),
         velnor_policy: VelnorPolicyContract::default(),
         required_checks: required_checks
             .iter()
