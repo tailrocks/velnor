@@ -26319,6 +26319,7 @@ fi"#
                     "INPUT_ACTION_PATH".into(),
                     "${{ github.action_path }}".into(),
                 ),
+                ("RUNS_ENV".into(), "action-value".into()),
             ],
             entrypoint: Some("/entrypoint.sh".into()),
             args: vec!["arg1".into()],
@@ -26368,6 +26369,7 @@ fi"#
         assert!(calls[2]
             .1
             .contains(&"INPUT_ACTION_PATH=/__a/_actions/acme_docker/v1".into()));
+        assert!(calls[2].1.contains(&"RUNS_ENV=action-value".into()));
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/github/file_commands/docker1_output".into()));

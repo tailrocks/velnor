@@ -80,6 +80,11 @@ pub struct ActionRuns {
     pub post_entrypoint: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment declared by the Docker action itself (`runs.env`).
+    /// Keep it separate from workflow step env until invocation construction,
+    /// where the latter can retain the runner's override precedence.
+    #[serde(default, deserialize_with = "deserialize_string_map")]
+    pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub steps: Vec<CompositeActionStep>,
 }
@@ -779,6 +784,13 @@ impl ResolvedAction {
             ("GITHUB_ACTION_REF".to_string(), self.plan.git_ref.clone()),
         ];
         env.extend(
+            self.metadata
+                .runs
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        env.extend(
             self.plan
                 .env
                 .iter()
@@ -800,16 +812,16 @@ impl ResolvedAction {
             ActionImageReference::DockerImage(image) => (image.as_str().to_owned(), None, None),
             ActionImageReference::Dockerfile(path) => {
                 let dockerfile_host = resolve_metadata_action_path(&self.plan.action_dir, &path)?;
+                let build_context_host = dockerfile_host
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("Dockerfile path has no parent directory"))?
+                    .to_path_buf();
                 let tag = docker_action_tag(
                     &self.plan.repository,
                     &self.plan.git_ref,
                     self.plan.source_path.as_deref(),
                 );
-                (
-                    tag,
-                    Some(self.plan.repository_dir.clone()),
-                    Some(dockerfile_host),
-                )
+                (tag, Some(build_context_host), Some(dockerfile_host))
             }
         };
         let entrypoint = self
@@ -3707,7 +3719,7 @@ runs:
     }
 
     #[test]
-    fn dockerfile_action_uses_repository_root_context_for_nested_copy() {
+    fn dockerfile_action_uses_dockerfile_parent_context_and_preserves_runs_env() {
         let root = std::env::temp_dir().join(format!(
             "velnor-docker-action-context-{}",
             std::process::id()
@@ -3715,13 +3727,14 @@ runs:
         let repository_dir = root.join("repository");
         let action_dir = repository_dir.join("actions/docker");
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&action_dir).unwrap();
+        let dockerfile_dir = action_dir.join("docker");
+        fs::create_dir_all(&dockerfile_dir).unwrap();
         fs::write(
-            action_dir.join("Dockerfile"),
-            "FROM alpine:3.20\nCOPY actions/docker/payload /payload\n",
+            dockerfile_dir.join("Dockerfile"),
+            "FROM alpine:3.20\nCOPY payload /payload\n",
         )
         .unwrap();
-        fs::write(action_dir.join("payload"), "nested payload\n").unwrap();
+        fs::write(dockerfile_dir.join("payload"), "nested payload\n").unwrap();
         let plan = RepositoryActionPlan {
             step_id: "docker".into(),
             repository: "octo/action".into(),
@@ -3735,8 +3748,10 @@ runs:
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let metadata =
-            parse_action_metadata("runs:\n  using: docker\n  image: Dockerfile\n").unwrap();
+        let metadata = parse_action_metadata(
+            "runs:\n  using: docker\n  image: docker/Dockerfile\n  env:\n    RUNS_ENV: action-value\n",
+        )
+        .unwrap();
         let resolved = ResolvedAction {
             plan,
             metadata_path: action_dir.join("action.yml"),
@@ -3746,11 +3761,14 @@ runs:
 
         let invocation = resolved.docker_invocation(&root).unwrap();
 
-        assert_eq!(invocation.build_context_host, Some(repository_dir));
+        assert_eq!(invocation.build_context_host, Some(dockerfile_dir.clone()));
         assert_eq!(
             invocation.dockerfile_host,
-            Some(action_dir.join("Dockerfile"))
+            Some(dockerfile_dir.join("Dockerfile"))
         );
+        assert!(invocation
+            .env
+            .contains(&("RUNS_ENV".into(), "action-value".into())));
         let _ = fs::remove_dir_all(root);
     }
 
