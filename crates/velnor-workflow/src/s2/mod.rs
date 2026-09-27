@@ -5872,26 +5872,23 @@ fn policy_renderer_steps(repository: &str, revision: &str) -> String {
 /// `setup-velnor-workflow` (and, when the audited tree declares a different
 /// generator than the base, the PR run's candidate product or the declared
 /// release product); the Velnor lane provisions its host-persistent slot.
-pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
-    let PolicyJobSpec {
-        name,
-        revision,
-        runner,
-        repository,
-        cache_backend,
-        trusted_gate,
-        default_branch,
-        declared_ruleset_contexts,
-        candidate_artifact_wiring,
-    } = *spec;
-    let trusted_gate = trusted_gate.unwrap_or_default();
-    let hosted = cache_backend == "github";
-    let runner = if hosted {
-        HOSTED_POLICY_RUNS_ON
-    } else {
-        runner
-    };
-    let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
+struct PolicyJobParts {
+    trusted_gate: String,
+    runner: String,
+    ruleset_step: String,
+    policy_arguments: &'static str,
+    validator: String,
+    audited_generator_pin: String,
+    setup_checkout: String,
+    renderer: String,
+    actionlint_setup: String,
+}
+
+fn policy_ruleset_fragments(
+    hosted: bool,
+    default_branch: &str,
+    declared_ruleset_contexts: &str,
+) -> (String, &'static str) {
     let ruleset_step = if hosted {
         format!(
             "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DECLARED_RULESET_CONTEXTS: {declared_ruleset_contexts}\n        run: |\n          set -euo pipefail\n          stderr=\"$(mktemp)\"\n          trap 'rm -f \"$stderr\"' EXIT\n          if contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" 2>\"$stderr\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"; then\n            :\n          elif grep -qE '(HTTP 403|Upgrade to GitHub Team)' \"$stderr\"; then\n            echo \"::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]\"\n            contexts=\"$DECLARED_RULESET_CONTEXTS\"\n          else\n            cat \"$stderr\" >&2\n            exit 1\n          fi\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
@@ -5904,25 +5901,11 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         ""
     };
-    let validator = if hosted {
-        let setup_revision = if owner {
-            "${{ steps.audited-generator-pin.outputs.revision }}"
-        } else {
-            revision
-        };
-        let setup_uses = if owner {
-            VELNOR_WORKFLOW_POLICY_SETUP_ACTION.to_owned()
-        } else {
-            workflow_setup_action_uses(repository, revision)
-        };
-        format!(
-            "      - name: Set up Velnor workflow runtime\n        uses: {setup_uses}\n        with:\n          rev: {setup_revision}\n          checkout-path: ${{{{ github.workspace }}}}/policy-checkout\n"
-        )
-    } else {
-        workflow_pinned_policy_runtime_local(revision, "${{ github.workspace }}/policy-checkout")
-    };
-    let audited_generator_pin = if hosted && owner {
-        r#"      - name: Resolve audited generator revision
+    (ruleset_step, policy_arguments)
+}
+
+fn audited_generator_pin_step() -> String {
+    r#"      - name: Resolve audited generator revision
         id: audited-generator-pin
         working-directory: policy-checkout
         env:
@@ -5952,7 +5935,45 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
           git merge-base --is-ancestor "$base_pin" "$pin" || { echo "::error::audited generator revision must equal or descend from the base tree's declared generator revision" >&2; exit 1; }
           git merge-base --is-ancestor "$pin" "$BASE_SHA" || { echo "::error::audited generator revision is not an ancestor of the base commit" >&2; exit 1; }
           echo "revision=$pin" >> "$GITHUB_OUTPUT"
-"#.to_owned()
+"#
+    .to_owned()
+}
+
+fn policy_job_parts(spec: &PolicyJobSpec<'_>) -> PolicyJobParts {
+    let PolicyJobSpec {
+        revision,
+        runner,
+        repository,
+        cache_backend,
+        trusted_gate,
+        default_branch,
+        declared_ruleset_contexts,
+        candidate_artifact_wiring,
+        ..
+    } = *spec;
+    let hosted = cache_backend == "github";
+    let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
+    let (ruleset_step, policy_arguments) =
+        policy_ruleset_fragments(hosted, default_branch, declared_ruleset_contexts);
+    let validator = if hosted {
+        let setup_revision = if owner {
+            "${{ steps.audited-generator-pin.outputs.revision }}"
+        } else {
+            revision
+        };
+        let setup_uses = if owner {
+            VELNOR_WORKFLOW_POLICY_SETUP_ACTION.to_owned()
+        } else {
+            workflow_setup_action_uses(repository, revision)
+        };
+        format!(
+            "      - name: Set up Velnor workflow runtime\n        uses: {setup_uses}\n        with:\n          rev: {setup_revision}\n          checkout-path: ${{{{ github.workspace }}}}/policy-checkout\n"
+        )
+    } else {
+        workflow_pinned_policy_runtime_local(revision, "${{ github.workspace }}/policy-checkout")
+    };
+    let audited_generator_pin = if hosted && owner {
+        audited_generator_pin_step()
     } else {
         String::new()
     };
@@ -5989,10 +6010,50 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         String::new()
     };
+    PolicyJobParts {
+        trusted_gate: trusted_gate.unwrap_or_default().to_owned(),
+        runner: if hosted {
+            HOSTED_POLICY_RUNS_ON
+        } else {
+            runner
+        }
+        .to_owned(),
+        ruleset_step,
+        policy_arguments,
+        validator,
+        audited_generator_pin,
+        setup_checkout,
+        renderer,
+        actionlint_setup: actionlint_setup_step(cache_backend),
+    }
+}
+
+pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
+    render_policy_job(spec, policy_job_parts(spec))
+}
+
+fn render_policy_job(spec: &PolicyJobSpec<'_>, parts: PolicyJobParts) -> String {
+    let PolicyJobSpec {
+        name,
+        revision,
+        candidate_artifact_wiring,
+        ..
+    } = *spec;
+    let PolicyJobParts {
+        trusted_gate,
+        runner,
+        ruleset_step,
+        policy_arguments,
+        validator,
+        audited_generator_pin,
+        setup_checkout,
+        renderer,
+        actionlint_setup,
+    } = parts;
     let job_rendered = format!(
         "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{audited_generator_pin}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
-        actionlint_setup = actionlint_setup_step(cache_backend),
+        actionlint_setup = actionlint_setup,
     );
     if candidate_artifact_wiring {
         job_rendered.replace(
