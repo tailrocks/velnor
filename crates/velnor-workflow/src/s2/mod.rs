@@ -5498,6 +5498,7 @@ pub(crate) struct PolicyJobSpec<'a> {
     /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
     /// rulesets API answers 403 on private repositories.
     pub(crate) declared_ruleset_contexts: &'a str,
+    pub(crate) candidate_artifact_wiring: bool,
 }
 
 /// Shell fragment reading the audited tree's declared generator pin into
@@ -5547,6 +5548,88 @@ fn audited_pin_script() -> &'static str {
     clippy::too_many_lines,
     reason = "the candidate acquisition shell keeps its provenance gates together"
 )]
+fn policy_candidate_step_legacy(revision: &str) -> String {
+    format!(
+        r#"      - name: Acquire candidate generator product
+        working-directory: policy-checkout
+        env:
+          GH_TOKEN: ${{{{ github.token }}}}
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
+          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}
+          BASE_PIN: {revision}
+        run: |
+          set -euo pipefail
+{pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
+          pin_closure="$(velnor-workflow closure --rev="$pin")"
+          if [[ "$pin_closure" == "$base_closure" ]]; then
+            # Same closure means the running base validator IS the pin's
+            # renderer, so --check decides tree==pin-render with no extra
+            # provisioning. A match exits early; a differ falls through to
+            # the candidate path (a generator change in flight) instead of
+            # stranding the validator with a cleared manifest and a red pin
+            # leg. The check output stays visible: on a fall-through it is
+            # the diagnosis, on a match it is one line.
+            if velnor-workflow --plain --check; then
+              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
+              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
+          fi
+          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
+          if ! git cat-file -e "$HEAD_SHA^{{commit}}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+          fi
+          head_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
+          name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
+          deadline=$((SECONDS + 900))
+          run_id=""
+          while (( SECONDS < deadline )); do
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
+            waiting=false
+            seen=false
+            while read -r candidate_run; do
+              test "$candidate_run" != '' || continue
+              seen=true
+              status="$(jq -r .status <<<"$candidate_run")"
+              id="$(jq -r .id <<<"$candidate_run")"
+              # $name in the filter is a jq variable, not a shell expansion.
+              # shellcheck disable=SC2016
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
+                run_id="$id"
+                break 2
+              fi
+              [[ "$status" == "completed" ]] || waiting=true
+            done <<<"$(jq -c '.[]' <<<"$runs")"
+            # No runs yet means the API has not indexed the sibling run, not
+            # that it will never come: keep polling until the deadline.
+            [[ "$seen" == "true" ]] || waiting=true
+            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
+            sleep 15
+          done
+          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
+          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
+          rm -rf "$candidate"
+          mkdir -p "$candidate"
+          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
+          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
+          else
+            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{{print $1}}')"
+          fi
+          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
+          [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
+          chmod 0755 "$candidate/velnor-workflow"
+          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
+          [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
+          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+"#,
+        pin_script = audited_pin_script(),
+    )
+}
+
 fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
@@ -5715,6 +5798,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         trusted_gate,
         default_branch,
         declared_ruleset_contexts,
+        candidate_artifact_wiring,
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
@@ -5765,7 +5849,11 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     };
     let renderer = if hosted {
         if owner {
-            policy_candidate_step(revision, default_branch)
+            if candidate_artifact_wiring {
+                policy_candidate_step(revision, default_branch)
+            } else {
+                policy_candidate_step_legacy(revision)
+            }
         } else {
             policy_renderer_steps(repository, revision)
         }
@@ -5777,10 +5865,14 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         ActionPin::Checkout.reference(),
         actionlint_setup = actionlint_setup_step(cache_backend),
     );
-    job_rendered.replace(
-        "    permissions:\n      contents: read\n    steps:\n",
-        "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n",
-    )
+    if candidate_artifact_wiring {
+        job_rendered.replace(
+            "    permissions:\n      contents: read\n    steps:\n",
+            "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n",
+        )
+    } else {
+        job_rendered
+    }
 }
 
 /// The step that provisions the pinned actionlint for the policy job. The
@@ -5895,6 +5987,9 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> Result<String,
         trusted_gate: gate.as_deref(),
         default_branch: &config.default_branch,
         declared_ruleset_contexts: &declared_ruleset_contexts,
+        candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
+            &config.workflow_revision,
+        ),
     });
     let concurrency = policy_concurrency_block(config);
     // `workflow_dispatch` lets a maintainer prove the validator the base
@@ -18868,6 +18963,7 @@ lockfile = true
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
+            candidate_artifact_wiring: true,
         })
     }
 
@@ -18881,6 +18977,7 @@ lockfile = true
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
+            candidate_artifact_wiring: true,
         })
     }
 
@@ -19890,6 +19987,38 @@ lockfile = true
                 "policy must include pull-requests: read: {policy}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_generator_pin_keeps_candidate_wiring_at_its_byte_compatible_default() {
+        assert!(!crate::candidate_artifact_wiring_enabled(
+            crate::LEGACY_CANDIDATE_POLICY_PIN
+        ));
+        assert!(crate::candidate_artifact_wiring_enabled(
+            "1111111111111111111111111111111111111111"
+        ));
+
+        let job = policy_job(&PolicyJobSpec {
+            name: "Policy",
+            revision: crate::LEGACY_CANDIDATE_POLICY_PIN,
+            runner: "ubuntu-24.04",
+            repository: workflow_setup_action_repository(),
+            cache_backend: "github",
+            trusted_gate: None,
+            default_branch: "main",
+            declared_ruleset_contexts: "ci-required,DCO,Policy",
+            candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
+                crate::LEGACY_CANDIDATE_POLICY_PIN,
+            ),
+        });
+        assert!(
+            job.contains("    permissions:\n      contents: read\n    steps:\n"),
+            "the bootstrap pin retains the established permission bytes: {job}"
+        );
+        assert!(job.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"));
+        assert!(job.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"));
+        assert!(!job.contains("EVENT_NAME: ${{ github.event_name }}"));
+        assert!(!job.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"));
     }
 
     #[test]

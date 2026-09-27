@@ -677,6 +677,7 @@ fn entrypoint_audit_accepts_legacy_or_final_read_permissions_on_policy_job() {
 #[test]
 fn owner_entrypoint_pin_ignores_variable_references() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
+        candidate_artifact_wiring: true,
         name: "Policy",
         revision: PIN_A,
         runner: "ubuntu-24.04",
@@ -716,6 +717,7 @@ fn owner_entrypoint_pin_ignores_variable_references() {
 #[test]
 fn owner_policy_resolves_squash_merge_push_to_pr_head() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
+        candidate_artifact_wiring: true,
         name: "Policy",
         revision: PIN_A,
         runner: "ubuntu-24.04",
@@ -785,6 +787,7 @@ fn owner_policy_resolves_squash_merge_push_to_pr_head() {
 #[test]
 fn owner_policy_fails_closed_for_direct_push_without_merged_pr() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
+        candidate_artifact_wiring: true,
         name: "Policy",
         revision: PIN_A,
         runner: "ubuntu-24.04",
@@ -816,6 +819,7 @@ fn owner_policy_fails_closed_for_direct_push_without_merged_pr() {
 #[test]
 fn owner_policy_rejects_merge_sha_wrong_head_repository_and_revision() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
+        candidate_artifact_wiring: true,
         name: "Policy",
         revision: PIN_A,
         runner: "ubuntu-24.04",
@@ -1046,6 +1050,7 @@ fn entrypoint_audit_requires_unique_canonical_api_token_steps() {
 #[test]
 fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
+        candidate_artifact_wiring: true,
         name: "Policy",
         revision: PIN_A,
         runner: "[self-hosted, velnor]",
@@ -2215,6 +2220,7 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
         "example/consumer",
     ] {
         let job = crate::s2::policy_job(&PolicyJobSpec {
+            candidate_artifact_wiring: true,
             name: "Policy",
             revision: PIN_A,
             runner: "ubuntu-24.04",
