@@ -18,8 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
+use unicode_normalization::UnicodeNormalization;
 
 mod apt;
+pub(crate) mod candidate_sandbox;
 mod closure;
 mod closure_inputs {
     //! Manifest-derived inputs for the workflow runtime source closure.
@@ -1299,6 +1301,247 @@ pub(crate) const GITHUB_CLAUDE_MD: &str = ".github/CLAUDE.md";
 /// The symlink target of [`GITHUB_CLAUDE_MD`], relative to `.github` so the
 /// link resolves inside any checkout or `--output` tree.
 pub(crate) const GITHUB_CLAUDE_MD_TARGET: &str = "AGENTS.md";
+/// Repository-root-relative path of the base-owned pull-request policy
+/// workflow. Static passthrough files must never replace this trust entrypoint.
+pub(crate) const CI_POLICY_WORKFLOW: &str = ".github/workflows/ci-policy.yml";
+
+/// Normalize one generated path for cross-platform ownership comparisons.
+/// NFKC runs before path parsing so fullwidth separators become separators;
+/// both slash spellings are then treated as separators, Windows trims trailing
+/// dots/spaces from components, and only ASCII remains after lowercase. The
+/// last rule is deliberate: Unicode lowercase is not full case folding, so a
+/// residual non-ASCII character is rejected instead of guessed equivalent.
+fn normalized_path_string(value: &str) -> Option<String> {
+    let normalized = value
+        .nfkc()
+        .flat_map(char::to_lowercase)
+        .nfkc()
+        .collect::<String>();
+    if !normalized.is_ascii() {
+        return None;
+    }
+    Some(normalized.replace('\\', "/"))
+}
+
+fn normalized_path_components(value: &str) -> Option<Vec<String>> {
+    let separators_normalized = normalized_path_string(value)?;
+    Some(
+        Path::new(&separators_normalized)
+            .components()
+            .filter_map(|component| match component {
+                Component::CurDir => None,
+                Component::Normal(part) => {
+                    Some(part.to_str()?.trim_end_matches([' ', '.']).to_owned())
+                }
+                other => Some(other.as_os_str().to_str()?.to_owned()),
+            })
+            .collect(),
+    )
+}
+
+fn windows_device_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches([' ', '.']);
+    matches!(stem, "con" | "prn" | "aux" | "nul" | "conin$" | "conout$")
+        || stem
+            .strip_prefix("com")
+            .or_else(|| stem.strip_prefix("lpt"))
+            .is_some_and(|suffix| {
+                suffix.len() == 1 && suffix.as_bytes()[0].is_ascii_digit() && suffix != "0"
+            })
+}
+
+/// Whether a path spelling is safe for a generated output. This is stricter
+/// than alias comparison: generated names must not depend on Windows name
+/// trimming, DOS short-name lookup, Unicode case folding, or device parsing.
+pub(crate) fn path_spelling_is_supported(value: &str) -> bool {
+    let Some(normalized) = normalized_path_string(value) else {
+        return false;
+    };
+    let mut under_github = false;
+    let mut saw_component = false;
+    for component in Path::new(&normalized).components() {
+        let Component::Normal(part) = component else {
+            if matches!(component, Component::CurDir) {
+                continue;
+            }
+            return false;
+        };
+        let Some(part) = part.to_str() else {
+            return false;
+        };
+        let trimmed = part.trim_end_matches([' ', '.']);
+        if trimmed.is_empty() || trimmed != part {
+            return false;
+        }
+        if part
+            .chars()
+            .any(|character| character == ':' || character.is_control())
+        {
+            return false;
+        }
+        if windows_device_name(part) {
+            return false;
+        }
+        under_github |= part == ".github";
+        if under_github && part.contains('~') {
+            return false;
+        }
+        saw_component = true;
+    }
+    saw_component
+}
+
+/// Whether two path spellings can name the same path on a case-insensitive
+/// filesystem. The final component also admits conservative Windows 8.3
+/// aliases, so `CI-POL~1.YML` cannot dodge a long reserved name.
+pub(crate) fn path_spellings_alias(left: &str, right: &str) -> bool {
+    fn windows_short_name_alias(short: &str, long: &str) -> bool {
+        let Some((short_stem, short_extension)) = short.rsplit_once('.') else {
+            return false;
+        };
+        let Some((long_stem, long_extension)) = long.rsplit_once('.') else {
+            return false;
+        };
+        if long_stem.chars().count() <= 8 && long_extension.chars().count() <= 3 {
+            return false;
+        }
+        if short_stem.chars().count() > 8
+            || short_extension.is_empty()
+            || short_extension.chars().count() > 3
+            || short_extension != long_extension.chars().take(3).collect::<String>()
+        {
+            return false;
+        }
+        let Some((prefix, sequence)) = short_stem.rsplit_once('~') else {
+            return false;
+        };
+        if prefix.is_empty()
+            || sequence.is_empty()
+            || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return false;
+        }
+        let direct_prefix = long_stem.chars().take(6).collect::<String>();
+        let compact_prefix = long_stem
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(6)
+            .collect::<String>();
+        prefix == direct_prefix || prefix == compact_prefix
+    }
+
+    let (Some(left), Some(right)) = (
+        normalized_path_components(left),
+        normalized_path_components(right),
+    ) else {
+        return false;
+    };
+    if left == right {
+        return true;
+    }
+    let Some((left_name, left_parents)) = left.split_last() else {
+        return false;
+    };
+    let Some((right_name, right_parents)) = right.split_last() else {
+        return false;
+    };
+    left_parents == right_parents
+        && (windows_short_name_alias(left_name, right_name)
+            || windows_short_name_alias(right_name, left_name))
+}
+
+pub(crate) fn generator_owned_static_file_path(path: &str) -> Option<&'static str> {
+    [
+        GITHUB_AGENTS_MD,
+        GITHUB_CLAUDE_MD,
+        CODEOWNERS_PATH,
+        CI_POLICY_WORKFLOW,
+    ]
+    .into_iter()
+    .find(|reserved| path_spellings_alias(path, reserved))
+}
+
+/// Reject a generated surface path that aliases the base-owned policy
+/// entrypoint. The canonical policy workflow is emitted by the assembly
+/// layer, so a primitive may never contribute a path that could replace it.
+/// Keeping the spelling check here makes the primitive and final assembly
+/// guards share the same case and NFKC rules.
+pub(crate) fn reject_reserved_policy_output(
+    path: &Path,
+    origin: &str,
+) -> Result<(), GeneratorError> {
+    let Some(value) = path.to_str() else {
+        return Err(GeneratorError::usage(format!(
+            "{origin} uses a non-UTF-8 generated path `{}`; generated paths must be UTF-8",
+            path.display()
+        )));
+    };
+    if path_spellings_alias(value, CI_POLICY_WORKFLOW) {
+        return Err(GeneratorError::usage(format!(
+            "{origin} attempts to render reserved `{CI_POLICY_WORKFLOW}` at `{}`; the policy workflow is generator-owned",
+            path.display()
+        )));
+    }
+    if !path_spelling_is_supported(value) {
+        return Err(GeneratorError::usage(format!(
+            "{origin} uses an unsupported generated path spelling `{}`; generated paths must use safe ASCII-compatible names",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_generated_writer_path(
+    path: &Path,
+    origin: &str,
+    allow_canonical_policy_file: bool,
+) -> Result<(), GeneratorError> {
+    let Some(value) = path.to_str() else {
+        return Err(GeneratorError::usage(format!(
+            "{origin} uses a non-UTF-8 generated path `{}`; generated paths must be UTF-8",
+            path.display()
+        )));
+    };
+    if path_spellings_alias(value, CI_POLICY_WORKFLOW)
+        && !(allow_canonical_policy_file && path == Path::new(CI_POLICY_WORKFLOW))
+    {
+        return Err(GeneratorError::usage(format!(
+            "{origin} aliases reserved `{CI_POLICY_WORKFLOW}` at `{}`; only the canonical generated policy file is allowed",
+            path.display()
+        )));
+    }
+    if !path_spelling_is_supported(value) {
+        return Err(GeneratorError::usage(format!(
+            "{origin} uses an unsupported generated path spelling `{}`; generated paths must use safe ASCII-compatible names",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_reserved_writer_outputs(
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+) -> Result<(), GeneratorError> {
+    for path in files.keys() {
+        validate_generated_writer_path(path, "generated file", true)?;
+    }
+    for path in symlinks.keys() {
+        validate_generated_writer_path(path, "generated symlink", false)?;
+    }
+    Ok(())
+}
+
+/// Return the canonical generator-owned path when a workflow basename aliases
+/// one of its reserved workflow outputs.
+pub(crate) fn generator_owned_workflow_name(name: &str) -> Option<&'static str> {
+    let path = Path::new(".github/workflows").join(name);
+    generator_owned_static_file_path(path.to_str()?)
+}
 
 /// The generator-owned symlinks every render emits: exactly
 /// `.github/CLAUDE.md -> AGENTS.md`. Both pipelines share this map so the
@@ -2834,7 +3077,7 @@ pub(crate) struct ReviewerRule {
     pub(crate) owners: Vec<String>,
 }
 
-fn default_workflow_files() -> Vec<String> {
+pub(crate) fn default_workflow_files() -> Vec<String> {
     vec![
         "ci-pr.yml".to_owned(),
         "ci-policy.yml".to_owned(),
@@ -3038,6 +3281,9 @@ fn scan_target(
     runners: RunnerMode,
     default_branch: &str,
 ) -> Result<ScannedTarget, GeneratorError> {
+    // Validate the complete repository boundary before config discovery or
+    // detector reads can follow a repository-controlled link.
+    scan::file_walk::validate_scan_root(root)?;
     let generation = config::discover(root)?;
     let exclude = generation
         .as_ref()
@@ -4988,7 +5234,7 @@ fn read_static_files(
         let (Some(file), Some(source)) = (row.file(), row.source()) else {
             continue;
         };
-        let path = root.join(source);
+        let path = config::validate_static_file_source(root, source)?;
         let content = fs::read_to_string(&path).map_err(|error| {
             GeneratorError::io("read declared static file source", &path, &error)
         })?;
@@ -6616,6 +6862,8 @@ pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) candidate_artifact_wiring: bool,
 }
 
+const HOSTED_POLICY_RUNS_ON: &str = "ubuntu-24.04";
+
 /// Shell fragment reading the audited tree's declared generator pin into
 /// `$pin` (fails closed when the tree declares none): `[generator]
 /// revision` first, the entrypoint literal second. Callers treat the pin as
@@ -6922,6 +7170,11 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
+    let runner = if hosted {
+        HOSTED_POLICY_RUNS_ON
+    } else {
+        runner
+    };
     let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
     let ruleset_step = if hosted {
         format!(
@@ -7212,8 +7465,6 @@ fn validate_both_lane_unit_coverage(
 }
 
 const CI_PR_WORKFLOW: &str = ".github/workflows/ci-pr.yml";
-const CI_POLICY_WORKFLOW: &str = ".github/workflows/ci-policy.yml";
-
 pub(crate) fn workflow_job_display_names(
     source: &str,
     yaml: &str,
@@ -7949,6 +8200,11 @@ fn generated_files_with_surface(
     validate_both_automatic_contract(&config)?;
     validate_both_lane_unit_coverage(&config, surface)?;
     let mut files = BTreeMap::new();
+    if let Some(surface) = surface {
+        for path in surface.files.keys() {
+            reject_reserved_policy_output(path, "primitive surface output")?;
+        }
+    }
     files.insert(
         PathBuf::from(".github/actionlint.yaml"),
         render_actionlint_config(&config),
@@ -7979,6 +8235,7 @@ fn generated_files_with_surface(
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
         if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
+            reject_reserved_policy_output(&path, "primitive surface output")?;
             files.insert(path, content.clone());
             continue;
         }
@@ -8040,12 +8297,8 @@ fn generated_files_with_surface(
     // reviewer-assignment file is generator-owned the same way even though
     // its emission is conditional: an unvalidated passthrough row must never
     // stand in for typed `[[reviewers]]` input.
-    for reserved in [GITHUB_AGENTS_MD, GITHUB_CLAUDE_MD, CODEOWNERS_PATH] {
-        if config
-            .static_files
-            .iter()
-            .any(|owned| Path::new(&owned.path) == Path::new(reserved))
-        {
+    for owned in &config.static_files {
+        if let Some(reserved) = generator_owned_static_file_path(&owned.path) {
             return Err(GeneratorError::usage(format!(
                 "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
             )));
@@ -9042,6 +9295,9 @@ fn apply_generated_write_plan(
         return Ok(WriteOutcome::Unchanged);
     }
     let _generation_lock = GenerationLock::acquire(root, files.keys().chain(symlinks.keys()))?;
+    validate_generated_paths(files, symlinks)?;
+    reject_symlinked_output_root(root)?;
+    reject_managed_symlink_ancestors(root, files.keys().chain(symlinks.keys()))?;
     validate_plan_preimages(root, plan)?;
     revalidate_unknown_tree(root, files, symlinks, plan)?;
     // A pre-state version is safe to adopt only when every existing generated
@@ -10626,6 +10882,7 @@ fn validate_generated_paths(
             )));
         }
     }
+    validate_reserved_writer_outputs(files, symlinks)?;
     Ok(())
 }
 
@@ -11606,6 +11863,36 @@ mod tests {
             .map(|label| (*label).to_owned())
             .collect();
         config
+    }
+
+    /// The final assembly guard remains active even if a caller hands it a
+    /// synthetic primitive surface that bypassed the primitive-stage check.
+    #[test]
+    fn generation_assembly_rejects_reserved_policy_aliases() {
+        let canonical_config = scanned_fixture(RunnerMode::Github);
+        let canonical = must(
+            generated_files_with_surface(&canonical_config, None),
+            "canonical policy output remains assembled",
+        );
+        assert!(canonical.contains_key(Path::new(CI_POLICY_WORKFLOW)));
+
+        for alias in [
+            CI_POLICY_WORKFLOW,
+            ".github/workflows/CI-POLICY.yml",
+            ".github/workflows/ｃｉ-ｐｏｌｉｃｙ.yml",
+        ] {
+            let config = scanned_fixture(RunnerMode::Github);
+            let surface = primitives::Surface {
+                files: BTreeMap::from([(PathBuf::from(alias), "attacker\n".to_owned())]),
+                units: config.units.clone(),
+                contracts: BTreeMap::new(),
+                added_files: Vec::new(),
+            };
+            let error =
+                must_fail(generated_files_with_surface(&config, Some(&surface)), alias).to_string();
+            assert!(error.contains(CI_POLICY_WORKFLOW), "{error}");
+            assert!(error.contains("primitive surface output"), "{error}");
+        }
     }
 
     fn temporary_repository(name: &str) -> PathBuf {
@@ -17926,7 +18213,7 @@ channel = "stable"
                 root.join(".github-gen/velnor-workflow.toml"),
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nrunners = \"both\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\
-                 files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\"]\n\n\
+                 files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\", \"ci-policy.yml\"]\n\n\
                  [release]\nenabled = true\nkind = \"native\"\npackage = \"example\"\n\
                  binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
                  consumer_repository = \"example/consumer\"\n\n\
@@ -23532,6 +23819,126 @@ channel = "stable"
         );
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn writer_rejects_reserved_policy_aliases_before_preimage_capture() {
+        let root = temporary_repository("reserved-policy-writer");
+        let policy_dir = root.join(".github/workflows");
+        must(fs::create_dir_all(&policy_dir), "create policy directory");
+        let sentinel = policy_dir.join("CI-POLICY.yml");
+        must(fs::write(&sentinel, "sentinel\n"), "write policy sentinel");
+        for alias in [
+            ".github/workflows/CI-POLICY.yml",
+            ".github/workflows/ｃｉ-ｐｏｌｉｃｙ.yml",
+            ".github／workflows／ci-policy.yml",
+            ".github\\workflows\\ci-policy.yml",
+            ".github/workflows/ci-policy.yml. ",
+            ".github/workflows/CI-POL~1.YML",
+        ] {
+            let files = BTreeMap::from([(PathBuf::from(alias), "evil\n".to_owned())]);
+            let error = must_some(
+                plan_generated_write(
+                    &root,
+                    &files,
+                    &BTreeMap::new(),
+                    &GenerationInputs::parts(0, 0),
+                )
+                .err(),
+                "reserved policy alias must fail before preimage capture",
+            );
+            assert!(error.to_string().contains(CI_POLICY_WORKFLOW), "{error}");
+            assert_eq!(
+                must(fs::read_to_string(&sentinel), "read policy sentinel"),
+                "sentinel\n",
+                "a refused alias must not mutate the existing policy preimage"
+            );
+        }
+
+        let symlinks = BTreeMap::from([(
+            PathBuf::from(".github/workflows/CI-POL~1.YML"),
+            PathBuf::from("target"),
+        )]);
+        let error = must_some(
+            plan_generated_write(
+                &root,
+                &BTreeMap::new(),
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+            )
+            .err(),
+            "reserved policy symlink must fail before preimage capture",
+        );
+        assert!(error.to_string().contains(CI_POLICY_WORKFLOW), "{error}");
+
+        must(fs::remove_file(&sentinel), "remove policy sentinel");
+        let canonical = BTreeMap::from([(
+            PathBuf::from(CI_POLICY_WORKFLOW),
+            "canonical policy\n".to_owned(),
+        )]);
+        must(
+            plan_generated_write(
+                &root,
+                &canonical,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+            ),
+            "the canonical policy file remains a writer-owned output",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_rejects_non_utf8_generated_paths_before_preimage_capture() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let root = temporary_repository("non-utf8-generated-path");
+        let path = PathBuf::from(OsString::from_vec(b".github/non-utf8-\xff".to_vec()));
+        let files = BTreeMap::from([(path, "evil\n".to_owned())]);
+        let error = must_some(
+            plan_generated_write(
+                &root,
+                &files,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+            )
+            .err(),
+            "non-UTF-8 generated path must fail closed",
+        );
+        assert!(error.to_string().contains("non-UTF-8"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writer_rejects_unsafe_generated_path_spellings() {
+        let root = temporary_repository("unsafe-generated-path-spellings");
+        for path in [
+            ".github/workfl~1/ci-policy.yml",
+            ".github/workflows/ci-policy.yml:ads",
+            ".github/workflows/CON.txt",
+            ".github/workflows/CONIN$.txt",
+        ] {
+            let files = BTreeMap::from([(PathBuf::from(path), "evil\n".to_owned())]);
+            let error = must_some(
+                plan_generated_write(
+                    &root,
+                    &files,
+                    &BTreeMap::new(),
+                    &GenerationInputs::parts(0, 0),
+                )
+                .err(),
+                "unsafe generated path must fail before preimage capture",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported generated path spelling"),
+                "{error}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn reserved_agent_path_with_redundant_separator_is_refused() {
         let root = temporary_repository("reserved-agent-spelling");
@@ -23899,18 +24306,11 @@ channel = "stable"
             std::os::unix::fs::symlink(&outside, root.join(".github")),
             "create managed directory symlink",
         );
-        let config = must(
-            scan_repository(&root, RunnerMode::Github),
-            "scan symlinked repository",
-        );
-        let files = must(generated_files(&config), "generate");
         let error = must_some(
-            write_generated(&root, &files, false, false, true).err(),
-            "symlinked managed directory must be rejected",
+            scan_repository(&root, RunnerMode::Github).err(),
+            "symlinked managed directory must be rejected during scan",
         );
-        assert!(error
-            .to_string()
-            .contains("refusing symlinked managed directory"));
+        assert!(error.to_string().contains("escapes the repository"));
         assert!(must(fs::read_dir(&outside), "read outside directory")
             .next()
             .is_none());
@@ -23926,18 +24326,11 @@ channel = "stable"
             std::os::unix::fs::symlink(&outside, root.join("config")),
             "create fleet directory symlink",
         );
-        let config = must(
-            scan_repository(&root, RunnerMode::Github),
-            "scan symlinked fleet repository",
-        );
-        let files = must(generated_files(&config), "generate fleet surface");
         let error = must_some(
-            write_generated(&root, &files, false, false, true).err(),
-            "symlinked fleet directory must be rejected",
+            scan_repository(&root, RunnerMode::Github).err(),
+            "symlinked fleet directory must be rejected during scan",
         );
-        assert!(error
-            .to_string()
-            .contains("refusing symlinked managed directory"));
+        assert!(error.to_string().contains("escapes the repository"));
         assert!(must(fs::read_dir(&outside), "read fleet target")
             .next()
             .is_none());
@@ -24324,6 +24717,57 @@ channel = "stable"
         assert!(project.contains("profile = \"example-profile\""));
         assert!(project.contains("velnor_labels = [\"self-hosted\", \"example-lane\"]"));
         assert!(project.contains("github_runner = \"ubuntu-26.04\""));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_surface_reads_confined_symlinked_static_file_source() {
+        let config = format!(
+            "{DECLARED_SURFACE_CONFIG}\n\
+             [[static_files]]\n\
+             file = \".github/actions/example/action.yml\"\n\
+             source = \".github-gen/sources/actions/example/action.yml\"\n"
+        );
+        let root = declared_surface_repository(
+            "symlinked-static-source",
+            &config,
+            &[("owned.yml", DECLARED_SURFACE_TEMPLATE)],
+            &[(
+                "actions/example/action.yml",
+                "name: 'Example composite'\nruns:\n  using: composite\n  steps: []\n",
+            )],
+        );
+        let target = root.join(".github-gen/sources/inside.yml");
+        must(
+            fs::write(
+                &target,
+                "name: 'Confined composite'\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            "write confined static source",
+        );
+        let source = root.join(".github-gen/sources/actions/example/action.yml");
+        must(fs::remove_file(&source), "remove regular static source");
+        must(
+            std::os::unix::fs::symlink("../../inside.yml", &source),
+            "create static source symlink",
+        );
+
+        let scanned = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "a confined symlinked static source must be accepted",
+        );
+        let files = must(
+            generated_files(&scanned.config),
+            "generate declared surface",
+        );
+        assert_eq!(
+            files
+                .get(Path::new(".github/actions/example/action.yml"))
+                .map(String::as_str),
+            Some("name: 'Confined composite'\nruns:\n  using: composite\n  steps: []\n"),
+            "generated static file must read the confined symlink target",
+        );
         let _ = fs::remove_dir_all(root);
     }
 

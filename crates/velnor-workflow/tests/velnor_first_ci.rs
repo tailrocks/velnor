@@ -427,6 +427,11 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
     )
     .unwrap();
     enable_approved_velnor_pull_requests(&root);
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.email", "check@test"]);
+    git(&root, &["config", "user.name", "check"]);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "fixture"]);
     let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .args(["--plain", "--force", "--default-branch", "main"])
         .arg(&root)
@@ -529,6 +534,11 @@ fn static_workflow_templates_path_is_rejected() {
 fn generate_twice_is_byte_identical_and_check_passes() {
     let root = unique_dir("generate-twice");
     write_rust_fixture(&root, 2);
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.email", "check@test"]);
+    git(&root, &["config", "user.name", "check"]);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "fixture"]);
     let first = generate_with(&root, &[]);
     let second_output = root.parent().unwrap().join(format!(
         "{}-out-2",
@@ -646,6 +656,11 @@ fn write_cargo_shim(directory: &Path) -> PathBuf {
 #[cfg(unix)]
 fn check_command(root: &Path, output: &Path, shim_dir: &Path, sentinel: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"));
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(shim_dir.to_path_buf()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .expect("valid test PATH");
     command
         .args([
             "--plain",
@@ -656,10 +671,9 @@ fn check_command(root: &Path, output: &Path, shim_dir: &Path, sentinel: &Path) -
             output.to_str().unwrap(),
             root.to_str().unwrap(),
         ])
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", shim_dir.to_str().unwrap()),
-        )
+        // Keep the cargo shim first while retaining tools such as Docker
+        // needed to isolate candidate policy binaries.
+        .env("PATH", path)
         .env("CARGO_SHIM_SENTINEL", sentinel)
         .env_remove("VELNOR_WORKFLOW_PINNED_BINARY")
         .env_remove("VELNOR_WORKFLOW_CANDIDATE_MANIFEST")

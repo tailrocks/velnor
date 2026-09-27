@@ -69,6 +69,11 @@ primitives. Generation is a function of the scanned repository shape, this
 config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
+When `[workflow].files` replaces the default list, it must still include
+`ci-policy.yml`, the base-owned policy entrypoint. `[[static_files]]` cannot
+claim that path. Policy audits every checked-in workflow; unknown workflow
+files fail generated-tree ownership checks and must be migrated into generator
+inputs before they can pass.
 
 The schema-1 Swift scanner fails closed for executable Swift products and
 recognized XcodeGen specs because it cannot emit their complete phase and

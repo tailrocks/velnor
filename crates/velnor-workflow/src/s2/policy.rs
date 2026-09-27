@@ -47,7 +47,9 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_yaml::{Mapping, Value};
@@ -354,11 +356,15 @@ fn candidate_manifest_source_with_env(
 /// Only when an input cannot be read or a tool cannot run; policy violations
 /// are `FAIL` rules in the returned report.
 pub(crate) fn evaluate(options: &PolicyOptions) -> Result<PolicyReport, GeneratorError> {
+    // Validate the physical tree before canonicalizing it or letting config
+    // discovery read any repository-controlled path. Canonicalization first
+    // would allow a symlinked checkout root to redirect the policy audit.
+    super::scan::file_walk::validate_repository_tree(&options.root)?;
     let root = options
         .root
         .canonicalize()
         .map_err(|error| GeneratorError::io("canonicalize workflow root", &options.root, &error))?;
-    let declared = DeclaredTree::read(&root)?;
+    let declared = DeclaredTree::read_validated(&root)?;
     let mut report = PolicyReport::default();
     let pin = declared_pin_rule(&declared, &mut report);
     pin_rules(&root, &declared, pin.as_deref(), options, &mut report);
@@ -455,15 +461,8 @@ fn pin_rules(
     let lookup =
         PinnedBinaryLookup::from_env(pin, options.build_pin, options.candidate_manifest.clone());
     let mainline = matches!((&head, &base), (Ok(head), Some(base)) if head == base);
-    let comparison = regenerate_and_compare(
-        root,
-        root,
-        pin,
-        &declared.default_branch,
-        &declared.excludes,
-        &lookup,
-        &source,
-    );
+    let comparison =
+        regenerate_and_compare(root, root, pin, &declared.default_branch, &lookup, &source);
     report
         .rules
         .push(generated_tree_report(pin, comparison, mainline));
@@ -577,11 +576,10 @@ pub(crate) fn verify_declared_pin_renders_tree(
             "declared workflow revision must be a full 40-character SHA, got {pin:?}"
         )));
     }
+    // `config::discover` reads the checkout, so apply the same physical-tree
+    // boundary used by the scanner before discovering any repository config.
+    super::scan::file_walk::validate_repository_tree(checkout)?;
     let generation = config::discover(checkout)?;
-    let excludes = generation
-        .as_ref()
-        .map(config::RepoGenerationConfig::effective_policy_exclude_workflows)
-        .unwrap_or_default();
     let source = pin_source(
         checkout,
         generation
@@ -594,7 +592,6 @@ pub(crate) fn verify_declared_pin_renders_tree(
         output_root,
         pin,
         &config.default_branch,
-        &excludes,
         &lookup,
         &source,
     )? {
@@ -635,7 +632,6 @@ struct DeclaredTree {
     /// `[generator] repository`, the slug the tree says it belongs to.
     repository: Option<String>,
     default_branch: String,
-    excludes: BTreeSet<String>,
     velnor_policy: VelnorPolicyContract,
     /// Ruleset contexts `ci-pr.yml` or `ci-policy.yml` must emit as job
     /// display names.
@@ -645,18 +641,24 @@ struct DeclaredTree {
 }
 
 impl DeclaredTree {
+    #[cfg(test)]
     fn read(root: &Path) -> Result<Self, GeneratorError> {
+        super::scan::file_walk::validate_repository_tree(root)?;
+        Self::read_validated(root)
+    }
+
+    fn read_validated(root: &Path) -> Result<Self, GeneratorError> {
+        let entrypoint_revision = entrypoint_policy_revision(root)?;
         let generation = config::discover(root)?;
+        if let Some(generation) = &generation {
+            generation.validate_policy_entrypoint_ownership()?;
+        }
         let pin = generation
             .as_ref()
             .and_then(|generation| generation.revision())
             .filter(|revision| super::is_full_revision(revision))
             .map(|revision| DeclaredPin::Config(revision.to_owned()))
-            .or_else(|| entrypoint_policy_revision(root).map(DeclaredPin::Entrypoint));
-        let excludes = generation
-            .as_ref()
-            .map(config::RepoGenerationConfig::effective_policy_exclude_workflows)
-            .unwrap_or_default();
+            .or_else(|| entrypoint_revision.map(DeclaredPin::Entrypoint));
         let repository = generation
             .as_ref()
             .and_then(config::RepoGenerationConfig::repository)
@@ -685,7 +687,6 @@ impl DeclaredTree {
             pin,
             repository,
             default_branch: velnor_policy.default_branch.clone(),
-            excludes,
             velnor_policy,
             required_checks,
             external_checks,
@@ -718,10 +719,59 @@ fn pin_source(root: &Path, repository: Option<&str>) -> PinSource {
 
 /// The `VELNOR_WORKFLOW_POLICY_REVISION:` literal the entrypoint exports,
 /// when it is a full SHA.
-fn entrypoint_policy_revision(root: &Path) -> Option<String> {
-    let content = fs::read_to_string(root.join(POLICY_ENTRYPOINT)).ok()?;
+fn reject_symlinked_workflow_roots(root: &Path) -> Result<(), GeneratorError> {
+    for (path, label) in [
+        (root.join(".github"), "workflow root"),
+        (root.join(".github/workflows"), "workflow directory"),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(GeneratorError::usage(format!(
+                    "refusing symlinked {label}: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GeneratorError::io(
+                    &format!("inspect {label}"),
+                    &path,
+                    &error,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn entrypoint_policy_revision(root: &Path) -> Result<Option<String>, GeneratorError> {
+    reject_symlinked_workflow_roots(root)?;
+    let path = root.join(POLICY_ENTRYPOINT);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "inspect policy entrypoint",
+                &path,
+                &error,
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(GeneratorError::usage(format!(
+            "refusing symlinked workflow file: {}",
+            path.display()
+        )));
+    }
+    if !metadata.file_type().is_file() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|error| GeneratorError::io("read policy entrypoint", &path, &error))?;
     let marker = format!("{BASE_REVISION_ENV}: ");
-    content
+    Ok(content
         .lines()
         .filter_map(|line| line.trim_start().strip_prefix(marker.as_str()))
         .map(|value| {
@@ -730,7 +780,7 @@ fn entrypoint_policy_revision(root: &Path) -> Option<String> {
                 .trim_matches(|character| character == '"' || character == '\'')
         })
         .find(|value| super::is_full_revision(value))
-        .map(str::to_owned)
+        .map(str::to_owned))
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,24 +1097,44 @@ fn binary_closure(binary: &Path) -> Result<String, String> {
 }
 
 fn binary_report(binary: &Path, flag: &str) -> Result<String, String> {
-    // The binary may be an env-slot candidate built from a pull request.
-    // Its closure/revision report needs no configuration, so never expose
-    // the policy step's ambient credentials or runner metadata.
-    let output = Command::new(binary)
-        .env_clear()
-        .arg(flag)
-        .output()
-        .map_err(|error| format!("{}: cannot run `{flag}`: {error}", binary.display()))?;
-    if !output.status.success() {
+    // The validator's own executable is trusted local code. Every other
+    // binary, including the workflow's env-provided "pinned" product, may
+    // be PR-built and runs with the checkout absent from its OS sandbox.
+    let current = env::current_exe().ok();
+    let output = if current
+        .as_deref()
+        .is_some_and(|current| same_executable(current, binary))
+    {
+        let output = Command::new(binary)
+            .env_clear()
+            .arg(flag)
+            .output()
+            .map_err(|error| format!("{}: cannot run `{flag}`: {error}", binary.display()))?;
+        crate::candidate_sandbox::Output {
+            status: output.status.code().unwrap_or(128),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    } else {
+        crate::candidate_sandbox::run(binary, None, None, &[OsString::from(flag)])?
+    };
+    if output.status != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "{}: `{flag}` failed ({}): {}",
+            "{}: `{flag}` failed (exit {}): {}",
             binary.display(),
             output.status,
             stderr.trim()
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn same_executable(left: &Path, right: &Path) -> bool {
+    matches!(
+        (fs::canonicalize(left), fs::canonicalize(right)),
+        (Ok(left), Ok(right)) if left == right
+    )
 }
 
 /// Closures a renderer for `pin` (a commit of `repo`) must report: the lean
@@ -1450,17 +1520,36 @@ fn scratch_directory(label: &str) -> Result<PathBuf, GeneratorError> {
         "velnor-workflow-{label}-{}",
         crate::unique_suffix()
     ));
-    fs::create_dir_all(&path)
+    fs::create_dir(&path)
         .map_err(|error| GeneratorError::io("create scratch directory", &path, &error))?;
+    if let Err(error) = set_private_directory(&path) {
+        remove_snapshot_tree(&path);
+        return Err(error);
+    }
     Ok(path)
+}
+
+fn set_private_directory(path: &Path) -> Result<(), GeneratorError> {
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| GeneratorError::io("inspect scratch directory", path, &error))?
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions)
+            .map_err(|error| GeneratorError::io("protect scratch directory", path, &error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Scan `checkout` with the generator built at `pin`, render into a scratch
 /// directory, and return every path under `tree` that differs, in sorted
 /// order. Every rendered entry must match the tree in kind and content —
 /// file bytes, the executable bit, and symlink targets — and every
-/// `.github` entry in the tree must be generator-owned unless the tree's
-/// policy excludes it. `checkout` and `tree` are the same directory except
+/// `.github` entry in the tree must be generator-owned. `checkout` and `tree`
+/// are the same directory except
 /// under `--check --output`, where the rendered tree lives apart from its
 /// source.
 ///
@@ -1483,7 +1572,6 @@ pub(crate) fn regenerate_and_compare(
     tree: &Path,
     pin: &str,
     default_branch: &str,
-    excludes: &BTreeSet<String>,
     lookup: &PinnedBinaryLookup,
     source: &PinSource,
 ) -> Result<TreeComparison, GeneratorError> {
@@ -1495,19 +1583,39 @@ pub(crate) fn regenerate_and_compare(
         PinSource::Remote(_) => expected_closures(checkout, pin).ok(),
     };
     let binary = resolve_pinned_binary(pin, expected.as_deref(), lookup, source)?;
+    let render_revision = git(checkout, &["rev-parse", "HEAD"])?
+        .filter(|revision| super::is_full_revision(revision))
+        .ok_or_else(|| {
+            GeneratorError::usage(
+                "workflow root is not a git checkout with a full HEAD revision; cannot bind the render snapshot",
+            )
+        })?;
     let scratch = scratch_directory("policy-render")?;
-    let verdict = render_and_compare(&binary, checkout, tree, &scratch, default_branch, excludes)
-        .and_then(|differences| {
-            if differences.is_empty() {
-                return Ok(TreeComparison::Pin);
-            }
-            match render_with_candidate(checkout, tree, &scratch, default_branch, excludes, lookup)?
-            {
-                Some(closure) => Ok(TreeComparison::Candidate(closure)),
-                None => Ok(TreeComparison::Differences(differences)),
-            }
-        });
-    let _ = fs::remove_dir_all(&scratch);
+    let verdict = render_and_compare(
+        &binary,
+        checkout,
+        &render_revision,
+        tree,
+        &scratch,
+        default_branch,
+    )
+    .and_then(|differences| {
+        if differences.is_empty() {
+            return Ok(TreeComparison::Pin);
+        }
+        match render_with_candidate_at_revision(
+            checkout,
+            tree,
+            &render_revision,
+            &scratch,
+            default_branch,
+            lookup,
+        )? {
+            Some(closure) => Ok(TreeComparison::Candidate(closure)),
+            None => Ok(TreeComparison::Differences(differences)),
+        }
+    });
+    remove_snapshot_tree(&scratch);
     verdict
 }
 
@@ -1528,22 +1636,15 @@ pub(crate) fn regenerate_and_compare(
     clippy::too_many_lines,
     reason = "candidate provenance checks stay ordered before untrusted execution"
 )]
-fn render_with_candidate(
+fn render_with_candidate_at_revision(
     checkout: &Path,
     tree: &Path,
+    render_revision: &str,
     scratch: &Path,
     default_branch: &str,
-    excludes: &BTreeSet<String>,
     lookup: &PinnedBinaryLookup,
 ) -> Result<Option<String>, GeneratorError> {
-    let Ok(Some(render_revision)) = git(checkout, &["rev-parse", "HEAD"]) else {
-        return Ok(None);
-    };
-    if !super::is_full_revision(&render_revision) {
-        return Ok(None);
-    }
-    let Ok(render_closure) =
-        closure_identity::candidate_closure_of_tree(checkout, &render_revision)
+    let Ok(render_closure) = closure_identity::candidate_closure_of_tree(checkout, render_revision)
     else {
         return Ok(None);
     };
@@ -1551,15 +1652,26 @@ fn render_with_candidate(
     // snapshot to scan and render, while `tree` remains the authoritative
     // checkout used for comparison. A candidate can mutate its snapshot
     // without changing the bytes the trusted comparison reads.
-    let candidate_source = scratch.with_file_name(format!(
+    let candidate_workspace = scratch.with_file_name(format!(
         "{}-candidate-source",
         scratch
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("policy-render")
     ));
-    let _ = fs::remove_dir_all(&candidate_source);
-    immutable_git_snapshot(checkout, &candidate_source)?;
+    fs::create_dir(&candidate_workspace).map_err(|error| {
+        GeneratorError::io(
+            "create candidate source workspace",
+            &candidate_workspace,
+            &error,
+        )
+    })?;
+    let candidate_workspace_cleanup = SnapshotWorkspaceCleanup::new(candidate_workspace.clone());
+    set_private_directory(&candidate_workspace)?;
+    let candidate_source = candidate_workspace.join("source");
+    let candidate_source =
+        CandidateSourceCleanup::new(candidate_source, candidate_workspace_cleanup);
+    immutable_git_snapshot(checkout, render_revision, candidate_source.path())?;
     let current_exe = env::current_exe().ok();
     // The manifest gate fails closed loudly: a manifest path that cannot be
     // loaded, or names another tree, is a configuration error, not a skip.
@@ -1631,33 +1743,218 @@ fn render_with_candidate(
         if reported != render_closure {
             continue;
         }
-        let differences = render_and_compare(
+        // `candidate_source` is already the immutable snapshot bound to
+        // `render_revision`; do not pass it through `render_and_compare`,
+        // which would try to archive this non-Git directory a second time.
+        let differences = render_source_and_compare(
             &binary,
-            &candidate_source,
+            candidate_source.path(),
             tree,
             scratch,
             default_branch,
-            excludes,
         );
         let differences = differences?;
         if differences.is_empty() {
-            let _ = fs::remove_dir_all(&candidate_source);
             return Ok(Some(reported));
         }
     }
-    let _ = fs::remove_dir_all(&candidate_source);
     Ok(None)
 }
 
-/// Materialize the audited `HEAD` from git objects into a disposable tree.
+#[cfg(test)]
+fn render_with_candidate(
+    checkout: &Path,
+    tree: &Path,
+    scratch: &Path,
+    default_branch: &str,
+    lookup: &PinnedBinaryLookup,
+) -> Result<Option<String>, GeneratorError> {
+    let Ok(Some(render_revision)) = git(checkout, &["rev-parse", "HEAD"]) else {
+        return Ok(None);
+    };
+    if !super::is_full_revision(&render_revision) {
+        return Ok(None);
+    }
+    render_with_candidate_at_revision(
+        checkout,
+        tree,
+        &render_revision,
+        scratch,
+        default_branch,
+        lookup,
+    )
+}
+
+/// Remove the candidate's immutable source snapshot on every exit path,
+/// including manifest validation and snapshot extraction failures.
+struct CandidateSourceCleanup {
+    path: PathBuf,
+    _workspace: SnapshotWorkspaceCleanup,
+}
+
+impl CandidateSourceCleanup {
+    fn new(path: PathBuf, workspace: SnapshotWorkspaceCleanup) -> Self {
+        Self {
+            path,
+            _workspace: workspace,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CandidateSourceCleanup {
+    fn drop(&mut self) {
+        remove_snapshot_tree(&self.path);
+    }
+}
+
+struct SnapshotWorkspaceCleanup {
+    path: PathBuf,
+}
+
+impl SnapshotWorkspaceCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SnapshotWorkspaceCleanup {
+    fn drop(&mut self) {
+        remove_snapshot_tree(&self.path);
+    }
+}
+
+/// Remove a sealed snapshot without following its symlinks. Sealing makes
+/// directories read-only, so restore write permission on every real entry
+/// before asking the filesystem to remove the tree.
+fn remove_snapshot_tree(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let _ = fs::remove_file(path);
+        return;
+    }
+    let _ = restore_snapshot_permissions(path);
+    let _ = fs::remove_dir_all(path);
+}
+
+fn restore_snapshot_permissions(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            restore_snapshot_permissions(&entry?.path())?;
+        }
+    }
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        permissions.set_mode(permissions.mode() | if metadata.is_dir() { 0o700 } else { 0o200 });
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+}
+
+struct SnapshotStagingCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl SnapshotStagingCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SnapshotStagingCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_snapshot_tree(&self.path);
+        }
+    }
+}
+
+/// Materialize the audited revision from git objects into a disposable tree.
 /// The candidate process receives this tree only; the authoritative checkout
 /// stays outside its writable working directory and is never passed to it.
-fn immutable_git_snapshot(checkout: &Path, destination: &Path) -> Result<(), GeneratorError> {
-    fs::create_dir_all(destination).map_err(|error| {
-        GeneratorError::io("create candidate source snapshot", destination, &error)
+fn immutable_git_snapshot(
+    checkout: &Path,
+    revision: &str,
+    destination: &Path,
+) -> Result<(), GeneratorError> {
+    if !super::is_full_revision(revision) {
+        return Err(GeneratorError::usage(format!(
+            "candidate source snapshot revision is not a full 40-character SHA: {revision:?}"
+        )));
+    }
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            return Err(GeneratorError::usage(format!(
+                "candidate source snapshot destination already exists: {}",
+                destination.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "inspect candidate source snapshot",
+                destination,
+                &error,
+            ))
+        }
+    }
+    let parent = destination.parent().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "candidate source snapshot destination has no parent: {}",
+            destination.display()
+        ))
     })?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|error| {
+        GeneratorError::io("inspect candidate source snapshot parent", parent, &error)
+    })?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "candidate source snapshot parent is not a real directory: {}",
+            parent.display()
+        )));
+    }
+    let name = destination.file_name().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "candidate source snapshot destination has no name: {}",
+            destination.display()
+        ))
+    })?;
+    let staging_path = parent.join(format!(
+        ".{}-staging-{}",
+        name.to_string_lossy(),
+        crate::unique_suffix()
+    ));
+    fs::create_dir(&staging_path).map_err(|error| {
+        GeneratorError::io(
+            "create candidate source staging directory",
+            &staging_path,
+            &error,
+        )
+    })?;
+    let mut staging = SnapshotStagingCleanup::new(staging_path);
+    set_private_directory(staging.path())?;
     let archive = Command::new("git")
-        .args(["archive", "--format=tar", "HEAD"])
+        .args(["archive", "--format=tar", revision])
         .current_dir(checkout)
         .output()
         .map_err(|error| GeneratorError::usage(format!("archive candidate source: {error}")))?;
@@ -1669,7 +1966,7 @@ fn immutable_git_snapshot(checkout: &Path, destination: &Path) -> Result<(), Gen
     }
     let mut extract = Command::new("tar")
         .args(["-xf", "-", "-C"])
-        .arg(destination)
+        .arg(staging.path())
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
@@ -1686,32 +1983,255 @@ fn immutable_git_snapshot(checkout: &Path, destination: &Path) -> Result<(), Gen
             "extract candidate source archive failed",
         ));
     }
+    validate_and_seal_snapshot(staging.path())?;
+    fs::rename(staging.path(), destination).map_err(|error| {
+        GeneratorError::io("publish candidate source snapshot", destination, &error)
+    })?;
+    staging.disarm();
     Ok(())
+}
+
+/// Reject links that can escape the git snapshot or resolve to non-files,
+/// then make every directory and regular file read-only before a renderer
+/// sees the tree. This also protects trusted local renders, which need the
+/// native host executable on non-Linux machines.
+fn validate_and_seal_snapshot(root: &Path) -> Result<(), GeneratorError> {
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|error| GeneratorError::io("inspect candidate source snapshot", root, &error))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "candidate source snapshot {} is not a real directory",
+            root.display()
+        )));
+    }
+    let root = fs::canonicalize(root)
+        .map_err(|error| GeneratorError::io("resolve candidate source snapshot", root, &error))?;
+    for protected in [
+        ".github",
+        ".github/workflows",
+        ".github/workflows/ci-policy.yml",
+    ] {
+        let path = root.join(protected);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(GeneratorError::usage(format!(
+                    "candidate source snapshot contains a symlinked policy path: {protected}"
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GeneratorError::io(
+                    "inspect candidate policy path",
+                    &path,
+                    &error,
+                ));
+            }
+        }
+    }
+    seal_snapshot_directory(&root, &root)?;
+    make_read_only(&root)
+}
+
+fn seal_snapshot_directory(root: &Path, directory: &Path) -> Result<(), GeneratorError> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("scan candidate source snapshot", directory, &error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            GeneratorError::io("read candidate source snapshot entry", directory, &error)
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("inspect candidate source entry", &path, &error))?;
+        let kind = metadata.file_type();
+        if kind.is_symlink() {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let target_path = fs::read_link(&path).map_err(|error| {
+                GeneratorError::io("read candidate source symlink", &path, &error)
+            })?;
+            if target_path.is_absolute() || symlink_target_escapes(relative, &target_path) {
+                return Err(GeneratorError::usage(format!(
+                    "candidate source symlink {} escapes the immutable snapshot",
+                    relative.display()
+                )));
+            }
+            let resolved = fs::canonicalize(&path).map_err(|error| {
+                GeneratorError::io("resolve candidate source symlink", &path, &error)
+            })?;
+            if !resolved.starts_with(root) {
+                return Err(GeneratorError::usage(format!(
+                    "candidate source symlink {} escapes the immutable snapshot",
+                    relative.display()
+                )));
+            }
+            let target = fs::metadata(&path).map_err(|error| {
+                GeneratorError::io("inspect candidate symlink target", &path, &error)
+            })?;
+            if !target.file_type().is_file() && !target.file_type().is_dir() {
+                return Err(GeneratorError::usage(format!(
+                    "candidate source symlink {} does not resolve to a regular file or directory",
+                    relative.display()
+                )));
+            }
+        } else if kind.is_dir() {
+            seal_snapshot_directory(root, &path)?;
+            make_read_only(&path)?;
+        } else if kind.is_file() {
+            make_read_only(&path)?;
+        } else {
+            return Err(GeneratorError::usage(format!(
+                "candidate source snapshot contains a non-regular entry: {}",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn symlink_target_escapes(relative_link: &Path, target: &Path) -> bool {
+    let Some(parent) = relative_link.parent() else {
+        return true;
+    };
+    let mut depth = parent
+        .components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count();
+    for component in target.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => return true,
+            Component::CurDir => {}
+            Component::Normal(_) => depth += 1,
+            Component::ParentDir => {
+                if depth == 0 {
+                    return true;
+                }
+                depth -= 1;
+            }
+        }
+    }
+    false
+}
+
+fn make_read_only(path: &Path) -> Result<(), GeneratorError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        GeneratorError::io("inspect candidate source permissions", path, &error)
+    })?;
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Candidate code runs as uid 65534. Preserve no-write sealing while
+        // making extracted owner-only files and directories readable by it.
+        // The Docker bind mount remains read-only as a second enforcement layer.
+        let mode = if metadata.is_dir() {
+            0o555
+        } else {
+            (metadata.permissions().mode() & 0o111) | 0o444
+        };
+        permissions.set_mode(mode);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| GeneratorError::io("seal candidate source entry", path, &error))
 }
 
 fn render_and_compare(
     binary: &Path,
     checkout: &Path,
+    render_revision: &str,
     root: &Path,
     scratch: &Path,
     default_branch: &str,
-    excludes: &BTreeSet<String>,
+) -> Result<Vec<String>, GeneratorError> {
+    if !super::is_full_revision(render_revision) {
+        return Err(GeneratorError::usage(format!(
+            "audited render revision is not a full 40-character SHA: {render_revision:?}"
+        )));
+    }
+    let source_workspace = scratch.with_file_name(format!(
+        "{}-policy-source",
+        scratch
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("policy-render")
+    ));
+    fs::create_dir(&source_workspace).map_err(|error| {
+        GeneratorError::io("create policy source workspace", &source_workspace, &error)
+    })?;
+    let source = source_workspace.join("source");
+    let source_workspace_cleanup = SnapshotWorkspaceCleanup::new(source_workspace.clone());
+    set_private_directory(&source_workspace)?;
+    let result = immutable_git_snapshot(checkout, render_revision, &source)
+        .and_then(|()| render_source_and_compare(binary, &source, root, scratch, default_branch));
+    drop(source_workspace_cleanup);
+    result
+}
+
+fn render_source_and_compare(
+    binary: &Path,
+    source: &Path,
+    root: &Path,
+    scratch: &Path,
+    default_branch: &str,
+) -> Result<Vec<String>, GeneratorError> {
+    if env::current_exe().is_ok_and(|current| same_executable(&current, binary)) {
+        render_locally_and_compare(binary, source, root, scratch, default_branch)
+    } else {
+        render_sandboxed_and_compare(binary, source, root, scratch, default_branch)
+    }
+}
+
+fn render_sandboxed_and_compare(
+    binary: &Path,
+    source: &Path,
+    root: &Path,
+    scratch: &Path,
+    default_branch: &str,
+) -> Result<Vec<String>, GeneratorError> {
+    prepare_render_scratch(scratch)?;
+    let args = [
+        OsString::from("/workspace"),
+        OsString::from("--output"),
+        OsString::from("/output"),
+        OsString::from("--plain"),
+        OsString::from("--force"),
+        OsString::from("--default-branch"),
+        OsString::from(default_branch),
+    ];
+    let output = crate::candidate_sandbox::run(binary, Some(source), Some(scratch), &args)
+        .map_err(GeneratorError::usage)?;
+    if output.status != 0 {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = if detail.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        } else {
+            detail.into_owned()
+        };
+        return Err(GeneratorError::usage(format!(
+            "regeneration in candidate sandbox with {} failed (exit {}): {}",
+            binary.display(),
+            output.status,
+            detail.trim()
+        )));
+    }
+    compare_rendered_tree(scratch, root)
+}
+
+fn render_locally_and_compare(
+    binary: &Path,
+    checkout: &Path,
+    root: &Path,
+    scratch: &Path,
+    default_branch: &str,
 ) -> Result<Vec<String>, GeneratorError> {
     // Each render starts from an empty scratch, so the comparison is
     // against exactly this renderer's tree — never a union with a
     // previous render into the same directory.
-    if fs::symlink_metadata(scratch).is_ok() {
-        fs::remove_dir_all(scratch)
-            .map_err(|error| GeneratorError::io("clean scratch directory", scratch, &error))?;
-    }
-    fs::create_dir_all(scratch)
-        .map_err(|error| GeneratorError::io("create scratch directory", scratch, &error))?;
-    // Candidate renderers are untrusted PR output. Their inputs are already
-    // bounded to the snapshot below. Preserve only PATH so git-backed scans
-    // retain their tracked-file boundary without credentials or runner data.
-    let path = env::var_os("PATH").ok_or_else(|| {
-        GeneratorError::usage("PATH is unavailable for the hermetic candidate render")
-    })?;
+    prepare_render_scratch(scratch)?;
+    let path = env::var_os("PATH")
+        .ok_or_else(|| GeneratorError::usage("PATH is unavailable for trusted local rendering"))?;
     let output = Command::new(binary)
         .env_clear()
         .env("PATH", path)
@@ -1740,7 +2260,16 @@ fn render_and_compare(
             detail.trim()
         )));
     }
-    compare_rendered_tree(scratch, root, excludes)
+    compare_rendered_tree(scratch, root)
+}
+
+fn prepare_render_scratch(scratch: &Path) -> Result<(), GeneratorError> {
+    if fs::symlink_metadata(scratch).is_ok() {
+        fs::remove_dir_all(scratch)
+            .map_err(|error| GeneratorError::io("clean scratch directory", scratch, &error))?;
+    }
+    fs::create_dir_all(scratch)
+        .map_err(|error| GeneratorError::io("create scratch directory", scratch, &error))
 }
 
 /// Compare an untrusted render directory with the untouched authoritative
@@ -1749,13 +2278,8 @@ fn render_and_compare(
 /// that escapes the root, dangles, or names a non-file is an error — and
 /// every admitted entry must then match the tree in kind and content:
 /// file bytes, the executable bit, and symlink targets. Every `.github`
-/// entry in the tree must be generator-owned unless the tree's policy
-/// excludes it.
-fn compare_rendered_tree(
-    rendered_root: &Path,
-    tree: &Path,
-    excludes: &BTreeSet<String>,
-) -> Result<Vec<String>, GeneratorError> {
+/// entry in the tree must be generator-owned.
+fn compare_rendered_tree(rendered_root: &Path, tree: &Path) -> Result<Vec<String>, GeneratorError> {
     let mut rendered = BTreeMap::new();
     collect_rendered_tree_entries(rendered_root, rendered_root, &mut rendered)?;
     let mut actual = BTreeMap::new();
@@ -1773,7 +2297,7 @@ fn compare_rendered_tree(
         }
     }
     for relative in actual.keys() {
-        if rendered.contains_key(relative) || is_excluded_workflow(relative, excludes) {
+        if rendered.contains_key(relative) {
             continue;
         }
         if relative.starts_with(".github/workflows")
@@ -1783,7 +2307,7 @@ fn compare_rendered_tree(
             )
         {
             differences.push(format!(
-                "{}: not generator-owned (hand-written workflows are refused; list it under [policy] exclude_workflows only while migrating)",
+                "{}: not generator-owned (hand-written workflows are refused)",
                 relative.display()
             ));
         } else {
@@ -1795,30 +2319,6 @@ fn compare_rendered_tree(
     }
     differences.sort();
     Ok(differences)
-}
-
-/// The migration hatch, unchanged: an unrendered top-level
-/// `.github/workflows/<name>.yml|.yaml` the tree's `[policy]
-/// exclude_workflows` names. Nested paths never match, exactly like the
-/// previous directory scan.
-fn is_excluded_workflow(relative: &Path, excludes: &BTreeSet<String>) -> bool {
-    if excludes.is_empty() {
-        return false;
-    }
-    let Ok(name) = relative.strip_prefix(".github/workflows") else {
-        return false;
-    };
-    if name.components().count() != 1
-        || !matches!(
-            name.extension().and_then(|value| value.to_str()),
-            Some("yml" | "yaml")
-        )
-    {
-        return false;
-    }
-    name.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| excludes.contains(name))
 }
 
 /// One collected tree entry: regular files by bytes plus the executable
@@ -1915,14 +2415,43 @@ fn compare_tree_entry(
 /// Classify one actual-tree path without following symlinks:
 /// `Ok(None)` when the path is absent.
 fn stat_tree_entry(path: &Path) -> Result<Option<TreeEntry>, GeneratorError> {
-    let metadata = match fs::symlink_metadata(path) {
+    // macOS exposes temporary directories through the stable `/var` and
+    // `/tmp` aliases. Normalize only those fixed system aliases; the
+    // caller-owned components remain checked below without following links.
+    let path = normalize_system_alias(path);
+    // `symlink_metadata(path)` does not follow the final component, but the
+    // OS resolves every parent before it reaches that component. Walk each
+    // parent from the root and reject symlinks before descending; otherwise
+    // `tree/link/child` could read bytes from the link target.
+    let mut current = PathBuf::new();
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        if matches!(component, Component::ParentDir) {
+            return Ok(None);
+        }
+        current.push(component.as_os_str());
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(GeneratorError::io("read tree parent", &current, &error));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Ok(None);
+        }
+    }
+    let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(GeneratorError::io("read tree file", path, &error)),
+        Err(error) => return Err(GeneratorError::io("read tree file", &path, &error)),
     };
     if metadata.file_type().is_symlink() {
-        let target = fs::read_link(path)
-            .map_err(|error| GeneratorError::io("read tree symlink", path, &error))?;
+        let target = fs::read_link(&path)
+            .map_err(|error| GeneratorError::io("read tree symlink", &path, &error))?;
         return Ok(Some(TreeEntry::Symlink { target }));
     }
     if metadata.file_type().is_dir() {
@@ -1932,11 +2461,23 @@ fn stat_tree_entry(path: &Path) -> Result<Option<TreeEntry>, GeneratorError> {
         return Ok(Some(TreeEntry::Special));
     }
     let bytes =
-        fs::read(path).map_err(|error| GeneratorError::io("read tree file", path, &error))?;
+        fs::read(&path).map_err(|error| GeneratorError::io("read tree file", &path, &error))?;
     Ok(Some(TreeEntry::File {
         bytes,
         executable: is_executable_metadata(&metadata),
     }))
+}
+
+fn normalize_system_alias(path: &Path) -> PathBuf {
+    for prefix in [Path::new("/var"), Path::new("/tmp")] {
+        if path.starts_with(prefix)
+            && let Ok(canonical_prefix) = fs::canonicalize(prefix)
+            && let Ok(rest) = path.strip_prefix(prefix)
+        {
+            return canonical_prefix.join(rest);
+        }
+    }
+    path.to_owned()
 }
 
 /// Collect the untrusted render side of a policy comparison: regular
@@ -2692,10 +3233,18 @@ fn canonical_api_step_findings(
     let declared_ruleset_contexts = declared_ruleset_contexts.join(",");
     let hosted = static_local_provider(job, velnor_policy).is_none();
     let expected = if hosted {
-        let Some(revision) = entrypoint_policy_revision(root) else {
-            return vec![format!(
-                "{POLICY_ENTRYPOINT} has no revision for the canonical API-step contract"
-            )];
+        let revision = match entrypoint_policy_revision(root) {
+            Ok(Some(revision)) => revision,
+            Ok(None) => {
+                return vec![format!(
+                    "{POLICY_ENTRYPOINT} has no revision for the canonical API-step contract"
+                )];
+            }
+            Err(error) => {
+                return vec![format!(
+                    "cannot safely inspect {POLICY_ENTRYPOINT} for the canonical API-step contract: {error}"
+                )];
+            }
         };
         let Some(runner) = mapping_value(job, "runs-on").and_then(Value::as_str) else {
             return vec![format!(
@@ -2875,15 +3424,17 @@ impl PolicyFindings {
 /// Audit every workflow under `root/.github/workflows` with the validator's
 /// semantic rules. The policy entrypoint is exempt from the
 /// `pull_request_target` rule here; [`audit_policy_entrypoint`] judges it.
+/// Every workflow receives the complete semantic audit.
 ///
 /// # Errors
 /// When the workflow directory or a workflow file cannot be read.
 pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorError> {
     let workflows = root.join(".github/workflows");
+    reject_symlinked_workflow_roots(root)?;
+    super::scan::file_walk::validate_repository_tree(root)?;
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
-    let policy_excludes = configured_policy_excludes(root);
     let velnor_policy = configured_velnor_policy(root)?;
     let mut findings = PolicyFindings {
         root: root.to_path_buf(),
@@ -2899,7 +3450,15 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
             .path();
-        if path.is_file()
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("inspect workflow entry", &path, &error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(GeneratorError::usage(format!(
+                "refusing symlinked workflow file: {}",
+                path.display()
+            )));
+        }
+        if metadata.file_type().is_file()
             && matches!(
                 path.extension().and_then(|value| value.to_str()),
                 Some("yml" | "yaml")
@@ -2910,13 +3469,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
     }
     paths.sort();
     for path in paths {
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| policy_excludes.contains(name))
-        {
-            continue;
-        }
+        let is_policy_entrypoint = path == policy_entrypoint;
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow", &path, &error))?;
         let document: Value = match serde_yaml::from_str_with_config(&content, &parser) {
@@ -2937,7 +3490,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
         inspect_workflow(
             workflow,
             &path,
-            path == policy_entrypoint,
+            is_policy_entrypoint,
             &velnor_policy,
             &mut findings,
         );
@@ -2954,17 +3507,18 @@ fn inspect_workflow(
 ) {
     for (key, value) in workflow {
         let key = key.as_str();
+        if key == "on"
+            && contains_exact_yaml_value(value, "pull_request_target")
+            && !is_policy_entrypoint
+        {
+            failures.record(
+                Rule::PullRequestTarget,
+                path,
+                "pull_request_target is forbidden outside the policy entrypoint",
+            );
+        }
         match key {
-            "on" => {
-                if contains_exact_yaml_value(value, "pull_request_target") && !is_policy_entrypoint
-                {
-                    failures.record(
-                        Rule::PullRequestTarget,
-                        path,
-                        "pull_request_target is forbidden outside the policy entrypoint",
-                    );
-                }
-            }
+            "on" => {}
             "jobs" => inspect_jobs(value, path, velnor_policy, failures),
             _ => inspect_yaml_value(value, path, None, false, velnor_policy, failures),
         }
@@ -3012,8 +3566,8 @@ fn has_safe_runner_gate(
         return true;
     }
     // A top-level conjunction carrying the exact trusted-event predicate
-    // excludes fork and bot pull requests whatever the functional side
-    // narrows: conjunction preserves exclusion. The split is paren- and
+    // rejects fork and bot pull requests whatever the functional side
+    // narrows: conjunction preserves that rejection. The split is paren- and
     // quote-aware, and any top-level `||` disqualifies, so the conjunct
     // cannot hide inside a wider disjunction.
     if has_exact_trusted_conjunct(condition) {
@@ -3096,14 +3650,6 @@ fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorErro
         GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
     })?;
     Ok(value.get("workflow").cloned())
-}
-
-fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
-    config::discover(root)
-        .ok()
-        .flatten()
-        .map(|config| config.effective_policy_exclude_workflows())
-        .unwrap_or_default()
 }
 
 fn toml_string_array(
@@ -4022,3 +4568,116 @@ fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod candidate_source_cleanup_tests {
+    #![expect(
+        clippy::panic,
+        reason = "the regression fixture uses assertions to name setup failures"
+    )]
+
+    use super::*;
+
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn command(root: &Path, arguments: &[&str], context: &str) {
+        let status = must(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(root)
+                .status(),
+            context,
+        );
+        assert!(status.success(), "{context}: {status}");
+    }
+
+    #[test]
+    fn candidate_source_is_removed_when_manifest_validation_fails() {
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-policy-candidate-source-cleanup-{}",
+            crate::unique_suffix()
+        ));
+        let scratch = env::temp_dir().join(format!(
+            "velnor-workflow-policy-candidate-source-cleanup-scratch-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(root.join("crates/velnor-workflow/src")),
+            "create source",
+        );
+        must(fs::create_dir_all(&scratch), "create scratch");
+        must(
+            fs::write(
+                root.join("crates/velnor-workflow/src/lib.rs"),
+                "pub fn fixture() {}\n",
+            ),
+            "write source",
+        );
+        must(
+            fs::write(root.join("Cargo.toml"), "[workspace]\n"),
+            "write manifest",
+        );
+        must(
+            fs::write(root.join("Cargo.lock"), "# fixture\n"),
+            "write lockfile",
+        );
+        command(&root, &["init", "-q"], "initialize fixture repository");
+        command(&root, &["add", "."], "stage fixture repository");
+        command(
+            &root,
+            &[
+                "-c",
+                "user.name=Velnor test",
+                "-c",
+                "user.email=velnor-test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            "commit fixture repository",
+        );
+        let head = must(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output(),
+            "read fixture HEAD",
+        );
+        assert!(head.status.success(), "read fixture HEAD: {head:?}");
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        let manifest = root.join("candidate-manifest.json");
+        must(
+            fs::write(&manifest, "{not json"),
+            "write malformed manifest",
+        );
+        let lookup = PinnedBinaryLookup {
+            pinned_binary: None,
+            candidate_binary: None,
+            search_path: None,
+            install_root: root.join("install"),
+            build_forbidden: true,
+            candidate_manifest: Some(manifest),
+        };
+        let result = render_with_candidate(&root, &root, &scratch, "main", &lookup);
+        assert!(result.is_err(), "malformed manifest must fail validation");
+        let snapshot = scratch.with_file_name(format!(
+            "{}-candidate-source",
+            scratch
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("policy-render")
+        ));
+        assert!(
+            !snapshot.exists(),
+            "candidate source snapshot for {head} must be removed after validation failure: {}",
+            snapshot.display()
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(scratch);
+    }
+}

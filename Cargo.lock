@@ -4094,6 +4094,7 @@ dependencies = [
  "tar",
  "termrock",
  "toml",
+ "unicode-normalization",
  "uuid",
  "velnor-model",
  "velnor-runner",
