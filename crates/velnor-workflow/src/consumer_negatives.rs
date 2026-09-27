@@ -1531,8 +1531,12 @@ fn candidate_acquire_exports_bound_product() {
     );
     let env = must(fs::read_to_string(&env_file), "read github env");
     assert!(
-        env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
-        "the binary exports: {env}"
+        env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
+        "the reader-bootstrap binary export remains on the base slot: {env}"
+    );
+    assert!(
+        !env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
+        "the writer stays on the base slot until the reader pin is promoted: {env}"
     );
     assert!(
         env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),
