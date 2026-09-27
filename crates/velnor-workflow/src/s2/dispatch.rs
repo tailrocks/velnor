@@ -12,7 +12,7 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Binary-only subcommands, mirroring `runtime::try_run` plus the reuse
 /// slice it falls through to. These never take a generator target, so the
@@ -147,6 +147,7 @@ pub(crate) fn dir_is_schema2(dir: &Path) -> bool {
 }
 
 fn try_dir_is_schema2(dir: &Path) -> Result<bool, crate::GeneratorError> {
+    validate_workflow_root_path(dir)?;
     let config_path = dir.join(super::config::GENERATION_CONFIG_PATH);
     validate_generation_config_path(dir, &config_path)?;
     let text = match std::fs::read_to_string(&config_path) {
@@ -164,6 +165,56 @@ fn try_dir_is_schema2(dir: &Path) -> Result<bool, crate::GeneratorError> {
         Ok(table) => Ok(table.get("schema").and_then(toml::Value::as_integer) == Some(2)),
         Err(_) => Ok(false),
     }
+}
+
+/// Reject symlinks in the supplied root path before reading its routing
+/// config. This inspects only path ancestors; repository contents remain the
+/// selected pipeline's responsibility.
+fn validate_workflow_root_path(root: &Path) -> Result<(), crate::GeneratorError> {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| crate::GeneratorError::io("resolve workflow root", root, &error))?
+            .join(root)
+    };
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                current.pop();
+                continue;
+            }
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(crate::GeneratorError::usage(format!(
+                    "refusing symlinked workflow root path: {}",
+                    current.display()
+                )));
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                return Err(crate::GeneratorError::usage(format!(
+                    "workflow root path component is not a directory: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(crate::GeneratorError::io(
+                    "inspect workflow root path",
+                    &current,
+                    &error,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate only the generation config's path components and type before the
@@ -235,7 +286,11 @@ mod tests {
     }
 
     fn fixture_dir(name: &str, config: Option<&str>) -> PathBuf {
-        let root = env::temp_dir().join(format!(
+        let temp = must(
+            std::fs::canonicalize(env::temp_dir()),
+            "resolve dispatch temporary directory",
+        );
+        let root = temp.join(format!(
             "velnor-r2-dispatch-{}-{name}",
             crate::unique_suffix()
         ));
@@ -253,8 +308,12 @@ mod tests {
         root
     }
 
-    fn short_fixture_dir(name: &str, config: Option<&str>) -> PathBuf {
-        let root = PathBuf::from("/tmp").join(format!("vw-dsp-{}-{name}", crate::unique_suffix()));
+    fn short_fixture_dir(_name: &str, config: Option<&str>) -> PathBuf {
+        let temp = must(
+            std::fs::canonicalize("/tmp"),
+            "resolve short temporary directory",
+        );
+        let root = temp.join(format!("vwd-{}", crate::unique_suffix()));
         must(
             std::fs::create_dir_all(root.join(".github-gen")),
             "create short dispatch fixture",
@@ -338,6 +397,59 @@ mod tests {
         );
 
         drop(listener);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_and_ancestor_fail_before_schema1_dispatch() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_fixture_dir(
+            "schema1-root",
+            Some("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n"),
+        );
+        assert!(
+            !must(try_dir_is_schema2(&root), "real schema-1 path is readable"),
+            "control path is an ordinary schema-1 directory"
+        );
+
+        let name = root.file_name().unwrap_or_default();
+        let parent = root.parent().unwrap_or(Path::new("/"));
+        let root_link = parent.join(format!("vw-dsp-{}-root-link", crate::unique_suffix()));
+        must(symlink(&root, &root_link), "create symlinked workflow root");
+        let parent_link = parent.join(format!("vw-dsp-{}-parent-link", crate::unique_suffix()));
+        must(
+            symlink(parent, &parent_link),
+            "create symlinked workflow ancestor",
+        );
+        let ancestor_linked_root = parent_link.join(name);
+
+        for (path, label) in [
+            (&root_link, "root symlink"),
+            (&ancestor_linked_root, "ancestor symlink"),
+        ] {
+            let error = must_fail(
+                try_dir_is_schema2(path),
+                &format!("{label} must fail before routing"),
+            );
+            assert!(
+                error.to_string().contains("symlinked workflow root path"),
+                "{label} is named in the refusal: {error}"
+            );
+            let target = path.to_string_lossy().into_owned();
+            let error = must_fail(
+                wants_s2(&args(&[target.as_str()])),
+                &format!("{label} must not fall through to schema 1"),
+            );
+            assert!(
+                error.to_string().contains("symlinked workflow root path"),
+                "dispatch preserves the root-path refusal: {error}"
+            );
+        }
+
+        let _ = std::fs::remove_file(root_link);
+        let _ = std::fs::remove_file(parent_link);
         let _ = std::fs::remove_dir_all(root);
     }
 
