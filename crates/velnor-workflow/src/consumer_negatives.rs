@@ -914,6 +914,9 @@ impl ConsumerFixture {
             ("name", name),
             ("run_id", run_id),
             ("head_candidate", head_candidate),
+            ("render_candidate", head_candidate),
+            ("CANDIDATE_SHA", self.revision.as_str()),
+            ("RENDER_SHA", self.revision.as_str()),
         ];
         env.extend_from_slice(extra);
         (self.run_script("candidate", &tail, &env, None), env_file)
@@ -928,6 +931,7 @@ fn candidate_manifest(fixture: &ConsumerFixture, closure: &str, digest: &str) ->
         "run_id": "12345678",
         "revision": fixture.revision.as_str(),
         "closure": closure,
+        "build_revision": fixture.revision.as_str(),
         "binary_sha256": digest,
     })
 }
