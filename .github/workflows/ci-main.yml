@@ -451,9 +451,6 @@ jobs:
         tools/unit-collector/examples/**
         tools/unit-collector/src/**
         tools/unit-collector/tests/**
-        tools/unit-collector/tests/fixtures/dependency-bump.jsonl
-        tools/unit-collector/tests/fixtures/fresh.jsonl
-        tools/unit-collector/tests/fixtures/touched-source.jsonl
       cache_paths: |
         ~/.cargo/registry
         ~/.cargo/git
@@ -529,19 +526,7 @@ jobs:
         crates/velnor-runner/debian/velnor.env
         crates/velnor-runner/examples/**
         crates/velnor-runner/src/**
-        crates/velnor-runner/src/cache.rs
-        crates/velnor-runner/src/execution/mod.rs
-        crates/velnor-runner/src/executor.rs
-        crates/velnor-runner/src/leftover_disk.rs
-        crates/velnor-runner/src/node/complete.rs
-        crates/velnor-runner/src/node/guardian.rs
-        crates/velnor-runner/src/node/job.rs
-        crates/velnor-runner/src/node/slot.rs
-        crates/velnor-runner/src/release.rs
-        crates/velnor-runner/src/runner.rs
         crates/velnor-runner/tests/**
-        crates/velnor-runner/tests/fixtures/backend-parity.yml
-        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
         crates/velnor-tools/debian/velnor-fleet-policy-audit.service
         crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
         docker/job-mise.lock
@@ -826,19 +811,7 @@ jobs:
         crates/velnor-runner/debian/velnor.env
         crates/velnor-runner/examples/**
         crates/velnor-runner/src/**
-        crates/velnor-runner/src/cache.rs
-        crates/velnor-runner/src/execution/mod.rs
-        crates/velnor-runner/src/executor.rs
-        crates/velnor-runner/src/leftover_disk.rs
-        crates/velnor-runner/src/node/complete.rs
-        crates/velnor-runner/src/node/guardian.rs
-        crates/velnor-runner/src/node/job.rs
-        crates/velnor-runner/src/node/slot.rs
-        crates/velnor-runner/src/release.rs
-        crates/velnor-runner/src/runner.rs
         crates/velnor-runner/tests/**
-        crates/velnor-runner/tests/fixtures/backend-parity.yml
-        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
         crates/velnor-tools/debian/velnor-fleet-policy-audit.service
         crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
         docker/job-mise.lock
@@ -905,15 +878,6 @@ jobs:
         crates/velnor-tools/benches/**
         crates/velnor-tools/examples/**
         crates/velnor-tools/src/**
-        crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/checks/jackin-project_jackin-agent-smith/pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0/check-runs/page-0001.body.base64
-        crates/velnor-tools/src/testdata/g0/raw-capture-20260920-065449/runs/tailrocks_holla-apt/run-35079189599/attempt-1/jobs/page-0001.body.base64
-        crates/velnor-tools/src/testdata/g0/real-api-fixture-corpus-20260920-080318/corpus.zip.base64
-        crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/dco-2.body.base64
-        crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/github-actions.body.base64
-        crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/apps/sonarqubecloud.body.base64
-        crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/homebrew-96059348318.body.base64
-        crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108219979.body.base64
-        crates/velnor-tools/src/testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108227551.body.base64
         crates/velnor-tools/tests/**
         mise.lock
         schemas/**
@@ -990,19 +954,7 @@ jobs:
         crates/velnor-runner/debian/velnor.env
         crates/velnor-runner/examples/**
         crates/velnor-runner/src/**
-        crates/velnor-runner/src/cache.rs
-        crates/velnor-runner/src/execution/mod.rs
-        crates/velnor-runner/src/executor.rs
-        crates/velnor-runner/src/leftover_disk.rs
-        crates/velnor-runner/src/node/complete.rs
-        crates/velnor-runner/src/node/guardian.rs
-        crates/velnor-runner/src/node/job.rs
-        crates/velnor-runner/src/node/slot.rs
-        crates/velnor-runner/src/release.rs
-        crates/velnor-runner/src/runner.rs
         crates/velnor-runner/tests/**
-        crates/velnor-runner/tests/fixtures/backend-parity.yml
-        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
         crates/velnor-tools/debian/velnor-fleet-policy-audit.service
         crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
         crates/velnor-workflow/**/*.rs
@@ -1015,8 +967,6 @@ jobs:
         crates/velnor-workflow/templates/**
         crates/velnor-workflow/templates/release-package-signer.yml
         crates/velnor-workflow/tests/**
-        crates/velnor-workflow/tests/fixtures/github-action-consumer/workflow.yml
-        crates/velnor-workflow/tests/generic_surface_literals.rs
         docker/build-mise.*
         docker/job-mise.lock
         docker/job-ubuntu.Dockerfile
@@ -1153,20 +1103,8 @@ jobs:
         crates/velnor-runner/debian/velnor.env
         crates/velnor-runner/examples/**
         crates/velnor-runner/src/**
-        crates/velnor-runner/src/cache.rs
-        crates/velnor-runner/src/execution/mod.rs
-        crates/velnor-runner/src/executor.rs
-        crates/velnor-runner/src/leftover_disk.rs
         crates/velnor-runner/src/node/canary.rs
-        crates/velnor-runner/src/node/complete.rs
-        crates/velnor-runner/src/node/guardian.rs
-        crates/velnor-runner/src/node/job.rs
-        crates/velnor-runner/src/node/slot.rs
-        crates/velnor-runner/src/release.rs
-        crates/velnor-runner/src/runner.rs
         crates/velnor-runner/tests/**
-        crates/velnor-runner/tests/fixtures/backend-parity.yml
-        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
         crates/velnor-tools/debian/velnor-fleet-policy-audit.service
         crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
         crates/velnorctl/**/*.rs

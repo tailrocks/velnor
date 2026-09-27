@@ -626,7 +626,7 @@ fn analyze_rust_manifests(
         }
         let (include_targets, include_limitations) =
             include_str_paths_for_package(root, files, file_set, &package_roots, &manifest.root)?;
-        watch.extend(include_targets);
+        watch.extend(only_unwatched_include_targets(include_targets, &watch)?);
         result.limitations.extend(include_limitations);
         let local_lock = join_repo_path(&manifest.root, "Cargo.lock");
         if file_set.contains(&local_lock) {
@@ -821,6 +821,33 @@ fn analyze_rust_manifests(
     result.limitations.sort();
     result.limitations.dedup();
     Ok(result)
+}
+
+/// Keep exact Rust include inputs only when the unit's ordinary watch set does
+/// not already cover them. This preserves arbitrary embedded assets while
+/// avoiding redundant exact paths under the crate's source/test watches.
+fn only_unwatched_include_targets(
+    targets: Vec<String>,
+    watches: &[String],
+) -> Result<Vec<String>, GeneratorError> {
+    let mut builder = GlobSetBuilder::new();
+    for watch in watches {
+        let glob = Glob::new(watch).map_err(|error| {
+            GeneratorError::usage(format!(
+                "[scan] Rust watch is not a valid glob: {watch}: {error}"
+            ))
+        })?;
+        builder.add(glob);
+    }
+    let matcher = builder.build().map_err(|error| {
+        GeneratorError::usage(format!(
+            "[scan] Rust watch globs could not be compiled: {error}"
+        ))
+    })?;
+    Ok(targets
+        .into_iter()
+        .filter(|target| !matcher.is_match(target))
+        .collect())
 }
 
 fn include_str_paths(
@@ -2304,11 +2331,35 @@ pub(crate) fn detect(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{include_str_paths, package_runs_doctests, parse_cargo_manifest};
+    use super::{
+        include_str_paths, only_unwatched_include_targets, package_runs_doctests,
+        parse_cargo_manifest,
+    };
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+
+    #[test]
+    fn include_targets_reuse_existing_package_watches() {
+        let targets = vec![
+            "crates/app/tests/fixtures/workflow.yml".to_owned(),
+            "crates/app/src/lib.rs".to_owned(),
+            "crates/app/assets/logo.svg".to_owned(),
+        ];
+        let watches = vec![
+            "crates/app/tests/**".to_owned(),
+            "crates/app/src/**".to_owned(),
+        ];
+
+        assert_eq!(
+            must(
+                only_unwatched_include_targets(targets, &watches),
+                "filter include targets already covered by watch globs",
+            ),
+            vec!["crates/app/assets/logo.svg"]
+        );
+    }
 
     #[test]
     fn lib_crate_types_mark_ffi_evidence() {
