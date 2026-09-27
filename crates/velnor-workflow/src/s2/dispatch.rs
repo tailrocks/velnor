@@ -137,21 +137,24 @@ fn workflow_root_argument(arguments: &[OsString]) -> Option<PathBuf> {
 
 /// Whether `dir` carries a generation config declaring `schema = 2`. A
 /// missing or unparsable config is not schema 2; the pipelines' own schema
-/// gates report the real error.
+/// gates report the real error. Dispatch validates only this routing authority
+/// and its parent path. The destination pipeline performs the full repository
+/// preflight after routing, so unrelated entries in the working directory
+/// cannot block runtime commands here.
 pub(crate) fn dir_is_schema2(dir: &Path) -> bool {
-    // Promotion still has a boolean routing API. An invalid physical tree
-    // must take the strict S2 path so it cannot fall through to the legacy
-    // renderer, which could read repository-controlled config before its own
-    // preflight. The dispatch bridge uses `try_dir_is_schema2` and preserves
-    // the concrete error for CLI callers.
+    // Promotion still has a boolean routing API. Keep invalid routing
+    // authorities on the strict S2 path so callers cannot use this facade to
+    // silently fall through to the legacy renderer. The dispatch bridge uses
+    // try_dir_is_schema2 and preserves the concrete error for CLI callers.
     try_dir_is_schema2(dir).unwrap_or(true)
 }
 
 fn try_dir_is_schema2(dir: &Path) -> Result<bool, crate::GeneratorError> {
-    super::scan::file_walk::validate_repository_tree(dir)
-        .map_err(|error| crate::GeneratorError::usage(error.to_string()))?;
-    let config_path = dir.join(super::config::GENERATION_CONFIG_PATH);
-    validate_generation_config_path(dir, &config_path)?;
+    let Some(root) = absolute_validated_root(dir)? else {
+        return Ok(false);
+    };
+    let config_path = root.join(super::config::GENERATION_CONFIG_PATH);
+    validate_generation_config_path(&root, &config_path)?;
     let text = match std::fs::read_to_string(&config_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -177,26 +180,133 @@ fn validate_generation_config_path(
     root: &Path,
     config_path: &Path,
 ) -> Result<(), crate::GeneratorError> {
-    for path in [root.join(".github-gen"), config_path.to_path_buf()] {
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(crate::GeneratorError::usage(format!(
-                    "refusing symlinked generation config path: {}",
-                    path.display()
-                )));
+    let config_directory = root.join(".github-gen");
+    let directory_metadata = match std::fs::symlink_metadata(&config_directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(crate::GeneratorError::io(
+                "inspect generation config path",
+                &config_directory,
+                &error,
+            ));
+        }
+    };
+    if directory_metadata.file_type().is_symlink() {
+        return Err(crate::GeneratorError::usage(format!(
+            "refusing symlinked generation config path: {}",
+            config_directory.display()
+        )));
+    }
+    if !directory_metadata.is_dir() {
+        return Err(crate::GeneratorError::usage(format!(
+            "generation config parent is not a directory: {}",
+            config_directory.display()
+        )));
+    }
+
+    let config_metadata = match std::fs::symlink_metadata(config_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(crate::GeneratorError::io(
+                "inspect generation config path",
+                config_path,
+                &error,
+            ));
+        }
+    };
+    if config_metadata.file_type().is_symlink() {
+        return Err(crate::GeneratorError::usage(format!(
+            "refusing symlinked generation config path: {}",
+            config_path.display()
+        )));
+    }
+    if !config_metadata.is_file() {
+        return Err(crate::GeneratorError::usage(format!(
+            "generation config is not a regular file: {}",
+            config_path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Make a path absolute and validate each encountered directory before
+/// collapsing `..`. Collapsing first is unsafe: `link/../repo` traverses
+/// `link` on the filesystem even though its lexical spelling omits it.
+/// Missing roots stay on the schema-1 routing path; symlinked or non-directory
+/// components fail closed.
+fn absolute_validated_root(path: &Path) -> Result<Option<PathBuf>, crate::GeneratorError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|error| {
+                crate::GeneratorError::usage(format!("read current directory: {error}"))
+            })?
+            .join(path)
+    };
+    // On macOS `/tmp` and `/var` are system aliases to `/private/tmp` and
+    // `/private/var`. Expand those known aliases before validating; preserve
+    // the remaining component order so `..` cannot erase a symlink first.
+    let absolute = normalize_macos_system_alias(absolute);
+    let mut root = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                root.pop();
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(crate::GeneratorError::io(
-                    "inspect generation config path",
-                    &path,
-                    &error,
-                ));
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                root.push(component.as_os_str());
+            }
+            std::path::Component::Normal(_) => {
+                root.push(component.as_os_str());
+                let metadata = match std::fs::symlink_metadata(&root) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => {
+                        return Err(crate::GeneratorError::io(
+                            "inspect generation config parent",
+                            &root,
+                            &error,
+                        ));
+                    }
+                };
+                if metadata.file_type().is_symlink() {
+                    return Err(crate::GeneratorError::usage(format!(
+                        "refusing symlinked generation config parent: {}",
+                        root.display()
+                    )));
+                }
+                if !metadata.is_dir() {
+                    return Err(crate::GeneratorError::usage(format!(
+                        "generation config parent is not a directory: {}",
+                        root.display()
+                    )));
+                }
             }
         }
     }
-    Ok(())
+    Ok(Some(root))
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_macos_system_alias(path: PathBuf) -> PathBuf {
+    for (alias, target) in [
+        (Path::new("/var"), Path::new("/private/var")),
+        (Path::new("/tmp"), Path::new("/private/tmp")),
+    ] {
+        if let Ok(suffix) = path.strip_prefix(alias) {
+            return target.join(suffix);
+        }
+    }
+    path
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_macos_system_alias(path: PathBuf) -> PathBuf {
+    path
 }
 
 #[cfg(test)]
@@ -310,6 +420,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn unrelated_special_files_and_symlinks_do_not_block_schema_dispatch() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let root = fixture_dir(
+            "unrelated-tree-entries",
+            Some("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n"),
+        );
+        let socket = root.join("unrelated.sock");
+        let short_socket =
+            PathBuf::from(format!("/tmp/velnor-dispatch-{}", crate::unique_suffix()));
+        let _ = std::fs::remove_file(&short_socket);
+        let listener = must(UnixListener::bind(&short_socket), "create unrelated socket");
+        must(
+            std::fs::rename(&short_socket, &socket),
+            "move unrelated socket into fixture",
+        );
+        must(
+            symlink(root.join("missing-target"), root.join("unrelated-link")),
+            "create unrelated symlink",
+        );
+
+        let target = root.to_string_lossy().into_owned();
+        assert!(routes_to_s2(&args(&[target.as_str()])));
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn symlinked_generation_config_fails_dispatch_preflight() {
         use std::os::unix::fs::symlink;
 
@@ -349,6 +490,44 @@ mod tests {
         assert!(
             dir_is_schema2(&root),
             "the boolean promotion facade routes invalid trees to strict S2"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_component_before_parent_reference_fails_dispatch() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_dir("symlink-before-parent", None);
+        let repository = root.join("repo");
+        must(
+            std::fs::create_dir_all(repository.join(".github-gen")),
+            "create routed repository",
+        );
+        must(
+            std::fs::write(
+                repository.join(".github-gen/velnor-workflow.toml"),
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write routed repository config",
+        );
+        let link = root.join("link");
+        must(
+            symlink(root.join("outside"), &link),
+            "create path component symlink",
+        );
+        let aliased_root = link.join("..").join("repo");
+
+        let error = must_fail(
+            try_dir_is_schema2(&aliased_root),
+            "dispatcher must inspect symlinks before collapsing parent components",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("symlinked generation config parent"),
+            "error identifies the path component: {error}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

@@ -54,6 +54,13 @@ fn absolute_normalized_path(path: &Path) -> Result<PathBuf, GeneratorError> {
             .map_err(|error| GeneratorError::usage(format!("read current directory: {error}")))?
             .join(path)
     };
+    // Inspect the caller-supplied path before lexical normalization. A
+    // symlink followed by `..` can otherwise disappear from the normalized
+    // path and redirect a later filesystem operation through an untrusted
+    // parent. Normalize macOS's `/tmp` and `/var` aliases first so those
+    // system aliases are not mistaken for repository-controlled symlinks.
+    let absolute = normalize_macos_system_alias(absolute);
+    reject_symlinked_root_components(&absolute)?;
     let mut normalized = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -133,7 +140,18 @@ fn validate_directory(
         let name = entry.file_name();
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
-            if is_preflight_excluded_directory(&name, at_root) {
+            if is_preflight_excluded_directory(&name, at_root)
+                && !is_opaque_root_output(&name, at_root)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "repository contains a symlinked excluded directory: {}",
+                    path.display()
+                )));
+            }
+            if is_opaque_root_output(&name, at_root) {
+                // CI may materialize the root build cache as a symlink. It is
+                // outside the scan boundary, so lstat it and prune it without
+                // resolving or reading its target.
                 continue;
             }
             validate_symlink(root, canonical_root, &path)?;
@@ -186,6 +204,14 @@ fn validate_symlink(root: &Path, canonical_root: &Path, path: &Path) -> Result<(
 fn is_preflight_excluded_directory(name: &std::ffi::OsStr, at_root: bool) -> bool {
     let name = name.to_string_lossy();
     name == ".git" || name == "node_modules" || at_root && is_excluded_directory(&name)
+}
+
+/// Root build output is an opaque scanner exclusion. In particular, CI may
+/// mount a cache at `target` through a symlink to a location outside the
+/// checkout; checking only its link metadata keeps the scanner from following
+/// or reading that cache.
+fn is_opaque_root_output(name: &std::ffi::OsStr, at_root: bool) -> bool {
+    at_root && name == "target"
 }
 
 pub(crate) fn repository_files(
@@ -396,7 +422,7 @@ fn collect_files(
     Ok(())
 }
 
-fn normalize_relative_path(path: &Path) -> Result<String, GeneratorError> {
+pub(crate) fn normalize_relative_path(path: &Path) -> Result<String, GeneratorError> {
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
@@ -1101,6 +1127,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn preflight_rejects_symlinked_root_component_before_parent_normalization() {
+        use std::os::unix::fs::symlink;
+
+        let root = short_scratch("preflight-root-parent-component");
+        let outside = short_scratch("preflight-root-parent-component-target");
+        must(
+            fs::create_dir_all(root.join("repo")),
+            "create normalized repository target",
+        );
+        must(
+            symlink(&outside, root.join("link")),
+            "create symlinked path component",
+        );
+
+        let error = must_fail(
+            validate_repository_tree(&root.join("link/../repo")),
+            "symlink before parent normalization must fail repository preflight",
+        );
+        assert!(
+            error.contains("root component"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("link"), "unexpected error: {error}");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn preflight_rejects_special_files() {
         use std::os::unix::net::UnixListener;
 
@@ -1118,29 +1174,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn repository_files_skips_symlinked_git_and_excluded_directories() {
+    fn repository_files_treats_a_symlinked_root_target_as_opaque() {
         use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
 
-        let root = scratch("preflight-excluded-links");
-        let outside = scratch("preflight-excluded-target");
-        must(
-            symlink(&outside, root.join(".git")),
-            "create symlinked git metadata",
+        let root = short_scratch("preflight-root-target-link");
+        let outside = short_scratch("preflight-root-target-cache");
+        let _listener = must(
+            UnixListener::bind(outside.join("must-not-be-read.sock")),
+            "create special file below external cache",
         );
-        must(
-            repository_files(&root, &[]),
-            "symlinked git metadata is outside scan inputs",
-        );
-
         must(
             symlink(&outside, root.join("target")),
-            "create symlinked build directory",
+            "create symlinked root target",
         );
-        must(
+        let files = must(
             repository_files(&root, &[]),
-            "symlinked build directory is outside scan inputs",
+            "scan with symlinked root target cache",
+        );
+        assert!(
+            files.is_empty(),
+            "root target cache entered scan: {files:?}"
         );
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_files_rejects_symlinked_git_and_dependency_directories() {
+        use std::os::unix::fs::symlink;
+
+        for name in [".git", "node_modules"] {
+            let root = short_scratch("preflight-excluded-link");
+            let outside = short_scratch("preflight-excluded-link-target");
+            must(
+                symlink(&outside, root.join(name)),
+                "create symlinked excluded directory",
+            );
+            let error = must_fail(
+                repository_files(&root, &[]),
+                "symlinked excluded directory must fail preflight",
+            );
+            assert!(error.contains("symlinked excluded directory"), "{error}");
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(outside);
+        }
     }
 }

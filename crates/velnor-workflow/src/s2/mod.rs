@@ -6051,8 +6051,12 @@ pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
 }
 
 pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> Result<String, GeneratorError> {
-    let runner = control_plane_runner(config)?;
     let local = provider::control_plane_provider(&config.providers).is_local();
+    let runner = if local {
+        control_plane_runner(config)?
+    } else {
+        yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
+    };
     let gate = local.then(|| control_plane_trusted_gate(&config.default_branch));
     let declared_ruleset_contexts = declared_ruleset_contexts_literal(config);
     let policy_job = policy_job(&PolicyJobSpec {
@@ -9586,7 +9590,7 @@ pub(crate) fn ownership_state_content(
         let _ = writeln!(
             content,
             "{}\t{:016x}",
-            relative.display(),
+            crate::ownership_state_path(relative),
             content_digest(generated)
         );
     }
@@ -9594,7 +9598,7 @@ pub(crate) fn ownership_state_content(
         let _ = writeln!(
             content,
             "{}\t{:016x}",
-            relative.display(),
+            crate::ownership_state_path(relative),
             crate::symlink_target_digest(target)
         );
     }
@@ -11172,6 +11176,143 @@ mod tests {
             required.contains("name: Download Velnor workflow runtime"),
             "a hosted ci-required downloads the runtime for its aggregate step: {required}"
         );
+    }
+
+    fn macos_hosted_fixture() -> ProjectConfig {
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        must_some(
+            config.selectors.get_mut(&ProviderId::GithubHosted),
+            "hosted fixture selector",
+        )
+        .runs_on = vec!["macos-15".to_owned()];
+        config
+    }
+
+    fn assert_hosted_control_plane_artifacts(workflow: &str) {
+        let plan = yaml_job(workflow, "plan");
+        assert!(
+            plan.contains("runs-on: ubuntu-24.04"),
+            "hosted Planning must publish the Linux runtime artifact: {plan}"
+        );
+        assert!(
+            !plan.contains("runs-on: macos-15"),
+            "Planning must not inherit the application runner: {plan}"
+        );
+        assert!(
+            plan.contains("name: velnor-workflow-runtime-")
+                && plan.contains("${{ runner.os }}-${{ runner.arch }}"),
+            "Planning must publish an OS-qualified runtime artifact: {plan}"
+        );
+
+        let required = yaml_job(workflow, "ci-required");
+        assert!(
+            required.contains("runs-on: ubuntu-24.04"),
+            "the aggregate must consume the Linux runtime artifact: {required}"
+        );
+        assert!(
+            required.contains("name: velnor-workflow-runtime-")
+                && required.contains("${{ runner.os }}-${{ runner.arch }}"),
+            "the aggregate must request the producer's OS-qualified artifact: {required}"
+        );
+        assert!(
+            !required.contains("runs-on: macos-15"),
+            "the aggregate must not inherit the application runner: {required}"
+        );
+
+        let required_mirror = yaml_job(workflow, "required");
+        assert!(
+            required_mirror.contains("runs-on: ubuntu-24.04"),
+            "the required status mirror must stay on the hosted control-plane runner: {required_mirror}"
+        );
+        assert!(
+            !required_mirror.contains("runs-on: macos-15"),
+            "the required status mirror must not inherit the application runner: {required_mirror}"
+        );
+    }
+
+    fn assert_hosted_application_runner(generator: &WorkflowIr) {
+        let kind = must_some(
+            must(
+                generator.render_kind_unit_workflow(UnitKind::Rust, None),
+                "render hosted Rust reusable workflow",
+            ),
+            "hosted Rust reusable workflow",
+        )
+        .1;
+        assert!(
+            kind.contains("runs-on: macos-15"),
+            "application unit jobs keep their configured runner: {kind}"
+        );
+        assert!(
+            kind.contains("name: Set up Velnor workflow runtime")
+                && !kind.contains("name: Download Velnor workflow runtime"),
+            "macOS unit jobs must bootstrap instead of downloading the Linux artifact: {kind}"
+        );
+    }
+
+    fn assert_hosted_policy_runner(config: &ProjectConfig) {
+        let policy = must(generated_ci_policy(config), "render policy entrypoint");
+        assert!(
+            policy.contains("runs-on: ubuntu-24.04") && !policy.contains("runs-on: macos-15"),
+            "Policy and Planning share the Docker-capable Linux runner: {policy}"
+        );
+    }
+
+    fn assert_hosted_nightly_control_runners(generator: &WorkflowIr) {
+        let nightly = generated_nightly(generator);
+        for job_id in ["dispatch-ci-main", "nightly-red-to-signal", "nightly-alert"] {
+            let job = yaml_job(&nightly, job_id);
+            assert!(
+                job.contains("runs-on: ubuntu-24.04"),
+                "hosted nightly control job stays on the policy runner: {job}"
+            );
+            assert!(
+                !job.contains("runs-on: macos-15"),
+                "hosted nightly control job must not inherit the application runner: {job}"
+            );
+        }
+
+        let nightly_aggregate =
+            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(generator), None);
+        for job_id in ["plan", "policy", "nightly-required", "nightly-alert"] {
+            let job = yaml_job(&nightly_aggregate, job_id);
+            assert!(
+                job.contains("runs-on: ubuntu-24.04"),
+                "hosted nightly aggregate control job stays on the policy runner: {job}"
+            );
+            assert!(
+                !job.contains("runs-on: macos-15"),
+                "hosted nightly aggregate control job must not inherit the application runner: {job}"
+            );
+        }
+    }
+
+    fn assert_local_nightly_control_runners() {
+        let local = WorkflowIr::from_config(&scanned_fixture(provider_set([ProviderId::Velnor])));
+        let local_nightly = generated_nightly(&local);
+        for job_id in ["dispatch-ci-main", "nightly-red-to-signal", "nightly-alert"] {
+            let job = yaml_job(&local_nightly, job_id);
+            assert!(
+                job.contains(&fixture_lane_selector()),
+                "local nightly control job keeps the configured Velnor runner: {job}"
+            );
+            assert!(
+                !job.contains("runs-on: ubuntu-24.04"),
+                "local nightly control job must not use the hosted policy runner: {job}"
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_control_plane_artifact_stays_linux_when_app_runner_is_macos() {
+        let config = macos_hosted_fixture();
+        let generator = WorkflowIr::from_config(&config);
+        let workflow = generated_ci_main(&generator);
+        assert_hosted_control_plane_artifacts(&workflow);
+        assert_hosted_application_runner(&generator);
+        assert_hosted_policy_runner(&config);
+        assert_hosted_nightly_control_runners(&generator);
+        assert_local_nightly_control_runners();
     }
 
     #[test]
@@ -20652,6 +20793,41 @@ lockfile = true
     }
 
     #[test]
+    fn policy_entrypoint_uses_linux_when_application_runner_is_macos() {
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        must_some(
+            config.selectors.get_mut(&ProviderId::GithubHosted),
+            "hosted fixture selector",
+        )
+        .runs_on = vec!["macos-15".to_owned()];
+        let policy = must(
+            generated_ci_policy(&config),
+            "render macOS-configured policy entrypoint",
+        );
+        assert!(
+            policy.contains("runs-on: ubuntu-24.04"),
+            "policy validation needs the Docker-capable Linux runner: {policy}"
+        );
+        assert!(
+            !policy.contains("runs-on: macos-15"),
+            "the policy job must not inherit the application runner: {policy}"
+        );
+
+        let rust_unit = must_some(
+            must(
+                WorkflowIr::from_config(&config).render_kind_unit_workflow(UnitKind::Rust, None),
+                "render hosted Rust reusable workflow",
+            ),
+            "hosted Rust reusable workflow",
+        )
+        .1;
+        assert!(
+            rust_unit.contains("runs-on: macos-15"),
+            "application unit jobs keep their configured runner: {rust_unit}"
+        );
+    }
+
+    #[test]
     fn generated_workflows_keep_pr_affected_and_main_full_triggers_distinct() {
         let config = scanned_fixture(all_providers());
         let generator = WorkflowIr::from_config(&config);
@@ -25848,7 +26024,11 @@ lockfile = true
             files.get(&PathBuf::from(".github/actionlint.yaml")),
             "generated actionlint config",
         );
-        assert!(pull_request.contains("runs-on: ubuntu-test"));
+        let plan = yaml_job(&pull_request, "plan");
+        assert!(
+            plan.contains("runs-on: ubuntu-24.04"),
+            "host control jobs stay on the Linux runner: {plan}"
+        );
         let rust_kind = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
             "generated rust kind reusable",
@@ -26019,6 +26199,19 @@ lockfile = true
             "recorded inputs must match the current run"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ownership_state_serializes_paths_with_forward_slashes() {
+        let files = BTreeMap::from([(
+            PathBuf::from(".github").join("workflows").join("ci.yml"),
+            "generated\n".to_owned(),
+        )]);
+        let state =
+            ownership_state_content(&files, &BTreeMap::new(), &GenerationInputs::parts(0, 0));
+
+        assert!(state.contains("[outputs]\n.github/workflows/ci.yml\t"));
+        assert!(!state.contains(".github\\workflows\\ci.yml"));
     }
 
     #[test]
