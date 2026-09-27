@@ -23,7 +23,7 @@ generator	70
 .github/workflows/ci-unit-rust.yml	6f6a3ef76bcceadc
 .github/workflows/maintenance.yml	9ad1db6fbc2872c3
 .github/workflows/nightly.yml	cde4c359bcb710cc
-.github/workflows/preview.yml	48fd0a89efbb7e7b
-.github/workflows/release.yml	95afd640d9c99bdc
+.github/workflows/preview.yml	a2351856ee886b60
+.github/workflows/release.yml	bb6eb5b27b5e17a5
 config/fleet/velnor-host.env	d14b419216449423
 .github/CLAUDE.md	78a740c6ccf6937a

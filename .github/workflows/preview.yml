@@ -3836,6 +3836,53 @@ jobs:
           esac
           [ "${#kernel}" -eq 64 ] || { echo "::error::kernel sha256 length ${#kernel}" >&2; exit 1; }
           [ "${#rootfs}" -eq 64 ] || { echo "::error::rootfs sha256 length ${#rootfs}" >&2; exit 1; }
+      - name: Reset cached Debian package outputs
+        run: |
+          set -euo pipefail
+          target="${TARGET:-}"
+          case "$target" in
+            '' ) ;;
+            *[!A-Za-z0-9_-]* )
+              echo "::error::invalid Debian target: $target" >&2
+              exit 1
+              ;;
+          esac
+          canonical="target/debian"
+          target_root=""
+          if [[ -n "$target" ]]; then
+            target_root="target/$target"
+          fi
+          reject_output_root() {
+            local root="$1"
+            if [[ -L "$root" ]]; then
+              echo "::error::refusing symlink Debian output root: $root" >&2
+              exit 1
+            fi
+            if [[ -e "$root" && ! -d "$root" ]]; then
+              echo "::error::Debian output root is not a directory: $root" >&2
+              exit 1
+            fi
+          }
+          reject_output_root target
+          reject_output_root "$canonical"
+          reject_output_root dist
+          if [[ -n "$target_root" ]]; then
+            reject_output_root "$target_root"
+            reject_output_root "$target_root/debian"
+          fi
+          clean_output_root() {
+            local root="$1"
+            if [[ -d "$root" ]]; then
+              find -P "$root" -maxdepth 1 \
+                \( -type f -o -type l \) \
+                \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
+            fi
+          }
+          clean_output_root "$canonical"
+          if [[ -n "$target_root" ]]; then
+            clean_output_root "$target_root/debian"
+          fi
+          clean_output_root dist
       - name: Build Debian packages
         run: |
           set -euo pipefail
