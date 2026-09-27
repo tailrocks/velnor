@@ -3119,13 +3119,14 @@ fn validate_static_source_in_scanner(root: &Path, relative: &Path) -> Result<(),
         None => &[],
     };
     let files = crate::s2::scan::file_walk::repository_files(root, excludes)?;
-    let relative = relative.to_str().ok_or_else(|| {
+    relative.to_str().ok_or_else(|| {
         GeneratorError::usage(format!(
             "[[static_file]] source path is not valid UTF-8: {}",
             relative.display()
         ))
     })?;
-    if files.iter().any(|file| file == relative) {
+    let relative = crate::s2::scan::file_walk::normalize_relative_path(relative)?;
+    if files.iter().any(|file| file == &relative) {
         return Ok(());
     }
     Err(GeneratorError::usage(format!(
@@ -6463,6 +6464,29 @@ mod tests {
                 "unexpected error for `{source}`: {error}"
             );
         }
+    }
+
+    #[test]
+    fn static_file_source_resolution_accepts_a_regular_repository_file() {
+        let root = scanned_root("static-source-regular");
+        let source = root.join(".github-gen/sources/action.yml");
+        let parent = must(
+            source.parent().ok_or("source parent missing"),
+            "source parent",
+        );
+        must(fs::create_dir_all(parent), "create static source parent");
+        must(fs::write(&source, "name: example\n"), "write static source");
+
+        let resolved = must(
+            validate_static_file_source(&root, ".github-gen/sources/action.yml"),
+            "resolve regular static source",
+        );
+        let canonical_source = must(fs::canonicalize(&source), "canonicalize regular source");
+        assert_eq!(resolved, canonical_source);
+        must(
+            fs::remove_dir_all(root),
+            "remove regular static source fixture",
+        );
     }
 
     #[test]
