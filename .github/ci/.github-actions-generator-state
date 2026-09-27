@@ -1,29 +1,29 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	8e2933dad559b993
-scan	5e36726e88be95a7
+config	1ecc4b21032b46f0
+scan	5da26d655e44cb85
 generator	70
 [outputs]
 .github/AGENTS.md	02ebb7198c435e9b
 .github/actionlint.yaml	85a2e7172b525ecb
 .github/actions/report-velnor-ci-outcomes/action.yml	3c9db68a0a158ce0
-.github/actions/setup-velnor-workflow/action.yml	01e783506f47d830
-.github/ci/project.toml	08b2c5d9879a5450
+.github/actions/setup-velnor-workflow/action.yml	da8fae1bb9e2226b
+.github/ci/project.toml	df8b7d0cc5dd57b0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	b340260ccf53b529
-.github/workflows/ci-policy.yml	e23a0475976c2aa9
-.github/workflows/ci-pr.yml	df8559b32f0e8b86
+.github/workflows/ci-main.yml	312fc91c6dddc5f8
+.github/workflows/ci-policy.yml	811926c61c251ec2
+.github/workflows/ci-pr.yml	de45fc85a462a72a
 .github/workflows/ci-release-package-signer.yml	29e2df02b006cd2e
-.github/workflows/ci-runtime-products.yml	780e44594a516f01
-.github/workflows/ci-unit-bun.yml	33551d16613d231e
-.github/workflows/ci-unit-docker.yml	9e14da11ca002704
-.github/workflows/ci-unit-docs.yml	a880146fee952f00
-.github/workflows/ci-unit-opentofu.yml	5e9b49455f668254
-.github/workflows/ci-unit-rust.yml	3d949810fd31245d
-.github/workflows/maintenance.yml	e607067ee06d8db5
+.github/workflows/ci-runtime-products.yml	4fc8534e1e557a06
+.github/workflows/ci-unit-bun.yml	47ebf9448cafac29
+.github/workflows/ci-unit-docker.yml	809f033aa02b711b
+.github/workflows/ci-unit-docs.yml	3287413d1becbccf
+.github/workflows/ci-unit-opentofu.yml	c9578eb02d307e41
+.github/workflows/ci-unit-rust.yml	6f6a3ef76bcceadc
+.github/workflows/maintenance.yml	9ad1db6fbc2872c3
 .github/workflows/nightly.yml	cde4c359bcb710cc
-.github/workflows/preview.yml	accd724f2e0b73e7
-.github/workflows/release.yml	b5156d48c732920f
+.github/workflows/preview.yml	48fd0a89efbb7e7b
+.github/workflows/release.yml	95afd640d9c99bdc
 config/fleet/velnor-host.env	d14b419216449423
 .github/CLAUDE.md	78a740c6ccf6937a
