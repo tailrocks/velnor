@@ -11370,7 +11370,10 @@ mod tests {
             .expect("resolver terminates before digest calculation");
         serde_yaml::from_str::<serde_yaml::Value>(&model)
             .expect("model-aware policy runtime is valid YAML");
-        assert!(model.contains("PRODUCT_REPOSITORY: tailrocks/velnor"));
+        assert!(model.contains(&format!(
+            "PRODUCT_REPOSITORY: {}",
+            regen_repository_marker()
+        )));
         assert!(model.contains(
             "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
         ));
