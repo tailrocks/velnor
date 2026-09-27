@@ -11161,7 +11161,7 @@ mod tests {
         );
         assert!(
                 policy.contains(
-                "head_candidate=\"$(velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
+                "head_candidate=\"$(env -u GH_TOKEN velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
                 ),
             "candidate verification must remain anchored to the resolved PR head: {policy}"
             );
@@ -20566,7 +20566,7 @@ lockfile = true
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
             owner.contains(
-                "head_candidate=\"$(velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
+                "head_candidate=\"$(env -u GH_TOKEN velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
             ),
             "the acquire step derives the candidate from the audited head: {owner}"
         );
@@ -20590,7 +20590,7 @@ lockfile = true
         );
         assert!(
             owner.contains(
-                "render_candidate=\"$(velnor-workflow closure --rev=\"$RENDER_SHA\" --candidate)\""
+                "render_candidate=\"$(env -u GH_TOKEN velnor-workflow closure --rev=\"$RENDER_SHA\" --candidate)\""
             ) && owner.contains("\"$manifest_closure\" == \"$render_candidate\""),
             "a PR artifact whose closure differs from the audited render fails closed: {owner}"
         );
