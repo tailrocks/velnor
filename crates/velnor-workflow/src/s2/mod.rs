@@ -5695,10 +5695,11 @@ fn policy_candidate_step_legacy(revision: &str) -> String {
 /// keys off the candidate closure; the manifest gate binds that closure to
 /// both the candidate revision and the audited render revision, so a squash
 /// merge whose main side changed closure inputs fails with an actionable
-/// rebase/rebuild error. The `--closure` probe runs later in a
-/// token-free policy step. The candidate is untrusted code and can inspect
-/// its parent process, so child-only environment clearing in this
-/// token-bearing acquisition step is not sufficient.
+/// rebase/rebuild error. The `--closure` probes run in this token-bearing
+/// acquisition step through the trusted pinned renderer; they do not execute
+/// the candidate binary. The candidate is untrusted code and can inspect its
+/// parent process, so it is first executed later in the separate token-free
+/// policy step.
 /// On the trusted main push after a squash merge, the event SHA is the new
 /// squash commit, not the PR head that produced the candidate artifact. The
 /// step resolves that commit to exactly one merged, same-repository PR before
@@ -6050,8 +6051,13 @@ fn render_policy_job(spec: &PolicyJobSpec<'_>, parts: PolicyJobParts) -> String 
         renderer,
         actionlint_setup,
     } = parts;
+    let permission_comment = if candidate_artifact_wiring {
+        "# Permissions are read-only: `actions: read`, `contents: read`, and\n    # `pull-requests: read` for candidate artifact and ruleset API access.\n"
+    } else {
+        "# Permissions are limited to `contents: read`.\n"
+    };
     let job_rendered = format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{audited_generator_pin}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target.\n    {permission_comment}    # It references no secrets, persists no credentials, and never compiles.\n    # When the audited tree differs from the declared pin's render, it\n    # additionally EXECUTES the PR run's prebuilt candidate generator —\n    # PR-built code, same-repository runs only, bound to the audited tree by\n    # manifest closure plus binary digest before execution — with no secret\n    # references, no persisted credentials, the read-only github.token\n    # confined to the Acquire/Ruleset API steps, and both candidate exec\n    # points tokenless. The trusted pinned renderer computes candidate\n    # closures in Acquire without executing the candidate binary.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{audited_generator_pin}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
         actionlint_setup = actionlint_setup,
     );
@@ -20767,10 +20773,9 @@ lockfile = true
         );
     }
 
-    /// The acquire step downloads and validates the artifact without executing
-    /// it. Later token-free policy execution checks candidate closure and
-    /// rendered output; child-only environment clearing here would not protect
-    /// the token-bearing parent from inspection by candidate code.
+    /// The acquire step downloads and validates the artifact with the trusted
+    /// pinned renderer; candidate code is first executed later, in a separate
+    /// token-free policy step that checks its closure and rendered output.
     #[test]
     fn policy_candidate_acquire_does_not_execute_candidate() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
@@ -20796,11 +20801,8 @@ lockfile = true
                 "the comment states that PR-built code executes: {job}"
             );
             assert!(
-                job.contains("same-repository runs only, bound"),
-                "the comment states the same-repo confinement: {job}"
-            );
-            assert!(
-                job.contains("by manifest closure plus binary digest before"),
+                job.contains("same-repository runs only, bound to the audited tree by")
+                    && job.contains("manifest closure plus binary digest before execution"),
                 "the comment states the pre-execution binding: {job}"
             );
             assert!(
@@ -20808,15 +20810,26 @@ lockfile = true
                 "the compile claim stays: {job}"
             );
             assert!(
-                job.contains("with no secret references, no persisted credentials, the"),
+                job.contains("# Permissions are read-only: `actions: read`, `contents: read`, and")
+                    && job.contains(
+                        "# `pull-requests: read` for candidate artifact and ruleset API access."
+                    ),
+                "the comment states every granted API permission: {job}"
+            );
+            assert!(
+                job.contains("references no secrets, persists no credentials, and never compiles."),
                 "the comment states the credential absence precisely: {job}"
             );
             assert!(
-                job.contains("read-only github.token confined to the Acquire/Ruleset API steps,"),
+                job.contains("read-only github.token")
+                    && job.contains("confined to the Acquire/Ruleset API steps,"),
                 "the comment confines the job token to the API steps: {job}"
             );
             assert!(
-                job.contains("and both candidate exec points tokenless."),
+                job.contains("and both candidate exec")
+                    && job.contains("points tokenless.")
+                    && job.contains("trusted pinned renderer computes candidate")
+                    && job.contains("closures in Acquire without executing the candidate binary."),
                 "the comment states both exec points hold no token: {job}"
             );
             assert!(

@@ -121,15 +121,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Trust invariant: this job runs the base branch's Stage-0 validator
-    # product against the audited tree under pull_request_target. It holds
-    # `contents: read` only, references no secrets, persists no credentials,
-    # and never compiles. When the audited tree differs from the declared
-    # pin's render, it additionally EXECUTES the PR run's prebuilt
-    # candidate generator — PR-built code, same-repository runs only, bound
-    # to the audited tree by manifest closure plus binary digest before
-    # execution — with no secret references, no persisted credentials, the
-    # read-only github.token confined to the Acquire/Ruleset API steps,
-    # and both candidate exec points tokenless.
+    # product against the audited tree under pull_request_target.
+    # Permissions are read-only: `actions: read`, `contents: read`, and
+    # `pull-requests: read` for candidate artifact and ruleset API access.
+    # It references no secrets, persists no credentials, and never compiles.
+    # When the audited tree differs from the declared pin's render, it
+    # additionally EXECUTES the PR run's prebuilt candidate generator —
+    # PR-built code, same-repository runs only, bound to the audited tree by
+    # manifest closure plus binary digest before execution — with no secret
+    # references, no persisted credentials, the read-only github.token
+    # confined to the Acquire/Ruleset API steps, and both candidate exec
+    # points tokenless. The trusted pinned renderer computes candidate
+    # closures in Acquire without executing the candidate binary.
     permissions:
       actions: read
       contents: read
