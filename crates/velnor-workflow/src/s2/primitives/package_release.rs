@@ -4274,6 +4274,14 @@ gh() {{
     }
 
     #[test]
+    fn indent_script_leaves_blank_yaml_block_lines_unindented() {
+        assert_eq!(
+            indent_script("\nfirst\n \t\nlast\n", 4),
+            "\n    first\n\n    last\n"
+        );
+    }
+
+    #[test]
     fn rendered_workflow_has_no_trailing_whitespace() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
