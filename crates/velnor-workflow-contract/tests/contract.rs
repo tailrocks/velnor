@@ -69,9 +69,8 @@ fn the_generator_owns_every_current_workflow() {
     }
 }
 
-/// The bootstrap composite action is repository-owned bytes under
-/// `.github-gen/sources`; the generator copies it into `.github/actions`, so
-/// the two copies must stay identical and the source must exist.
+/// The complete bootstrap action lives under `.github-gen/sources`; the
+/// generator copies it byte-for-byte into `.github/actions`.
 #[test]
 fn the_setup_action_is_owned_verbatim() {
     let source = read(".github-gen/sources/actions/setup-velnor-workflow/action.yml");

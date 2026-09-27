@@ -66,7 +66,7 @@ fn producer_closure_pathspec(paths: &[String]) -> String {
             if index < closure_inputs::BASE_CLOSURE_PATHS.len() {
                 path.clone()
             } else {
-                format!(":(literal){}", crate::shell_quote(path))
+                crate::shell_quote(&format!(":(literal){path}"))
             }
         })
         .collect::<Vec<_>>()
@@ -686,7 +686,7 @@ mod tests {
         let hostile = "vendor/[glob]* with space;touch sentinel";
         paths.push(hostile.to_owned());
         assert!(producer_closure_pathspec(&paths)
-            .ends_with(&format!(":(literal){}", crate::shell_quote(hostile))));
+            .ends_with(&crate::shell_quote(&format!(":(literal){hostile}"))));
     }
 
     #[expect(
@@ -926,10 +926,7 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
         let source = must(fs::read_to_string(&path), "read the setup action source");
-        must(
-            closure_inputs::render_setup_action(&source),
-            "render the setup action for the active closure",
-        )
+        closure_inputs::render_setup_action(&source)
     }
 
     #[test]
@@ -996,7 +993,8 @@ mod tests {
     #[test]
     fn closure_shell_matches_the_canonical_form() {
         let content = owner_content(&[]);
-        let pathspec = must(producer_closure_paths(), "current manifests parse").join(" ");
+        let paths = must(producer_closure_paths(), "current manifests parse");
+        let pathspec = producer_closure_pathspec(&paths);
         assert!(
             content.contains(&format!("git ls-tree -r HEAD -- {pathspec}")),
             "the closure pathspec derives from CLOSURE_PATHS: {content}"
@@ -1018,9 +1016,9 @@ mod tests {
     fn closure_shell_matches_the_setup_action() {
         let content = owner_content(&[]);
         let action = setup_action_source();
-        // The commands differ (the action resolves any rev portably, the
-        // producer resolves HEAD on Linux), but the hashed byte stream — the
-        // pathspec, the byte sort, and the footer — must agree exactly.
+        // The producer resolves current HEAD; the action resolves any pin
+        // using that revision's direct dependencies. Both retain the same
+        // canonical sort and footer.
         let action_ls_tree = must_some(
             action
                 .lines()
@@ -1038,14 +1036,19 @@ mod tests {
             action_pathspec.strip_suffix(")\""),
             "the setup action pathspec end",
         );
-        assert_eq!(
-            action_pathspec,
-            CLOSURE_PATHS.join(" "),
-            "the setup action pathspec is the closure paths"
+        assert!(
+            action_pathspec == "crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"
+                && action.contains("dependency_paths=\"$(python3")
+                && action.contains("listing+=$'\\n'\"$dependency_tree\"")
+                && !action.contains("include_model=false"),
+            "the setup action resolves extra source roots from the pinned workflow manifest"
         );
         assert!(
-            content.contains(action_pathspec),
-            "producer and setup action hash the same pathspec: {content}"
+            content.contains(&producer_closure_pathspec(&must(
+                producer_closure_paths(),
+                "current closure paths parse"
+            ))),
+            "{content}"
         );
         let footer = format!(
             "closure-version:{CLOSURE_VERSION}\\nfeatures:{CI_FEATURES}\\nprofile:{PROFILE_RELEASE}\\n"
@@ -1903,7 +1906,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "5af36c64290af071e9f4d0aff08e7ef39ecb274401c7c9029ff04ba2cc45eda5";
+        const PINNED: &str = "2ed034a542aabc27e3dbcd4430c21bfbf56d0ff8ab63d721a8dd23856a7acba4";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

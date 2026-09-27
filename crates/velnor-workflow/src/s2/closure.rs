@@ -138,27 +138,17 @@ pub(crate) fn closure_of_tree(
     features: &str,
     profile: &str,
 ) -> Result<String, GeneratorError> {
-    let paths = if git_path_exists(repo, rev, "crates/velnor-workflow/Cargo.toml")? {
-        let workflow_manifest = git_show(repo, rev, "crates/velnor-workflow/Cargo.toml")?;
-        let workspace_manifest = if git_path_exists(repo, rev, "Cargo.toml")? {
-            git_show(repo, rev, "Cargo.toml")?
-        } else {
-            "[workspace]\n".to_owned()
-        };
-        let paths = closure_inputs::closure_paths(&workflow_manifest, &workspace_manifest)
-            .map_err(GeneratorError::usage)?;
-        for dependency_root in paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len()) {
-            reject_transitive_path_dependencies(repo, rev, dependency_root, &workspace_manifest)?;
-        }
-        paths
+    let workflow_manifest = git_show(repo, rev, "crates/velnor-workflow/Cargo.toml")?;
+    let workspace_manifest = if git_path_exists(repo, rev, "Cargo.toml")? {
+        git_show(repo, rev, "Cargo.toml")?
     } else {
-        // Keep the published v1 pathset for historical revisions before the
-        // workflow crate manifest existed.
-        closure_inputs::BASE_CLOSURE_PATHS
-            .iter()
-            .map(|path| (*path).to_owned())
-            .collect()
+        "[workspace]\n".to_owned()
     };
+    let paths = closure_inputs::closure_paths(&workflow_manifest, &workspace_manifest)
+        .map_err(GeneratorError::usage)?;
+    for dependency_root in paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len()) {
+        reject_transitive_path_dependencies(repo, rev, dependency_root, &workspace_manifest)?;
+    }
     let mut arguments = vec![
         "ls-tree".to_owned(),
         "-r".to_owned(),
@@ -354,6 +344,10 @@ mod tests {
                 "pub fn value() -> u8 { 1 }\n",
             ),
             (
+                "crates/velnor-model/Cargo.toml",
+                "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
                 "Cargo.toml",
                 "[workspace]\nmembers = [\"crates/velnor-workflow\", \"crates/velnor-model\"]\n",
             ),
@@ -454,6 +448,113 @@ mod tests {
         );
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn commit_fixture(root: &std::path::Path, message: &str) {
+        git_in(root, &["add", "-A"]);
+        git_in(
+            root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                message,
+            ],
+        );
+    }
+
+    #[test]
+    fn closure_of_tree_requires_revision_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-no-manifest-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        git_in(&root, &["init", "--quiet"]);
+        commit_fixture(&root, "fixture with manifest");
+        let original = git_output(&root, &["rev-parse", "HEAD"]);
+        must(
+            std::fs::remove_file(root.join("crates/velnor-workflow/Cargo.toml")),
+            "remove workflow manifest",
+        );
+        commit_fixture(&root, "fixture without manifest");
+        let missing = git_output(&root, &["rev-parse", "HEAD"]);
+
+        let error = must_some(
+            closure_of_tree(&root, &missing, "", PROFILE_RELEASE).err(),
+            "missing workflow manifest must fail closed",
+        );
+        assert!(error
+            .to_string()
+            .contains("crates/velnor-workflow/Cargo.toml"));
+        assert!(
+            closure_of_tree(&root, "missing-revision", "", PROFILE_RELEASE).is_err(),
+            "git show failure for an unreadable revision must fail closed"
+        );
+        assert!(
+            closure_of_tree(&root, &original, "", PROFILE_RELEASE).is_ok(),
+            "revision with a manifest remains readable"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn closure_of_tree_keeps_old_no_model_pins_and_tracks_current_model_dependency() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-model-dependency-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        git_in(&root, &["init", "--quiet"]);
+        commit_fixture(&root, "old pin without model dependency");
+        let old_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let old_closure = must(
+            closure_of_tree(&root, &old_rev, "", PROFILE_RELEASE),
+            "old no-model closure",
+        );
+
+        must(
+            std::fs::write(
+                root.join("crates/velnor-model/src/lib.rs"),
+                "pub fn value() -> u8 { 2 }\n",
+            ),
+            "change unreferenced model",
+        );
+        commit_fixture(&root, "change model outside old closure");
+        let old_unchanged_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            must(
+                closure_of_tree(&root, &old_unchanged_rev, "", PROFILE_RELEASE),
+                "old no-model closure after model change"
+            ),
+            old_closure,
+            "manifest without local model dependency keeps the legacy pathset"
+        );
+
+        must(
+            std::fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n[dependencies]\nvelnor-model = { path = \"../velnor-model\" }\n",
+            ),
+            "declare current model dependency",
+        );
+        commit_fixture(&root, "current manifest uses model");
+        let current_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            must(
+                closure_of_tree(&root, &current_rev, "", PROFILE_RELEASE),
+                "current model closure"
+            ),
+            old_closure,
+            "current manifest includes the model dependency tree"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -941,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_workflow_manifest_keeps_legacy_pathset() {
+    fn missing_workflow_manifest_fails_closed() {
         let root = std::env::temp_dir().join(format!(
             "velnor-closure-bridge-s2-missing-manifest-{}",
             crate::unique_suffix()
@@ -959,15 +1060,13 @@ mod tests {
         git_in(&root, &["add", "-A"]);
         git_in(&root, &["commit", "--quiet", "--message", "historic tree"]);
         let revision = git_output(&root, &["rev-parse", "HEAD"]);
-        let actual = must(
-            closure_of_tree(&root, &revision, "", PROFILE_RELEASE),
-            "legacy closure without workflow manifest",
+        let error = must_some(
+            closure_of_tree(&root, &revision, "", PROFILE_RELEASE).err(),
+            "missing manifest must fail closed",
         );
-        let mut arguments = vec!["ls-tree", "-r", revision.as_str(), "--"];
-        arguments.extend(BASE_CLOSURE_PATHS.iter().copied());
-        let listing = git_output(&root, &arguments);
-        let lines = listing.lines().map(str::to_owned).collect::<Vec<_>>();
-        assert_eq!(actual, canonical_digest(&lines, "", PROFILE_RELEASE));
+        assert!(error
+            .to_string()
+            .contains("crates/velnor-workflow/Cargo.toml"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

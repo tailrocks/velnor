@@ -34,6 +34,7 @@ use sha2::{Digest, Sha256};
 
 const BASE_CLOSURE_PATHS: &[&str] = &[
     "crates/velnor-workflow",
+    "crates/velnor-model",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",

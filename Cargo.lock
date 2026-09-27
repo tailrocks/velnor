@@ -4096,6 +4096,7 @@ dependencies = [
  "toml",
  "unicode-normalization",
  "uuid",
+ "velnor-model",
  "velnor-runner",
 ]
 

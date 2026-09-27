@@ -4397,8 +4397,11 @@ where
             },
             temp_host,
         )?;
-        let action_state = state.with_env(action_context_env(&action.env));
-        let mut env = action_state.step_env(&[]);
+        let action_state = state
+            .with_env(action_context_env(&action.env))
+            .with_context_root("inputs", action.inputs.clone());
+        let mut env = action_state.resolve_env(&action.runs_env)?;
+        env.extend(action_state.step_env(&[]));
         env.extend(action_state.resolve_env(&action.env)?);
         set_env_value(&mut env, "GITHUB_WORKSPACE", "/github/workspace");
         set_env_value(&mut env, "RUNNER_TEMP", "/github/runner_temp");
@@ -12716,6 +12719,23 @@ impl JobExecutionState {
         for (name, value) in env {
             state.env.insert(name, value);
         }
+        state
+    }
+
+    /// Derive an action-scoped expression context without mutating the job's
+    /// context. Docker action `runs.env` receives the effective action inputs
+    /// in GitHub's `inputs` root while retaining the regular job roots.
+    fn with_context_root(&self, name: &str, values: BTreeMap<String, String>) -> Self {
+        let mut state = self.with_env(Vec::new());
+        state.context_data.insert(
+            name.to_owned(),
+            Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, Value::String(value)))
+                    .collect(),
+            ),
+        );
         state
     }
 
@@ -26308,7 +26328,15 @@ fi"#
             build_context_host: None,
             dockerfile_host: None,
             action_container_path: "/__a/_actions/acme_docker/v1".into(),
-            inputs: BTreeMap::new(),
+            inputs: BTreeMap::from([("name".into(), "value".into())]),
+            runs_env: vec![
+                (
+                    "RUNS_ENV".into(),
+                    "${{ inputs.name }}:${{ github.repository }}".into(),
+                ),
+                ("FROM_META".into(), "metadata".into()),
+                ("JOB_WINS".into(), "metadata".into()),
+            ],
             env: vec![
                 (
                     "GITHUB_ACTION_PATH".into(),
@@ -26319,6 +26347,7 @@ fi"#
                     "INPUT_ACTION_PATH".into(),
                     "${{ github.action_path }}".into(),
                 ),
+                ("FROM_META".into(), "step".into()),
             ],
             entrypoint: Some("/entrypoint.sh".into()),
             args: vec!["arg1".into()],
@@ -26337,8 +26366,22 @@ fi"#
         }];
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
+        let context_data = [(
+            "github".into(),
+            serde_json::json!({"repository": "acme/repo"}),
+        )];
         let results = executor
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .execute_ordered_steps_with_context(
+                &container(&temp),
+                &steps,
+                &[
+                    ("FROM_META".into(), "job".into()),
+                    ("JOB_WINS".into(), "job".into()),
+                    ("INPUT_NAME".into(), "job-input".into()),
+                ],
+                &context_data,
+                &temp,
+            )
             .unwrap();
 
         assert_eq!(results.len(), 1);
@@ -26368,6 +26411,10 @@ fi"#
         assert!(calls[2]
             .1
             .contains(&"INPUT_ACTION_PATH=/__a/_actions/acme_docker/v1".into()));
+        assert!(calls[2].1.contains(&"RUNS_ENV=value:acme/repo".into()));
+        assert!(calls[2].1.contains(&"FROM_META=step".into()));
+        assert!(calls[2].1.contains(&"JOB_WINS=job".into()));
+        assert!(calls[2].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/github/file_commands/docker1_output".into()));
@@ -26376,6 +26423,36 @@ fi"#
             .windows(2)
             .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));
         assert!(calls[2].1.ends_with(&["alpine:3.20".into(), "arg1".into()]));
+
+        for (name, expression) in [
+            ("malformed", "${{ inputs.name }"),
+            ("unsupported root", "${{ unsupported.value }}"),
+        ] {
+            let mut invalid_action = steps.clone();
+            if let ExecutableStep::Docker { invocation, .. } = &mut invalid_action[0] {
+                invocation.env.push(("BAD".into(), expression.into()));
+            }
+            let mut invalid_executor = DockerJobEngine::inert(RecordingRunner::default());
+            let invalid_result = invalid_executor
+                .execute_ordered_steps_with_context(
+                    &container(&temp),
+                    &invalid_action,
+                    &[
+                        ("FROM_META".into(), "job".into()),
+                        ("JOB_WINS".into(), "job".into()),
+                        ("INPUT_NAME".into(), "job-input".into()),
+                    ],
+                    &context_data,
+                    &temp,
+                )
+                .unwrap();
+            assert_eq!(invalid_result.len(), 1);
+            assert_eq!(invalid_result[0].exit_code, 1);
+            assert!(
+                !invalid_result[0].stderr.is_empty(),
+                "{name} expression fails closed"
+            );
+        }
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -26393,6 +26470,7 @@ fi"#
             dockerfile_host: None,
             action_container_path: "/__a/_actions/acme_docker/v1".into(),
             inputs: BTreeMap::new(),
+            runs_env: Vec::new(),
             env: Vec::new(),
             entrypoint: Some("/main.sh".into()),
             args: vec!["arg1".into()],
@@ -26473,6 +26551,7 @@ fi"#
             dockerfile_host: None,
             action_container_path: "/__a/_actions/acme_docker/v1".into(),
             inputs: BTreeMap::new(),
+            runs_env: Vec::new(),
             env: Vec::new(),
             entrypoint: Some("${{ env.DOCKER_ENTRYPOINT }}".into()),
             args: vec![
@@ -26539,6 +26618,7 @@ fi"#
             dockerfile_host: Some(action_dir.join("Dockerfile")),
             action_container_path: "/__a/_actions/acme_docker/v1".into(),
             inputs: BTreeMap::new(),
+            runs_env: Vec::new(),
             env: Vec::new(),
             entrypoint: None,
             args: Vec::new(),

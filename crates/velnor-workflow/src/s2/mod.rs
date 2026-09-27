@@ -626,6 +626,7 @@ pub enum UnitKind {
     Gradle,
     Node,
     Bun,
+    GithubAction,
     Swift,
     OpenTofu,
     Docker,
@@ -641,6 +642,7 @@ impl UnitKind {
             "gradle" => Self::Gradle,
             "node" => Self::Node,
             "bun" => Self::Bun,
+            "github-action" => Self::GithubAction,
             "swift" => Self::Swift,
             "opentofu" => Self::OpenTofu,
             "docker" => Self::Docker,
@@ -656,6 +658,7 @@ impl UnitKind {
             Self::Gradle => "gradle",
             Self::Node => "node",
             Self::Bun => "bun",
+            Self::GithubAction => "github-action",
             Self::Swift => "swift",
             Self::OpenTofu => "opentofu",
             Self::Docker => "docker",
@@ -670,6 +673,7 @@ impl UnitKind {
             Self::Gradle => "Gradle",
             Self::Node => "Node.js",
             Self::Bun => "Bun",
+            Self::GithubAction => "GitHub Action",
             Self::Swift => "Swift / Apple",
             Self::OpenTofu => "OpenTofu",
             Self::Docker => "Docker",
@@ -4042,6 +4046,7 @@ pub(crate) fn unit_group(kind: UnitKind) -> &'static str {
         UnitKind::Node => "Node / Packages",
         UnitKind::Docker => "Docker / Images",
         UnitKind::Docs => "Documentation",
+        UnitKind::GithubAction => "GitHub Actions",
         UnitKind::OpenTofu => "OpenTofu",
         UnitKind::Homebrew => "Homebrew",
         UnitKind::Swift => "Swift / Packages",
@@ -7045,12 +7050,7 @@ fn generated_files_with_surface(
         files.entry(path).or_insert(content);
     }
     for owned in &config.static_files {
-        let content = if owned.path == ".github/actions/setup-velnor-workflow/action.yml" {
-            closure_inputs::render_setup_action(&owned.content).map_err(GeneratorError::usage)?
-        } else {
-            owned.content.clone()
-        };
-        files.insert(PathBuf::from(&owned.path), content);
+        files.insert(PathBuf::from(&owned.path), owned.content.clone());
     }
     if config.velnor_host_cache.has_overrides() {
         files.insert(
@@ -20138,7 +20138,13 @@ lockfile = true
         let velnor = velnor_policy_job("revision", "[self-hosted, velnor]");
         assert!(!velnor.contains("--pin-build"), "{velnor}");
         assert!(!velnor.contains("--ruleset-contexts"), "{velnor}");
-        assert!(!velnor.contains("gh api"), "{velnor}");
+        assert!(
+            velnor.contains(
+                "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
+            ),
+            "an unavailable pin resolves through the product repository only: {velnor}"
+        );
+        assert!(!velnor.contains("repos/$GITHUB_REPOSITORY/"), "{velnor}");
         let hosted = hosted_policy_job("revision");
         assert!(!hosted.contains("--pin-build"), "{hosted}");
         assert!(

@@ -180,6 +180,19 @@ if [[ "$command" == "api" ]]; then
   endpoint="${2:-}"
   log "api endpoint=$endpoint"
   case "$endpoint" in
+    repos/*/contents/crates/velnor-workflow/Cargo.toml?ref=*)
+      printf '{"content":""}\n'
+      exit 0
+      ;;
+    repos/*/git/blobs/*)
+      blob="${endpoint##*/}"
+      if [[ ! -f "$GH_STUB_DIR/blobs/$blob.json" ]]; then
+        echo "stub serves no blob response for $endpoint" >&2
+        exit 1
+      fi
+      cat "$GH_STUB_DIR/blobs/$blob.json"
+      exit 0
+      ;;
     repos/*/git/trees/*)
       if [[ ! -f "$GH_STUB_DIR/trees.json" ]]; then
         echo "stub serves no trees response for $endpoint" >&2
@@ -373,10 +386,7 @@ fn setup_action_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
     let source = must(fs::read_to_string(&path), "read setup action");
-    must(
-        crate::closure_inputs::render_setup_action(&source),
-        "render setup action for the active closure",
-    )
+    crate::closure_inputs::render_setup_action(&source)
 }
 
 fn dedent(body: &str, indent: usize) -> String {
@@ -697,6 +707,8 @@ impl ConsumerFixture {
     /// the committed tree converted entry-for-entry, so API resolution
     /// yields the same listing — and closure — as a local `ls-tree`.
     fn serve_trees(&self) {
+        use std::io::Write as _;
+
         let output = must(
             Command::new("git")
                 .arg("-C")
@@ -707,6 +719,8 @@ impl ConsumerFixture {
         );
         assert!(output.status.success(), "ls-tree fixture revision");
         let mut tree = Vec::new();
+        let blob_dir = self.serve.join("blobs");
+        must(fs::create_dir_all(&blob_dir), "create blob responses");
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let (meta, path) = must_some(line.split_once('\t'), "fixture ls-tree shape");
             let mut fields = meta.split(' ');
@@ -719,6 +733,43 @@ impl ConsumerFixture {
                 "sha": sha,
                 "path": path,
             }));
+            if kind == "blob" && path.ends_with("Cargo.toml") {
+                let contents = must(
+                    fs::read(self.checkout.join(path)),
+                    "read fixture Cargo manifest",
+                );
+                let mut encoder = must(
+                    Command::new("base64")
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .spawn(),
+                    "spawn fixture base64 encoder",
+                );
+                must(
+                    must_some(encoder.stdin.take(), "encoder stdin is piped").write_all(&contents),
+                    "encode fixture manifest",
+                );
+                let encoded_manifest_output =
+                    must(encoder.wait_with_output(), "wait for base64 encoder");
+                assert!(
+                    encoded_manifest_output.status.success(),
+                    "fixture manifest encoding succeeds"
+                );
+                let content = String::from_utf8_lossy(&encoded_manifest_output.stdout)
+                    .lines()
+                    .collect::<String>();
+                let response = serde_json::json!({
+                    "encoding": "base64",
+                    "content": content,
+                });
+                must(
+                    fs::write(
+                        blob_dir.join(format!("{sha}.json")),
+                        must(serde_json::to_string(&response), "render blob response"),
+                    ),
+                    "serve manifest blob",
+                );
+            }
         }
         assert!(!tree.is_empty(), "the fixture revision has a tree");
         let response = serde_json::json!({

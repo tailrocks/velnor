@@ -138,28 +138,14 @@ pub(crate) fn closure_of_tree(
     features: &str,
     profile: &str,
 ) -> Result<String, GeneratorError> {
-    let paths = if git_path_exists(repo, rev, "crates/velnor-workflow/Cargo.toml")? {
-        let workflow_manifest = git_show(repo, rev, "crates/velnor-workflow/Cargo.toml")?;
-        let workspace_manifest = if git_path_exists(repo, rev, "Cargo.toml")? {
-            git_show(repo, rev, "Cargo.toml")?
-        } else {
-            "[workspace]\n".to_owned()
-        };
-        closure_inputs::closure_paths(&workflow_manifest, &workspace_manifest)
-            .map_err(GeneratorError::usage)?
-    } else {
-        // Trees from before the workflow crate manifest existed cannot declare
-        // its optional model dependency. Retain their published v1 pathset.
-        closure_inputs::BASE_CLOSURE_PATHS
-            .iter()
-            .map(|path| (*path).to_owned())
-            .collect::<Vec<_>>()
-    };
+    let workflow_manifest = git_show(repo, rev, "crates/velnor-workflow/Cargo.toml")?;
     let workspace_manifest = if git_path_exists(repo, rev, "Cargo.toml")? {
         git_show(repo, rev, "Cargo.toml")?
     } else {
         "[workspace]\n".to_owned()
     };
+    let paths = closure_inputs::closure_paths(&workflow_manifest, &workspace_manifest)
+        .map_err(GeneratorError::usage)?;
     for dependency_root in paths.iter().skip(closure_inputs::BASE_CLOSURE_PATHS.len()) {
         reject_transitive_path_dependencies(repo, rev, dependency_root, &workspace_manifest)?;
     }
@@ -337,6 +323,10 @@ mod tests {
                 "pub fn value() -> u8 { 1 }\n",
             ),
             (
+                "crates/velnor-model/Cargo.toml",
+                "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
                 "Cargo.toml",
                 "[workspace]\nmembers = [\"crates/velnor-workflow\", \"crates/velnor-model\"]\n",
             ),
@@ -437,6 +427,113 @@ mod tests {
         );
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn commit_fixture(root: &std::path::Path, message: &str) {
+        git_in(root, &["add", "-A"]);
+        git_in(
+            root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                message,
+            ],
+        );
+    }
+
+    #[test]
+    fn closure_of_tree_requires_revision_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-no-manifest-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        git_in(&root, &["init", "--quiet"]);
+        commit_fixture(&root, "fixture with manifest");
+        let original = git_output(&root, &["rev-parse", "HEAD"]);
+        must(
+            std::fs::remove_file(root.join("crates/velnor-workflow/Cargo.toml")),
+            "remove workflow manifest",
+        );
+        commit_fixture(&root, "fixture without manifest");
+        let missing = git_output(&root, &["rev-parse", "HEAD"]);
+
+        let error = must_some(
+            closure_of_tree(&root, &missing, "", PROFILE_RELEASE).err(),
+            "missing workflow manifest must fail closed",
+        );
+        assert!(error
+            .to_string()
+            .contains("crates/velnor-workflow/Cargo.toml"));
+        assert!(
+            closure_of_tree(&root, "missing-revision", "", PROFILE_RELEASE).is_err(),
+            "git show failure for an unreadable revision must fail closed"
+        );
+        assert!(
+            closure_of_tree(&root, &original, "", PROFILE_RELEASE).is_ok(),
+            "revision with a manifest remains readable"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn closure_of_tree_keeps_old_no_model_pins_and_tracks_current_model_dependency() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-model-dependency-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        git_in(&root, &["init", "--quiet"]);
+        commit_fixture(&root, "old pin without model dependency");
+        let old_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        let old_closure = must(
+            closure_of_tree(&root, &old_rev, "", PROFILE_RELEASE),
+            "old no-model closure",
+        );
+
+        must(
+            std::fs::write(
+                root.join("crates/velnor-model/src/lib.rs"),
+                "pub fn value() -> u8 { 2 }\n",
+            ),
+            "change unreferenced model",
+        );
+        commit_fixture(&root, "change model outside old closure");
+        let old_unchanged_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            must(
+                closure_of_tree(&root, &old_unchanged_rev, "", PROFILE_RELEASE),
+                "old no-model closure after model change"
+            ),
+            old_closure,
+            "manifest without local model dependency keeps the legacy pathset"
+        );
+
+        must(
+            std::fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n[dependencies]\nvelnor-model = { path = \"../velnor-model\" }\n",
+            ),
+            "declare current model dependency",
+        );
+        commit_fixture(&root, "current manifest uses model");
+        let current_rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            must(
+                closure_of_tree(&root, &current_rev, "", PROFILE_RELEASE),
+                "current model closure"
+            ),
+            old_closure,
+            "current manifest includes the model dependency tree"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -936,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_without_workflow_manifest_keeps_the_published_pathset() {
+    fn revision_without_workflow_manifest_fails_closed() {
         let root = std::env::temp_dir().join(format!(
             "velnor-closure-legacy-manifest-{}",
             crate::unique_suffix()
@@ -952,34 +1049,13 @@ mod tests {
         git_in(&root, &["add", "-A"]);
         git_in(&root, &["commit", "--quiet", "--message", "legacy tree"]);
         let revision = git_output(&root, &["rev-parse", "HEAD"]);
-        let digest = must(
-            closure_of_tree(&root, &revision, "", PROFILE_RELEASE),
-            "legacy closure without workflow manifest",
+        let error = must_some(
+            closure_of_tree(&root, &revision, "", PROFILE_RELEASE).err(),
+            "missing manifest must fail closed",
         );
-        let output = must(
-            Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args([
-                    "ls-tree",
-                    "-r",
-                    &revision,
-                    "--",
-                    "crates/velnor-workflow",
-                    "Cargo.toml",
-                    "Cargo.lock",
-                    "rust-toolchain.toml",
-                    "rust-toolchain",
-                    ".cargo",
-                ])
-                .output(),
-            "legacy pathset listing",
-        );
-        let lines = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        assert_eq!(digest, canonical_digest(&lines, "", PROFILE_RELEASE));
+        assert!(error
+            .to_string()
+            .contains("crates/velnor-workflow/Cargo.toml"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1041,26 +1117,36 @@ mod tests {
     }
 
     #[test]
-    fn crate_inputs_stay_closure_complete() {
-        // A local path dependency outside the closure paths would silently
-        // escape the digest: two trees with different dependency bytes would
-        // mint the same product tag. Any non-dev `path =` dependency fails
-        // here until its tree is folded into `CLOSURE_PATHS` (or the
-        // dependency goes away).
+    fn crate_inputs_include_current_local_dependencies_in_the_closure() {
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let manifest = must(
             std::fs::read_to_string(manifest_dir.join("Cargo.toml")),
             "read crate manifest for closure completeness",
         );
-        for (section, lines) in binary_dependency_sections(&manifest) {
-            for line in &lines {
-                let code = line.split('#').next().unwrap_or_default();
-                assert!(
-                    !names_local_path(code),
-                    "section [{section}] names a local path dependency that the source closure does not cover: {line}"
-                );
-            }
-        }
+        let workspace_manifest = must(
+            std::fs::read_to_string(manifest_dir.join("../../Cargo.toml")),
+            "read workspace manifest for closure completeness",
+        );
+        let paths = must(
+            closure_inputs::closure_paths(&manifest, &workspace_manifest),
+            "resolve current closure paths",
+        );
+        assert!(
+            paths.iter().any(|path| path == "crates/velnor-model"),
+            "the declared model path dependency is included in current closure inputs"
+        );
+        let dependency_sections = binary_dependency_sections(&manifest);
+        let local_dependency_lines: Vec<&String> = dependency_sections
+            .iter()
+            .flat_map(|(_, lines)| lines)
+            .filter(|line| names_local_path(line.split('#').next().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            local_dependency_lines.len(),
+            1,
+            "only the declared model dependency is local"
+        );
+        assert!(local_dependency_lines[0].contains("velnor-model"));
         assert!(
             names_local_path("velnor-runner = { path = \"../velnor-runner\" }"),
             "the guard matches a real path dependency"
