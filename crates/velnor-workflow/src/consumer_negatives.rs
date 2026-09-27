@@ -449,6 +449,7 @@ fn candidate_verify_tail(revision: &str) -> String {
         "gh run download",
         "candidate digest mismatch",
         "is not the head's candidate",
+        "VELNOR_WORKFLOW_CANDIDATE_BINARY=",
         "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=",
     ] {
         assert!(
@@ -903,6 +904,16 @@ impl ConsumerFixture {
         let env_file = self
             .root
             .join(format!("github-env-{}", crate::unique_suffix()));
+        must(
+            fs::write(
+                &env_file,
+                format!(
+                    "{}=/trusted/velnor-workflow\n",
+                    crate::VELNOR_WORKFLOW_PINNED_BINARY_ENV
+                ),
+            ),
+            "seed trusted pinned renderer slot",
+        );
         let env_str = must_some(env_file.to_str(), "env file is UTF-8");
         let mut env: Vec<(&str, &str)> = vec![
             ("RUNNER_TEMP", runner_temp_str),
@@ -1530,13 +1541,23 @@ fn candidate_acquire_exports_bound_product() {
         stderr_of(&output)
     );
     let env = must(fs::read_to_string(&env_file), "read github env");
-    assert!(
-        env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "the reader-bootstrap binary export remains on the base slot: {env}"
+    let pinned_slot = format!(
+        "{}=/trusted/velnor-workflow",
+        crate::VELNOR_WORKFLOW_PINNED_BINARY_ENV
     );
     assert!(
-        !env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
-        "the writer stays on the base slot until the reader pin is promoted: {env}"
+        env.lines().any(|line| line == pinned_slot),
+        "the previously provisioned trusted renderer remains in the pinned slot: {env}"
+    );
+    assert!(
+        env.lines().any(|line| {
+            line == format!(
+                "{}={}/runner-temp/velnor-workflow-candidate/velnor-workflow",
+                crate::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV,
+                fixture.root.display()
+            )
+        }),
+        "the downloaded product exports through the candidate slot: {env}"
     );
     assert!(
         env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),

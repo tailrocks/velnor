@@ -5521,11 +5521,12 @@ fn audited_pin_script() -> &'static str {
 /// candidate artifact the Rust unit job packaged, verifies its manifest
 /// bindings and digest, requires the manifest closure to equal the audited
 /// head's candidate closure in full (not just the artifact-name prefix),
-/// and exports the binary through the existing pinned-binary slot plus its
-/// manifest. This reader-only change lands before the generated writer moves
-/// to the candidate slot, so the base validator remains able to verify this
-/// tree. A later pin promotion and writer migration can switch the export
-/// once this candidate-slot reader is the base validator.
+/// and exports the binary through the dedicated candidate-binary slot plus
+/// its manifest. The independently provisioned trusted renderer stays in
+/// the pinned lookup chain (the running binary, an explicit pinned-binary
+/// slot, or `PATH`); acquiring a candidate cannot shadow that renderer. The
+/// policy reader can therefore prove the declared pin before considering
+/// the separately bound candidate.
 /// The poll name and the manifest gate both key off the head closure — the
 /// same identity the publisher names the artifact by and the validator's
 /// `wanted` binding checks — so the three legs rendezvous on one digest. The
@@ -5615,7 +5616,7 @@ fn policy_candidate_step(revision: &str) -> String {
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
 "#,
         pin_script = audited_pin_script(),
@@ -19912,6 +19913,23 @@ lockfile = true
         )
     }
 
+    fn source_closure_is_declared_pin(source_closure: &str, pin_closures: &[String]) -> bool {
+        pin_closures.iter().any(|closure| closure == source_closure)
+    }
+
+    #[test]
+    fn checked_in_workflow_render_gate_uses_pin_closure_identity() {
+        let pin_closures = vec!["declared-pin-closure".to_owned()];
+        assert!(source_closure_is_declared_pin(
+            "declared-pin-closure",
+            &pin_closures
+        ));
+        assert!(!source_closure_is_declared_pin(
+            "candidate-source-closure",
+            &pin_closures
+        ));
+    }
+
     /// The schema-2 pipeline refuses a schema-1 repository: the dogfood
     /// tree flipped to schema 2 (R2m), so the refusal now runs against a
     /// synthetic schema-1 config instead of the repository itself. The
@@ -19941,19 +19959,35 @@ lockfile = true
         let _ = fs::remove_dir_all(root);
     }
 
-    /// The checked-in workflows are byte-identical to what the schema-2
-    /// pipeline renders for this repository: regeneration is a fixed
-    /// point, so a template change without its regen (or a hand-edit)
-    /// fails here before it fails in CI. The harness renders the
-    /// repository's own surface the way `run` renders it, which makes
-    /// comparing every workflow trivial — including the shared policy
-    /// job in `ci-policy.yml` and `ci-main.yml`.
+    /// When this build's source closure is the declared pin, the checked-in
+    /// workflows must be byte-identical to this schema-2 render. During a
+    /// generator change, the checked-in tree remains owned by its declared
+    /// pin; the Policy `generated-tree` rule verifies that pinned render and
+    /// the candidate exception separately. Comparing the candidate build to
+    /// the pinned tree in that state would enforce the wrong renderer.
     #[test]
-    fn checked_in_workflows_match_the_generator_byte_for_byte() {
+    fn checked_in_workflows_match_current_renderer_when_it_is_the_pin() {
         let root = must(
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
+        let generation = must(config::discover(&root), "discover generation config");
+        let pin = must_some(
+            generation
+                .as_ref()
+                .and_then(config::RepoGenerationConfig::revision),
+            "declared generator revision",
+        );
+        let pin_closures = must(
+            policy::expected_closures(&root, pin),
+            "compute declared pin closures",
+        );
+        if !source_closure_is_declared_pin(SOURCE_CLOSURE, &pin_closures) {
+            eprintln!(
+                "skip current-source byte comparison: source closure {SOURCE_CLOSURE} differs from declared pin {pin}; Policy verifies the pinned render and candidate separately"
+            );
+            return;
+        }
         let files = rendered_repository_files();
         let entries = must(
             fs::read_dir(root.join(".github/workflows")),
@@ -20152,19 +20186,19 @@ lockfile = true
     /// rendered output; child-only environment clearing here would not protect
     /// the token-bearing parent from inspection by candidate code.
     #[test]
-    fn policy_candidate_acquire_does_not_execute_candidate() {
+    fn policy_candidate_acquire_uses_candidate_slot_without_execution() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
             !owner.contains("reported=\"$(env -i"),
             "the token-bearing acquire step never executes the candidate: {owner}"
         );
         assert!(
-            owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
-            "the verified candidate remains visible to the base validator during reader bootstrap: {owner}"
+            owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"),
+            "the verified artifact is exported through the candidate slot: {owner}"
         );
         assert!(
-            !owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"),
-            "the writer stays on the pinned slot until the reader pin is promoted: {owner}"
+            !owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
+            "acquiring a candidate never replaces the trusted pinned renderer: {owner}"
         );
     }
 

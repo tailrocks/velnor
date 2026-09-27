@@ -5424,11 +5424,12 @@ fn audited_pin_script() -> &'static str {
 /// candidate artifact the Rust unit job packaged, verifies its manifest
 /// bindings and digest, requires the manifest closure to equal the audited
 /// head's candidate closure in full (not just the artifact-name prefix),
-/// and exports the binary through the existing pinned-binary slot plus its
-/// manifest. This reader-only change lands before the generated writer moves
-/// to the candidate slot, so the base validator remains able to verify this
-/// tree. A later pin promotion and writer migration can switch the export
-/// once this candidate-slot reader is the base validator.
+/// and exports the binary through the dedicated candidate-binary slot plus
+/// its manifest. The independently provisioned trusted renderer stays in
+/// the pinned lookup chain (the running binary, an explicit pinned-binary
+/// slot, or `PATH`); acquiring a candidate cannot shadow that renderer. The
+/// policy reader can therefore prove the declared pin before considering
+/// the separately bound candidate.
 /// The poll name and the manifest gate both key off the head closure — the
 /// same identity the publisher names the artifact by and the validator's
 /// `wanted` binding checks — so the three legs rendezvous on one digest. The
@@ -5518,7 +5519,7 @@ fn policy_candidate_step(revision: &str) -> String {
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
 "#,
         pin_script = audited_pin_script(),
@@ -18916,19 +18917,19 @@ channel = "stable"
     /// rendered output; child-only environment clearing here would not protect
     /// the token-bearing parent from inspection by candidate code.
     #[test]
-    fn policy_candidate_acquire_does_not_execute_candidate() {
+    fn policy_candidate_acquire_uses_candidate_slot_without_execution() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
             !owner.contains("reported=\"$(env -i"),
             "the token-bearing acquire step never executes the candidate: {owner}"
         );
         assert!(
-            owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
-            "the verified candidate remains visible to the base validator during reader bootstrap: {owner}"
+            owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"),
+            "the verified artifact is exported through the candidate slot: {owner}"
         );
         assert!(
-            !owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"),
-            "the writer stays on the pinned slot until the reader pin is promoted: {owner}"
+            !owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
+            "acquiring a candidate never replaces the trusted pinned renderer: {owner}"
         );
     }
 

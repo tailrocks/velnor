@@ -39,6 +39,14 @@ the pin's own source closure, then stamps the pin and regenerates the whole
 tree in a single commit; `--check` verifies the pinned generator renders the
 tree.
 
+For same-repository generator pull requests, the policy job resolves the
+trusted renderer through its normal pinned lookup. After validating the
+sibling PR run's candidate artifact and manifest, it exports that artifact
+separately in `VELNOR_WORKFLOW_CANDIDATE_BINARY`; candidate acquisition cannot
+shadow the pinned renderer. The validator proves the declared pin first, then
+accepts the candidate only when its manifest matches the audited head's
+candidate closure and binary digest.
+
 Runtime commands are derived from scanned capabilities, not from config-supplied
 shell arrays. GitHub-hosted execution is the automatic and omitted-dispatch
 default; Velnor runs only when dispatch selects `velnor` or `both`. The binary
