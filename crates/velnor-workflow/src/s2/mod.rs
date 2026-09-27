@@ -9405,6 +9405,7 @@ fn is_managed_output_path(value: &str) -> bool {
     let path = Path::new(value);
     let normalized = !value.is_empty()
         && !value.starts_with('/')
+        && !value.chars().any(char::is_control)
         && !value
             .chars()
             .any(|character| matches!(character, '\\' | ':'))
@@ -9473,6 +9474,7 @@ fn validate_generated_paths(
     let ownership_state = Path::new(OWNERSHIP_STATE);
     for relative in &paths {
         if relative.components().count() == 0
+            || relative.to_string_lossy().chars().any(char::is_control)
             || !relative
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)))
@@ -23213,6 +23215,23 @@ lockfile = true
         drop(third);
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn managed_output_paths_reject_control_delimiters() {
+        let symlinks = BTreeMap::<PathBuf, PathBuf>::new();
+        for path in [
+            "config/runtime/bad\nname.env",
+            "config/runtime/bad\rname.env",
+            "config/runtime/bad\tname.env",
+        ] {
+            assert!(
+                managed_relative_path(path).is_err(),
+                "unsafe state path: {path:?}"
+            );
+            let files = BTreeMap::from([(PathBuf::from(path), String::new())]);
+            assert!(validate_generated_paths(&files, &symlinks).is_err());
+        }
+    }
+
     #[test]
     fn check_ownership_refresh_names_the_state_file() {
         let root = temporary_repository("check-ownership-refresh");

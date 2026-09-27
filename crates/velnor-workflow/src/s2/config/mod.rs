@@ -2956,7 +2956,7 @@ fn is_normalized_repository_path(path: &str) -> bool {
         && !path.starts_with('/')
         && !path
             .chars()
-            .any(|character| matches!(character, '\\' | ':'))
+            .any(|character| character.is_control() || matches!(character, '\\' | ':'))
         && path.split('/').all(|segment| {
             !segment.is_empty() && segment != "." && segment != ".." && segment != ".git"
         })
@@ -6767,6 +6767,10 @@ mod tests {
              mbx_generation_bound = 2\n",
         );
         assert_eq!(config.cache_github().budget_bytes, Some(8_589_934_592));
+        assert!(toml::from_str::<RepoGenerationConfig>(
+            "schema = 2\n\n[cache.velnor]\nbudget_bytes = 1\n"
+        )
+        .is_err());
     }
 
     #[test]
@@ -6796,6 +6800,9 @@ mod tests {
             ".github/ci",
             ".github/ci/.github-actions-generator-state",
             ".github/ci/.github-actions-generator-state/child",
+            "config/runtime/bad\nname.env",
+            "config/runtime/bad\rname.env",
+            "config/runtime/bad\tname.env",
         ] {
             let rows = [StaticFileSection {
                 file: Some(output.to_owned()),
@@ -6811,6 +6818,9 @@ mod tests {
             ".github/workflows/generated.yml",
             ".git/config",
             "config/./source.env",
+            "config/runtime/bad\nsource.env",
+            "config/runtime/bad\rsource.env",
+            "config/runtime/bad\tsource.env",
         ] {
             let rows = [StaticFileSection {
                 file: Some("config/runtime/generated.env".to_owned()),
