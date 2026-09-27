@@ -5430,40 +5430,14 @@ fn audited_pin_script() -> &'static str {
 "#
 }
 
-/// Owner policy step acquiring the PR run's candidate generator product.
-/// When the audited pin shares the base validator's closure AND the tree
-/// matches the pin's render the step exits immediately (the Stage-0
-/// validator renders). A same-closure tree that differs from the pin's
-/// render falls through to the candidate path: that is a generator change
-/// in flight, and exiting early would strand the validator with no
-/// candidate binding (manifest cleared, pin leg red). Otherwise the step
-/// waits for the same-repository PR run at the resolved candidate head to
-/// publish the artifact the Rust unit job packaged, verifies its manifest
-/// bindings and digest, requires the candidate closure to equal the audited
-/// render closure before any candidate execution, and exports the binary in
-/// the dedicated candidate slot plus its manifest for the validator's
-/// binding. The trusted pinned binary slot stays unchanged. The poll name
-/// keys off the candidate closure; the manifest gate binds that closure to
-/// both the candidate revision and the audited render revision, so a squash
-/// merge whose main side changed closure inputs fails with an actionable
-/// rebase/rebuild error. The `--closure` probe runs later in a
-/// token-free policy step. The candidate is untrusted code and can inspect
-/// its parent process, so child-only environment clearing in this
-/// token-bearing acquisition step is not sufficient.
-/// On the trusted main push after a squash merge, the event SHA is the new
-/// squash commit, not the PR head that produced the candidate artifact. The
-/// step resolves that commit to exactly one merged, same-repository PR before
-/// polling; a direct push or an ambiguous association fails closed. Fork
-/// generator changes fail closed: only same-repository runs are even
-/// considered. The same-repository select compares the embedded
-/// `.head_repository.id` object: the runs-list endpoint exposes no
-/// `.head_repository_id` scalar, and selecting on it matches nothing.
-/// The artifact check pipes the listing through real jq for the same
-/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
-/// never report the match.
+/// Compatibility renderer used while `[generator].revision` is the legacy
+/// bootstrap pin. It looks up the artifact for `HEAD_SHA`, verifies its
+/// manifest, digest, and candidate closure, then exports it through the
+/// existing pinned-binary slot plus its manifest. Keep this fragment byte
+/// compatible with the bootstrap workflow until the pin is promoted.
 #[expect(
     clippy::too_many_lines,
-    reason = "the candidate acquisition shell keeps its provenance gates together"
+    reason = "the legacy candidate acquisition shell keeps its provenance gates together"
 )]
 fn policy_candidate_step_legacy(revision: &str) -> String {
     format!(
@@ -5547,6 +5521,41 @@ fn policy_candidate_step_legacy(revision: &str) -> String {
     )
 }
 
+/// Owner policy step acquiring the PR run's candidate generator product.
+/// When the audited pin shares the base validator's closure AND the tree
+/// matches the pin's render the step exits immediately (the Stage-0
+/// validator renders). A same-closure tree that differs from the pin's
+/// render falls through to the candidate path: that is a generator change
+/// in flight, and exiting early would strand the validator with no
+/// candidate binding (manifest cleared, pin leg red). Otherwise the step
+/// waits for the same-repository PR run at the resolved candidate head to
+/// publish the artifact the Rust unit job packaged, verifies its manifest
+/// bindings and digest, requires the candidate closure to equal the audited
+/// render closure before any candidate execution, and exports the binary in
+/// the dedicated candidate slot plus its manifest for the validator's
+/// binding. The trusted pinned binary slot stays unchanged. The poll name
+/// keys off the candidate closure; the manifest gate binds that closure to
+/// both the candidate revision and the audited render revision, so a squash
+/// merge whose main side changed closure inputs fails with an actionable
+/// rebase/rebuild error. The `--closure` probe runs later in a
+/// token-free policy step. The candidate is untrusted code and can inspect
+/// its parent process, so child-only environment clearing in this
+/// token-bearing acquisition step is not sufficient.
+/// On the trusted main push after a squash merge, the event SHA is the new
+/// squash commit, not the PR head that produced the candidate artifact. The
+/// step resolves that commit to exactly one merged, same-repository PR before
+/// polling; a direct push or an ambiguous association fails closed. Fork
+/// generator changes fail closed: only same-repository runs are even
+/// considered. The same-repository select compares the embedded
+/// `.head_repository.id` object: the runs-list endpoint exposes no
+/// `.head_repository_id` scalar, and selecting on it matches nothing.
+/// The artifact check pipes the listing through real jq for the same
+/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
+/// never report the match.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the candidate acquisition shell keeps its provenance gates together"
+)]
 fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
