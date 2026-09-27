@@ -16,10 +16,11 @@
 //! * **Is the tree safe?** The validator's own semantic rules run on the
 //!   tree's YAML: no `pull_request_target` outside the policy entrypoint,
 //!   every self-hosted job behind a trusted-event gate, every action pinned to
-//!   a full SHA, the entrypoint restricted to `contents: read` and its policy
-//!   job restricted to `actions: read`, `contents: read`, and
-//!   `pull-requests: read`, with no secrets, and the ruleset's required
-//!   contexts emitted by `ci-pr.yml`.
+//!   a full SHA, the entrypoint workflow restricted to `contents: read` and
+//!   its policy job restricted to `contents: read` or the final read-only set
+//!   `actions: read`, `contents: read`, and `pull-requests: read`, with no
+//!   secrets, and the ruleset's required contexts
+//!   emitted by `ci-pr.yml`.
 //!
 //! Every rule reports `PASS` or `FAIL` with a one-line reason; the report is
 //! what a reviewer reads in the job log.
@@ -528,7 +529,7 @@ fn semantic_rules(
     report.rules.push(RuleReport::from_findings(
         "entrypoint-privileges",
         &format!(
-            "{POLICY_ENTRYPOINT} holds workflow contents: read and a policy-job token restricted to actions: read, contents: read, and pull-requests: read, references no secrets, and persists no credentials"
+            "{POLICY_ENTRYPOINT} holds workflow contents: read and a policy-job token restricted to contents: read or actions: read, contents: read, and pull-requests: read, references no secrets, and persists no credentials"
         ),
         entrypoint.privileges,
     ));
@@ -2212,9 +2213,10 @@ fn audit_entrypoint_triggers(workflow: &Mapping, audit: &mut EntrypointAudit) {
     }
 }
 
-/// Privileges: workflow `contents: read`, policy-job `actions: read`,
-/// `contents: read`, and `pull-requests: read`; no secrets, no persisted
-/// credentials, one job on a hosted or trust-gated approved runner.
+/// Privileges: workflow `contents: read`; policy-job `contents: read` or the
+/// final exact set `actions: read`, `contents: read`, and `pull-requests: read`;
+/// no secrets, no persisted credentials, one job on a hosted or trust-gated
+/// approved runner.
 fn audit_entrypoint_privileges(
     root: &Path,
     workflow: &Mapping,
@@ -2251,7 +2253,7 @@ fn audit_entrypoint_privileges(
             };
             if !is_policy_job_read_only(mapping_value(job, "permissions")) {
                 audit.privileges.push(finding(&format!(
-                    "job {job_id} permissions must be exactly `actions: read, contents: read, pull-requests: read`"
+                    "job {job_id} permissions must be exactly `contents: read` or `actions: read, contents: read, pull-requests: read`"
                 )));
             }
             if mapping_value(job, "environment").is_some() {
@@ -2744,11 +2746,15 @@ fn is_policy_job_read_only(permissions: Option<&Value>) -> bool {
     permissions
         .and_then(Value::as_mapping)
         .is_some_and(|permissions| {
-            permissions.len() == 3
-                && mapping_value(permissions, "actions").and_then(Value::as_str) == Some("read")
-                && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
-                && mapping_value(permissions, "pull-requests").and_then(Value::as_str)
-                    == Some("read")
+            (permissions.len() == 1
+                && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read"))
+                || (permissions.len() == 3
+                    && mapping_value(permissions, "actions").and_then(Value::as_str)
+                        == Some("read")
+                    && mapping_value(permissions, "contents").and_then(Value::as_str)
+                        == Some("read")
+                    && mapping_value(permissions, "pull-requests").and_then(Value::as_str)
+                        == Some("read"))
         })
 }
 
