@@ -12745,10 +12745,7 @@ mod tests {
                 "write stub blob response",
             );
         }
-        let mut closure_listing = listing
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
+        let mut closure_listing = listing.iter().map(ToString::to_string).collect::<Vec<_>>();
         closure_listing.extend([
             "100644 blob ffffffffffffffffffffffffffffffffffffffff\tcrates/velnor-model/Cargo.toml"
                 .to_owned(),
