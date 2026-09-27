@@ -36,7 +36,14 @@ pub(crate) fn repository_files(
         files
     };
     let excludes = exclude_set(exclude)?;
-    files.retain(|file| !excludes.is_match(file) && !generator_owned.contains(Path::new(file)));
+    // Dependency trees are never repository inputs, regardless of whether a
+    // committed index entry or a physical walk supplied the path. Keep this
+    // boundary here so every detector sees the same filtered file set.
+    files.retain(|file| {
+        !excludes.is_match(file)
+            && !generator_owned.contains(Path::new(file))
+            && !is_node_modules_path(file)
+    });
     files.sort();
     Ok(files)
 }
@@ -183,18 +190,18 @@ fn collect_files(
         if kind.is_symlink() {
             continue;
         }
-        // Parity with the git-index walk, which filters on the leading path
-        // component only: tool-output names stay excluded at the repository
-        // root, but nested content (committed fixtures under a nested `dist/`,
-        // ...) scans like any other input. `.git` metadata is never an input
-        // at any depth — the index never lists it, and a linked worktree's
-        // `.git` pointer file must not enter the scan either.
+        // Parity with the git-index walk, which filters tool output at the
+        // repository root. Dependency trees are excluded at every depth;
+        // committed fixtures under nested `dist/` and similar directories
+        // remain scan inputs. `.git` metadata is never an input at any depth —
+        // the index never lists it, and a linked worktree's `.git` pointer file
+        // must not enter the scan either.
         if name.as_ref() == ".git" {
             continue;
         }
         let at_root = directory == root;
         if kind.is_dir() {
-            if at_root && is_excluded_directory(name.as_ref()) {
+            if name.as_ref() == "node_modules" || at_root && is_excluded_directory(name.as_ref()) {
                 continue;
             }
             collect_files(root, &path, files)?;
@@ -415,6 +422,15 @@ mod tests {
         );
         git(&root, &["add", "tracked.txt"]);
         must(
+            fs::create_dir_all(root.join("web/node_modules/vite")),
+            "create tracked dependency directory",
+        );
+        must(
+            fs::write(root.join("web/node_modules/vite/package.json"), "{}\n"),
+            "write tracked dependency manifest",
+        );
+        git(&root, &["add", "web/node_modules/vite/package.json"]);
+        must(
             fs::write(root.join("untracked.txt"), "untracked"),
             "write untracked file",
         );
@@ -596,6 +612,14 @@ mod tests {
         must(
             fs::write(root.join("pkg/main.rs"), "main"),
             "write nested source",
+        );
+        must(
+            fs::create_dir_all(root.join("pkg/node_modules/vite")),
+            "create nested dependency directory",
+        );
+        must(
+            fs::write(root.join("pkg/node_modules/vite/package.json"), "{}\n"),
+            "write nested dependency manifest",
         );
         must(
             fs::create_dir_all(root.join("pkg/.git/objects")),
