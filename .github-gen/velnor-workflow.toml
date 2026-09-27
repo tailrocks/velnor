@@ -5,10 +5,7 @@ repository = "tailrocks/velnor"
 # D19 pin: the velnor-workflow commit that rendered this tree. The policy
 # validator regenerates the tree with the generator built at this commit and
 # requires a byte-identical result; bump it in a single pin commit after the
-# last generator change (see the plan ledger).
-# The branch changes the generator, so keep Stage 0 on the published base
-# product until the generator change is merged and published. The policy
-# candidate path verifies the checked-in tree with this branch's renderer.
+# last generator change.
 revision = "12f9f4b4c90c1ba116f80bc832fc1a279dbb3c95"
 
 [scan]
