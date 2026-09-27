@@ -6077,6 +6077,36 @@ pub(crate) fn workflow_setup_action_repository() -> &'static str {
     }
 }
 
+/// Resolve a revision's workflow source closure using only dependencies
+/// declared by that revision. The model subtree entered the workflow binary's
+/// closure when the workflow crate began depending on it; old pins keep their
+/// published closure digest.
+fn workflow_closure_resolution_script(revision: &str) -> String {
+    let script = r#"listing=""
+include_model=false
+if git -C "$CHECKOUT_PATH" cat-file -e "@REV@^{commit}" 2>/dev/null; then
+  manifest="$(git -C "$CHECKOUT_PATH" show "@REV@:crates/velnor-workflow/Cargo.toml")"
+  if grep -Eq '^[[:space:]]*velnor-model[[:space:]]*=[[:space:]]*\{[^}]*path[[:space:]]*=[[:space:]]*"\.\./velnor-model"' <<<"$manifest"; then include_model=true; fi
+  paths=(crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)
+  [[ "$include_model" != true ]] || paths+=(crates/velnor-model)
+  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "@REV@" -- "${paths[@]}")"
+else
+  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/@REV@?recursive=1")" || { echo "::error::unknown generator revision @REV@" >&2; exit 1; }
+  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
+  manifest_json="$(gh api "repos/$PRODUCT_REPOSITORY/contents/crates/velnor-workflow/Cargo.toml?ref=@REV@")" || { echo "::error::workflow manifest unavailable at @REV@" >&2; exit 1; }
+  encoded_manifest="$(jq -er '.content' <<<"$manifest_json")"
+  if base64 --decode <<<"" >/dev/null 2>&1; then manifest="$(base64 --decode <<<"$encoded_manifest")"; else manifest="$(base64 -D <<<"$encoded_manifest")"; fi
+  if grep -Eq '^[[:space:]]*velnor-model[[:space:]]*=[[:space:]]*\{[^}]*path[[:space:]]*=[[:space:]]*"\.\./velnor-model"' <<<"$manifest"; then include_model=true; fi
+  listing="$(jq -r --arg model "$include_model" '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or ($model == "true" and (.path | startswith("crates/velnor-model/"))) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+fi
+"#;
+    script
+        .replace("@REV@", revision)
+        .lines()
+        .map(|line| format!("          {line}\n"))
+        .collect()
+}
+
 /// Hosted `rev:` for `setup-velnor-workflow`: always the tree's declared
 /// generator pin, for every repository and every event.
 ///
@@ -6169,16 +6199,21 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workf
 /// workflow was rendered.
 pub(crate) fn workflow_pinned_policy_runtime_velnor(checkout: &str) -> String {
     let product_repository = workflow_setup_action_repository();
-    format!(
+    let rendered = format!(
         "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          CHECKOUT_PATH: {checkout}\n          PRODUCT_REPOSITORY: {product_repository}\n        run: |\n          set -euo pipefail\n          PINNED_REVISION=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' \"$CHECKOUT_PATH/.github-gen/velnor-workflow.toml\" | head -n 1)\"\n          test \"$PINNED_REVISION\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          listing=\"\"\n          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          else\n            tree=\"$(gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\")\" || {{ echo \"::error::unknown generator revision $PINNED_REVISION\" >&2; exit 1; }}\n            [[ \"$(jq -r '.truncated // false' <<<\"$tree\")\" != \"true\" ]] || {{ echo \"::error::tree API response is truncated; the closure cannot be proven\" >&2; exit 1; }}\n            listing=\"$(jq -r '[.tree[] | select(.type != \"tree\") | select(.path == \"Cargo.toml\" or .path == \"Cargo.lock\" or .path == \"rust-toolchain.toml\" or .path == \"rust-toolchain\" or (.path | startswith(\"crates/velnor-workflow/\")) or (.path | startswith(\".cargo/\"))) | \"\\(.mode) \\(.type) \\(.sha)\\t\\(.path)\"] | sort | join(\"\\n\")' <<<\"$tree\")\"\n          fi\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          check_slot() {{\n            if command -v sha256sum >/dev/null 2>&1; then\n              installed=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              installed=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$installed\" == \"$expected\" ]] || {{ echo \"::error::policy runtime slot changed after verification\" >&2; exit 1; }}\n          }}\n          check_slot\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\"\n          check_slot\n          reported_revision=\"$(\"$binary\" --revision)\"\n          [[ \"$reported_revision\" == \"$manifest_revision\" ]] || {{ echo \"::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
-    )
-    .replace(
-        "crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo",
-        &closure::CLOSURE_PATHS.join(" "),
-    )
-    .replace(
-        "(.path | startswith(\"crates/velnor-workflow/\")) or (.path | startswith(\".cargo/\"))",
-        "(.path | startswith(\"crates/velnor-workflow/\")) or (.path | startswith(\"crates/velnor-model/\")) or (.path | startswith(\".cargo/\"))",
+    );
+    let start = rendered
+        .find("listing=\"\"")
+        .expect("closure resolver renders");
+    let end = rendered[start..]
+        .find("          test \"$listing\"")
+        .map(|offset| start + offset)
+        .expect("closure input guard renders");
+    format!(
+        "{}{}{}",
+        &rendered[..start],
+        workflow_closure_resolution_script("$PINNED_REVISION"),
+        &rendered[end..]
     )
 }
 
@@ -11056,7 +11091,7 @@ mod tests {
         must(
             fs::write(
                 stubs.join("gh"),
-                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  cat \"$STUB_LOG/trees.json\"\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
+                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  case \"$2\" in *contents/*) printf '{\\\"content\\\":\\\"\\\"}\\n';; *) cat \"$STUB_LOG/trees.json\";; esac\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
             ),
             "write stub gh",
         );
@@ -11129,13 +11164,23 @@ mod tests {
             "consumer identity is never consulted: {stderr}"
         );
         let api = must(fs::read_to_string(log.join("gh-api")), "read api log");
+        let endpoints = api.lines().collect::<Vec<_>>();
+        assert_eq!(endpoints.len(), 2, "tree and manifest are fetched once");
         assert_eq!(
-            api.trim(),
+            endpoints[0],
             format!(
                 "repos/{}/git/trees/{pin}?recursive=1",
                 workflow_setup_action_repository()
             ),
-            "the closure resolves over the product repository API"
+            "the closure tree resolves from the product repository"
+        );
+        assert_eq!(
+            endpoints[1],
+            format!(
+                "repos/{}/contents/crates/velnor-workflow/Cargo.toml?ref={pin}",
+                workflow_setup_action_repository()
+            ),
+            "dependency metadata resolves from the same product repository"
         );
         let git_args = must(fs::read_to_string(log.join("git-args")), "read git log");
         assert!(
@@ -11288,7 +11333,12 @@ mod tests {
         );
         // Closure resolution: local git first, trees API fallback, same
         // canonical bytes (byte-sorted ls-tree lines plus the footer).
-        assert!(action.contains("ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow crates/velnor-model Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"), "{action}");
+        assert!(
+            action.contains("paths=(crates/velnor-workflow Cargo.toml Cargo.lock"),
+            "{action}"
+        );
+        assert!(action.contains("paths+=(crates/velnor-model)"), "{action}");
+        assert!(action.contains("include_model=false"), "{action}");
         assert!(
             action.contains("git/trees/$INSTALL_REV?recursive=1"),
             "{action}"
@@ -18599,14 +18649,18 @@ channel = "stable"
         );
         assert_eq!(
             velnor.matches("gh api").count(),
-            1,
-            "the only Velnor API call resolves the pin from the product repository: {velnor}"
+            2,
+            "Velnor resolves the pin tree and dependency manifest from the product repository: {velnor}"
         );
         assert!(
             velnor.contains(
                 "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
             ),
             "the Velnor API call is the product-trees fallback: {velnor}"
+        );
+        assert!(
+            velnor.contains("repos/$PRODUCT_REPOSITORY/contents/crates/velnor-workflow/Cargo.toml?ref=$PINNED_REVISION"),
+            "the manifest dependency check uses the product API too: {velnor}"
         );
         let hosted = hosted_policy_job("revision");
         assert!(!hosted.contains("--pin-build"), "{hosted}");

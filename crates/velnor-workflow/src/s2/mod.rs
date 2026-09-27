@@ -11299,7 +11299,12 @@ mod tests {
         );
         // Closure resolution: local git first, trees API fallback, same
         // canonical bytes (byte-sorted ls-tree lines plus the footer).
-        assert!(action.contains("ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow crates/velnor-model Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"), "{action}");
+        assert!(
+            action.contains("paths=(crates/velnor-workflow Cargo.toml Cargo.lock"),
+            "{action}"
+        );
+        assert!(action.contains("paths+=(crates/velnor-model)"), "{action}");
+        assert!(action.contains("include_model=false"), "{action}");
         assert!(
             action.contains("git/trees/$INSTALL_REV?recursive=1"),
             "{action}"

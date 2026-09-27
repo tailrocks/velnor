@@ -79,12 +79,21 @@ runs:
         test "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }
         [[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }
         listing=""
+        include_model=false
         if git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then
-          listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow crates/velnor-model Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+          manifest="$(git -C "$CHECKOUT_PATH" show "$INSTALL_REV:crates/velnor-workflow/Cargo.toml")"
+          if grep -Eq '^[[:space:]]*velnor-model[[:space:]]*=[[:space:]]*\{[^}]*path[[:space:]]*=[[:space:]]*"\.\./velnor-model"' <<<"$manifest"; then include_model=true; fi
+          paths=(crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)
+          [[ "$include_model" != true ]] || paths+=(crates/velnor-model)
+          listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- "${paths[@]}")"
         else
           tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }
           [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
-          listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith("crates/velnor-model/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+          manifest_json="$(gh api "repos/$PRODUCT_REPOSITORY/contents/crates/velnor-workflow/Cargo.toml?ref=$INSTALL_REV")" || { echo "::error::workflow manifest unavailable at $INSTALL_REV" >&2; exit 1; }
+          encoded_manifest="$(jq -er '.content' <<<"$manifest_json")"
+          if base64 --decode <<<"" >/dev/null 2>&1; then manifest="$(base64 --decode <<<"$encoded_manifest")"; else manifest="$(base64 -D <<<"$encoded_manifest")"; fi
+          if grep -Eq '^[[:space:]]*velnor-model[[:space:]]*=[[:space:]]*\{[^}]*path[[:space:]]*=[[:space:]]*"\.\./velnor-model"' <<<"$manifest"; then include_model=true; fi
+          listing="$(jq -r --arg model "$include_model" '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or ($model == "true" and (.path | startswith("crates/velnor-model/"))) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
         fi
         test "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }
         closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"

@@ -936,9 +936,9 @@ mod tests {
     fn closure_shell_matches_the_setup_action() {
         let content = owner_content(&[]);
         let action = setup_action_source();
-        // The commands differ (the action resolves any rev portably, the
-        // producer resolves HEAD on Linux), but the hashed byte stream — the
-        // pathspec, the byte sort, and the footer — must agree exactly.
+        // The producer resolves current HEAD; the action resolves any pin
+        // using that revision's direct dependencies. Both retain the same
+        // canonical sort and footer.
         let action_ls_tree = must_some(
             action
                 .lines()
@@ -956,15 +956,14 @@ mod tests {
             action_pathspec.strip_suffix(")\""),
             "the setup action pathspec end",
         );
-        assert_eq!(
-            action_pathspec,
-            CLOSURE_PATHS.join(" "),
-            "the setup action pathspec is the closure paths"
-        );
         assert!(
-            content.contains(action_pathspec),
-            "producer and setup action hash the same pathspec: {content}"
+            action_pathspec == "\"${paths[@]}\""
+                && action.contains("paths=(crates/velnor-workflow Cargo.toml Cargo.lock")
+                && action.contains("include_model=false")
+                && action.contains("paths+=(crates/velnor-model)"),
+            "the setup action includes model sources only when the pinned workflow manifest depends on them"
         );
+        assert!(content.contains(&CLOSURE_PATHS.join(" ")), "{content}");
         let footer = format!(
             "closure-version:{CLOSURE_VERSION}\\nfeatures:{CI_FEATURES}\\nprofile:{PROFILE_RELEASE}\\n"
         );

@@ -140,8 +140,27 @@ pub(crate) fn closure_of_tree(
     features: &str,
     profile: &str,
 ) -> Result<String, GeneratorError> {
+    let manifest = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["show", &format!("{rev}:crates/velnor-workflow/Cargo.toml")])
+        .output()
+        .map_err(|error| {
+            GeneratorError::usage(format!("read workflow manifest at {rev}: {error}"))
+        })?;
+    let manifest_ok = manifest.status.success();
+    let manifest = String::from_utf8_lossy(&manifest.stdout);
+    let uses_model = manifest_ok
+        && manifest.lines().any(|line| {
+            line.trim_start().starts_with("velnor-model")
+                && line.contains("path = \"../velnor-model\"")
+        });
+    let mut paths = CLOSURE_PATHS.to_vec();
+    if !uses_model {
+        paths.retain(|path| *path != "crates/velnor-model");
+    }
     let mut arguments = vec!["ls-tree", "-r", rev, "--"];
-    arguments.extend_from_slice(CLOSURE_PATHS);
+    arguments.extend_from_slice(&paths);
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)

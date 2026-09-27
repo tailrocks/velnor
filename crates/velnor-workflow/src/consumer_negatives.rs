@@ -180,6 +180,10 @@ if [[ "$command" == "api" ]]; then
   endpoint="${2:-}"
   log "api endpoint=$endpoint"
   case "$endpoint" in
+    repos/*/contents/crates/velnor-workflow/Cargo.toml?ref=*)
+      printf '{"content":""}\n'
+      exit 0
+      ;;
     repos/*/git/trees/*)
       if [[ ! -f "$GH_STUB_DIR/trees.json" ]]; then
         echo "stub serves no trees response for $endpoint" >&2
