@@ -33,10 +33,11 @@
 //! the pin from the audited tree.
 //!
 //! The candidate exception binds the env-slot candidate binary by manifest
-//! before executing it: the manifest's closure must equal the audited tree's
-//! candidate closure (computed locally from git history) and the binary's
-//! digest must match the manifest first, because a `--closure` echo is an
-//! assertion by untrusted bytes, not proof. The manifest arrives via
+//! before executing it: the manifest names the PR-head candidate revision,
+//! its closure must equal both that revision's closure and the audited render
+//! revision's closure (computed locally from git history), and the binary's
+//! digest plus `--revision` report must match the manifest first, because a
+//! `--closure` echo is an assertion by untrusted bytes, not proof. The manifest arrives via
 //! `--candidate-manifest` or `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without
 //! either, env-slot binaries are skipped, never executed.
 
@@ -45,8 +46,9 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_yaml::{Mapping, Value};
 
@@ -66,7 +68,8 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
-/// Names the env-slot candidate binary.
+/// Names the env-slot candidate binary; it is separate from the pinned
+/// policy runtime so an untrusted PR product cannot replace the pin.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV;
 /// Names the manifest binding the env-slot candidate binary.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
@@ -1138,7 +1141,7 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
 pub(crate) struct PinnedBinaryLookup {
     /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
     pinned_binary: Option<PathBuf>,
-    /// Candidate renderer, separately bound by its manifest and digest.
+    /// [`VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV`].
     candidate_binary: Option<PathBuf>,
     /// `PATH`.
     search_path: Option<OsString>,
@@ -1290,15 +1293,14 @@ pub(crate) fn resolve_pinned_binary(
 /// The candidate manifest the publisher wrote beside the candidate binary
 /// (`profile`, `platform`, `repository`, `run_id`, `revision`, `closure`,
 /// `binary_sha256`, plus `build_revision`). The consume-side binding uses the
-/// closure, digest, and the candidate binary's `--revision` report: `revision`
-/// names the PR head the publisher built for, while `build_revision` names
-/// the tree that actually produced the bytes.
+/// candidate revision and closure as the source identity, the digest as the
+/// byte binding, and the binary's `--revision` report as the build identity.
 #[derive(serde::Deserialize)]
 struct CandidateManifest {
     revision: String,
-    build_revision: String,
     closure: String,
     binary_sha256: String,
+    build_revision: String,
 }
 
 /// Read and shape-validate the manifest at `path`: valid JSON whose
@@ -1315,13 +1317,6 @@ fn load_candidate_manifest(path: &Path) -> Result<CandidateManifest, String> {
             "{}: revision {:?} is not a full commit SHA",
             path.display(),
             manifest.revision
-        ));
-    }
-    if !super::is_full_revision(&manifest.build_revision) {
-        return Err(format!(
-            "{}: build_revision {:?} is not a full commit SHA",
-            path.display(),
-            manifest.build_revision
         ));
     }
     if !closure_identity::is_full_closure(&manifest.closure) {
@@ -1341,6 +1336,13 @@ fn load_candidate_manifest(path: &Path) -> Result<CandidateManifest, String> {
             "{}: binary_sha256 {:?} is not a SHA-256 digest",
             path.display(),
             manifest.binary_sha256
+        ));
+    }
+    if !super::is_full_revision(&manifest.build_revision) {
+        return Err(format!(
+            "{}: build_revision {:?} is not a full commit SHA",
+            path.display(),
+            manifest.build_revision
         ));
     }
     Ok(manifest)
@@ -1563,15 +1565,17 @@ pub(crate) fn regenerate_and_compare(
 
 /// The candidate exception: when the tree differs from the declared pin's
 /// render, it may still be legitimate — a generator change in flight renders
-/// with the audited tree's own candidate, not with the pin.
+/// with a candidate built for the PR head, but only when that head's closure
+/// equals the audited render revision's closure.
 ///
 /// Acceptance requires the manifest binding, not `--closure` alone: the
-/// manifest's closure must equal the audited checkout's own candidate
-/// closure (computed locally from git history), the env-slot binary's digest
-/// must match the manifest before any execution, and only then does the
-/// `--closure` self-report stay as a final tripwire. A `--closure` echo is an
-/// assertion by untrusted bytes, not proof. Returns the proving closure, or
-/// `None` when no bound candidate reproduces the tree.
+/// manifest's revision closure must equal the manifest closure and the
+/// audited render revision's closure (all computed locally from git history),
+/// the env-slot binary's digest and `--revision` report must match the
+/// manifest before any execution, and only then does the `--closure`
+/// self-report stay as a final tripwire. A `--closure` echo is an assertion by
+/// untrusted bytes, not proof. Returns the proving closure, or `None` when no
+/// bound candidate reproduces the tree.
 fn render_with_candidate(
     checkout: &Path,
     tree: &Path,
@@ -1580,15 +1584,30 @@ fn render_with_candidate(
     excludes: &BTreeSet<String>,
     lookup: &PinnedBinaryLookup,
 ) -> Result<Option<String>, GeneratorError> {
-    let Ok(Some(head)) = git(checkout, &["rev-parse", "HEAD"]) else {
+    let Ok(Some(render_revision)) = git(checkout, &["rev-parse", "HEAD"]) else {
         return Ok(None);
     };
-    if !super::is_full_revision(&head) {
+    if !super::is_full_revision(&render_revision) {
         return Ok(None);
     }
-    let Ok(wanted) = closure_identity::candidate_closure_of_tree(checkout, &head) else {
+    let Ok(render_closure) =
+        closure_identity::candidate_closure_of_tree(checkout, &render_revision)
+    else {
         return Ok(None);
     };
+    // Candidate code is untrusted PR output. Give it a clean git-object
+    // snapshot to scan and render, while `tree` remains the authoritative
+    // checkout used for comparison. A candidate can mutate its snapshot
+    // without changing the bytes the trusted comparison reads.
+    let candidate_source = scratch.with_file_name(format!(
+        "{}-candidate-source",
+        scratch
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("policy-render")
+    ));
+    let _ = fs::remove_dir_all(&candidate_source);
+    immutable_git_snapshot(checkout, &candidate_source)?;
     let current_exe = env::current_exe().ok();
     // The manifest gate fails closed loudly: a manifest path that cannot be
     // loaded, or names another tree, is a configuration error, not a skip.
@@ -1596,11 +1615,24 @@ fn render_with_candidate(
         None => None,
         Some(path) => {
             let manifest = load_candidate_manifest(path).map_err(GeneratorError::usage)?;
-            if manifest.closure != wanted {
+            let candidate_closure =
+                closure_identity::candidate_closure_of_tree(checkout, &manifest.revision)?;
+            if manifest.closure != candidate_closure {
                 return Err(GeneratorError::usage(format!(
-                    "candidate manifest {} names closure {}, but the audited tree's candidate closure is {wanted}",
+                    "candidate manifest {} names closure {}, but candidate revision {} computes closure {}",
                     path.display(),
-                    manifest.closure
+                    manifest.closure,
+                    manifest.revision,
+                    candidate_closure
+                )));
+            }
+            if candidate_closure != render_closure {
+                return Err(GeneratorError::usage(format!(
+                    "candidate revision {} closure {} differs from audited render revision {} closure {}; update the PR branch/rebuild the candidate after main changes",
+                    manifest.revision,
+                    candidate_closure,
+                    render_revision,
+                    render_closure
                 )));
             }
             Some(manifest)
@@ -1644,16 +1676,64 @@ fn render_with_candidate(
         let Ok(reported) = binary_closure(&binary) else {
             continue;
         };
-        if reported != wanted {
+        if reported != render_closure {
             continue;
         }
-        let differences =
-            render_and_compare(&binary, checkout, tree, scratch, default_branch, excludes)?;
+        let differences = render_and_compare(
+            &binary,
+            &candidate_source,
+            tree,
+            scratch,
+            default_branch,
+            excludes,
+        )?;
         if differences.is_empty() {
+            let _ = fs::remove_dir_all(&candidate_source);
             return Ok(Some(reported));
         }
     }
+    let _ = fs::remove_dir_all(&candidate_source);
     Ok(None)
+}
+
+/// Materialize the audited `HEAD` from git objects into a disposable tree.
+/// The candidate process receives this tree only; the authoritative checkout
+/// stays outside its writable working directory and is never passed to it.
+fn immutable_git_snapshot(checkout: &Path, destination: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(destination).map_err(|error| {
+        GeneratorError::io("create candidate source snapshot", destination, &error)
+    })?;
+    let archive = Command::new("git")
+        .args(["archive", "--format=tar", "HEAD"])
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("archive candidate source: {error}")))?;
+    if !archive.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "archive candidate source failed: {}",
+            String::from_utf8_lossy(&archive.stderr).trim()
+        )));
+    }
+    let mut extract = Command::new("tar")
+        .args(["-xf", "-", "-C"])
+        .arg(destination)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if let Some(stdin) = extract.stdin.as_mut() {
+        stdin.write_all(&archive.stdout).map_err(|error| {
+            GeneratorError::usage(format!("write candidate source archive: {error}"))
+        })?;
+    }
+    let status = extract
+        .wait()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage(
+            "extract candidate source archive failed",
+        ));
+    }
+    Ok(())
 }
 
 fn render_and_compare(
@@ -2090,7 +2170,7 @@ fn audit_policy_entrypoint(
         return Ok(audit);
     };
     audit_entrypoint_triggers(workflow, &mut audit);
-    audit_entrypoint_privileges(workflow, &content, velnor_policy, &mut audit);
+    audit_entrypoint_privileges(root, workflow, velnor_policy, &mut audit);
     Ok(audit)
 }
 
@@ -2138,8 +2218,8 @@ fn audit_entrypoint_triggers(workflow: &Mapping, audit: &mut EntrypointAudit) {
 /// no secrets, no persisted credentials, one job on a hosted or trust-gated
 /// approved runner.
 fn audit_entrypoint_privileges(
+    root: &Path,
     workflow: &Mapping,
-    content: &str,
     velnor_policy: &VelnorPolicyContract,
     audit: &mut EntrypointAudit,
 ) {
@@ -2149,11 +2229,16 @@ fn audit_entrypoint_privileges(
             "workflow permissions must be exactly `contents: read`",
         ));
     }
-    let references_secrets = content.lines().any(|line| line.contains("secrets."));
-    if references_secrets {
+    if mapping_contains_context(workflow, "secrets") {
         audit
             .privileges
-            .push(finding("must not reference `secrets.`"));
+            .push(finding("must not reference the GitHub `secrets` context"));
+    }
+    for reference in github_token_scope_findings(workflow) {
+        audit.privileges.push(finding(&reference));
+    }
+    for reference in canonical_api_step_findings(root, workflow, velnor_policy) {
+        audit.privileges.push(finding(&reference));
     }
     match mapping_value(workflow, "jobs").and_then(Value::as_mapping) {
         Some(jobs) if jobs.len() == 1 => {
@@ -2238,6 +2323,415 @@ fn audit_entrypoint_privileges(
         ))),
         None => audit.privileges.push(finding("`jobs` must be a mapping")),
     }
+}
+
+/// The read-only job token may be materialized only for the two API steps.
+/// Candidate code runs later in a separate step, so an expression outside
+/// these exact `GH_TOKEN` bindings would leak the token through its parent
+/// environment or another workflow command.
+fn github_token_scope_findings(workflow: &Mapping) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (key, value) in workflow {
+        let name = key.as_str();
+        if name != "jobs" && value_contains_github_token(value) {
+            findings.push(format!(
+                "`github.token` may only be bound as GH_TOKEN in the Acquire/Ruleset API steps; found at workflow.{name}"
+            ));
+        }
+    }
+    let Some(jobs) = mapping_value(workflow, "jobs").and_then(Value::as_mapping) else {
+        return findings;
+    };
+    for (job_key, job_value) in jobs {
+        let job_name = job_key.as_str();
+        let Some(job) = job_value.as_mapping() else {
+            if value_contains_github_token(job_value) {
+                findings.push(format!(
+                    "`github.token` may only be bound as GH_TOKEN in the Acquire/Ruleset API steps; found at jobs.{job_name}"
+                ));
+            }
+            continue;
+        };
+        for (key, value) in job {
+            let field = key.as_str();
+            if field != "steps" && value_contains_github_token(value) {
+                findings.push(format!(
+                    "`github.token` may only be bound as GH_TOKEN in the Acquire/Ruleset API steps; found at jobs.{job_name}.{field}"
+                ));
+            }
+        }
+        let Some(steps) = mapping_value(job, "steps").and_then(Value::as_sequence) else {
+            continue;
+        };
+        for (index, step_value) in steps.iter().enumerate() {
+            let Some(step) = step_value.as_mapping() else {
+                if value_contains_github_token(step_value) {
+                    findings.push(format!(
+                        "`github.token` may only be bound as GH_TOKEN in the Acquire/Ruleset API steps; found at jobs.{job_name}.steps[{index}]"
+                    ));
+                }
+                continue;
+            };
+            let step_name = mapping_value(step, "name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>");
+            for (key, value) in step {
+                let field = key.as_str();
+                if !value_contains_github_token(value) {
+                    continue;
+                }
+                let allowed = matches!(
+                    step_name,
+                    "Acquire candidate generator product" | "Resolve required status checks"
+                ) && field == "env"
+                    && token_env_is_exact(value);
+                if !allowed {
+                    findings.push(format!(
+                        "`github.token` may only be bound as GH_TOKEN in the Acquire/Ruleset API steps; found at jobs.{job_name}.steps[{index}].{field}"
+                    ));
+                }
+            }
+        }
+    }
+    findings
+}
+
+fn value_contains_github_token(value: &Value) -> bool {
+    match value {
+        Value::String(value) => contains_github_token_access(value),
+        Value::Mapping(mapping) => mapping.values().any(value_contains_github_token),
+        Value::Sequence(sequence) => sequence.iter().any(value_contains_github_token),
+        Value::Tagged(tagged) => value_contains_github_token(tagged.value()),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+/// Reject a GitHub expression context wherever it appears in the parsed
+/// workflow. The policy entrypoint must not carry secrets at all, so this
+/// deliberately fails closed on every scalar containing the context name:
+/// dotted, bracketed, whitespace-separated, case-variant, serialized, and
+/// indirect expressions are all covered without relying on one spelling.
+fn value_contains_context(value: &Value, context: &str) -> bool {
+    match value {
+        Value::String(value) => contains_context_name(value, context),
+        Value::Mapping(mapping) => mapping_contains_context(mapping, context),
+        Value::Sequence(sequence) => sequence
+            .iter()
+            .any(|value| value_contains_context(value, context)),
+        Value::Tagged(tagged) => value_contains_context(tagged.value(), context),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn mapping_contains_context(mapping: &Mapping, context: &str) -> bool {
+    mapping
+        .keys()
+        .any(|key| contains_context_name(key.as_str(), context))
+        || mapping
+            .values()
+            .any(|value| value_contains_context(value, context))
+}
+
+fn contains_context_name(value: &str, context: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    let bytes = normalized.as_bytes();
+    let mut offset = 0;
+    while let Some(relative) = normalized[offset..].find(context) {
+        let start = offset + relative;
+        let end = start + context.len();
+        if identifier_boundary(bytes, start, end) {
+            return true;
+        }
+        offset = end;
+    }
+    false
+}
+
+/// Recognize every way a workflow expression can obtain the token-bearing
+/// `github` context. Direct dotted access is the generated spelling; indexed
+/// access and passing the root object to a function are rejected because they
+/// can select or serialize `token` without spelling `github.token`.
+fn contains_github_token_access(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    let bytes = normalized.as_bytes();
+    let mut offset = 0;
+    while let Some(relative) = normalized[offset..].find("github") {
+        let start = offset + relative;
+        let end = start + "github".len();
+        if identifier_boundary(bytes, start, end) {
+            let next = skip_ascii_whitespace(bytes, end);
+            match bytes.get(next).copied() {
+                Some(b'[') => return true,
+                Some(b'.') => {
+                    let property = skip_ascii_whitespace(bytes, next + 1);
+                    if identifier_at(bytes, property, "token") {
+                        return true;
+                    }
+                }
+                _ if github_root_is_in_expression(&normalized, start) => return true,
+                _ => {}
+            }
+        }
+        offset = end;
+    }
+    contains_github_serialization(&normalized)
+}
+
+fn contains_github_serialization(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut offset = 0;
+    while let Some(relative) = value[offset..].find("tojson") {
+        let start = offset + relative;
+        let end = start + "tojson".len();
+        if !identifier_boundary(bytes, start, end) {
+            offset = end;
+            continue;
+        }
+        let open = skip_ascii_whitespace(bytes, end);
+        if bytes.get(open) != Some(&b'(') {
+            offset = end;
+            continue;
+        }
+        let mut depth = 1;
+        let mut cursor = open + 1;
+        while cursor < bytes.len() && depth > 0 {
+            match bytes[cursor] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            if depth > 0
+                && cursor + "github".len() <= bytes.len()
+                && &bytes[cursor..cursor + "github".len()] == b"github"
+                && identifier_boundary(bytes, cursor, cursor + "github".len())
+            {
+                return true;
+            }
+            cursor += 1;
+        }
+        offset = end;
+    }
+    false
+}
+
+fn github_root_is_in_expression(value: &str, start: usize) -> bool {
+    let before = &value[..start];
+    let Some(open) = before.rfind("${{") else {
+        return false;
+    };
+    before[open + 3..].rfind("}}").is_none()
+}
+
+fn identifier_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    !start
+        .checked_sub(1)
+        .and_then(|index| bytes.get(index))
+        .is_some_and(|byte| is_identifier_byte(*byte))
+        && !bytes.get(end).is_some_and(|byte| is_identifier_byte(*byte))
+}
+
+fn identifier_at(bytes: &[u8], start: usize, identifier: &str) -> bool {
+    let end = start.saturating_add(identifier.len());
+    end <= bytes.len()
+        && &bytes[start..end] == identifier.as_bytes()
+        && identifier_boundary(bytes, start, end)
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    index
+}
+
+fn token_env_is_exact(value: &Value) -> bool {
+    let Some(environment) = value.as_mapping() else {
+        return false;
+    };
+    environment.iter().all(|(key, value)| {
+        if !value_contains_github_token(value) {
+            return true;
+        }
+        key.as_str() == "GH_TOKEN"
+            && matches!(value, Value::String(value) if value.trim() == "${{ github.token }}")
+    })
+}
+
+/// The token-bearing API steps are a privilege boundary: an arbitrary step
+/// with the generated step's name and `GH_TOKEN` binding could exfiltrate the
+/// read-only token. Compare each such step with the generator's complete
+/// canonical mapping and require one instance, rather than trusting a name
+/// and one environment entry. This also catches a duplicate, renamed, or
+/// body-mutated step before the policy job can run it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "canonical API-step validation keeps its provenance contract together"
+)]
+fn canonical_api_step_findings(
+    root: &Path,
+    workflow: &Mapping,
+    velnor_policy: &VelnorPolicyContract,
+) -> Vec<String> {
+    let Some(jobs) = mapping_value(workflow, "jobs").and_then(Value::as_mapping) else {
+        return Vec::new();
+    };
+    let Some((_, job_value)) = jobs.iter().next() else {
+        return Vec::new();
+    };
+    let Some(job) = job_value.as_mapping() else {
+        return Vec::new();
+    };
+    let Some(steps) = mapping_value(job, "steps").and_then(Value::as_sequence) else {
+        return Vec::new();
+    };
+
+    let generation = match config::discover(root) {
+        Ok(generation) => generation,
+        Err(error) => {
+            return vec![format!(
+                "cannot resolve the canonical API-step contract: {error}"
+            )]
+        }
+    };
+    let repository = generation
+        .as_ref()
+        .and_then(config::RepoGenerationConfig::repository)
+        .unwrap_or_default();
+    let mut declared_ruleset_contexts = generation
+        .as_ref()
+        .map(|generation| generation.ruleset_required_status_checks().to_vec())
+        .filter(|contexts| !contexts.is_empty())
+        .unwrap_or_else(|| {
+            if generation
+                .as_ref()
+                .and_then(config::RepoGenerationConfig::ci_required)
+                .unwrap_or(true)
+            {
+                vec!["ci-required".to_owned()]
+            } else {
+                Vec::new()
+            }
+        });
+    if let Some(generation) = &generation {
+        declared_ruleset_contexts
+            .extend(generation.ruleset_external_status_checks().iter().cloned());
+    }
+    declared_ruleset_contexts.push("Policy".to_owned());
+    declared_ruleset_contexts.sort();
+    declared_ruleset_contexts.dedup();
+    let declared_ruleset_contexts = declared_ruleset_contexts.join(",");
+    let hosted = velnor_policy.runners != "velnor";
+    let expected = if hosted {
+        let Some(revision) = entrypoint_policy_revision(root) else {
+            return vec![format!(
+                "{POLICY_ENTRYPOINT} has no revision for the canonical API-step contract"
+            )];
+        };
+        let Some(runner) = mapping_value(job, "runs-on").and_then(Value::as_str) else {
+            return vec![format!(
+                "{POLICY_ENTRYPOINT}: policy job runs-on must be a scalar to verify canonical API steps"
+            )];
+        };
+        let default_branch = if velnor_policy.default_branch.is_empty() {
+            "main"
+        } else {
+            velnor_policy.default_branch.as_str()
+        };
+        let rendered = super::policy_job(&super::PolicyJobSpec {
+            candidate_artifact_wiring: true,
+            name: "Policy",
+            revision: &revision,
+            runner,
+            repository,
+            cache_backend: "github",
+            trusted_gate: None,
+            default_branch,
+            declared_ruleset_contexts: &declared_ruleset_contexts,
+        });
+        let document: Value = match serde_yaml::from_str(&format!("jobs:\n{rendered}")) {
+            Ok(document) => document,
+            Err(error) => {
+                return vec![format!(
+                    "cannot parse the canonical API-step contract: {error}"
+                )]
+            }
+        };
+        let Some(canonical_job) = document
+            .as_mapping()
+            .and_then(|document| mapping_value(document, "jobs"))
+            .and_then(Value::as_mapping)
+            .and_then(|jobs| mapping_value(jobs, "policy"))
+            .and_then(Value::as_mapping)
+        else {
+            return vec!["canonical API-step contract contains no policy job".to_owned()];
+        };
+        mapping_value(canonical_job, "steps")
+            .and_then(Value::as_sequence)
+            .map(|steps| {
+                steps
+                    .iter()
+                    .filter(|step| value_contains_github_token(step))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let canonical_names = expected
+        .iter()
+        .filter_map(|step| {
+            mapping_value(step.as_mapping()?, "name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let mut findings = Vec::new();
+    for (expected_step, name) in expected.iter().zip(&canonical_names) {
+        let matching = steps
+            .iter()
+            .filter(|step| {
+                step.as_mapping()
+                    .and_then(|step| mapping_value(step, "name"))
+                    .and_then(Value::as_str)
+                    == Some(name)
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            findings.push(format!(
+                "API step `{name}` must appear exactly once in its canonical structure; found {}",
+                matching.len()
+            ));
+            continue;
+        }
+        if matching[0] != expected_step {
+            findings.push(format!(
+                "API step `{name}` must match its canonical full structure and body"
+            ));
+        }
+    }
+
+    for step in steps {
+        if !value_contains_github_token(step) {
+            continue;
+        }
+        let name = step
+            .as_mapping()
+            .and_then(|step| mapping_value(step, "name"))
+            .and_then(Value::as_str)
+            .unwrap_or("<unnamed>");
+        if !canonical_names.iter().any(|candidate| candidate == name) {
+            findings.push(format!(
+                "`github.token` may only appear in the canonical Acquire/Ruleset API steps; found step `{name}`"
+            ));
+        }
+    }
+    findings
 }
 
 fn is_contents_read_only(permissions: Option<&Value>) -> bool {

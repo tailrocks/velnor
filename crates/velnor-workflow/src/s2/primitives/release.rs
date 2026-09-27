@@ -9804,7 +9804,13 @@ verification_providers = ["github-hosted"]
         };
         let preview = super::render_preview(&config, Some(release));
         let script = yaml_run_step(&preview, "debian", "Reset cached Debian package outputs");
-        for kind in ["target", "target-root", "canonical", "dist"] {
+        for kind in [
+            "target",
+            "target-root",
+            "canonical",
+            "target-debian",
+            "dist",
+        ] {
             let root = std::env::temp_dir().join(format!(
                 "velnor debian reset symlink {kind} {}",
                 crate::unique_suffix()
@@ -9846,6 +9852,19 @@ verification_providers = ["github-hosted"]
                     must(
                         symlink(&outside, checkout.join("target/debian")),
                         "link canonical root",
+                    );
+                }
+                "target-debian" => {
+                    must(
+                        fs::create_dir_all(checkout.join("target/aarch64-unknown-linux-gnu")),
+                        "create target-specific parent",
+                    );
+                    must(
+                        symlink(
+                            &outside,
+                            checkout.join("target/aarch64-unknown-linux-gnu/debian"),
+                        ),
+                        "link target-specific Debian root",
                     );
                 }
                 "dist" => {
