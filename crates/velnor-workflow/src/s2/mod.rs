@@ -11144,8 +11144,8 @@ mod tests {
 
         let policy = must(generated_ci_policy(&config), "render policy entrypoint");
         assert!(
-            policy.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
-            "policy must use the published base runtime: {policy}"
+            policy.contains("rev: ${{ steps.audited-generator-pin.outputs.revision }}"),
+            "policy setup must use the validated audited generator revision: {policy}"
         );
         assert!(
             policy.contains(&format!("BASE_PIN: {PUBLISHED_BASE_REVISION}")),
