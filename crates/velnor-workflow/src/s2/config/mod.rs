@@ -2896,7 +2896,7 @@ pub(crate) fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), Ge
         let source = row.source.as_deref().unwrap_or_default();
         if !is_safe_static_output_path(file) {
             return Err(GeneratorError::usage(format!(
-                "[[static_files]] file must be a safe repository-relative path inside `.github/` or `config/`, found `{file}`"
+                "[[static_files]] file must be a safe repository-relative path inside `.github/` or equal `config/fleet/velnor-host.env`, found `{file}"
             )));
         }
         if !is_normalized_repository_path(source) {
@@ -2970,10 +2970,13 @@ fn is_safe_static_output_path(path: &str) -> bool {
         return false;
     }
     let path = Path::new(path);
-    let under_allowed_root = path.starts_with(".github") || path.starts_with("config");
+    let under_allowed_root = path.starts_with(".github");
+    let approved_host_config = path == Path::new("config/fleet/velnor-host.env");
     let has_child = path.components().count() > 1;
     let ownership_state = Path::new(crate::s2::OWNERSHIP_STATE);
-    under_allowed_root && has_child && !paths_overlap(path, ownership_state)
+    (under_allowed_root || approved_host_config)
+        && has_child
+        && !paths_overlap(path, ownership_state)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -6774,10 +6777,10 @@ mod tests {
     }
 
     #[test]
-    fn static_file_targets_allow_config_roots_and_reject_unsafe_paths() {
+    fn static_file_targets_allow_approved_host_config_and_reject_other_config_paths() {
         for output in [
             ".github/actions/setup/action.yml",
-            "config/runtime/generated.env",
+            "config/fleet/velnor-host.env",
         ] {
             let rows = [StaticFileSection {
                 file: Some(output.to_owned()),
@@ -6797,6 +6800,8 @@ mod tests {
             "config",
             "other/generated.env",
             "config/.git/config",
+            "config/runtime/generated.env",
+            "config/fleet/other.env",
             ".github/ci",
             ".github/ci/.github-actions-generator-state",
             ".github/ci/.github-actions-generator-state/child",

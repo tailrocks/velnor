@@ -22502,7 +22502,7 @@ channel = "stable"
             "symlinked-declared-config-output-parent",
             Some(
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [[static_files]]\nfile = \"config/runtime/generated.env\"\n\
+                 [[static_files]]\nfile = \"config/fleet/velnor-host.env\"\n\
                  source = \".github-gen/sources/generated.env\"\n",
             ),
         );
@@ -23533,7 +23533,7 @@ channel = "stable"
             "static-source-symlinked-parent",
             Some(
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [[static_files]]\nfile = \"config/runtime/generated.env\"\n\
+                 [[static_files]]\nfile = \"config/fleet/velnor-host.env\"\n\
                  source = \".github-gen/sources/generated.env\"\n",
             ),
         );
@@ -23563,7 +23563,7 @@ channel = "stable"
             "schema1-config-output-prune-and-manual-file",
             Some(
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [[static_files]]\nfile = \"config/runtime/generated.env\"\n\
+                 [[static_files]]\nfile = \"config/fleet/velnor-host.env\"\n\
                  source = \".github-gen/sources/generated.env\"\n",
             ),
         );
@@ -23573,7 +23573,7 @@ channel = "stable"
             "create static source directory",
         );
         must(fs::write(&source, "VALUE=1\n"), "write static source");
-        let output = Path::new("config/runtime/generated.env");
+        let output = Path::new("config/fleet/velnor-host.env");
         generate_repository(&root, true);
         assert!(
             root.join(output).is_file(),
@@ -23624,7 +23624,7 @@ channel = "stable"
             .any(|file| file == &output.display().to_string()));
 
         must(
-            fs::create_dir_all(root.join("config/runtime")),
+            fs::create_dir_all(root.join("config/fleet")),
             "create manual runtime config directory",
         );
         must(

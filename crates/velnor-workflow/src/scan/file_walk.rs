@@ -492,11 +492,11 @@ mod tests {
             "write recorded output",
         );
         must(
-            fs::create_dir_all(root.join("config/runtime")),
+            fs::create_dir_all(root.join("config/fleet")),
             "create runtime config directory",
         );
         must(
-            fs::write(root.join("config/runtime/generated.env"), "MANUAL=1\n"),
+            fs::write(root.join("config/fleet/velnor-host.env"), "MANUAL=1\n"),
             "write manual runtime config",
         );
         must(
@@ -516,7 +516,7 @@ mod tests {
         );
         assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
         assert!(files.contains(&".github/workflows/forged.yml".to_owned()));
-        assert!(files.contains(&"config/runtime/generated.env".to_owned()));
+        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
         assert!(!files.contains(&".github/workflows/generated.yml".to_owned()));
         assert!(!files.contains(&crate::s2::OWNERSHIP_STATE.to_owned()));
 
@@ -524,7 +524,7 @@ mod tests {
             fs::write(
                 root.join(crate::s2::OWNERSHIP_STATE),
                 format!(
-                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nconfig/runtime/generated.env\t0000000000000000\n",
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nconfig/fleet/velnor-host.env\t0000000000000000\n",
                     crate::s2::GENERATOR_REVISION
                 ),
             ),
@@ -534,7 +534,7 @@ mod tests {
             repository_files(&root, &[]),
             "scan after runtime config ownership is recorded",
         );
-        assert!(!files.contains(&"config/runtime/generated.env".to_owned()));
+        assert!(!files.contains(&"config/fleet/velnor-host.env".to_owned()));
     }
 
     #[cfg(unix)]
@@ -568,16 +568,16 @@ mod tests {
     fn manual_config_output_is_scanned_without_declaration() {
         let root = scratch("schema1-manual-config-output-without-declaration");
         git(&root, &["init", "-q"]);
-        let path = Path::new("config/runtime/generated.env");
+        let path = Path::new("config/fleet/velnor-host.env");
         must(
-            fs::create_dir_all(root.join("config/runtime")),
+            fs::create_dir_all(root.join("config/fleet")),
             "create manual config output directory",
         );
         must(
             fs::write(root.join(path), "MANUALLY_OWNED=value\n"),
             "write manual config output",
         );
-        git(&root, &["add", "config/runtime/generated.env"]);
+        git(&root, &["add", "config/fleet/velnor-host.env"]);
         git(&root, &["commit", "-qm", "manual config output"]);
 
         let files = must(repository_files(&root, &[]), "scan manual config output");
@@ -588,9 +588,9 @@ mod tests {
     fn declared_config_output_is_excluded_from_scan() {
         let root = scratch("schema1-declared-config-output");
         git(&root, &["init", "-q"]);
-        let path = Path::new("config/runtime/generated.env");
+        let path = Path::new("config/fleet/velnor-host.env");
         must(
-            fs::create_dir_all(root.join("config/runtime")),
+            fs::create_dir_all(root.join("config/fleet")),
             "create config output directory",
         );
         must(
@@ -611,7 +611,7 @@ mod tests {
         must(
             fs::write(
                 root.join(crate::config::GENERATION_CONFIG_PATH),
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \"config/runtime/generated.env\"\nsource = \".github-gen/sources/generated.env\"\n",
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \"config/fleet/velnor-host.env\"\nsource = \".github-gen/sources/generated.env\"\n",
             ),
             "write static output declaration",
         );
@@ -621,7 +621,7 @@ mod tests {
                 "add",
                 ".github-gen/velnor-workflow.toml",
                 ".github-gen/sources/generated.env",
-                "config/runtime/generated.env",
+                "config/fleet/velnor-host.env",
             ],
         );
         git(&root, &["commit", "-qm", "declared config output"]);
