@@ -234,6 +234,47 @@ pub(crate) struct CargoDependency {
     pub(crate) name: String,
     pub(crate) package_name: Option<String>,
     pub(crate) path: Option<String>,
+    pub(crate) workspace: bool,
+    pub(crate) target: Option<String>,
+}
+
+/// Derive container requirements from a crate's direct Cargo dependencies.
+/// Testcontainers packages execute Docker-backed integration tests; language
+/// kind alone is not evidence that a Rust unit needs a Docker runner.
+fn dependency_capabilities(
+    dependencies: &[CargoDependency],
+    workspace_dependencies: &[CargoDependency],
+) -> crate::s2::provider::Capabilities {
+    let uses_testcontainers = dependencies.iter().any(|dependency| {
+        if !dependency_target_applies_to_linux(dependency.target.as_deref()) {
+            return false;
+        }
+        let package = if dependency.workspace {
+            workspace_dependencies
+                .iter()
+                .find(|workspace_dependency| workspace_dependency.name == dependency.name)
+                .map(|workspace_dependency| {
+                    workspace_dependency
+                        .package_name
+                        .as_deref()
+                        .unwrap_or(&workspace_dependency.name)
+                })
+        } else {
+            Some(
+                dependency
+                    .package_name
+                    .as_deref()
+                    .unwrap_or(&dependency.name),
+            )
+        };
+        package
+            .is_some_and(|package| matches!(package, "testcontainers" | "testcontainers-modules"))
+    });
+    crate::s2::provider::Capabilities {
+        docker: uses_testcontainers,
+        testcontainers: uses_testcontainers,
+        ..crate::s2::provider::Capabilities::default()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -245,6 +286,7 @@ pub(crate) struct CargoManifestFacts {
     pub(crate) workspace_members: Vec<String>,
     pub(crate) workspace_excludes: Vec<String>,
     pub(crate) dependencies: Vec<CargoDependency>,
+    pub(crate) workspace_dependencies: Vec<CargoDependency>,
     pub(crate) build_script: Option<String>,
     pub(crate) binary_targets: Vec<String>,
     pub(crate) test_targets: Vec<String>,
@@ -486,6 +528,17 @@ fn analyze_rust_manifests(
         .as_deref()
         .map(|workspace| join_repo_path(workspace, "Cargo.toml"));
     for manifest in &package_facts {
+        let workspace_dependencies = workspaces
+            .iter()
+            .find(|workspace| {
+                workspace.root == manifest.root
+                    || workspace.workspace_members.iter().any(|pattern| {
+                        workspace_pattern_matches(pattern, &workspace.root, &manifest.root)
+                    })
+            })
+            .map_or(&[][..], |workspace| {
+                workspace.workspace_dependencies.as_slice()
+            });
         let manifest_path = join_repo_path(&manifest.root, "Cargo.toml");
         let prefix = path_prefix(&manifest.root);
         let command_prefix = shell_change_dir(&manifest.root);
@@ -686,11 +739,7 @@ fn analyze_rust_manifests(
             services: Vec::new(),
             trust: crate::s2::provider::TrustReq::UntrustedOk,
             platform: crate::s2::provider::Platform::LinuxX64,
-            capabilities: crate::s2::provider::Capabilities {
-                docker: true,
-                testcontainers: true,
-                ..crate::s2::provider::Capabilities::default()
-            },
+            capabilities: dependency_capabilities(&manifest.dependencies, workspace_dependencies),
             workspace_check: false,
             reads_closed: false,
             full_history: false,
@@ -757,11 +806,7 @@ fn analyze_rust_manifests(
             services: Vec::new(),
             trust: crate::s2::provider::TrustReq::UntrustedOk,
             platform: crate::s2::provider::Platform::LinuxX64,
-            capabilities: crate::s2::provider::Capabilities {
-                docker: true,
-                testcontainers: true,
-                ..crate::s2::provider::Capabilities::default()
-            },
+            capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
             reads_closed: false,
             full_history: false,
@@ -922,8 +967,62 @@ fn source_belongs_to_package(source: &str, package_roots: &[String], package_roo
         .is_some_and(|owner| owner == package_root)
 }
 
-pub(crate) fn cargo_dependency_name(key: &str) -> &str {
-    key.strip_suffix(".workspace").unwrap_or(key)
+fn cargo_dependency_rows(
+    value: Option<&toml::Value>,
+    target: Option<&str>,
+) -> Vec<CargoDependency> {
+    let Some(dependencies) = value.and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    dependencies
+        .iter()
+        .map(|(name, value)| {
+            let attributes = value.as_table();
+            CargoDependency {
+                name: name.clone(),
+                package_name: attributes
+                    .and_then(|table| table.get("package"))
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned),
+                path: attributes
+                    .and_then(|table| table.get("path"))
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned),
+                workspace: attributes
+                    .and_then(|table| table.get("workspace"))
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false),
+                target: target.map(str::to_owned),
+            }
+        })
+        .collect()
+}
+
+fn populate_cargo_dependencies(contents: &str, facts: &mut CargoManifestFacts) {
+    let Ok(manifest) = toml::from_str::<toml::Value>(contents) else {
+        return;
+    };
+    let dependency_kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
+    facts.workspace_dependencies = cargo_dependency_rows(
+        manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies")),
+        None,
+    );
+    for kind in dependency_kinds {
+        facts
+            .dependencies
+            .extend(cargo_dependency_rows(manifest.get(kind), None));
+    }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (target, configuration) in targets {
+            for kind in dependency_kinds {
+                facts
+                    .dependencies
+                    .extend(cargo_dependency_rows(configuration.get(kind), Some(target)));
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestFacts {
@@ -935,6 +1034,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         workspace_members: Vec::new(),
         workspace_excludes: Vec::new(),
         dependencies: Vec::new(),
+        workspace_dependencies: Vec::new(),
         build_script: None,
         binary_targets: Vec::new(),
         test_targets: Vec::new(),
@@ -943,6 +1043,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         has_lib_section: false,
         autolib: None,
     };
+    populate_cargo_dependencies(contents, &mut facts);
     let mut section = String::new();
     let lines = contents.lines().collect::<Vec<_>>();
     let mut index = 0;
@@ -958,7 +1059,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
                 .trim_end_matches(']')
                 .trim_start_matches('[')
                 .trim_end_matches(']');
-            normalized_section.clone_into(&mut section);
+            normalized_section.trim().clone_into(&mut section);
             if section == "package" {
                 facts.has_package = true;
             }
@@ -1005,24 +1106,292 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
                     .map_or_else(|| toml_array_values(&value), |single| vec![single]);
             }
             "features" => facts.features.push(key),
-            section if is_cargo_dependency_section(section) => {
-                facts.dependencies.push(CargoDependency {
-                    name: cargo_dependency_name(&key).to_owned(),
-                    package_name: toml_inline_string(&value, "package"),
-                    path: toml_inline_string(&value, "path"),
-                });
-            }
             _ => {}
         }
     }
     facts
 }
 
-fn is_cargo_dependency_section(section: &str) -> bool {
-    matches!(
-        section,
-        "dependencies" | "dev-dependencies" | "build-dependencies"
-    ) || (section != "workspace.dependencies" && section.ends_with(".dependencies"))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CfgTruth {
+    True,
+    False,
+    Unknown,
+}
+
+impl CfgTruth {
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn not(self) -> Self {
+        match self {
+            Self::True => Self::False,
+            Self::False => Self::True,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+}
+
+struct CfgExpressionParser<'a> {
+    input: &'a str,
+    offset: usize,
+}
+
+impl CfgExpressionParser<'_> {
+    fn skip_whitespace(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.consume();
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input.get(self.offset..)?.chars().next()
+    }
+
+    fn consume(&mut self) -> Option<char> {
+        let character = self.peek()?;
+        self.offset += character.len_utf8();
+        Some(character)
+    }
+
+    fn consume_if(&mut self, expected: char) -> bool {
+        if self.peek() == Some(expected) {
+            self.consume();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_identifier(&mut self) -> Option<&str> {
+        let start = self.offset;
+        while self
+            .peek()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            self.consume();
+        }
+        (self.offset > start).then(|| &self.input[start..self.offset])
+    }
+
+    fn parse_string(&mut self) -> Option<String> {
+        if !self.consume_if('"') {
+            return None;
+        }
+        let mut value = String::new();
+        loop {
+            match self.consume()? {
+                '"' => return Some(value),
+                '\\' => value.push(match self.consume()? {
+                    '"' => '"',
+                    '\\' => '\\',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '0' => '\0',
+                    _ => return None,
+                }),
+                character => value.push(character),
+            }
+        }
+    }
+
+    fn parse_expression(&mut self) -> CfgTruth {
+        self.skip_whitespace();
+        let Some(name) = self.parse_identifier() else {
+            return CfgTruth::Unknown;
+        };
+        let name = name.to_owned();
+        self.skip_whitespace();
+        if self.consume_if('(') {
+            return self.parse_operator(&name);
+        }
+        if self.consume_if('=') {
+            self.skip_whitespace();
+            return self.parse_string().map_or(CfgTruth::Unknown, |value| {
+                linux_cfg_atom(&name, Some(&value))
+            });
+        }
+        linux_cfg_atom(&name, None)
+    }
+
+    fn parse_operator(&mut self, operator: &str) -> CfgTruth {
+        self.skip_whitespace();
+        let mut values = Vec::new();
+        if self.consume_if(')') {
+            return apply_cfg_operator(operator, &values);
+        }
+        loop {
+            values.push(self.parse_expression());
+            self.skip_whitespace();
+            if self.consume_if(')') {
+                break;
+            }
+            if !self.consume_if(',') {
+                return CfgTruth::Unknown;
+            }
+            self.skip_whitespace();
+            if self.consume_if(')') {
+                break;
+            }
+        }
+        apply_cfg_operator(operator, &values)
+    }
+}
+
+fn apply_cfg_operator(operator: &str, values: &[CfgTruth]) -> CfgTruth {
+    match operator {
+        "all" => values.iter().copied().fold(CfgTruth::True, CfgTruth::and),
+        "any" => values.iter().copied().fold(CfgTruth::False, CfgTruth::or),
+        "not" if let [value] = values => value.not(),
+        _ => CfgTruth::Unknown,
+    }
+}
+
+fn linux_cfg_atom(name: &str, value: Option<&str>) -> CfgTruth {
+    if matches!(name, "unix" | "windows") {
+        return match (name, value) {
+            ("unix", None) => CfgTruth::True,
+            ("windows", None) => CfgTruth::False,
+            _ => CfgTruth::Unknown,
+        };
+    }
+    if name == "target_thread_local" {
+        return match value {
+            None => CfgTruth::False,
+            Some(_) => CfgTruth::Unknown,
+        };
+    }
+    if name == "target_env" {
+        return match value {
+            Some("gnu") => CfgTruth::True,
+            Some("msvc") => CfgTruth::False,
+            _ => CfgTruth::Unknown,
+        };
+    }
+    if name == "target_vendor" {
+        return match value {
+            Some("unknown") => CfgTruth::True,
+            Some("apple") => CfgTruth::False,
+            _ => CfgTruth::Unknown,
+        };
+    }
+    let accepted = match name {
+        "target_arch" => &["x86_64"][..],
+        "target_family" => &["unix"][..],
+        "target_os" => &["linux"][..],
+        "target_endian" => &["little"][..],
+        "target_pointer_width" => &["64"][..],
+        "target_abi" => &[""][..],
+        "target_feature" => &["fxsr", "sse", "sse2"][..],
+        "target_has_atomic" | "target_has_atomic_primitive_alignment" => {
+            &["8", "16", "32", "64", "ptr"][..]
+        }
+        _ => return CfgTruth::Unknown,
+    };
+    match value {
+        Some(value) if accepted.contains(&value) => CfgTruth::True,
+        Some(_) => CfgTruth::False,
+        None => CfgTruth::Unknown,
+    }
+}
+
+fn linux_cfg_expression(expression: &str) -> CfgTruth {
+    let mut parser = CfgExpressionParser {
+        input: expression,
+        offset: 0,
+    };
+    let truth = parser.parse_expression();
+    parser.skip_whitespace();
+    if parser.offset == expression.len() {
+        truth
+    } else {
+        CfgTruth::Unknown
+    }
+}
+
+fn linux_target_applies(target: &str) -> CfgTruth {
+    if let Some(expression) = target
+        .strip_prefix("cfg(")
+        .and_then(|expression| expression.strip_suffix(')'))
+    {
+        return linux_cfg_expression(expression);
+    }
+    if target == "x86_64-unknown-linux-gnu" {
+        return CfgTruth::True;
+    }
+    if [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-gnueabihf",
+        "i686-unknown-linux-gnu",
+        "i686-unknown-linux-musl",
+        "x86_64-unknown-linux-gnux32",
+        "x86_64-unknown-linux-musl",
+        "x86_64-unknown-linux-uclibc",
+        "x86_64-pc-linux-gnu",
+    ]
+    .contains(&target)
+    {
+        return CfgTruth::False;
+    }
+    if [
+        "windows",
+        "darwin",
+        "freebsd",
+        "openbsd",
+        "netbsd",
+        "dragonfly",
+        "android",
+    ]
+    .iter()
+    .any(|os| target.contains(os))
+    {
+        return CfgTruth::False;
+    }
+    if target.contains("-unknown-linux-")
+        && [
+            "aarch64-",
+            "arm-",
+            "armv",
+            "i386-",
+            "i486-",
+            "i586-",
+            "i686-",
+            "loongarch",
+            "mips",
+            "powerpc",
+            "riscv32",
+            "riscv64",
+            "s390x-",
+            "sparc",
+            "thumbv",
+            "wasm",
+            "xtensa",
+        ]
+        .iter()
+        .any(|architecture| target.starts_with(architecture))
+    {
+        return CfgTruth::False;
+    }
+    CfgTruth::Unknown
+}
+
+fn dependency_target_applies_to_linux(target: Option<&str>) -> bool {
+    target.is_none_or(|target| linux_target_applies(target) == CfgTruth::True)
 }
 
 fn strip_toml_comment(line: &str) -> String {
@@ -1143,14 +1512,6 @@ fn toml_array_values(value: &str) -> Vec<String> {
         }
     }
     values
-}
-
-fn toml_inline_string(value: &str, wanted_key: &str) -> Option<String> {
-    let value = value.trim().strip_prefix('{')?.strip_suffix('}')?;
-    value.split(',').find_map(|entry| {
-        let (key, value) = entry.split_once('=')?;
-        (key.trim().trim_matches('"') == wanted_key).then(|| toml_string_value(value.trim()))?
-    })
 }
 
 /// One `boltffi.toml` Apple producer: a Rust crate whose `pack apple` run
@@ -2352,6 +2713,385 @@ mod tests {
         );
         assert!(!plain.has_lib_section);
         assert_eq!(plain.autolib, None);
+    }
+
+    #[test]
+    fn testcontainers_capabilities_require_a_direct_cargo_dependency() {
+        let plain = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"plain\"\nversion = \"0.1.0\"\n\n[[test]]\nname = \"integration\"\n\n[dev-dependencies]\nserde = \"1\"\n",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            super::dependency_capabilities(&plain.dependencies, &[]),
+            "a Rust test target does not prove Docker use"
+        );
+
+        let direct = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ntc = { package = \"testcontainers\", version = \"0.1\" }\n",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities {
+                docker: true,
+                testcontainers: true,
+                ..crate::s2::provider::Capabilities::default()
+            },
+            super::dependency_capabilities(&direct.dependencies, &[]),
+            "renamed direct Testcontainers dependency proves both requirements"
+        );
+
+        let nested = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[dev-dependencies.testcontainers]\nversion = \"0.1\"\n",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities {
+                docker: true,
+                testcontainers: true,
+                ..crate::s2::provider::Capabilities::default()
+            },
+            super::dependency_capabilities(&nested.dependencies, &[]),
+            "Cargo's nested dependency-table form is also direct evidence"
+        );
+
+        let module = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ntestcontainers-modules = \"0.1\"\n",
+        );
+        assert!(
+            super::dependency_capabilities(&module.dependencies, &[]).testcontainers,
+            "the direct Testcontainers modules crate uses the same Docker-backed capability"
+        );
+
+        let lookalike = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"plain\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ntestcontainers-mock = \"0.1\"\nmy-testcontainers = \"0.1\"\n",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            super::dependency_capabilities(&lookalike.dependencies, &[]),
+            "similar package names do not imply Testcontainers use"
+        );
+    }
+
+    #[test]
+    fn testcontainers_capabilities_respect_linux_target_predicates() {
+        let target_nested = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'cfg(unix)'.dev-dependencies.tc]\npackage = \"testcontainers\"\nversion = \"0.1\"\n",
+        );
+        assert!(
+            super::dependency_capabilities(&target_nested.dependencies, &[]).testcontainers,
+            "target-specific nested tables retain renamed package evidence"
+        );
+
+        for target in [
+            "cfg(all(unix, target_arch = \"x86_64\"))",
+            "cfg(all(target_os = \"linux\", target_arch = \"x86_64\"))",
+            "cfg(any(target_os = \"windows\", target_family = \"unix\"))",
+        ] {
+            let manifest = format!(
+                "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'{target}'.dev-dependencies]\ntestcontainers = \"0.1\"\n"
+            );
+            let compound = parse_cargo_manifest(".", &manifest);
+            assert!(
+                super::dependency_capabilities(&compound.dependencies, &[]).testcontainers,
+                "LinuxX64 must recognize target predicate {target}"
+            );
+        }
+
+        let escaped_header = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.\"cfg(target_os = \\\"linux\\\")\".dev-dependencies]\ntestcontainers = \"0.1\"\n",
+        );
+        assert!(
+            super::dependency_capabilities(&escaped_header.dependencies, &[]).testcontainers,
+            "TOML-decoded target keys preserve escaped cfg string values"
+        );
+
+        for target in [
+            "cfg(windows)",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "x86_64-unknown-linux-gnux32",
+            "cfg(target_env = \"msvc\")",
+            "cfg(target_vendor = \"apple\")",
+            "x86_64-custom-os",
+            "x86_64-custom-linux-gnu",
+        ] {
+            let manifest = format!(
+                "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'{target}'.dev-dependencies]\ntestcontainers = \"0.1\"\n"
+            );
+            let platform_specific = parse_cargo_manifest(".", &manifest);
+            assert_eq!(
+                crate::s2::provider::Capabilities::default(),
+                super::dependency_capabilities(&platform_specific.dependencies, &[]),
+                "non-LinuxX64 target `{target}` must not add Docker requirements"
+            );
+        }
+
+        let native_triple = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'x86_64-unknown-linux-gnu'.dev-dependencies]\ntestcontainers = \"0.1\"\n",
+        );
+        assert!(
+            super::dependency_capabilities(&native_triple.dependencies, &[]).testcontainers,
+            "the native LinuxX64 Cargo target triple is known to apply"
+        );
+
+        let custom_target = parse_cargo_manifest(
+            ".",
+            "[package]\nname = \"containers\"\nversion = \"0.1.0\"\n\n[target.'cfg(custom_target)'.dev-dependencies]\ntestcontainers = \"0.1\"\n",
+        );
+        assert_eq!(
+            super::CfgTruth::Unknown,
+            super::linux_target_applies("cfg(custom_target)"),
+            "unknown custom selectors remain identifiable as unknown"
+        );
+        assert_eq!(
+            super::CfgTruth::Unknown,
+            super::linux_target_applies("x86_64-custom-linux-gnu"),
+            "unrecognized Cargo target triples remain identifiable as unknown"
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            super::dependency_capabilities(&custom_target.dependencies, &[]),
+            "unknown target predicates do not prove Docker use on LinuxX64"
+        );
+    }
+
+    #[test]
+    fn testcontainers_workspace_capability_requires_member_inheritance() {
+        let workspace = parse_cargo_manifest(
+            ".",
+            "[workspace]\nmembers = []\n\n[workspace.dependencies]\ntc = { package = \"testcontainers\", version = \"0.1\" }\n",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            super::dependency_capabilities(&workspace.dependencies, &[]),
+            "a workspace dependency catalog is not a crate dependency"
+        );
+
+        let nested_workspace = parse_cargo_manifest(
+            ".",
+            "[workspace]\nmembers = []\n\n[workspace.dependencies.tc]\npackage = \"testcontainers\"\nversion = \"0.1\"\n",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            super::dependency_capabilities(
+                &nested_workspace.dependencies,
+                &nested_workspace.workspace_dependencies,
+            ),
+            "a nested workspace catalog is not a crate dependency"
+        );
+
+        for member_dependency in [
+            "[dev-dependencies]\ntc.workspace = true",
+            "[dev-dependencies]\ntc = { workspace = true }",
+            "[dev-dependencies.tc]\nworkspace = true",
+        ] {
+            let manifest =
+                format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n{member_dependency}\n");
+            let inherited_alias = parse_cargo_manifest("crates/app", &manifest);
+            assert!(
+                super::dependency_capabilities(
+                    &inherited_alias.dependencies,
+                    &workspace.workspace_dependencies,
+                )
+                .testcontainers,
+                "workspace alias inherits through `{member_dependency}`"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_and_policy_units_start_without_unproven_docker_requirements() {
+        let root = scratch("capability-evidence");
+        must(
+            fs::create_dir_all(root.join("tests")),
+            "create integration test directory",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"plain\"\nversion = \"0.1.0\"\n",
+            ),
+            "write plain manifest",
+        );
+        must(
+            fs::write(root.join("deny.toml"), ""),
+            "write dependency policy marker",
+        );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+            "write toolchain pin",
+        );
+        must(
+            fs::write(root.join("tests/integration.rs"), "#[test] fn smoke() {}\n"),
+            "write plain integration test",
+        );
+
+        let files = vec![
+            "Cargo.toml".to_owned(),
+            "deny.toml".to_owned(),
+            "rust-toolchain.toml".to_owned(),
+            "tests/integration.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let plain = must(
+            super::analyze_rust_manifests(&root, &files, &file_set, &["Cargo.toml".to_owned()]),
+            "analyze plain Rust and policy units",
+        );
+        assert!(
+            plain
+                .units
+                .iter()
+                .all(|unit| { unit.capabilities == crate::s2::provider::Capabilities::default() }),
+            "tests and dependency policy do not imply Docker: {:?}",
+            plain
+                .units
+                .iter()
+                .map(|unit| (&unit.id, unit.capabilities))
+                .collect::<Vec<_>>()
+        );
+
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"plain\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ntestcontainers = \"0.1\"\n",
+            ),
+            "add direct Testcontainers dependency",
+        );
+        let testcontainers = must(
+            super::analyze_rust_manifests(&root, &files, &file_set, &["Cargo.toml".to_owned()]),
+            "analyze Testcontainers Rust unit",
+        );
+        let rust_unit = must(
+            testcontainers
+                .units
+                .iter()
+                .find(|unit| unit.id == "rust-plain")
+                .ok_or("Rust package unit exists"),
+            "find Rust package unit",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities {
+                docker: true,
+                testcontainers: true,
+                ..crate::s2::provider::Capabilities::default()
+            },
+            rust_unit.capabilities
+        );
+        let policy_unit = must(
+            testcontainers
+                .units
+                .iter()
+                .find(|unit| unit.id == super::POLICY_UNIT_ID)
+                .ok_or("dependency policy unit exists"),
+            "find dependency policy unit",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            policy_unit.capabilities,
+            "a sibling Testcontainers dependency does not give policy checks Docker needs"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inherited_workspace_testcontainers_alias_marks_only_its_rust_unit() {
+        let root = scratch("workspace-capability-evidence");
+        must(
+            fs::create_dir_all(root.join("crates/app")),
+            "create workspace member directory",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"crates/app\"]\n\n[workspace.dependencies]\ntc = { package = \"testcontainers\", version = \"0.1\" }\n",
+            ),
+            "write workspace catalog",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/Cargo.toml"),
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+            ),
+            "write package without inherited dependency",
+        );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+            "write toolchain pin",
+        );
+        let files = vec![
+            "Cargo.toml".to_owned(),
+            "crates/app/Cargo.toml".to_owned(),
+            "rust-toolchain.toml".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let catalog_only = must(
+            super::analyze_rust_manifests(
+                &root,
+                &files,
+                &file_set,
+                &["Cargo.toml".to_owned(), "crates/app/Cargo.toml".to_owned()],
+            ),
+            "analyze workspace catalog without member use",
+        );
+        let app = must(
+            catalog_only
+                .units
+                .iter()
+                .find(|unit| unit.id == "rust-app")
+                .ok_or("workspace member unit exists"),
+            "find plain workspace member",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities::default(),
+            app.capabilities,
+            "catalog entries alone are not direct package requirements"
+        );
+
+        must(
+            fs::write(
+                root.join("crates/app/Cargo.toml"),
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ntc.workspace = true\n",
+            ),
+            "inherit Testcontainers dependency in member",
+        );
+        let inherited = must(
+            super::analyze_rust_manifests(
+                &root,
+                &files,
+                &file_set,
+                &["Cargo.toml".to_owned(), "crates/app/Cargo.toml".to_owned()],
+            ),
+            "analyze inherited workspace dependency",
+        );
+        let app = must(
+            inherited
+                .units
+                .iter()
+                .find(|unit| unit.id == "rust-app")
+                .ok_or("workspace member unit exists"),
+            "find Testcontainers workspace member",
+        );
+        assert_eq!(
+            crate::s2::provider::Capabilities {
+                docker: true,
+                testcontainers: true,
+                ..crate::s2::provider::Capabilities::default()
+            },
+            app.capabilities
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
