@@ -729,10 +729,10 @@ fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
 }
 
 /// The generated entrypoint holds exactly the privileges the trust argument
-/// in `ci-policy.yml` states: workflow `contents: read`; the policy job may
-/// use `contents: read` or `actions: read` plus `contents: read`; no secrets,
-/// no persisted credentials, no deployment environment, one hosted job, and
-/// only the reviewed triggers.
+/// in `ci-policy.yml` states: workflow `contents: read`; the policy job uses
+/// `actions: read` plus `contents: read`; no secrets, no persisted
+/// credentials, no deployment environment, one hosted job, and only the
+/// reviewed triggers.
 #[test]
 fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let entrypoint = hosted_entrypoint(PIN_A);
@@ -774,19 +774,17 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
 #[test]
 fn entrypoint_audit_accepts_read_only_actions_permission_on_policy_job() {
     let clean = hosted_entrypoint(PIN_A);
-    let with_actions = clean.replacen(
-        "    permissions:\n      contents: read\n",
-        "    permissions:\n      actions: read\n      contents: read\n",
-        1,
-    );
-    assert_ne!(clean, with_actions);
-    let root = entrypoint_tree("entrypoint-actions-read", &with_actions);
+    let root = entrypoint_tree("entrypoint-actions-read", &clean);
     let audit = must(
         audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
         "audit actions-read entrypoint",
     );
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
     assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
+    assert!(
+        clean.contains("actions: read\n      contents: read"),
+        "{clean}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -836,7 +834,7 @@ fn owner_entrypoint_pin_ignores_variable_references() {
 #[test]
 fn entrypoint_audit_names_each_escalation() {
     let clean = hosted_entrypoint(PIN_A);
-    let cases: [(&str, &str, &str, &str); 6] = [
+    let cases: [(&str, &str, &str, &str); 7] = [
         (
             "write",
             "permissions:\n  contents: read\n\njobs:",
@@ -845,9 +843,15 @@ fn entrypoint_audit_names_each_escalation() {
         ),
         (
             "job-permissions",
+            "    permissions:\n      actions: read\n      contents: read\n",
+            "    permissions:\n      actions: read\n      contents: read\n      id-token: write\n",
+            "permissions must be exactly `actions: read, contents: read`",
+        ),
+        (
+            "legacy-job-permissions",
+            "    permissions:\n      actions: read\n      contents: read\n",
             "    permissions:\n      contents: read\n",
-            "    permissions:\n      contents: read\n      id-token: write\n",
-            "permissions must be exactly `contents: read` or `actions: read, contents: read`",
+            "permissions must be exactly `actions: read, contents: read`",
         ),
         (
             "secret",
