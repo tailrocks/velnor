@@ -771,6 +771,16 @@ fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
     // A pin the fixture history cannot contain, so resolution takes the
     // revision fallback against the provisioned fake below.
     let foreign_pin = "0123456789abcdef0123456789abcdef01234567";
+    // Candidate closure inspection requires the workflow crate manifest to
+    // exist in the committed fixture tree, just as it does in production.
+    let workflow_dir = root.join("crates/velnor-workflow");
+    fs::create_dir_all(workflow_dir.join("src")).unwrap();
+    fs::write(
+        workflow_dir.join("Cargo.toml"),
+        "[package]\nname = \"velnor-workflow\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(workflow_dir.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let config = root.join(".github-gen/velnor-workflow.toml");
     let body = fs::read_to_string(&config).unwrap();
     fs::write(
@@ -781,6 +791,12 @@ fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
         ),
     )
     .unwrap();
+    // The renderer compares candidate output against an immutable HEAD
+    // snapshot. Commit the edited config first so both views see the same
+    // candidate manifest closure.
+    git(&root, &["add", "crates/velnor-workflow"]);
+    git(&root, &["add", ".github-gen/velnor-workflow.toml"]);
+    git(&root, &["commit", "-q", "-m", "use foreign pin in fixture"]);
     let generated = generate(&root);
     let output = generated.output;
     let head = git_output(&root, &["rev-parse", "HEAD"]);
