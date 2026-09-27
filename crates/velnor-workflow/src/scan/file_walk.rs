@@ -170,10 +170,7 @@ fn validate_scan_directory(
 
         if metadata.file_type().is_symlink() {
             if is_scan_pruned_directory(&name, at_root) {
-                return Err(GeneratorError::usage(format!(
-                    "repository excluded directory must not be a symlink: {}",
-                    path.display()
-                )));
+                continue;
             }
             validate_confined_symlink(&path, canonical_root)?;
             continue;
@@ -1001,7 +998,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scan_preflight_rejects_a_symlinked_git_metadata_entry() {
+    fn scan_preflight_skips_symlinked_git_metadata_entry() {
         use std::os::unix::fs::symlink;
 
         let root = short_scratch("symlinked-git");
@@ -1010,13 +1007,9 @@ mod tests {
             symlink(&outside, root.join(".git")),
             "create symlinked git metadata entry",
         );
-        let error = must_fail(
+        must(
             validate_scan_root(&root),
-            "symlinked git metadata must fail scan preflight",
-        );
-        assert!(
-            error.contains("excluded directory must not be a symlink"),
-            "unexpected error: {error}"
+            "symlinked git metadata is outside scan inputs",
         );
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
@@ -1024,7 +1017,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scan_preflight_rejects_a_symlinked_skipped_directory() {
+    fn scan_preflight_skips_a_symlinked_excluded_directory() {
         use std::os::unix::fs::symlink;
 
         let root = short_scratch("symlinked-skipped-directory");
@@ -1033,13 +1026,9 @@ mod tests {
             symlink(&outside, root.join("target")),
             "create symlinked skipped directory",
         );
-        let error = must_fail(
+        must(
             validate_scan_root(&root),
-            "symlinked skipped directory must fail scan preflight",
-        );
-        assert!(
-            error.contains("excluded directory must not be a symlink"),
-            "unexpected error: {error}"
+            "symlinked excluded directory is outside scan inputs",
         );
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
@@ -1047,7 +1036,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scan_preflight_rejects_confined_symlinks_at_pruned_boundaries() {
+    fn scan_preflight_skips_symlinks_at_pruned_boundaries() {
         use std::os::unix::fs::symlink;
 
         for name in [".git", "target", "node_modules"] {
@@ -1060,13 +1049,9 @@ mod tests {
                 symlink("real-target", root.join(name)),
                 "create confined pruned symlink",
             );
-            let error = must_fail(
+            must(
                 validate_scan_root(&root),
-                "confined symlink at a pruned boundary must fail",
-            );
-            assert!(
-                error.contains("excluded directory must not be a symlink"),
-                "unexpected error for {name}: {error}"
+                "symlink at a pruned boundary is outside scan inputs",
             );
             let _ = fs::remove_dir_all(root);
         }

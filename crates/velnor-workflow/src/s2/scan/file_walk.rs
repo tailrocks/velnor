@@ -134,10 +134,7 @@ fn validate_directory(
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
             if is_preflight_excluded_directory(&name, at_root) {
-                return Err(GeneratorError::usage(format!(
-                    "repository contains a symlinked excluded directory: {}",
-                    path.display()
-                )));
+                continue;
             }
             validate_symlink(root, canonical_root, &path)?;
         } else if metadata.is_dir() {
@@ -1121,7 +1118,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn repository_files_rejects_symlinked_git_and_excluded_directories() {
+    fn repository_files_skips_symlinked_git_and_excluded_directories() {
         use std::os::unix::fs::symlink;
 
         let root = scratch("preflight-excluded-links");
@@ -1130,22 +1127,19 @@ mod tests {
             symlink(&outside, root.join(".git")),
             "create symlinked git metadata",
         );
-        let error = must_fail(
+        must(
             repository_files(&root, &[]),
-            "symlinked git metadata must fail preflight",
+            "symlinked git metadata is outside scan inputs",
         );
-        assert!(error.contains("symlinked excluded directory"), "{error}");
-        let _ = fs::remove_file(root.join(".git"));
 
         must(
             symlink(&outside, root.join("target")),
             "create symlinked build directory",
         );
-        let error = must_fail(
+        must(
             repository_files(&root, &[]),
-            "symlinked build directory must fail preflight",
+            "symlinked build directory is outside scan inputs",
         );
-        assert!(error.contains("symlinked excluded directory"), "{error}");
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
