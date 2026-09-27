@@ -2674,6 +2674,61 @@ fn candidate_snapshot_preflight_allows_confined_directory_links_and_seals_tree()
 
 #[cfg(unix)]
 #[test]
+fn candidate_sandbox_uid_can_read_sealed_workflow_config_but_cannot_write_it() {
+    use std::ffi::OsString;
+
+    let root = temporary_directory("snapshot-sandbox-uid");
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    write(&config, "schema = 1\n");
+    must(
+        validate_and_seal_snapshot(&root),
+        "seal workflow config snapshot",
+    );
+
+    let artifacts = temporary_directory("snapshot-sandbox-uid-artifacts");
+    let candidate = artifacts.join("candidate.sh");
+    write(
+        &candidate,
+        "#!/bin/sh\nset -eu\ntest \"$(id -u)\" = 65534\nconfig=/workspace/.github-gen/velnor-workflow.toml\ntest \"$(cat \"$config\")\" = 'schema = 1'\nif printf 'tampered\\n' > \"$config\" 2>/dev/null; then exit 71; fi\ncat \"$config\"\n",
+    );
+    must(
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)),
+        "make candidate executable",
+    );
+    let output = temporary_directory("snapshot-sandbox-uid-output");
+    let result = must(
+        crate::candidate_sandbox::run(
+            &candidate,
+            Some(&root),
+            Some(&output),
+            &[OsString::from("--unused")],
+        ),
+        "run candidate in uid-dropped sandbox",
+    );
+    assert_eq!(
+        result.status,
+        0,
+        "candidate stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"schema = 1\n");
+    assert_eq!(
+        must(fs::read(&config), "read source config after candidate"),
+        b"schema = 1\n",
+        "candidate write attempt must leave sealed config unchanged"
+    );
+
+    cleanup_snapshot(&root);
+    assert!(
+        !root.exists(),
+        "cleanup must reopen and remove sealed snapshot"
+    );
+    let _ = fs::remove_dir_all(artifacts);
+    let _ = fs::remove_dir_all(output);
+}
+
+#[cfg(unix)]
+#[test]
 fn candidate_snapshot_preflight_rejects_special_files() {
     use std::os::unix::net::UnixListener;
 

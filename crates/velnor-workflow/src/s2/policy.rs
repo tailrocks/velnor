@@ -2113,9 +2113,25 @@ fn symlink_target_escapes(relative_link: &Path, target: &Path) -> bool {
 }
 
 fn make_read_only(path: &Path) -> Result<(), GeneratorError> {
-    let mut permissions = fs::metadata(path)
-        .map_err(|error| GeneratorError::io("inspect candidate source permissions", path, &error))?
-        .permissions();
+    let metadata = fs::metadata(path).map_err(|error| {
+        GeneratorError::io("inspect candidate source permissions", path, &error)
+    })?;
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Candidate code runs as uid 65534. Preserve no-write sealing while
+        // making extracted owner-only files and directories readable by it.
+        // The Docker bind mount remains read-only as a second enforcement layer.
+        let mode = if metadata.is_dir() {
+            0o555
+        } else {
+            (metadata.permissions().mode() & 0o111) | 0o444
+        };
+        permissions.set_mode(mode);
+    }
+    #[cfg(not(unix))]
     permissions.set_readonly(true);
     fs::set_permissions(path, permissions)
         .map_err(|error| GeneratorError::io("seal candidate source entry", path, &error))
