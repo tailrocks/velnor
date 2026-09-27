@@ -83,6 +83,16 @@ prefix fallback: the force-full prefix list is empty
 (`crates/velnor-workflow/src/reuse.rs:64`), and `.github/` paths go through
 the contract table below instead.
 
+Generated output ownership does not add a path-prefix exclusion. A target
+repository's active `[[static_files]]` rows exclude only their declared output
+paths; a valid ownership sidecar also excludes its prior outputs during a
+stale-output prune. After the generator verifies and removes a stale output,
+the sidecar no longer reserves that path, so a manually recreated file is
+scanned like any other repository input. This applies to both `.github/` and
+`config/` outputs (`crates/velnor-workflow/src/scan/file_walk.rs` and
+`crates/velnor-workflow/src/s2/scan/file_walk.rs`; lifecycle tests in
+`crates/velnor-workflow/src/lib.rs` and `crates/velnor-workflow/src/s2/mod.rs`).
+
 ## Dependency semantics
 
 `CURRENT`: direct path hits expand across `depends_on` edges in one direction

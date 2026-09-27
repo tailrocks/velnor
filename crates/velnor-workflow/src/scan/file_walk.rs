@@ -22,10 +22,16 @@ pub(crate) fn repository_files(
     }
     let mut generator_owned = crate::s2::generator_owned_output_paths(root)
         .map_err(|error| GeneratorError::usage(error.to_string()))?;
-    if let Some(generation) = crate::config::discover(root)?
-        && let Some(path) = generation.cache_velnor().generated_output_path()
-    {
-        generator_owned.insert(path);
+    if let Some(generation) = crate::config::discover(root)? {
+        crate::config::validate_static_files(generation.static_files())?;
+        generator_owned.extend(
+            generation
+                .static_files()
+                .iter()
+                .filter_map(crate::config::StaticFileSection::file)
+                .map(Path::new)
+                .map(Path::to_path_buf),
+        );
     }
     // Generation must stay a function of the committed repository, not of the
     // checkout: untracked CI runtime artifacts, scratch files, and the `.git`
@@ -461,12 +467,12 @@ mod tests {
             "write recorded output",
         );
         must(
-            fs::create_dir_all(root.join("config/fleet")),
-            "create fleet config directory",
+            fs::create_dir_all(root.join("config/runtime")),
+            "create runtime config directory",
         );
         must(
-            fs::write(root.join("config/fleet/velnor-host.env"), "MANUAL=1\n"),
-            "write manual fleet config",
+            fs::write(root.join("config/runtime/generated.env"), "MANUAL=1\n"),
+            "write manual runtime config",
         );
         must(
             fs::write(
@@ -485,7 +491,7 @@ mod tests {
         );
         assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
         assert!(files.contains(&".github/workflows/forged.yml".to_owned()));
-        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        assert!(files.contains(&"config/runtime/generated.env".to_owned()));
         assert!(!files.contains(&".github/workflows/generated.yml".to_owned()));
         assert!(!files.contains(&crate::s2::OWNERSHIP_STATE.to_owned()));
 
@@ -493,75 +499,111 @@ mod tests {
             fs::write(
                 root.join(crate::s2::OWNERSHIP_STATE),
                 format!(
-                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nconfig/fleet/velnor-host.env\t0000000000000000\n",
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nconfig/runtime/generated.env\t0000000000000000\n",
                     crate::s2::GENERATOR_REVISION
                 ),
             ),
-            "record fleet config as generated",
+            "record runtime config as generated",
         );
         let files = must(
             repository_files(&root, &[]),
-            "scan after fleet config ownership is recorded",
+            "scan after runtime config ownership is recorded",
         );
-        assert!(!files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        assert!(!files.contains(&"config/runtime/generated.env".to_owned()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_symlinked_parent_is_rejected_before_read() {
+        let root = scratch("sidecar-parent-symlink");
+        let outside = scratch("sidecar-symlink-target");
+        must(
+            fs::create_dir_all(root.join(".github")),
+            "create generated root",
+        );
+        must(
+            fs::write(
+                outside.join(".github-actions-generator-state"),
+                "not ownership state",
+            ),
+            "write outside marker",
+        );
+        must(
+            std::os::unix::fs::symlink(&outside, root.join(".github/ci")),
+            "create sidecar parent symlink",
+        );
+        let error = must_fail(
+            repository_files(&root, &[]),
+            "sidecar parent symlink must be rejected",
+        );
+        assert!(error.contains("refusing symlinked managed directory"));
     }
 
     #[test]
-    fn manual_cache_host_env_is_scanned_without_cache_config() {
-        let root = scratch("schema1-manual-host-env-without-config");
+    fn manual_config_output_is_scanned_without_declaration() {
+        let root = scratch("schema1-manual-config-output-without-declaration");
         git(&root, &["init", "-q"]);
-        let path = Path::new("config/fleet/velnor-host.env");
+        let path = Path::new("config/runtime/generated.env");
         must(
-            fs::create_dir_all(root.join("config/fleet")),
-            "create manual host config directory",
+            fs::create_dir_all(root.join("config/runtime")),
+            "create manual config output directory",
         );
         must(
             fs::write(root.join(path), "MANUALLY_OWNED=value\n"),
-            "write manual host config",
+            "write manual config output",
         );
-        git(&root, &["add", "config/fleet/velnor-host.env"]);
-        git(&root, &["commit", "-qm", "manual host config"]);
+        git(&root, &["add", "config/runtime/generated.env"]);
+        git(&root, &["commit", "-qm", "manual config output"]);
 
-        let files = must(repository_files(&root, &[]), "scan manual host config");
+        let files = must(repository_files(&root, &[]), "scan manual config output");
         assert!(files.contains(&path.display().to_string()));
     }
 
     #[test]
-    fn configured_cache_host_env_is_excluded_from_scan() {
-        let root = scratch("schema1-configured-host-env");
+    fn declared_config_output_is_excluded_from_scan() {
+        let root = scratch("schema1-declared-config-output");
         git(&root, &["init", "-q"]);
-        let path = Path::new("config/fleet/velnor-host.env");
+        let path = Path::new("config/runtime/generated.env");
         must(
-            fs::create_dir_all(root.join("config/fleet")),
-            "create host config directory",
+            fs::create_dir_all(root.join("config/runtime")),
+            "create config output directory",
         );
         must(
             fs::write(root.join(path), "GENERATED=value\n"),
-            "write generated host config",
+            "write generated config output",
         );
         must(
-            fs::create_dir_all(root.join(".github-gen")),
-            "create generation config directory",
+            fs::create_dir_all(root.join(".github-gen/sources")),
+            "create generation source directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/sources/generated.env"),
+                "GENERATED=value\n",
+            ),
+            "write static source",
         );
         must(
             fs::write(
                 root.join(crate::config::GENERATION_CONFIG_PATH),
-                "schema = 1\n\n[cache.velnor]\nbudget_bytes = 1\n",
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \"config/runtime/generated.env\"\nsource = \".github-gen/sources/generated.env\"\n",
             ),
-            "write configured host cache",
+            "write static output declaration",
         );
         git(
             &root,
             &[
                 "add",
                 ".github-gen/velnor-workflow.toml",
-                "config/fleet/velnor-host.env",
+                ".github-gen/sources/generated.env",
+                "config/runtime/generated.env",
             ],
         );
-        git(&root, &["commit", "-qm", "configured host cache"]);
+        git(&root, &["commit", "-qm", "declared config output"]);
 
-        let files = must(repository_files(&root, &[]), "scan generated host config");
+        let files = must(repository_files(&root, &[]), "scan declared config output");
         assert!(!files.contains(&path.display().to_string()));
+        assert!(files.contains(&".github-gen/sources/generated.env".to_owned()));
     }
 
     #[test]

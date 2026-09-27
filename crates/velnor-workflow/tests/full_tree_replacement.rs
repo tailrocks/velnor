@@ -555,8 +555,8 @@ fn reserved_agent_path_spellings_are_rejected(pipeline: Pipeline) {
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     fs::write(&source, "evil\n").unwrap();
 
-    // A redundant separator must not dodge the reserved-path guard: the
-    // comparison is over paths, not strings.
+    // Reject a redundant separator during lexical path validation before it
+    // can alias a generator-owned path through filesystem normalization.
     let config = root.join(".github-gen/velnor-workflow.toml");
     let base = fs::read_to_string(&config).unwrap();
     fs::write(
@@ -573,8 +573,8 @@ fn reserved_agent_path_spellings_are_rejected(pipeline: Pipeline) {
     );
     let stderr = String::from_utf8_lossy(&outcome.stderr);
     assert!(
-        stderr.contains("generator owns this path"),
-        "refusal must name the reservation: {stderr}"
+        stderr.contains("safe repository-relative path"),
+        "refusal must identify the unsafe path: {stderr}"
     );
 }
 

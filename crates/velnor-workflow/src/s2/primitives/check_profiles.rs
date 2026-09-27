@@ -788,7 +788,6 @@ mod tests {
             mise_lock_backends: std::collections::BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
-            velnor_host_cache: config::CacheVelnorSection::default(),
         }
     }
 

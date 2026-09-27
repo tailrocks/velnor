@@ -242,16 +242,11 @@ Canonical root `<VELNOR_STORAGE_ROOT>/cache/velnor/v1/<trust_scope>/<class>` —
 ## 6. Target configuration (`.github-gen/velnor-workflow.toml`)
 
 ```toml
-# Proposed — wire in Phase 6 schema work
+# Current generation config
 [cache.github]
 budget_bytes = 8589934592              # 8 GiB — GHA account only
 producer_window_seconds = 7200
 mbx_generation_bound = 2
-
-[cache.velnor]
-budget_bytes = 53687091200             # 50 GiB — host store only
-producer_window_seconds = 86400        # longer protection on host
-mbx_generation_bound = 6               # more generations than GitHub (2)
 
 # Lane-agnostic — keep
 [[declare]]
@@ -259,7 +254,7 @@ primitive = "cache-contract"
 # backend = "detected" (default)
 ```
 
-(rev 2) `RepoGenerationConfig` (`config/mod.rs:91-110`) has no cache section today and is `deny_unknown_fields`; per-unit `[units.cache]` supports `key_files`, `paths`, `mutable_mount_seed` (`:292-306`). `[cache.*]` is **generator-only** — it must never be serialized into `.github/ci/project.toml`, whose runtime parser is also `deny_unknown_fields` (P0-1 is exactly this failure mode).
+(rev 2) `[cache.github]` is generator-only and never serialized into `.github/ci/project.toml`, whose runtime parser is also `deny_unknown_fields` (P0-1 is exactly this failure mode). Host GC values have one authority: `.github-gen/sources/velnor-host.env`; `[[static_files]]` copies those bytes to `config/fleet/velnor-host.env` without deriving values from a second cache-budget table.
 
 Until schema lands, Velnor 50 GiB is enforced via **fleet env** (`VELNOR_BUDGET_*`, `MBX_GC_MAX_TOTAL_SIZE`).
 
@@ -452,9 +447,9 @@ Pre-req: Phase 0 green.
 
 ### Schema wiring (generator)
 
-- [x] Add `[cache.github]` and `[cache.velnor]` to `RepoGenerationConfig` (`config/mod.rs`) — generator-only, never serialized to `project.toml`
+- [x] Add `[cache.github]` to `RepoGenerationConfig` (`config/mod.rs`) — generator-only, never serialized to `project.toml`
 - [x] `RetentionPolicy::from_config(&cache.github)` for `cache-plan`
-- [x] Emit Velnor host policy artifact (`velnor.env` snippet) from generator
+- [x] Copy the target-owned Velnor host policy source to its configured output with `[[static_files]]`
 - [x] Golden test: adding `[cache.*]` does not change cache keys
 - [x] Test: `project.toml` round-trips through the runtime parser (`deny_unknown_fields`) — the P0-1 regression class
 
@@ -833,7 +828,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 
 | Claim | Verdict | Evidence |
 | --- | --- | --- |
-| `[cache.*]` schema; `velnor-host.env` emission | V | `config/mod.rs:110-143`; test `emitted_project_toml_ignores_cache_generation_config` |
+| Host environment output | V | Generic `[[static_files]]` owns the output path; `.github-gen/sources/velnor-host.env` is the sole host-value source. The generator copies it verbatim and records edits as scan inputs. |
 | Fleet timer + runbook + BuildKit GC artifact | V | `debian/velnor-cache-gc.{timer,service}`; `config/fleet/RUNBOOK.md`; `buildkitd.gc.toml` |
 | D18 PR copy seed (was read-through overlay) | V | `trust_class.rs` `AdmittedTrust::cargo_seed_scope`; `storage.rs` `seed_cargo_store`; `runner.rs` `execute_script_job_inner` seed call before `github_job_container_spec`; `velnor-host.env:10` |
 | `VELNOR_STORAGE_ROOT` applied on fleet hosts | U | snippet only; no host apply evidence |

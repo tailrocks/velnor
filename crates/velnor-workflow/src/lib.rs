@@ -259,7 +259,7 @@ const MR_BOXINGTON_VERSION: &str = "1.12.0";
 /// mbx's action-store budget setting (`gc.max_size`). It is the bound the
 /// automatic sweep prunes the store to after a build, and the only budget
 /// that applies on a hosted runner: `gc.max_total_size` is unset there and
-/// governs the Velnor hosts' combined store (`config/fleet/velnor-host.env`).
+/// governs the local runner's persistent store, configured by the repository.
 pub(crate) const MR_BOXINGTON_STORE_BUDGET_ENV: &str = "MBX_GC_MAX_SIZE";
 /// The action-store budget every GitHub-backend Mr. Boxington job exports.
 ///
@@ -1597,9 +1597,6 @@ pub struct ProjectConfig {
     /// Generator-only GitHub cache retention from `[cache.github]`. Never
     /// serialized into `project.toml`.
     pub(crate) github_cache: config::CacheGithubSection,
-    /// Generator-only Velnor host cache budgets from `[cache.velnor]`. Never
-    /// serialized into `project.toml`.
-    pub(crate) velnor_host_cache: config::CacheVelnorSection,
 }
 
 /// A repository-local file the generated output owns verbatim: the repository
@@ -2662,7 +2659,6 @@ fn apply_generation_config(
     read_static_files(config, generation.static_files(), root)?;
     apply_reviewer_rows(config, generation.reviewers());
     config.github_cache = generation.cache_github().clone();
-    config.velnor_host_cache = generation.cache_velnor().clone();
     validate_velnor_pull_request_contract(config)?;
     refresh_mr_boxington_note(config);
     refresh_swift_executor_note(config);
@@ -3758,7 +3754,7 @@ fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
 
 /// Read the repository-local files the generated output owns verbatim. The
 /// repository owns the bytes at `source`; the generator owns the write to
-/// `file`, which stays inside `.github/`.
+/// `file`, which may be under `.github/` or `config/`.
 ///
 /// # Errors
 /// Returns errors for a declared source that is missing, unreadable, or not
@@ -3768,11 +3764,14 @@ fn read_static_files(
     rows: &[config::StaticFileSection],
     root: &Path,
 ) -> Result<(), GeneratorError> {
+    config::validate_static_files(rows)?;
     for row in rows {
         let (Some(file), Some(source)) = (row.file(), row.source()) else {
             continue;
         };
-        let path = root.join(source);
+        let source_path = Path::new(source);
+        reject_static_source_symlinks(root, source_path)?;
+        let path = root.join(source_path);
         let content = fs::read_to_string(&path).map_err(|error| {
             GeneratorError::io("read declared static file source", &path, &error)
         })?;
@@ -3781,6 +3780,51 @@ fn read_static_files(
             source: source.to_owned(),
             content,
         });
+    }
+    Ok(())
+}
+
+fn reject_static_source_symlinks(root: &Path, source: &Path) -> Result<(), GeneratorError> {
+    let components = source.components().collect::<Vec<_>>();
+    let mut relative = PathBuf::new();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(_) = component else {
+            return Err(GeneratorError::usage(format!(
+                "declared static file source is not a normalized repository path: {}",
+                source.display()
+            )));
+        };
+        relative.push(component.as_os_str());
+        let path = root.join(&relative);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(GeneratorError::usage(format!(
+                    "refusing symlinked static file source: {}",
+                    path.display()
+                )));
+            }
+            Ok(metadata) if index + 1 < components.len() && !metadata.is_dir() => {
+                return Err(GeneratorError::usage(format!(
+                    "static file source parent is not a directory: {}",
+                    path.display()
+                )));
+            }
+            Ok(metadata) if index + 1 == components.len() && !metadata.is_file() => {
+                return Err(GeneratorError::usage(format!(
+                    "static file source is not a regular file: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => (),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(GeneratorError::io(
+                    "inspect declared static file source",
+                    &path,
+                    &error,
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -4438,7 +4482,7 @@ const MR_BOXINGTON_STORE_BUDGET_STEP: &str = "Bound the Mr. Boxington store";
 /// export still needs; the budget is therefore a property of "runs mbx on a
 /// hosted runner", checked over every rendered workflow instead of being
 /// remembered per job. A local-backend job runs on a Velnor host whose
-/// persistent store is budgeted by `config/fleet/velnor-host.env`; exporting
+/// persistent store is budgeted by its repository-owned host configuration; exporting
 /// the hosted ceiling there would shrink the shared store.
 ///
 /// # Errors
@@ -4475,8 +4519,8 @@ pub(crate) fn validate_hosted_mr_boxington_store_budget(
             } else if budget.is_some() {
                 return Err(GeneratorError::usage(format!(
                     "{path}: job `{job}` exports the hosted Mr. Boxington store budget `{export}` \
-                     around a local-backend store; the Velnor host budgets its persistent store \
-                     in config/fleet/velnor-host.env, and the hosted ceiling would shrink it"
+                     around a local-backend store; the local host uses a persistent store, and \
+                     the hosted ceiling would shrink it"
                 )));
             }
         }
@@ -6636,13 +6680,14 @@ fn generated_files_with_surface(
         files.entry(path).or_insert(content);
     }
     for owned in &config.static_files {
-        files.insert(PathBuf::from(&owned.path), owned.content.clone());
-    }
-    if let Some(path) = config.velnor_host_cache.generated_output_path() {
-        files.insert(
-            path,
-            config::render_velnor_host_env(&config.velnor_host_cache),
-        );
+        let path = PathBuf::from(&owned.path);
+        if files.contains_key(&path) || generated_symlinks().contains_key(&path) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_files]] output collides with a generator-owned output: {}",
+                path.display()
+            )));
+        }
+        files.insert(path, owned.content.clone());
     }
     // The agent-instruction file is unconditional: every render owns these
     // exact bytes, even for minimal repositories. A `static_files` row for a
@@ -8560,20 +8605,14 @@ fn reject_managed_symlink_ancestors<'a>(
     root: &Path,
     generated: impl IntoIterator<Item = &'a PathBuf>,
 ) -> Result<(), GeneratorError> {
-    let mut managed = BTreeSet::from([
-        PathBuf::from(".github"),
-        PathBuf::from("config"),
-        PathBuf::from("config/fleet"),
-    ]);
+    let mut managed = BTreeSet::from([PathBuf::from(".github"), PathBuf::from(".github/ci")]);
     for relative in generated {
         managed.extend(
             relative
                 .ancestors()
                 .skip(1)
                 .filter(|ancestor| {
-                    ancestor.starts_with(".github")
-                        || *ancestor == Path::new("config")
-                        || ancestor.starts_with("config/fleet")
+                    ancestor.starts_with(".github") || ancestor.starts_with("config")
                 })
                 .map(Path::to_path_buf),
         );
@@ -9114,17 +9153,24 @@ fn parse_digest<'a>(
     if owned.next() != Some("[outputs]") {
         return Err(invalid());
     }
-    let mut state = BTreeMap::new();
+    let mut state = BTreeMap::<PathBuf, u64>::new();
     for line in owned {
         let (raw_path, raw_digest) = line.split_once('\t').ok_or_else(invalid)?;
         let relative = managed_relative_path(raw_path)?;
         let digest = u64::from_str_radix(raw_digest, 16).map_err(|_| invalid())?;
-        if state.insert(relative, digest).is_some() {
+        if state.contains_key(&relative) {
             return Err(GeneratorError::usage(format!(
                 "duplicate generated ownership state entry: {}",
                 path.display()
             )));
         }
+        if state
+            .keys()
+            .any(|existing| existing.starts_with(&relative) || relative.starts_with(existing))
+        {
+            return Err(invalid());
+        }
+        state.insert(relative, digest);
     }
     Ok(state)
 }
@@ -9164,20 +9210,35 @@ fn ownership_state_content(
 
 fn managed_relative_path(value: &str) -> Result<PathBuf, GeneratorError> {
     let path = Path::new(value);
-    if !path
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return Err(GeneratorError::usage(
-            "generated ownership state contains an unsafe path",
-        ));
-    }
-    if value.starts_with(".github/") || value == "config/fleet/velnor-host.env" {
+    if is_managed_output_path(value) {
         return Ok(path.to_path_buf());
     }
     Err(GeneratorError::usage(
         "generated ownership state contains an unsafe path",
     ))
+}
+
+fn is_managed_output_path(value: &str) -> bool {
+    let path = Path::new(value);
+    let normalized = !value.is_empty()
+        && !value.starts_with('/')
+        && !value
+            .chars()
+            .any(|character| matches!(character, '\\' | ':'))
+        && value.split('/').all(|segment| {
+            !segment.is_empty() && segment != "." && segment != ".." && segment != ".git"
+        })
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+    let output_root = path.starts_with(".github") || path.starts_with("config");
+    let has_child = path.components().count() > 1;
+    let ownership_state = Path::new(OWNERSHIP_STATE);
+    normalized
+        && output_root
+        && has_child
+        && !path.starts_with(ownership_state)
+        && !ownership_state.starts_with(path)
 }
 
 fn content_digest(content: &str) -> u64 {
@@ -9225,7 +9286,9 @@ fn validate_generated_paths(
     files: &BTreeMap<PathBuf, String>,
     symlinks: &BTreeMap<PathBuf, PathBuf>,
 ) -> Result<(), GeneratorError> {
-    for relative in files.keys().chain(symlinks.keys()) {
+    let paths = files.keys().chain(symlinks.keys()).collect::<Vec<_>>();
+    let ownership_state = Path::new(OWNERSHIP_STATE);
+    for relative in &paths {
         if relative.components().count() == 0
             || !relative
                 .components()
@@ -9235,6 +9298,24 @@ fn validate_generated_paths(
                 "generated path escapes the output tree: {}",
                 relative.display()
             )));
+        }
+        if relative.starts_with(ownership_state) || ownership_state.starts_with(relative.as_path())
+        {
+            return Err(GeneratorError::usage(format!(
+                "generated output overlaps the ownership state path: {}",
+                relative.display()
+            )));
+        }
+    }
+    for (index, left) in paths.iter().enumerate() {
+        for right in paths.iter().skip(index + 1) {
+            if left.starts_with(right.as_path()) || right.starts_with(left.as_path()) {
+                return Err(GeneratorError::usage(format!(
+                    "generated output paths overlap: {} and {}",
+                    left.display(),
+                    right.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -11561,7 +11642,6 @@ mod tests {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
-            velnor_host_cache: config::CacheVelnorSection::default(),
         }
     }
 
@@ -18302,7 +18382,6 @@ channel = "stable"
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
-            velnor_host_cache: config::CacheVelnorSection::default(),
         };
         must(
             fs::write(root.join(".github/ci/project.toml"), config.toml()),
@@ -19794,7 +19873,7 @@ channel = "stable"
     }
 
     #[test]
-    fn cache_generation_config_does_not_change_github_lane_cache_keys() {
+    fn github_cache_config_does_not_change_github_lane_cache_keys() {
         let root = configured_repository(
             "cache-config-golden",
             Some(
@@ -19809,19 +19888,12 @@ channel = "stable"
         let baseline_keys = github_lane_cache_key_lines(
             &WorkflowIr::from_config(&baseline.config).render(WorkflowKind::Main),
         );
-        let artifact_path = PathBuf::from("config/fleet/velnor-host.env");
-        assert!(
-            !must(generated_files(&baseline.config), "generate baseline")
-                .contains_key(&artifact_path),
-            "an unconfigured host cache must not emit the fleet env file",
-        );
         must(
             fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
-                 [cache.github]\nbudget_bytes = 8589934592\n\
-                 [cache.velnor]\nbudget_bytes = 53687091200\n",
+                 [cache.github]\nbudget_bytes = 8589934592\n",
             ),
             "write cache generation config",
         );
@@ -19834,16 +19906,7 @@ channel = "stable"
         );
         assert_eq!(
             baseline_keys, with_cache_keys,
-            "cache sections must not affect cache keys"
-        );
-        let files = must(
-            generated_files(&with_cache.config),
-            "generate configured cache",
-        );
-        assert_eq!(
-            files.get(&artifact_path).map(String::as_str),
-            Some(config::render_velnor_host_env(&with_cache.config.velnor_host_cache).as_str()),
-            "an explicit host cache override must emit its fleet env file",
+            "cache config must not affect cache keys"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -19855,8 +19918,7 @@ channel = "stable"
             Some(
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
-                 [cache.github]\nbudget_bytes = 8589934592\n\
-                 [cache.velnor]\nbudget_bytes = 53687091200\n",
+                 [cache.github]\nbudget_bytes = 8589934592\n",
             ),
         );
         let scanned = must(
@@ -19881,11 +19943,6 @@ channel = "stable"
         must(
             runtime::read_config_for_test(&path),
             "emitted project.toml must round-trip through runtime parser",
-        );
-        let files = must(generated_files(&scanned.config), "generate");
-        assert!(
-            files.contains_key(&PathBuf::from("config/fleet/velnor-host.env")),
-            "generator must emit velnor-host.env fleet snippet",
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -22394,14 +22451,9 @@ channel = "stable"
             std::os::unix::fs::symlink(&outside, root.join(".github")),
             "create managed directory symlink",
         );
-        let config = must(
-            scan_repository(&root, RunnerMode::Github),
-            "scan symlinked repository",
-        );
-        let files = must(generated_files(&config), "generate");
         let error = must_some(
-            write_generated(&root, &files, false, false, true).err(),
-            "symlinked managed directory must be rejected",
+            scan_repository(&root, RunnerMode::Github).err(),
+            "scan must reject symlinked managed directory before reading its sidecar",
         );
         assert!(error
             .to_string()
@@ -22414,26 +22466,66 @@ channel = "stable"
     }
     #[cfg(unix)]
     #[test]
-    fn generation_refuses_symlinked_fleet_directory() {
-        let root = temporary_repository("symlinked-fleet-directory");
-        let outside = temporary_directory("symlinked-fleet-target");
+    fn generation_refuses_symlinked_declared_config_output_parent() {
+        let root = configured_repository(
+            "symlinked-declared-config-output-parent",
+            Some(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[static_files]]\nfile = \"config/runtime/generated.env\"\n\
+                 source = \".github-gen/sources/generated.env\"\n",
+            ),
+        );
+        let outside = temporary_directory("declared-config-output-target");
+        must(
+            fs::create_dir_all(root.join(".github-gen/sources")),
+            "create static source directory",
+        );
+        must(
+            fs::write(root.join(".github-gen/sources/generated.env"), "VALUE=1\n"),
+            "write static source",
+        );
         must(
             std::os::unix::fs::symlink(&outside, root.join("config")),
-            "create fleet directory symlink",
+            "create config output parent symlink",
         );
         let config = must(
             scan_repository(&root, RunnerMode::Github),
-            "scan symlinked fleet repository",
+            "scan config output repository",
         );
-        let files = must(generated_files(&config), "generate fleet surface");
+        let files = must(generated_files(&config), "generate config output");
         let error = must_some(
             write_generated(&root, &files, false, false, true).err(),
-            "symlinked fleet directory must be rejected",
+            "symlinked declared output parent must be rejected",
         );
         assert!(error
             .to_string()
             .contains("refusing symlinked managed directory"));
-        assert!(must(fs::read_dir(&outside), "read fleet target")
+        assert!(must(fs::read_dir(&outside), "read config output target")
+            .next()
+            .is_none());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_allows_unmanaged_config_symlink_without_declared_output() {
+        let root = temporary_repository("unmanaged-config-symlink");
+        let outside = temporary_directory("unmanaged-config-target");
+        must(
+            std::os::unix::fs::symlink(&outside, root.join("config")),
+            "create unrelated config symlink",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan repository without config output",
+        );
+        let files = must(generated_files(&config), "generate repository");
+        must(
+            write_generated(&root, &files, false, false, true),
+            "unrelated config symlink does not block generation",
+        );
+        assert!(must(fs::read_dir(&outside), "read unrelated config target")
             .next()
             .is_none());
         let _ = fs::remove_dir_all(root);
@@ -23403,25 +23495,80 @@ channel = "stable"
         ))
     }
 
+    #[cfg(unix)]
     #[test]
-    fn removed_cache_config_prunes_output_then_manual_file_is_scanned() {
+    fn static_source_symlinked_parent_is_rejected_before_read() {
         let root = configured_repository(
-            "schema1-cache-output-prune-and-manual-file",
+            "static-source-symlinked-parent",
             Some(
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [cache.velnor]\nbudget_bytes = 53687091200\n",
+                 [[static_files]]\nfile = \"config/runtime/generated.env\"\n\
+                 source = \".github-gen/sources/generated.env\"\n",
             ),
         );
-        let output = Path::new("config/fleet/velnor-host.env");
+        let outside = temporary_directory("static-source-target");
+        must(
+            fs::write(outside.join("generated.env"), "SECRET=value\n"),
+            "write outside source",
+        );
+        must(
+            std::os::unix::fs::symlink(&outside, root.join(".github-gen/sources")),
+            "create source parent symlink",
+        );
+        let error = must_some(
+            scan_target(&root, RunnerMode::Github, "main").err(),
+            "static source parent symlink must be rejected",
+        );
+        assert!(error
+            .to_string()
+            .contains("refusing symlinked static file source"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn declared_config_output_prunes_then_manual_file_is_scanned() {
+        let root = configured_repository(
+            "schema1-config-output-prune-and-manual-file",
+            Some(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[static_files]]\nfile = \"config/runtime/generated.env\"\n\
+                 source = \".github-gen/sources/generated.env\"\n",
+            ),
+        );
+        let source = root.join(".github-gen/sources/generated.env");
+        must(
+            fs::create_dir_all(must_some(source.parent(), "static source parent")),
+            "create static source directory",
+        );
+        must(fs::write(&source, "VALUE=1\n"), "write static source");
+        let output = Path::new("config/runtime/generated.env");
         generate_repository(&root, true);
         assert!(
             root.join(output).is_file(),
             "configured output is generated"
         );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(output)),
+                "read generated output"
+            ),
+            "VALUE=1\n"
+        );
+        must(fs::write(&source, "VALUE=2\n"), "change static source");
+        assert!(
+            !matches!(check_repository(&root), Ok(WriteOutcome::Unchanged)),
+            "source edits make generated output drift visible to --check"
+        );
+        generate_repository(&root, true);
+        assert_eq!(
+            must(fs::read_to_string(root.join(output)), "read updated output"),
+            "VALUE=2\n"
+        );
 
         must(
             fs::remove_file(root.join(config::GENERATION_CONFIG_PATH)),
-            "remove cache generation config",
+            "remove static output declaration",
         );
         let before_prune = must(
             scan_target(&root, RunnerMode::Github, "main"),
@@ -23446,16 +23593,16 @@ channel = "stable"
             .any(|file| file == &output.display().to_string()));
 
         must(
-            fs::create_dir_all(root.join("config/fleet")),
-            "create manual host config directory",
+            fs::create_dir_all(root.join("config/runtime")),
+            "create manual runtime config directory",
         );
         must(
             fs::write(root.join(output), "MANUALLY_OWNED=value\n"),
-            "write manual host config",
+            "write manual runtime config",
         );
         let manual = must(
             scan_target(&root, RunnerMode::Github, "main"),
-            "scan manual host config",
+            "scan manual runtime config",
         );
         assert!(manual
             .shape

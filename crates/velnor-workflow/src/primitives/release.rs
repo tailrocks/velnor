@@ -5030,7 +5030,6 @@ mod maintenance_lanes_tests {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: crate::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::config::CacheVelnorSection::default(),
         }
     }
 
@@ -6047,7 +6046,6 @@ cp "$record" "$out"
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: crate::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::config::CacheVelnorSection::default(),
         }
     }
 

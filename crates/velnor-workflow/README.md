@@ -53,6 +53,15 @@ config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
 
+`[[static_files]]` rows let the target repository own source bytes while the
+generator owns each declared output. Outputs may live below `.github/` or
+`config/`; sources must stay inside the repository and outside generated
+`.github/` content. Active declared outputs are omitted from scans. When a
+declaration is removed, its last sidecar-owned output stays omitted only for
+the generation that verifies and prunes it. After pruning, a manually
+recreated file becomes an ordinary scan input. There is no path-prefix
+exclusion for `config/`.
+
 The schema-1 Swift scanner fails closed for executable Swift products and
 recognized XcodeGen specs because it cannot emit their complete phase and
 selection contracts; use schema 2 for those Apple surfaces.

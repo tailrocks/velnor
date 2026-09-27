@@ -1,8 +1,8 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	db2a031123382b76
-scan	5da26d655e44cb85
+config	38e6e56f92cbb8b3
+scan	f96419b3f5f5c30f
 generator	70
 [outputs]
 .github/AGENTS.md	02ebb7198c435e9b
@@ -25,5 +25,5 @@ generator	70
 .github/workflows/nightly.yml	cde4c359bcb710cc
 .github/workflows/preview.yml	9f24aa5a29a336b3
 .github/workflows/release.yml	eb9877030c786d10
-config/fleet/velnor-host.env	d14b419216449423
+config/fleet/velnor-host.env	d10f1b48c09022e1
 .github/CLAUDE.md	78a740c6ccf6937a

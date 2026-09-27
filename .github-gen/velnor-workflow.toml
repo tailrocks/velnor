@@ -50,11 +50,6 @@ budget_bytes = 8589934592
 producer_window_seconds = 7200
 mbx_generation_bound = 2
 
-[cache.velnor]
-budget_bytes = 53687091200
-producer_window_seconds = 86400
-mbx_generation_bound = 6
-
 # Release contract: typed native publisher + rolling preview. Guest-seed
 # restore/save is derived from the microvm recipe, not a pasted workflow body.
 
@@ -287,6 +282,12 @@ source = ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml"
 [[static_files]]
 file = ".github/workflows/AGENTS.md"
 source = ".github-gen/sources/workflows-AGENTS.md"
+
+# The source below is the sole authority for host GC configuration. The
+# generator copies these bytes verbatim; edit the source to change the host file.
+[[static_files]]
+file = "config/fleet/velnor-host.env"
+source = ".github-gen/sources/velnor-host.env"
 
 [[declare]]
 primitive = "release"
