@@ -5433,8 +5433,8 @@ fn audited_pin_script() -> &'static str {
 /// Compatibility renderer used while `[generator].revision` is the legacy
 /// bootstrap pin. It looks up the artifact for `HEAD_SHA`, verifies its
 /// manifest, digest, and candidate closure, then exports it through the
-/// existing pinned-binary slot plus its manifest. Keep this fragment byte
-/// compatible with the bootstrap workflow until the pin is promoted.
+/// dedicated candidate-binary slot plus its manifest. The trusted pinned
+/// binary remains in `VELNOR_WORKFLOW_PINNED_BINARY`.
 fn policy_candidate_step_legacy(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
@@ -5510,7 +5510,7 @@ fn policy_candidate_step_legacy(revision: &str) -> String {
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
 "#,
         pin_script = audited_pin_script(),
@@ -18835,7 +18835,7 @@ channel = "stable"
     }
 
     #[test]
-    fn legacy_generator_pin_keeps_candidate_wiring_at_its_byte_compatible_default() {
+    fn legacy_generator_pin_keeps_candidate_in_its_dedicated_slot() {
         assert!(!candidate_artifact_wiring_enabled(
             LEGACY_CANDIDATE_POLICY_PIN
         ));
@@ -18861,9 +18861,9 @@ channel = "stable"
             "the bootstrap pin retains the established permission bytes: {job}"
         );
         assert!(job.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"));
-        assert!(job.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"));
+        assert!(job.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"));
+        assert!(!job.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"));
         assert!(!job.contains("EVENT_NAME: ${{ github.event_name }}"));
-        assert!(!job.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"));
     }
 
     #[test]
