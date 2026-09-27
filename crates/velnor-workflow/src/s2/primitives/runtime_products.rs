@@ -29,8 +29,11 @@
 use std::fmt::Write as _;
 
 use super::{Args, Primitive, RenderCtx, Rendered};
+use crate::closure_inputs;
+#[cfg(test)]
+use crate::s2::closure::CLOSURE_PATHS;
 use crate::s2::closure::{
-    product_tag, CI_FEATURES, CLOSURE_PATHS, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
+    product_tag, CI_FEATURES, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
 };
 use crate::s2::{
     config_rust_toolchain, control_plane_gate, workflow_setup_action_repository, yaml_scalar,
@@ -46,6 +49,14 @@ pub(crate) const RUNTIME_PRODUCTS_FILE: &str = "ci-runtime-products.yml";
 /// The producer side-file family and the canonical file it renders.
 pub(crate) const RUNTIME_PRODUCTS_SIDE_FILES: &[(&str, &str)] =
     &[(RUNTIME_PRODUCTS_FILE, super::RUNTIME_PRODUCTS)];
+
+fn producer_closure_paths() -> Result<Vec<&'static str>, GeneratorError> {
+    closure_inputs::closure_paths(
+        include_str!("../../../Cargo.toml"),
+        include_str!("../../../../../Cargo.toml"),
+    )
+    .map_err(GeneratorError::usage)
+}
 
 /// Whether `primitive` renders the runtime-product producer workflow.
 pub(crate) fn is_runtime_products_side(primitive: &str) -> bool {
@@ -184,6 +195,10 @@ pub(crate) fn runtime_products_content(
     let build_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
     let publish_gate = gate.as_job_condition("needs.closure.outputs.exists != 'true'");
     let repository = workflow_setup_action_repository();
+    // Preserve the legacy v1 pathset unless this emitter package declares
+    // the optional local model dependency. Then both publisher resolutions
+    // include the model source subtree.
+    let closure_paths = producer_closure_paths()?;
     let owner = product_owner(repository);
     // The toolchain install is file-driven: the checkout's own
     // `rust-toolchain.toml` — itself a closure input — pins the channel, so a
@@ -562,7 +577,7 @@ jobs:
         workflow_file = RUNTIME_PRODUCTS_FILE,
         runtime_home = HOSTED_WORKFLOW_RUNTIME_HOME,
         tag_prefix = PRODUCT_TAG_PREFIX,
-        closure_paths = CLOSURE_PATHS.join(" "),
+        closure_paths = closure_paths.join(" "),
         closure_footer = closure_footer,
         matrix = matrix,
         manifest_products = manifest_program,
@@ -847,7 +862,11 @@ mod tests {
     fn setup_action_source() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
-        must(fs::read_to_string(&path), "read the setup action source")
+        let source = must(fs::read_to_string(&path), "read the setup action source");
+        must(
+            closure_inputs::render_setup_action(&source),
+            "render the setup action for the active closure",
+        )
     }
 
     #[test]
@@ -914,7 +933,7 @@ mod tests {
     #[test]
     fn closure_shell_matches_the_canonical_form() {
         let content = owner_content(&[]);
-        let pathspec = CLOSURE_PATHS.join(" ");
+        let pathspec = must(producer_closure_paths(), "current manifests parse").join(" ");
         assert!(
             content.contains(&format!("git ls-tree -r HEAD -- {pathspec}")),
             "the closure pathspec derives from CLOSURE_PATHS: {content}"

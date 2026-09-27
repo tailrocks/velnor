@@ -53,6 +53,9 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
+use crate::closure_inputs;
+#[cfg(test)]
+use crate::closure_inputs::BASE_CLOSURE_PATHS;
 
 /// Closure algorithm version. Bump when the inputs or canonical form change;
 /// digests minted under different versions never compare equal because the
@@ -81,14 +84,10 @@ pub(crate) const PRODUCT_TAG_PREFIX: &str = "velnor-workflow-runtime-v1-";
 /// Paths (files or subtrees) whose tracked content is the source closure.
 /// Git pathspec semantics: a directory names its whole subtree, so future
 /// files inside these directories are covered without updating this list.
-pub(crate) const CLOSURE_PATHS: &[&str] = &[
-    "crates/velnor-workflow",
-    "Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-    "rust-toolchain",
-    ".cargo",
-];
+/// The legacy v1 input set. Optional local dependency inputs are selected by
+/// `closure_inputs::closure_paths` for the revision being measured.
+#[cfg(test)]
+pub(crate) const CLOSURE_PATHS: &[&str] = BASE_CLOSURE_PATHS;
 
 /// Whether `value` is a full 64-hex closure digest.
 pub(crate) fn is_full_closure(value: &str) -> bool {
@@ -139,8 +138,22 @@ pub(crate) fn closure_of_tree(
     features: &str,
     profile: &str,
 ) -> Result<String, GeneratorError> {
+    let paths = if git_path_exists(repo, rev, "crates/velnor-workflow/Cargo.toml")? {
+        let workflow_manifest = git_show(repo, rev, "crates/velnor-workflow/Cargo.toml")?;
+        let workspace_manifest = if git_path_exists(repo, rev, "Cargo.toml")? {
+            git_show(repo, rev, "Cargo.toml")?
+        } else {
+            "[workspace]\n".to_owned()
+        };
+        closure_inputs::closure_paths(&workflow_manifest, &workspace_manifest)
+            .map_err(GeneratorError::usage)?
+    } else {
+        // Trees from before the workflow crate manifest existed cannot declare
+        // its optional model dependency. Retain their published v1 pathset.
+        closure_inputs::BASE_CLOSURE_PATHS.to_vec()
+    };
     let mut arguments = vec!["ls-tree", "-r", rev, "--"];
-    arguments.extend_from_slice(CLOSURE_PATHS);
+    arguments.extend_from_slice(&paths);
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -166,6 +179,33 @@ pub(crate) fn closure_of_tree(
         )));
     }
     Ok(canonical_digest(&lines, features, profile))
+}
+
+fn git_path_exists(repo: &Path, rev: &str, path: &str) -> Result<bool, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "-e", &format!("{rev}:{path}")])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("check {path} at {rev}: {error}")))?;
+    Ok(output.status.success())
+}
+
+fn git_show(repo: &Path, rev: &str, path: &str) -> Result<String, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["show", &format!("{rev}:{path}")])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("read {path} at {rev}: {error}")))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "revision {rev} has no tracked {path} in {}",
+            repo.display()
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| GeneratorError::usage(format!("{path} at {rev} is not UTF-8: {error}")))
 }
 
 /// Digest identifying the candidate product for `rev`: the debug binary the
@@ -205,10 +245,25 @@ mod tests {
             std::fs::create_dir_all(root.join("crates/velnor-workflow/src")),
             "fixture dirs",
         );
+        must(
+            std::fs::create_dir_all(root.join("crates/velnor-model/src")),
+            "fixture model dirs",
+        );
         for (name, content) in [
             ("crates/velnor-workflow/src/Zebra.rs", "zebra\n"),
             ("crates/velnor-workflow/src/apple.rs", "apple\n"),
-            ("Cargo.toml", "[workspace]\n"),
+            (
+                "crates/velnor-workflow/Cargo.toml",
+                "[package]\nname = \"velnor-workflow\"\n[dependencies]\nserde = \"1\"\n",
+            ),
+            (
+                "crates/velnor-model/src/lib.rs",
+                "pub fn value() -> u8 { 1 }\n",
+            ),
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/velnor-workflow\", \"crates/velnor-model\"]\n",
+            ),
             ("Cargo.lock", "# lock\n"),
             ("UNRELATED.md", "unrelated\n"),
         ] {
@@ -485,6 +540,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the parity test keeps old/new revision proof adjacent"
+    )]
+    #[test]
+    fn old_and_dependency_trees_resolve_without_closure_drift() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-closure-bridge-{}", crate::unique_suffix()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        git_in(&root, &["init", "--quiet", "-b", "main"]);
+        git_in(&root, &["config", "user.email", "closure@test"]);
+        git_in(&root, &["config", "user.name", "closure"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "--quiet", "--message", "legacy tree"]);
+        let legacy = git_output(&root, &["rev-parse", "HEAD"]);
+        let legacy_digest = must(
+            closure_of_tree(&root, &legacy, "", PROFILE_RELEASE),
+            "legacy closure",
+        );
+        let legacy_listing = must(
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args([
+                    "ls-tree",
+                    "-r",
+                    &legacy,
+                    "--",
+                    "crates/velnor-workflow",
+                    "Cargo.toml",
+                    "Cargo.lock",
+                    "rust-toolchain.toml",
+                    "rust-toolchain",
+                    ".cargo",
+                ])
+                .output(),
+            "legacy pathset oracle",
+        );
+        let legacy_lines = String::from_utf8_lossy(&legacy_listing.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            legacy_digest,
+            canonical_digest(&legacy_lines, "", PROFILE_RELEASE),
+            "a revision without the model dependency retains the published v1 pathset"
+        );
+
+        must(
+            std::fs::write(
+                root.join("crates/velnor-model/src/lib.rs"),
+                "pub fn value() -> u8 { 2 }\n",
+            ),
+            "change unrelated model source",
+        );
+        git_in(
+            &root,
+            &[
+                "commit",
+                "--quiet",
+                "-a",
+                "--message",
+                "unrelated model change",
+            ],
+        );
+        let legacy_after_model_change = git_output(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            must(
+                closure_of_tree(&root, &legacy_after_model_change, "", PROFILE_RELEASE),
+                "legacy closure after unrelated model change"
+            ),
+            legacy_digest,
+            "unreferenced model changes do not invalidate old product identities"
+        );
+
+        must(
+            std::fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n[dependencies.velnor-model]\npath = \"../velnor-model\"\n",
+            ),
+            "add local model dependency",
+        );
+        git_in(
+            &root,
+            &["commit", "--quiet", "-a", "--message", "model dependency"],
+        );
+        let dependent = git_output(&root, &["rev-parse", "HEAD"]);
+        let dependent_digest = must(
+            closure_of_tree(&root, &dependent, "", PROFILE_RELEASE),
+            "dependent closure",
+        );
+        assert_ne!(dependent_digest, legacy_digest);
+        must(
+            std::fs::write(
+                root.join("crates/velnor-model/src/lib.rs"),
+                "pub fn value() -> u8 { 3 }\n",
+            ),
+            "change depended-on model source",
+        );
+        git_in(
+            &root,
+            &[
+                "commit",
+                "--quiet",
+                "-a",
+                "--message",
+                "model source change",
+            ],
+        );
+        let dependent_after_model_change = git_output(&root, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            must(
+                closure_of_tree(&root, &dependent_after_model_change, "", PROFILE_RELEASE),
+                "dependent closure after model source change"
+            ),
+            dependent_digest,
+            "model source edits invalidate dependent workflow products"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn revision_without_workflow_manifest_keeps_the_published_pathset() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-legacy-manifest-{}",
+            crate::unique_suffix()
+        ));
+        write_closure_fixture(&root);
+        must(
+            std::fs::remove_file(root.join("crates/velnor-workflow/Cargo.toml")),
+            "remove legacy-missing manifest",
+        );
+        git_in(&root, &["init", "--quiet", "-b", "main"]);
+        git_in(&root, &["config", "user.email", "closure@test"]);
+        git_in(&root, &["config", "user.name", "closure"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "--quiet", "--message", "legacy tree"]);
+        let revision = git_output(&root, &["rev-parse", "HEAD"]);
+        let digest = must(
+            closure_of_tree(&root, &revision, "", PROFILE_RELEASE),
+            "legacy closure without workflow manifest",
+        );
+        let output = must(
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args([
+                    "ls-tree",
+                    "-r",
+                    &revision,
+                    "--",
+                    "crates/velnor-workflow",
+                    "Cargo.toml",
+                    "Cargo.lock",
+                    "rust-toolchain.toml",
+                    "rust-toolchain",
+                    ".cargo",
+                ])
+                .output(),
+            "legacy pathset listing",
+        );
+        let lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(digest, canonical_digest(&lines, "", PROFILE_RELEASE));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Every `[dependencies]`-shaped section of the crate manifest that can
     /// feed the shipped binary. Dev-dependencies are excluded by
     /// construction: they never enter release products, so the dev-only
@@ -619,10 +844,14 @@ mod tests {
         );
         for path in CLOSURE_PATHS {
             assert!(
-                build.contains(&format!("\"{path}\"")),
-                "build.rs pathspec is missing {path}"
+                crate::closure_inputs::BASE_CLOSURE_PATHS.contains(path),
+                "shared closure path list is missing {path}"
             );
         }
+        assert!(
+            build.contains("build_closure_paths"),
+            "build.rs must use the fail-closed dependency detector"
+        );
         assert!(
             build.contains("VELNOR_WORKFLOW_CLOSURE_DIGEST"),
             "build.rs must stamp the closure digest"

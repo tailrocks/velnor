@@ -1481,6 +1481,10 @@ fn closure_fixture(name: &str) -> (PathBuf, String) {
         &root.join("crates/velnor-workflow/src/lib.rs"),
         "pub fn f() {}\n",
     );
+    write(
+        &root.join("crates/velnor-workflow/Cargo.toml"),
+        "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
+    );
     write(&root.join("Cargo.toml"), "[workspace]\n");
     write(&root.join("Cargo.lock"), "# lock\n");
     write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
@@ -1495,6 +1499,10 @@ fn squash_fixture(name: &str, main_touches_closure: bool) -> (PathBuf, String, S
     write(
         &root.join("crates/velnor-workflow/src/lib.rs"),
         "pub fn f() {}\n",
+    );
+    write(
+        &root.join("crates/velnor-workflow/Cargo.toml"),
+        "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
     );
     write(&root.join("Cargo.toml"), "[workspace]\n");
     write(&root.join("Cargo.lock"), "# base-lock\n");

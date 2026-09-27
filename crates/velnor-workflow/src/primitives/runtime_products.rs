@@ -35,9 +35,12 @@
 use std::fmt::Write as _;
 
 use super::{Args, Primitive, RenderCtx, Rendered};
+#[cfg(test)]
+use crate::closure::CLOSURE_PATHS;
 use crate::closure::{
-    product_tag, CI_FEATURES, CLOSURE_PATHS, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
+    product_tag, CI_FEATURES, CLOSURE_VERSION, PRODUCT_TAG_PREFIX, PROFILE_RELEASE,
 };
+use crate::closure_inputs;
 use crate::{
     config_rust_toolchain, workflow_setup_action_repository, yaml_scalar, ActionPin,
     GeneratorError, ProjectConfig, RustToolchain, GENERATED_HEADER, HOSTED_WORKFLOW_RUNTIME_HOME,
@@ -51,6 +54,18 @@ pub(crate) const RUNTIME_PRODUCTS_FILE: &str = "ci-runtime-products.yml";
 /// The producer side-file family and the canonical file it renders.
 pub(crate) const RUNTIME_PRODUCTS_SIDE_FILES: &[(&str, &str)] =
     &[(RUNTIME_PRODUCTS_FILE, super::RUNTIME_PRODUCTS)];
+
+#[expect(
+    clippy::expect_used,
+    reason = "Cargo has validated both emitter manifests before this build runs"
+)]
+fn producer_closure_paths() -> Vec<&'static str> {
+    closure_inputs::closure_paths(
+        include_str!("../../Cargo.toml"),
+        include_str!("../../../../Cargo.toml"),
+    )
+    .expect("the emitter Cargo manifests must resolve the runtime closure")
+}
 
 /// Whether `primitive` renders the runtime-product producer workflow.
 pub(crate) fn is_runtime_products_side(primitive: &str) -> bool {
@@ -177,6 +192,12 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
         return None;
     }
     let repository = workflow_setup_action_repository();
+    // Select optional source inputs from the package that owns this emitter.
+    // With no local `velnor-model` dependency this is exactly the v1 legacy
+    // pathset, preserving all already-published product identities and the
+    // generated workflow bytes. A future dependency-bearing source tree emits
+    // the extra path into both producer closure resolutions.
+    let closure_paths = producer_closure_paths();
     let owner = product_owner(repository);
     // The toolchain install is file-driven: the checkout's own
     // `rust-toolchain.toml` — itself a closure input — pins the channel, so a
@@ -626,7 +647,7 @@ jobs:
         workflow_file = RUNTIME_PRODUCTS_FILE,
         runtime_home = HOSTED_WORKFLOW_RUNTIME_HOME,
         tag_prefix = PRODUCT_TAG_PREFIX,
-        closure_paths = CLOSURE_PATHS.join(" "),
+        closure_paths = closure_paths.join(" "),
         closure_footer = closure_footer,
         matrix = matrix,
         manifest_products = manifest_program,
@@ -905,7 +926,11 @@ mod tests {
     fn setup_action_source() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
-        must(fs::read_to_string(&path), "read the setup action source")
+        let source = must(fs::read_to_string(&path), "read the setup action source");
+        must(
+            closure_inputs::render_setup_action(&source),
+            "render the setup action for the active closure",
+        )
     }
 
     #[test]
@@ -969,7 +994,7 @@ mod tests {
     #[test]
     fn closure_shell_matches_the_canonical_form() {
         let content = owner_content(&[]);
-        let pathspec = CLOSURE_PATHS.join(" ");
+        let pathspec = producer_closure_paths().join(" ");
         assert!(
             content.contains(&format!("git ls-tree -r HEAD -- {pathspec}")),
             "the closure pathspec derives from CLOSURE_PATHS: {content}"
@@ -2062,6 +2087,17 @@ mod tests {
                 "write a fixture input",
             );
         }
+        must(
+            fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
+            ),
+            "write fixture workflow manifest",
+        );
+        must(
+            fs::write(root.join("Cargo.toml"), "[workspace]\n"),
+            "write fixture workspace manifest",
+        );
         let git = |args: &[&str]| {
             let status = must(
                 std::process::Command::new("git")

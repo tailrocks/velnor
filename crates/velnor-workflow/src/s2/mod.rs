@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::closure_inputs;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
@@ -6453,9 +6454,47 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workf
 ///   becomes unacceptable, the fix is a new feature (provision and verify
 ///   `velnor-workflow` on Velnor per job, mirroring the GitHub
 ///   `Download`→`Verify`→`Add to PATH` triple), not a parity restoration.
+#[expect(
+    clippy::panic,
+    reason = "invalid emitter manifests must fail closed before rendering policy"
+)]
 pub(crate) fn workflow_pinned_policy_runtime_local(revision: &str, checkout: &str) -> String {
+    let model_dependency = closure_inputs::current_package_has_model_dependency()
+        .unwrap_or_else(|error| panic!("resolve emitter model dependency: {error}"));
+    workflow_pinned_policy_runtime_local_with_model_dependency(revision, checkout, model_dependency)
+}
+
+fn workflow_pinned_policy_runtime_local_with_model_dependency(
+    revision: &str,
+    checkout: &str,
+    model_dependency: bool,
+) -> String {
+    let product_repository = workflow_setup_action_repository();
+    let product_repository_env = if model_dependency {
+        format!("          PRODUCT_REPOSITORY: {product_repository}\n")
+    } else {
+        String::new()
+    };
+    let source_setup = if model_dependency {
+        let mut setup = String::from(
+            "          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{commit}\" 2>/dev/null; then\n            listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n",
+        );
+        setup.push_str(&closure_inputs::local_shell_resolver(
+            "PINNED_REVISION",
+            "CHECKOUT_PATH",
+            "          ",
+        ));
+        setup.push_str(
+            "          else\n            tree=\"$(gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\")\" || { echo \"::error::unknown generator revision $PINNED_REVISION\" >&2; exit 1; }\n            [[ \"$(jq -r '.truncated // false' <<<\"$tree\")\" != \"true\" ]] || { echo \"::error::tree API response is truncated; the closure cannot be proven\" >&2; exit 1; }\n            listing=\"$(jq -r '[.tree[] | select(.type != \"tree\") | select(.path == \"Cargo.toml\" or .path == \"Cargo.lock\" or .path == \"rust-toolchain.toml\" or .path == \"rust-toolchain\" or (.path | startswith(\"crates/velnor-workflow/\")) or (.path | startswith(\".cargo/\"))) | \"\\(.mode) \\(.type) \\(.sha)\\t\\(.path)\"] | sort | join(\"\\n\")' <<<\"$tree\")\"\n",
+        );
+        setup.push_str(&closure_inputs::api_shell_resolver("          "));
+        setup.push_str("          fi\n");
+        setup
+    } else {
+        "          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{commit}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n".to_owned()
+    };
     format!(
-        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n        run: |\n          set -euo pipefail\n          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
+        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n{product_repository_env}        run: |\n          set -euo pipefail\n{source_setup}          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
     )
 }
 
@@ -6924,7 +6963,12 @@ fn generated_files_with_surface(
         files.entry(path).or_insert(content);
     }
     for owned in &config.static_files {
-        files.insert(PathBuf::from(&owned.path), owned.content.clone());
+        let content = if owned.path == ".github/actions/setup-velnor-workflow/action.yml" {
+            closure_inputs::render_setup_action(&owned.content).map_err(GeneratorError::usage)?
+        } else {
+            owned.content.clone()
+        };
+        files.insert(PathBuf::from(&owned.path), content);
     }
     if config.velnor_host_cache.has_overrides() {
         files.insert(
@@ -11284,6 +11328,70 @@ mod tests {
         assert!(
             step.contains("mainline runtime-product publisher"),
             "the failure names the producer that publishes the product: {step}"
+        );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "test setup failures should identify the missing rendered contract"
+    )]
+    #[test]
+    fn local_policy_resolver_adds_model_only_for_dependency_aware_emitters() {
+        let legacy = workflow_pinned_policy_runtime_local_with_model_dependency(
+            FIXTURE_REVISION,
+            "checkout",
+            false,
+        );
+        assert!(!legacy.contains("manifests=\"$(mktemp -d)\""));
+
+        let model = workflow_pinned_policy_runtime_local_with_model_dependency(
+            FIXTURE_REVISION,
+            "checkout",
+            true,
+        );
+        assert!(model.contains(
+            "git -C \"$CHECKOUT_PATH\" show \"$PINNED_REVISION:crates/velnor-workflow/Cargo.toml\""
+        ));
+        assert!(model.contains(
+            "git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-model"
+        ));
+        assert!(model.contains("import tomllib"));
+        assert!(model.contains("listing+=$'\\n'\"$model_tree\""));
+        assert!(model.contains("velnor-model dependency has no tracked source tree"));
+
+        let start = model
+            .find(
+                "          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{commit}\"",
+            )
+            .expect("resolver renders");
+        let end = model[start..]
+            .find("          if command -v sha256sum")
+            .map(|offset| start + offset)
+            .expect("resolver terminates before digest calculation");
+        serde_yaml::from_str::<serde_yaml::Value>(&model)
+            .expect("model-aware policy runtime is valid YAML");
+        assert!(model.contains("PRODUCT_REPOSITORY: tailrocks/velnor"));
+        assert!(model.contains(
+            "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
+        ));
+        let shell = model[start..end]
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut syntax = Command::new("bash")
+            .args(["-n"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("bash is available for shell syntax verification");
+        std::io::Write::write_all(syntax.stdin.as_mut().expect("bash stdin"), shell.as_bytes())
+            .expect("write shell fragment");
+        let result = syntax.wait_with_output().expect("wait for bash -n");
+        assert!(
+            result.status.success(),
+            "local resolver shell syntax: {}",
+            String::from_utf8_lossy(&result.stderr)
         );
     }
 
