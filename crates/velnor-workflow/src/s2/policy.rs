@@ -4619,6 +4619,13 @@ mod candidate_source_cleanup_tests {
             "write source",
         );
         must(
+            fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write workflow package manifest",
+        );
+        must(
             fs::write(root.join("Cargo.toml"), "[workspace]\n"),
             "write manifest",
         );
