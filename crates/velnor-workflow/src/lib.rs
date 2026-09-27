@@ -238,9 +238,9 @@ pub(crate) const SOURCE_PROFILE: &str = env!("VELNOR_WORKFLOW_PROFILE");
 /// installing the runtime artifact's policy binary so `--check` never needs
 /// the network.
 pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINARY";
-/// Names a `velnor-workflow` binary built from the audited pull-request tree.
-/// The policy candidate exception consults this slot only after the pinned
-/// binary has independently proved the declared generator revision.
+/// Names the candidate binary downloaded from the same-repository PR run.
+/// The candidate renderer is untrusted and must never replace the pinned
+/// policy runtime slot; policy consumes it only with its matching manifest.
 pub const VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_BINARY";
 /// Names the candidate manifest binding the env-slot candidate binary: the
 /// `candidate-manifest.json` the policy job's acquire step downloaded beside
@@ -250,6 +250,20 @@ pub const VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV: &str = "VELNOR_WORKFLOW_CANDIDAT
 /// `--candidate-manifest` overrides this fallback; empty or missing disables
 /// the env-slot candidate.
 pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_MANIFEST";
+
+/// The published base validator used during candidate-workflow bootstrap.
+/// Keeping `[generator].revision` at this exact pin preserves the established
+/// generated workflow bytes. Promoting the pin to a newer renderer opts into
+/// the candidate artifact wiring after that renderer is available as the
+/// trusted validator.
+pub(crate) const LEGACY_CANDIDATE_POLICY_PIN: &str = "e988d793937c044275e4086b00856444c60f6ab8";
+
+/// The legacy pin is the typed opt-out sentinel for candidate workflow
+/// wiring. The pin change is the promotion step; no extra config key is
+/// introduced for older validators to reject.
+pub(crate) fn candidate_artifact_wiring_enabled(revision: &str) -> bool {
+    revision != LEGACY_CANDIDATE_POLICY_PIN
+}
 // The D19 generator pin is not a source literal: a constant naming the commit
 // that carries it can never equal that commit, so a tree rendered by the
 // pinned generator could never be byte-identical to the tree that declares the
@@ -5376,7 +5390,9 @@ fn refresh_velnor_action_pins(template: &str) -> String {
 /// entrypoint (`Policy`, `pull_request_target` + `workflow_dispatch`) and the
 /// same job inside the trusted aggregates (`ci-main.yml`, `nightly.yml`),
 /// where a push to the default branch proves the validator the branch now
-/// carries passes on its own tree.
+/// carries passes on its own tree. The policy job grants only \`actions: read\`,
+/// \`contents: read\`, and \`pull-requests: read\` so it can inspect the
+/// candidate run and checkout.
 pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) name: &'a str,
     /// The validator pin: the `velnor-workflow` commit whose `policy`
@@ -5399,6 +5415,7 @@ pub(crate) struct PolicyJobSpec<'a> {
     /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
     /// rulesets API answers 403 on private repositories.
     pub(crate) declared_ruleset_contexts: &'a str,
+    pub(crate) candidate_artifact_wiring: bool,
 }
 
 /// Shell fragment reading the audited tree's declared generator pin into
@@ -5413,37 +5430,12 @@ fn audited_pin_script() -> &'static str {
 "#
 }
 
-/// Owner policy step acquiring the PR run's candidate generator product.
-/// When the audited pin shares the base validator's closure AND the tree
-/// matches the pin's render the step exits immediately (the Stage-0
-/// validator renders). A same-closure tree that differs from the pin's
-/// render falls through to the candidate path: that is a generator change
-/// in flight, and exiting early would strand the validator with no
-/// candidate binding (manifest cleared, pin leg red). Otherwise the step
-/// waits for the same-repository PR run at the audited head to publish the
-/// candidate artifact the Rust unit job packaged, verifies its manifest
-/// bindings and digest, requires the manifest closure to equal the audited
-/// head's candidate closure in full (not just the artifact-name prefix),
-/// and exports the binary through the existing pinned-binary slot plus its
-/// manifest. This reader-only change lands before the generated writer moves
-/// to the candidate slot, so the base validator remains able to verify this
-/// tree. A later pin promotion and writer migration can switch the export
-/// once this candidate-slot reader is the base validator.
-/// The poll name and the manifest gate both key off the head closure — the
-/// same identity the publisher names the artifact by and the validator's
-/// `wanted` binding checks — so the three legs rendezvous on one digest. The
-/// `--closure` probe runs later in a token-free policy step. The candidate is
-/// untrusted code and can inspect its parent process, so child-only
-/// environment clearing in this token-bearing acquisition step is not
-/// sufficient.
-/// Fork generator changes fail closed: only same-repository runs
-/// are even considered. The same-repository select compares the embedded
-/// `.head_repository.id` object: the runs-list endpoint exposes no
-/// `.head_repository_id` scalar, and selecting on it matches nothing.
-/// The artifact check pipes the listing through real jq for the same
-/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
-/// never report the match.
-fn policy_candidate_step(revision: &str) -> String {
+/// Compatibility renderer used while `[generator].revision` is the legacy
+/// bootstrap pin. It looks up the artifact for `HEAD_SHA`, verifies its
+/// manifest, digest, and candidate closure, then exports it through the
+/// existing pinned-binary slot plus its manifest. Keep this fragment byte
+/// compatible with the bootstrap workflow until the pin is promoted.
+fn policy_candidate_step_legacy(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
         working-directory: policy-checkout
@@ -5525,6 +5517,147 @@ fn policy_candidate_step(revision: &str) -> String {
     )
 }
 
+/// Owner policy step acquiring the PR run's candidate generator product.
+/// When the audited pin shares the base validator's closure AND the tree
+/// matches the pin's render the step exits immediately (the Stage-0
+/// validator renders). A same-closure tree that differs from the pin's
+/// render falls through to the candidate path: that is a generator change
+/// in flight, and exiting early would strand the validator with no
+/// candidate binding (manifest cleared, pin leg red). Otherwise the step
+/// waits for the same-repository PR run at the resolved candidate head to
+/// publish the artifact the Rust unit job packaged, verifies its manifest
+/// bindings and digest, requires the candidate closure to equal the audited
+/// render closure before any candidate execution, and exports the binary in
+/// the dedicated candidate slot plus its manifest for the validator's
+/// binding. The trusted pinned binary slot stays unchanged. The poll name
+/// keys off the candidate closure; the manifest gate binds that closure to
+/// both the candidate revision and the audited render revision, so a squash
+/// merge whose main side changed closure inputs fails with an actionable
+/// rebase/rebuild error. The `--closure` probe runs later in a
+/// token-free policy step. The candidate is untrusted code and can inspect
+/// its parent process, so child-only environment clearing in this
+/// token-bearing acquisition step is not sufficient.
+/// On the trusted main push after a squash merge, the event SHA is the new
+/// squash commit, not the PR head that produced the candidate artifact. The
+/// step resolves that commit to exactly one merged, same-repository PR before
+/// polling; a direct push or an ambiguous association fails closed. Fork
+/// generator changes fail closed: only same-repository runs are even
+/// considered. The same-repository select compares the embedded
+/// `.head_repository.id` object: the runs-list endpoint exposes no
+/// `.head_repository_id` scalar, and selecting on it matches nothing.
+/// The artifact check pipes the listing through real jq for the same
+/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
+/// never report the match.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the candidate acquisition shell keeps its provenance gates together"
+)]
+fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
+    format!(
+        r#"      - name: Acquire candidate generator product
+        working-directory: policy-checkout
+        env:
+          GH_TOKEN: ${{{{ github.token }}}}
+          EVENT_NAME: ${{{{ github.event_name }}}}
+          MERGE_SHA: ${{{{ github.sha }}}}
+          PR_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+          PR_HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
+          DEFAULT_BRANCH: {default_branch}
+          BASE_PIN: {revision}
+        run: |
+          set -euo pipefail
+{pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
+          pin_closure="$(velnor-workflow closure --rev="$pin")"
+          if [[ "$pin_closure" == "$base_closure" ]]; then
+            # Same closure means the running base validator IS the pin's
+            # renderer, so --check decides tree==pin-render with no extra
+            # provisioning. A match exits early; a differ falls through to
+            # the candidate path (a generator change in flight) instead of
+            # stranding the validator with a cleared manifest and a red pin
+            # leg. The check output stays visible: on a fall-through it is
+            # the diagnosis, on a match it is one line.
+            if velnor-workflow --plain --check; then
+              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
+              echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=" >> "$GITHUB_ENV"
+              echo "{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}=" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
+          fi
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            merged_pulls="$(gh api "repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls" | jq -c --arg merge_sha "$MERGE_SHA" --arg repository "$GITHUB_REPOSITORY" --arg default_branch "$DEFAULT_BRANCH" '[.[] | select(.merge_commit_sha == $merge_sha and .merged_at != null and .base.ref == $default_branch and .base.repo.full_name == $repository and .head.repo.full_name == $repository) | {{head_sha: .head.sha, head_repository: .head.repo.full_name}}]')"
+            if [[ "$(jq 'length' <<<"$merged_pulls")" != "1" ]]; then
+              echo "::error::push $MERGE_SHA is not associated with exactly one merged same-repository pull request; direct pushes and ambiguous squash merges fail closed" >&2
+              exit 1
+            fi
+            CANDIDATE_SHA="$(jq -er '.[0].head_sha' <<<"$merged_pulls")"
+            HEAD_REPOSITORY="$(jq -er '.[0].head_repository' <<<"$merged_pulls")"
+            RENDER_SHA="$MERGE_SHA"
+          elif [[ "$EVENT_NAME" == "pull_request_target" ]]; then
+            CANDIDATE_SHA="$PR_HEAD_SHA"
+            HEAD_REPOSITORY="$PR_HEAD_REPOSITORY"
+            RENDER_SHA="$PR_HEAD_SHA"
+            [[ -n "$CANDIDATE_SHA" && -n "$HEAD_REPOSITORY" ]] || {{ echo "::error::pull_request_target has no same-repository head; candidate lookup fails closed" >&2; exit 1; }}
+          elif [[ "$EVENT_NAME" != "pull_request_target" ]]; then
+            echo "::error::candidate lookup requires pull_request_target or a squash-merge push, got $EVENT_NAME" >&2
+            exit 1
+          fi
+          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
+          if ! git cat-file -e "$CANDIDATE_SHA^{{commit}}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$CANDIDATE_SHA"
+          fi
+          head_candidate="$(velnor-workflow closure --rev="$CANDIDATE_SHA" --candidate)"
+          render_candidate="$(velnor-workflow closure --rev="$RENDER_SHA" --candidate)"
+          name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
+          deadline=$((SECONDS + 900))
+          run_id=""
+          while (( SECONDS < deadline )); do
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
+            waiting=false
+            seen=false
+            while read -r candidate_run; do
+              test "$candidate_run" != '' || continue
+              seen=true
+              status="$(jq -r .status <<<"$candidate_run")"
+              id="$(jq -r .id <<<"$candidate_run")"
+              # $name in the filter is a jq variable, not a shell expansion.
+              # shellcheck disable=SC2016
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
+                run_id="$id"
+                break 2
+              fi
+              [[ "$status" == "completed" ]] || waiting=true
+            done <<<"$(jq -c '.[]' <<<"$runs")"
+            # No runs yet means the API has not indexed the sibling run, not
+            # that it will never come: keep polling until the deadline.
+            [[ "$seen" == "true" ]] || waiting=true
+            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
+            sleep 15
+          done
+          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
+          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
+          rm -rf "$candidate"
+          mkdir -p "$candidate"
+          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
+          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" --arg revision "$CANDIDATE_SHA" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and .revision == $revision and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
+          else
+            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{{print $1}}')"
+          fi
+          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
+          [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
+          chmod 0755 "$candidate/velnor-workflow"
+          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
+          [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
+          [[ "$manifest_closure" == "$render_candidate" ]] || {{ echo "::error::candidate revision $CANDIDATE_SHA closure $manifest_closure differs from audited render $RENDER_SHA closure $render_candidate; update the PR branch/rebuild the candidate after main changes" >&2; exit 1; }}
+          echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+"#,
+        pin_script = audited_pin_script(),
+    )
+}
+
 /// Consumer policy steps acquiring the audited tree's declared generator as
 /// a release product. Consumer pins always name released generators, so a
 /// second setup call with the runtime-read pin suffices; when the pin equals
@@ -5587,6 +5720,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         trusted_gate,
         default_branch,
         declared_ruleset_contexts,
+        candidate_artifact_wiring,
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
@@ -5637,18 +5771,30 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     };
     let renderer = if hosted {
         if owner {
-            policy_candidate_step(revision)
+            if candidate_artifact_wiring {
+                policy_candidate_step(revision, default_branch)
+            } else {
+                policy_candidate_step_legacy(revision)
+            }
         } else {
             policy_renderer_steps(repository, revision)
         }
     } else {
         String::new()
     };
-    format!(
+    let job_rendered = format!(
         "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
         actionlint_setup = actionlint_setup_step(cache_backend),
-    )
+    );
+    if candidate_artifact_wiring {
+        job_rendered.replace(
+            "    permissions:\n      contents: read\n    steps:\n",
+            "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n",
+        )
+    } else {
+        job_rendered
+    }
 }
 
 /// The step that provisions the pinned actionlint for the policy job. The
@@ -5736,6 +5882,7 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
         trusted_gate: gate.as_deref(),
         default_branch: &config.default_branch,
         declared_ruleset_contexts: &declared_ruleset_contexts,
+        candidate_artifact_wiring: candidate_artifact_wiring_enabled(&config.workflow_revision),
     });
     let concurrency = policy_concurrency_block(config);
     // `workflow_dispatch` lets a maintainer prove the validator the base
@@ -17894,6 +18041,7 @@ channel = "stable"
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
+            candidate_artifact_wiring: true,
         })
     }
 
@@ -17907,6 +18055,7 @@ channel = "stable"
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
+            candidate_artifact_wiring: true,
         })
     }
 
@@ -18766,19 +18915,56 @@ channel = "stable"
     }
 
     #[test]
-    fn policy_job_preserves_legacy_permissions_during_bootstrap() {
+    fn policy_job_grants_exact_read_only_api_permissions() {
         for policy in [
             hosted_policy_job("abc123"),
             velnor_policy_job("abc123", "[self-hosted, velnor]"),
         ] {
             assert!(
-                policy.contains("    permissions:\n      contents: read\n    steps:\n"),
+                policy.contains(
+                    "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n"
+                ),
                 "{policy}"
             );
-            assert!(!policy.contains(
-                "    permissions:\n      actions: read\n      contents: read\n    steps:\n"
-            ));
+            assert!(
+                !policy.contains(
+                    "    permissions:\n      actions: read\n      contents: read\n    steps:\n"
+                ),
+                "policy must include pull-requests: read: {policy}"
+            );
         }
+    }
+
+    #[test]
+    fn legacy_generator_pin_keeps_candidate_wiring_at_its_byte_compatible_default() {
+        assert!(!candidate_artifact_wiring_enabled(
+            LEGACY_CANDIDATE_POLICY_PIN
+        ));
+        assert!(candidate_artifact_wiring_enabled(
+            "1111111111111111111111111111111111111111"
+        ));
+
+        let job = policy_job(&PolicyJobSpec {
+            name: "Policy",
+            revision: LEGACY_CANDIDATE_POLICY_PIN,
+            runner: "ubuntu-24.04",
+            repository: workflow_setup_action_repository(),
+            cache_backend: "github",
+            trusted_gate: None,
+            default_branch: "main",
+            declared_ruleset_contexts: "ci-required,DCO,Policy",
+            candidate_artifact_wiring: candidate_artifact_wiring_enabled(
+                LEGACY_CANDIDATE_POLICY_PIN,
+            ),
+        });
+        assert!(
+            job.contains("    permissions:\n      contents: read\n    steps:\n"),
+            "the bootstrap pin retains the established permission bytes: {job}"
+        );
+        assert!(job.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"));
+        assert!(job.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"));
+        assert!(!job.contains("EVENT_NAME: ${{ github.event_name }}"));
+        assert!(!job.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"));
     }
 
     #[test]
@@ -18824,19 +19010,17 @@ channel = "stable"
     }
 
     /// The acquire step, the unit-job publisher, and the validator's
-    /// `wanted` binding rendezvous on one digest: the audited head's
-    /// candidate closure. Polling by the pin's candidate closure while the
-    /// other two legs bind the head's is jointly satisfiable only when
-    /// pin..head is closure-clean, so no render-changing generator PR can
-    /// land green. The step therefore derives the poll name and the
-    /// manifest gate from `closure --rev $HEAD_SHA --candidate`, and no
-    /// `pin_candidate` derivation survives anywhere in the job.
+    /// `wanted` binding rendezvous on one digest: the resolved candidate
+    /// revision's closure and the audited render revision's closure must
+    /// agree. The step derives the poll name from `CANDIDATE_SHA`, keeps
+    /// `RENDER_SHA` explicit for squash pushes, and rejects main changes that
+    /// make a PR-head artifact stale until the branch is updated and rebuilt.
     #[test]
     fn policy_candidate_step_binds_manifest_to_head_and_exports_it() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
             owner.contains(
-                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
             ),
             "the acquire step derives the candidate from the audited head: {owner}"
         );
@@ -18857,6 +19041,20 @@ channel = "stable"
                 "candidate manifest closure $manifest_closure is not the head's candidate $head_candidate"
             ),
             "a closure mismatch fails closed with both digests: {owner}"
+        );
+        assert!(
+            owner.contains(
+                "render_candidate=\"$(velnor-workflow closure --rev=\"$RENDER_SHA\" --candidate)\""
+            ) && owner.contains("\"$manifest_closure\" == \"$render_candidate\""),
+            "a PR artifact whose closure differs from the audited render fails closed: {owner}"
+        );
+        assert!(
+            owner.contains(".build_revision | test(\"^[0-9a-f]{40}$\")"),
+            "the manifest binds the binary build revision: {owner}"
+        );
+        assert!(
+            owner.contains("update the PR branch/rebuild the candidate after main changes"),
+            "closure divergence names its remediation: {owner}"
         );
         assert!(
             owner.contains(
@@ -18942,37 +19140,44 @@ channel = "stable"
         );
     }
 
-    /// `closure --rev $HEAD_SHA` reads git objects at the audited head,
-    /// which the checkout step normally already fetched — but the acquire
-    /// step must not assume that: a missing head commit fails closed as a
-    /// fetch, never as a closure error. The fetch line matches the
-    /// checkout step's exactly, so both occurrences are asserted together.
+    /// Candidate closure reads the resolved PR-head object, which the
+    /// checkout step cannot guarantee after a squash merge. The acquire step
+    /// fetches that candidate revision before deriving its artifact name;
+    /// the audited render revision remains checked out separately.
     #[test]
     fn policy_acquire_fetches_head_before_deriving_its_candidate() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        let fetch = "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"";
+        let checkout_fetch =
+            "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"";
         assert_eq!(
-            owner.matches(fetch).count(),
-            2,
-            "the checkout step and the acquire step both ensure the head commit: {owner}"
+            owner.matches(checkout_fetch).count(),
+            1,
+            "the checkout step ensures the audited render commit: {owner}"
+        );
+        let candidate_fetch =
+            "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$CANDIDATE_SHA\"";
+        assert_eq!(
+            owner.matches(candidate_fetch).count(),
+            1,
+            "the acquire step ensures the resolved PR-head commit: {owner}"
         );
         let acquire_fetch = must_some(
             owner
                 .find("Acquire candidate generator product")
                 .and_then(|start| {
                     owner[start..]
-                        .find("if ! git cat-file -e \"$HEAD_SHA^{commit}\"")
+                        .find("if ! git cat-file -e \"$CANDIDATE_SHA^{commit}\"")
                         .map(|offset| start + offset)
                 }),
-            "the acquire step guards its own head fetch",
+            "the acquire step guards its own candidate fetch",
         );
         let head = must_some(
             owner.find("head_candidate=\"$(velnor-workflow closure"),
-            "the head derivation is present",
+            "the candidate derivation is present",
         );
         assert!(
             acquire_fetch < head,
-            "the head commit is ensured before its candidate is derived: {owner}"
+            "the candidate commit is ensured before its artifact is derived: {owner}"
         );
     }
 
@@ -19024,12 +19229,9 @@ channel = "stable"
             "the token-bearing acquire step never executes the candidate: {owner}"
         );
         assert!(
-            owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
-            "the verified candidate remains visible to the base validator during reader bootstrap: {owner}"
-        );
-        assert!(
-            !owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"),
-            "the writer stays on the pinned slot until the reader pin is promoted: {owner}"
+            owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow")
+                && !owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
+            "the verified candidate is handed to later token-free policy execution in its separate slot: {owner}"
         );
     }
 

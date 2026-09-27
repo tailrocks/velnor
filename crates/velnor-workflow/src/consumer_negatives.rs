@@ -440,7 +440,7 @@ fn velnor_provisioner_script(checkout: &str) -> String {
 /// with the download block and still contain every trust gate — so script
 /// drift fails here instead of silently testing less.
 fn candidate_verify_tail(revision: &str) -> String {
-    let step = crate::policy_candidate_step(revision);
+    let step = crate::policy_candidate_step(revision, "main");
     let marker = "candidate=\"$RUNNER_TEMP/velnor-workflow-candidate\"";
     let at = must_some(step.find(marker), "locate candidate download block");
     let line_start = step[..at].rfind('\n').map_or(0, |index| index + 1);
@@ -918,6 +918,9 @@ impl ConsumerFixture {
             ("name", name),
             ("run_id", run_id),
             ("head_candidate", head_candidate),
+            ("render_candidate", head_candidate),
+            ("CANDIDATE_SHA", self.revision.as_str()),
+            ("RENDER_SHA", self.revision.as_str()),
         ];
         env.extend_from_slice(extra);
         (self.run_script("candidate", &tail, &env, None), env_file)
@@ -931,8 +934,8 @@ fn candidate_manifest(fixture: &ConsumerFixture, closure: &str, digest: &str) ->
         "repository": crate::workflow_setup_action_repository(),
         "run_id": "12345678",
         "revision": fixture.revision.as_str(),
-        "build_revision": fixture.revision.as_str(),
         "closure": closure,
+        "build_revision": fixture.revision.as_str(),
         "binary_sha256": digest,
     })
 }
@@ -1535,12 +1538,12 @@ fn candidate_acquire_exports_bound_product() {
     );
     let env = must(fs::read_to_string(&env_file), "read github env");
     assert!(
-        env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "the reader-bootstrap binary export remains on the base slot: {env}"
+        env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
+        "the candidate binary exports in its own slot: {env}"
     );
     assert!(
-        !env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
-        "the writer stays on the base slot until the reader pin is promoted: {env}"
+        !env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
+        "candidate acquisition preserves the pinned runtime slot: {env}"
     );
     assert!(
         env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),
