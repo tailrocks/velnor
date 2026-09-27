@@ -729,7 +729,8 @@ fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
 }
 
 /// The generated entrypoint holds exactly the privileges the trust argument
-/// in `ci-policy.yml` states: `contents: read` at both levels, no secrets,
+/// in `ci-policy.yml` states: workflow `contents: read`; the policy job may
+/// use `contents: read` or `actions: read` plus `contents: read`; no secrets,
 /// no persisted credentials, no deployment environment, one hosted job, and
 /// only the reviewed triggers.
 #[test]
@@ -767,6 +768,25 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
         "{:?}",
         drift.details
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn entrypoint_audit_accepts_read_only_actions_permission_on_policy_job() {
+    let clean = hosted_entrypoint(PIN_A);
+    let with_actions = clean.replacen(
+        "    permissions:\n      contents: read\n",
+        "    permissions:\n      actions: read\n      contents: read\n",
+        1,
+    );
+    assert_ne!(clean, with_actions);
+    let root = entrypoint_tree("entrypoint-actions-read", &with_actions);
+    let audit = must(
+        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+        "audit actions-read entrypoint",
+    );
+    assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
+    assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -827,7 +847,7 @@ fn entrypoint_audit_names_each_escalation() {
             "job-permissions",
             "    permissions:\n      contents: read\n",
             "    permissions:\n      contents: read\n      id-token: write\n",
-            "permissions must be exactly `contents: read`",
+            "permissions must be exactly `contents: read` or `actions: read, contents: read`",
         ),
         (
             "secret",
