@@ -4811,11 +4811,14 @@ trap 'cleanup_publication "$?"' EXIT
             Ok(process_group) => terminate_and_reap_fixture_group(child, process_group),
             Err(group_error) => {
                 let kill_result = child.kill();
-                reap_fixture_child_bounded(child).map_err(|cleanup_error| {
-                    format!(
+                match reap_fixture_child_bounded(child) {
+                    Ok(()) => Err(format!(
+                        "fixture group unavailable ({group_error}); direct child cleanup completed ({kill_result:?}), but group cleanup could not be verified"
+                    )),
+                    Err(cleanup_error) => Err(format!(
                         "fixture group unavailable ({group_error}); direct-child cleanup failed: {cleanup_error}; kill result: {kill_result:?}"
-                    )
-                })
+                    )),
+                }
             }
         }
     }
@@ -4922,7 +4925,15 @@ trap 'cleanup_publication "$?"' EXIT
             if !self.armed {
                 return;
             }
-            let _ = terminate_and_reap_fixture_group(&mut self.child, self.process_group);
+            if let Err(error) =
+                terminate_and_reap_fixture_group(&mut self.child, self.process_group)
+            {
+                let mut stderr = std::io::stderr().lock();
+                let _ = std::io::Write::write_fmt(
+                    &mut stderr,
+                    format_args!("fixture process-group cleanup failed: {error}\n"),
+                );
+            }
         }
     }
 
