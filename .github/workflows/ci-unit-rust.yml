@@ -181,12 +181,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-9567d50ca2b404e64d818dca845beec747518565-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-13a4f0f536b9083a517c23a78997480189bc835c-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 9567d50ca2b404e64d818dca845beec747518565
+          EXPECTED_REVISION: 13a4f0f536b9083a517c23a78997480189bc835c
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -200,7 +200,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 9567d50ca2b404e64d818dca845beec747518565
+          EXPECTED_REVISION: 13a4f0f536b9083a517c23a78997480189bc835c
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
@@ -496,6 +496,32 @@ jobs:
             if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
               chmod 0444 "$marker" 2>/dev/null || true
             fi
+          fi
+      - name: Fetch D19 pin history
+        env:
+          CI_UNIT_ID: ${{ inputs.unit }}
+        run: |
+          set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') exit 0 ;;
+            'rust-velnor-bench') exit 0 ;;
+            'rust-velnor-client') exit 0 ;;
+            'rust-velnor-control') exit 0 ;;
+            'rust-velnor-model') exit 0 ;;
+            'rust-velnor-render') exit 0 ;;
+            'rust-velnor-runner') exit 0 ;;
+            'rust-velnor-tools') exit 0 ;;
+            'rust-velnor-workflow') : ;;
+            'rust-velnor-workflow-contract') exit 0 ;;
+            'rust-velnorctl') exit 0 ;;
+            'rust-production-topology') exit 0 ;;
+            *) echo "unknown unit for pin fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
+          test "$pin" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }
+          if ! git cat-file -e "$pin^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$pin"
           fi
       - name: Formatting check
         if: ${{ contains(format(',{0},', inputs.validation_phases), ',fmt,') }}
