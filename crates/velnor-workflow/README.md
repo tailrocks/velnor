@@ -171,7 +171,11 @@ rerun generate on a byte-matching tree to move it to schema 2.
 ## Hosted workflow runtime product
 
 Generated GitHub-hosted jobs acquire a prebuilt runtime through the composite
-action. The action never compiles Velnor or falls back to `cargo install`:
+action. For a consuming repository, pin `uses` to the full commit SHA of the
+action and set `rev` to the full commit SHA of the generator source whose
+closure identifies the runtime product. The values can differ: `uses` selects
+the action code, while `rev` selects the generator revision. The action never
+compiles Velnor or falls back to `cargo install`:
 
 ```yaml
 - name: Set up Velnor workflow runtime
@@ -181,21 +185,29 @@ action. The action never compiles Velnor or falls back to `cargo install`:
     rev: <generator-commit-SHA>
 ```
 
-Both values are full commit SHAs with separate roles: `uses` selects the
-composite action code; `rev` selects the generator source whose closure
-identifies the runtime product. The action resolves that source closure from
-the checkout when available, or from the GitHub trees API. It downloads the
-platform binary and manifest from the immutable
-`velnor-workflow-runtime-v1-<closure-prefix>` release in `tailrocks/velnor`.
-The tag is only a locator. The action verifies the manifest and binary
-attestations against the mainline runtime-product publisher, checks the
-manifest's closure and platform, recomputes the binary SHA-256, then checks
-the binary's reported closure and revision. Missing products, unverifiable
-attestations, and mismatches fail closed; consumers never build the runtime.
+For workflows generated inside the Velnor owner repository, `uses` points to the
+local action path `./.github/actions/setup-velnor-workflow`; `rev` still
+resolves to the full generator commit SHA. The trusted `ci-policy.yml` job
+checks out the setup action from the base commit into `policy-setup-action/`
+and uses `./policy-setup-action/.github/actions/setup-velnor-workflow`. Its
+trusted workflow validates and resolves the full `rev` before setup, so a pull
+request cannot supply the action code used to validate itself.
+
+The action resolves the source closure from the checkout when available, or
+from the GitHub trees API. On a cache miss, it downloads the platform binary
+and manifest from the immutable
+`velnor-workflow-runtime-v1-<closure-prefix>` release in the Velnor owner
+repository and verifies attestations for the downloaded binary and
+manifest against the mainline runtime-product publisher. The tag is only a
+locator. It checks the manifest's closure and platform, recomputes the binary
+SHA-256, then checks the binary's reported closure and revision. Missing
+products, unverifiable attestations, and mismatches fail closed; consumers
+never build the runtime.
 
 The Actions cache is only an acceleration, keyed by runner OS, architecture,
-and source closure. Every restored product has its manifest, digest, and
-runtime-reported closure and revision checked again. A cache miss downloads
+and source closure. On a cache hit, the action revalidates the manifest,
+binary digest, and binary-reported closure and revision. Attestations for the
+downloaded binary and manifest are verified on download. A cache miss downloads
 the published release product; it does not compile it.
 
 For a `pull_request_target` run, GitHub executes the base branch's trusted
