@@ -4818,7 +4818,12 @@ trap 'cleanup_publication "$?"' EXIT
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             let _ = child.kill();
-            let _ = child.wait();
+            for _ in 0..200 {
+                if child.try_wait().ok().flatten().is_some() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
 
