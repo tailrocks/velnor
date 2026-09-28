@@ -121,8 +121,15 @@ fn hosted_lane_uses_the_github_mb_boxington_backend() {
 #[test]
 fn the_regeneration_gate_is_declared() {
     let config = read(".github-gen/velnor-workflow.toml");
-    assert!(config.contains("primitive = \"regen-gate\""));
-    assert!(config.contains("--plain --check ../.."));
+    if config.contains("revision = \"9567d50ca2b404e64d818dca845beec747518565\"") {
+        assert!(
+            !config.contains("primitive = \"regen-gate\""),
+            "bootstrap on the published base runtime omits the self-check until pin promotion"
+        );
+    } else {
+        assert!(config.contains("primitive = \"regen-gate\""));
+        assert!(config.contains("--plain --check ../.."));
+    }
     let project = read(".github/ci/project.toml");
     let runtime_watched = project.lines().any(|line| {
         line.starts_with("watch = [") && line.contains("crates/velnor-workflow/src/runtime.rs")
