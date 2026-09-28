@@ -1097,12 +1097,15 @@ path = "../native-helper"
             assert!(rendered.contains("listing+=$'\\n'\"$dependency_tree\""));
             assert!(rendered.contains("local Cargo dependency contains a symlink"));
             assert!(rendered.contains(
-                "NF == 2 && $1 == \"120000 blob 47dc3e3d863cfb5727b87d785d09abf9743c0a72\" && $2 == \"crates/velnor-workflow/CLAUDE.md\""
+                r#"[[ "$(awk -F '\t' '$1 ~ /^120000 / { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]]"#
             ));
-            assert!(rendered.contains("-v revision=\"$INSTALL_REV\""));
             assert!(rendered.contains(
-                "and .sha == \"47dc3e3d863cfb5727b87d785d09abf9743c0a72\" and .path == \"crates/velnor-workflow/CLAUDE.md\""
+                "jq -e '[.tree[] | select(.type != \"tree\") | select(.path == \"Cargo.toml\""
             ));
+            assert!(rendered.contains("| select(.mode == \"120000\")] | length == 0' <<<\"$tree\""));
+            assert!(!rendered.contains("9567d50ca2b404e64d818dca845beec747518565"));
+            assert!(!rendered.contains("47dc3e3d863cfb5727b87d785d09abf9743c0a72"));
+            assert!(!rendered.contains("crates/velnor-workflow/CLAUDE.md"));
             assert!(rendered.contains("select(.path == \"Cargo.toml\" or .path == \"Cargo.lock\""));
             let mut product_closure = BASE_CLOSURE_PATHS
                 .iter()
