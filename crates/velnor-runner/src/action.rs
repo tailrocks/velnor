@@ -678,15 +678,12 @@ fn action_metadata_scalar_lexemes(contents: &str) -> Result<Vec<ActionMetadataSc
                     }
                 )
             }) {
-                if !children[..colon]
-                    .iter()
-                    .any(|child| child_has_value(*child))
-                {
+                if !children[..colon].iter().any(|child| child_has_value(child)) {
                     empty_key_before.insert(colon);
                 }
                 if !children[colon + 1..]
                     .iter()
-                    .any(|child| child_has_value(*child))
+                    .any(|child| child_has_value(child))
                 {
                     empty_value_after.insert(children.len());
                 }
@@ -700,13 +697,11 @@ fn action_metadata_scalar_lexemes(contents: &str) -> Result<Vec<ActionMetadataSc
                         ..
                     }
                 )
-            }) {
-                if !children[dash + 1..]
-                    .iter()
-                    .any(|child| child_has_value(*child))
-                {
-                    empty_sequence_item_before.insert(children.len());
-                }
+            }) && !children[dash + 1..]
+                .iter()
+                .any(|child| child_has_value(child))
+            {
+                empty_sequence_item_before.insert(children.len());
             }
         } else if kind == K::FlowMapping {
             let mut segment_start = 0usize;
@@ -724,7 +719,7 @@ fn action_metadata_scalar_lexemes(contents: &str) -> Result<Vec<ActionMetadataSc
                     } => {
                         if !children[segment_start..index]
                             .iter()
-                            .any(|child| child_has_value(*child))
+                            .any(|child| child_has_value(child))
                         {
                             empty_key_before.insert(index);
                         }
@@ -742,7 +737,7 @@ fn action_metadata_scalar_lexemes(contents: &str) -> Result<Vec<ActionMetadataSc
                         }
                         if !children[index + 1..end]
                             .iter()
-                            .any(|child| child_has_value(*child))
+                            .any(|child| child_has_value(child))
                         {
                             empty_value_after.insert(end);
                         }
@@ -757,7 +752,7 @@ fn action_metadata_scalar_lexemes(contents: &str) -> Result<Vec<ActionMetadataSc
                 if matches!(child, GreenChild::Token { kind: K::Comma, .. }) {
                     if !children[segment_start..index]
                         .iter()
-                        .any(|child| child_has_value(*child))
+                        .any(|child| child_has_value(child))
                     {
                         empty_sequence_item_before.insert(index);
                     }
@@ -1074,7 +1069,7 @@ fn normalize_explicit_scalar_tag(
         .as_deref()
         .and_then(|tag| runner_core_scalar_tag_from_source(tag, tag_directives))
         .or_else(|| match &value {
-            serde_yaml::Value::Tagged(tagged) => runner_core_scalar_tag(&tagged.tag().to_string()),
+            serde_yaml::Value::Tagged(tagged) => runner_core_scalar_tag(tagged.tag().as_ref()),
             _ => None,
         })
         .context("unsupported action metadata scalar tag")?;
@@ -1203,7 +1198,7 @@ fn normalize_action_runs(value: serde_yaml::Value) -> Result<serde_yaml::Value> 
             .to_ascii_lowercase();
         let has_node_only_field = ["main", "pre", "post"]
             .iter()
-            .any(|key| mapping.contains_key(*key));
+            .any(|key| mapping.contains_key(key));
         let has_container_only_field = [
             "image",
             "entrypoint",
@@ -1213,7 +1208,7 @@ fn normalize_action_runs(value: serde_yaml::Value) -> Result<serde_yaml::Value> 
             "post-entrypoint",
         ]
         .iter()
-        .any(|key| mapping.contains_key(*key));
+        .any(|key| mapping.contains_key(key));
         if matches!(using.as_str(), "node12" | "node16" | "node20" | "node24")
             && !has_node_only_field
             && !has_container_only_field
@@ -1393,17 +1388,14 @@ fn action_metadata_tag_syntax(contents: &str) -> Result<Vec<ActionMetadataTagSyn
                         .iter()
                         .find_map(|next| match next {
                             GreenChild::Node(_) => Some(None),
-                            GreenChild::Token { kind, .. }
-                                if matches!(
-                                    kind,
+                            GreenChild::Token {
+                                kind:
                                     SyntaxKind::Whitespace
-                                        | SyntaxKind::Newline
-                                        | SyntaxKind::Comment
-                                        | SyntaxKind::AnchorMark
-                                ) =>
-                            {
-                                None
-                            }
+                                    | SyntaxKind::Newline
+                                    | SyntaxKind::Comment
+                                    | SyntaxKind::AnchorMark,
+                                ..
+                            } => None,
                             GreenChild::Token { kind, .. } => Some(Some(*kind)),
                         })
                         .flatten();
@@ -1506,8 +1498,8 @@ fn runner_action_tag_directives(contents: &str) -> Result<BTreeMap<String, Strin
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        if line.starts_with("---") {
-            let marker_tail = line[3..].trim_start();
+        if let Some(marker_tail) = line.strip_prefix("---") {
+            let marker_tail = marker_tail.trim_start();
             if marker_tail.is_empty() || marker_tail.starts_with('#') {
                 break;
             }
@@ -1591,14 +1583,14 @@ fn runner_core_scalar_tag_from_source(
 ) -> Option<ActionMetadataScalarTag> {
     let expanded = if let Some(uri) = tag.strip_prefix("!<").and_then(|tag| tag.strip_suffix('>')) {
         uri.to_owned()
-    } else if tag.starts_with("!!") {
+    } else if let Some(tag_suffix) = tag.strip_prefix("!!") {
         // An explicit %TAG directive may override YAML's default secondary
         // handle. Runner uses the expanded tag URI, so preserve that override.
         let prefix = directives
             .get("!!")
             .map(String::as_str)
             .unwrap_or("tag:yaml.org,2002:");
-        format!("{prefix}{}", &tag[2..])
+        format!("{prefix}{tag_suffix}")
     } else {
         let separator = tag[1..].find('!').map(|index| index + 1);
         let (handle, suffix) = separator.map_or(("!", &tag[1..]), |index| {
@@ -1843,7 +1835,7 @@ where
     match value {
         serde_yaml::Value::Bool(value) => Ok(Some(value.to_string())),
         serde_yaml::Value::Tagged(tagged)
-            if runner_core_scalar_tag(&tagged.tag().to_string())
+            if runner_core_scalar_tag(tagged.tag().as_ref())
                 == Some(ActionMetadataScalarTag::Bool) =>
         {
             action_metadata_scalar_to_string(serde_yaml::Value::Tagged(tagged))

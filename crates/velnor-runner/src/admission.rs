@@ -27,7 +27,9 @@ use anyhow::Result;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::action::{native_action_adapter, ActionAdapter, ActionMetadata, NATIVE_ACTION_REF};
+use crate::action::{
+    native_action_adapter, ActionAdapter, ActionMetadata, ActionRuntime, NATIVE_ACTION_REF,
+};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
@@ -1102,10 +1104,19 @@ fn admit_local(
     walk.graph.link(parent, index, ancestry)?;
 
     let metadata = cached_metadata(walk, &action_key, repository, sha, Some(subpath), ancestry)?;
-    if !is_composite(&metadata) {
-        // A local JavaScript/Docker action is trusted workflow-repository code;
-        // it is a closure leaf (matches the prior local preflight semantics).
-        return Ok(());
+    // Local action planning has one executable path: composite expansion. Parse
+    // the runtime here so a valid JavaScript/Docker manifest cannot pass the
+    // read-only walk and fail only after checkout and other step setup.
+    let runtime = metadata.runtime().map_err(|error| {
+        AdmissionError::malformed_manifest(ancestry, "runtime", error.to_string())
+    })?;
+    if runtime != ActionRuntime::Composite {
+        return Err(AdmissionError::new(
+            ancestry,
+            "runtime",
+            "local action runtime is unsupported; Velnor plans only composite actions",
+            vec!["composite".to_string()],
+        ));
     }
     let provided_inputs = provided_inputs
         .resolve()
@@ -1365,10 +1376,6 @@ fn reject_runtime_capability_inputs(
     Ok(())
 }
 
-fn is_composite(metadata: &ActionMetadata) -> bool {
-    metadata.runs.using.eq_ignore_ascii_case("composite")
-}
-
 fn resolve_step_inputs(
     step: &crate::job_message::ActionStep,
     context_data: &[(String, Value)],
@@ -1624,6 +1631,11 @@ fn validate_metadata_bounds(
         "runs.using",
         &mut total_string_bytes,
     )?;
+    validate_metadata_text(
+        metadata.runs.plugin.as_deref(),
+        "runs.plugin",
+        &mut total_string_bytes,
+    )?;
     for (field, value) in [
         ("runs.main", metadata.runs.main.as_deref()),
         ("runs.pre", metadata.runs.pre.as_deref()),
@@ -1828,6 +1840,7 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
         add(&mut total, output.value.as_deref());
     }
     add(&mut total, Some(&metadata.runs.using));
+    add(&mut total, metadata.runs.plugin.as_deref());
     for value in [
         metadata.runs.main.as_deref(),
         metadata.runs.pre.as_deref(),
@@ -2099,6 +2112,24 @@ mod tests {
     }
 
     #[test]
+    fn runs_plugin_string_limits_are_admission_policy_and_counted() {
+        let plugin = "x".repeat(MAX_METADATA_STRING_BYTES + 1);
+        let metadata =
+            crate::action::parse_action_metadata(&format!("runs:\n  plugin: '{plugin}'\n"))
+                .unwrap();
+
+        let error = validate_metadata_bounds(&metadata).unwrap_err();
+
+        assert!(matches!(error, MetadataValidationFailure::Policy(_)));
+        let mut without_plugin = metadata.clone();
+        without_plugin.runs.plugin = None;
+        assert_eq!(
+            metadata_retained_bytes(&metadata) - metadata_retained_bytes(&without_plugin),
+            plugin.len()
+        );
+    }
+
+    #[test]
     fn runs_env_entry_count_is_bounded() {
         let mut yaml = String::from("runs:\n  using: docker\n  image: Dockerfile\n  env:\n");
         for index in 0..=MAX_METADATA_MAP_ENTRIES {
@@ -2155,7 +2186,7 @@ runs:
             .map(|index| {
                 let sha = format!("{index:040x}");
                 let yaml = format!(
-                    "runs:\n  using: node20\n  main: index.js\n  env:\n    PAYLOAD: '{payload}'\n"
+                    "runs:\n  using: docker\n  image: Dockerfile\n  env:\n    PAYLOAD: '{payload}'\n"
                 );
                 (format!("{repository}@{sha}"), yaml)
             })
@@ -2200,6 +2231,64 @@ runs:
     }
 
     #[test]
+    fn local_plugin_runtime_is_rejected_during_admission() {
+        let repository = "acme/repo";
+        let workflow_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let subpath = "./.github/actions/plugin";
+        let job = job(serde_json::json!([repo_step(
+            subpath,
+            "",
+            Some(subpath),
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[(
+            &format!("{repository}/.github/actions/plugin@{workflow_sha}"),
+            "runs:\n  plugin: marketplace\n",
+        )]);
+
+        let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+
+        assert_eq!(source.reads(), 1);
+        assert_eq!(
+            error.failure_kind(),
+            AdmissionFailureKind::ManifestMalformed
+        );
+        assert_eq!(error.field, "runtime");
+        assert!(error
+            .reason
+            .contains("plugin action runtime 'marketplace' is not supported"));
+    }
+
+    #[test]
+    fn local_non_composite_runtime_is_rejected_during_admission() {
+        let repository = "acme/repo";
+        let workflow_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let subpath = "./.github/actions/non-composite";
+        let job = job(serde_json::json!([repo_step(
+            subpath,
+            "",
+            Some(subpath),
+            serde_json::json!({})
+        )]));
+
+        for metadata in [
+            "runs:\n  using: node20\n  main: dist/index.js\n",
+            "runs:\n  using: docker\n  image: Dockerfile\n",
+        ] {
+            let key = format!("{repository}/.github/actions/non-composite@{workflow_sha}");
+            let source = FakeMetadataSource::new(&[(&key, metadata)]);
+
+            let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+
+            assert_eq!(source.reads(), 1);
+            assert_eq!(error.failure_kind(), AdmissionFailureKind::Policy);
+            assert_eq!(error.field, "runtime");
+            assert_eq!(error.accepted, vec!["composite"]);
+            assert!(error.reason.contains("unsupported"));
+        }
+    }
+
+    #[test]
     fn case_distinct_local_subpaths_are_not_aliases() {
         let context = workflow_context();
         let job = job(serde_json::json!([
@@ -2219,7 +2308,7 @@ runs:
         let source = FakeMetadataSource::new(&[
             (
                 "acme/repo/.github/actions/Foo@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                "runs:\n  using: node20\n  main: dist/index.js\n",
+                "runs:\n  using: composite\n  steps: []\n",
             ),
             (
                 "acme/repo/.github/actions/foo@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",

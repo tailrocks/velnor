@@ -21,7 +21,8 @@ use super::file_walk::is_test_support_path;
 use super::{unit, RepositoryShape, ScanContext};
 use crate::s2::{parent_path, shell_quote, UnitKind};
 
-const MAX_ACTION_METADATA_BYTES: u64 = 1024 * 1024;
+const MAX_ACTION_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_ACTION_METADATA_BYTES_U64: u64 = 1024 * 1024;
 const MAX_ACTION_METADATA_DEPTH: usize = 64;
 const MAX_ACTION_METADATA_NODES: usize = 50_000;
 const MAX_ACTION_METADATA_EVENTS: usize = 1_000_000;
@@ -415,11 +416,15 @@ impl<'de> Visitor<'de> for RunnerYamlMapKeyVisitor {
     }
 
     fn visit_i64<E>(self, key: i64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlMapKey(runner_number_to_string(key as f64)))
+        Ok(RunnerYamlMapKey(runner_number_to_string(
+            serde_yaml::Number::from(key).as_f64(),
+        )))
     }
 
     fn visit_u64<E>(self, key: u64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlMapKey(runner_number_to_string(key as f64)))
+        Ok(RunnerYamlMapKey(runner_number_to_string(
+            serde_yaml::Number::from(key).as_f64(),
+        )))
     }
 
     fn visit_f64<E>(self, key: f64) -> Result<Self::Value, E> {
@@ -559,20 +564,19 @@ fn runner_number_to_string(value: f64) -> String {
     let digits = format!("{whole}{fraction}");
     let decimal_index = exponent + 1;
     let mut result = if decimal_index <= 0 {
-        format!(
-            "0.{}{}",
-            "0".repeat(decimal_index.unsigned_abs() as usize),
-            digits
-        )
-    } else if decimal_index as usize >= digits.len() {
-        format!(
-            "{}{}",
-            digits,
-            "0".repeat(decimal_index as usize - digits.len())
-        )
+        let Some(leading_zeroes) = usize::try_from(decimal_index.unsigned_abs()).ok() else {
+            return value.to_string();
+        };
+        format!("0.{}{}", "0".repeat(leading_zeroes), digits)
     } else {
-        let decimal_index = decimal_index as usize;
-        format!("{}.{}", &digits[..decimal_index], &digits[decimal_index..])
+        let Some(decimal_index) = usize::try_from(decimal_index).ok() else {
+            return value.to_string();
+        };
+        if decimal_index >= digits.len() {
+            format!("{}{}", digits, "0".repeat(decimal_index - digits.len()))
+        } else {
+            format!("{}.{}", &digits[..decimal_index], &digits[decimal_index..])
+        }
     };
     if result.contains('.') {
         while result.ends_with('0') {
@@ -645,11 +649,11 @@ fn runner_yaml_collection_kind(kind: serde_yaml::cst::SyntaxKind) -> bool {
 
 fn runner_action_parser_config() -> serde_yaml::ParserConfig {
     serde_yaml::ParserConfig::new()
-        .max_document_length(MAX_ACTION_METADATA_BYTES as usize)
+        .max_document_length(MAX_ACTION_METADATA_BYTES)
         .max_depth(MAX_ACTION_METADATA_DEPTH)
         .max_nodes(MAX_ACTION_METADATA_NODES)
         .max_events(MAX_ACTION_METADATA_EVENTS)
-        .max_total_scalar_bytes(MAX_ACTION_METADATA_BYTES as usize)
+        .max_total_scalar_bytes(MAX_ACTION_METADATA_BYTES)
         .max_mapping_keys(MAX_ACTION_METADATA_NODES)
         .max_sequence_length(MAX_ACTION_METADATA_NODES)
         .max_alias_expansions(0)
@@ -684,7 +688,7 @@ fn runner_tag_directives(contents: &str) -> Result<BTreeMap<String, String>, &'s
         };
         if fields.next().is_some_and(|field| !field.starts_with('#')) {
             continue;
-        };
+        }
         if !handle.starts_with('!') {
             continue;
         }
@@ -725,7 +729,7 @@ fn decode_runner_tag_uri(value: &str) -> Option<String> {
         let low = bytes
             .get(index + 2)
             .and_then(|byte| (*byte as char).to_digit(16))?;
-        decoded.push((high * 16 + low) as u8);
+        decoded.push(u8::try_from(high * 16 + low).ok()?);
         index += 3;
     }
     String::from_utf8(decoded).ok()
@@ -738,14 +742,13 @@ fn expand_runner_tag(raw_tag: &str, directives: &BTreeMap<String, String>) -> Op
     {
         return decode_runner_tag_uri(uri);
     }
-    if raw_tag.starts_with("!!") {
+    if let Some(suffix) = raw_tag.strip_prefix("!!") {
         // A document may override the default secondary handle. Match
         // Runner's expanded tag URI before applying its built-in default.
         let prefix = directives
             .get("!!")
-            .map(String::as_str)
-            .unwrap_or("tag:yaml.org,2002:");
-        return decode_runner_tag_uri(&format!("{prefix}{}", &raw_tag[2..]));
+            .map_or("tag:yaml.org,2002:", String::as_str);
+        return decode_runner_tag_uri(&format!("{prefix}{suffix}"));
     }
 
     let separator = raw_tag[1..].find('!').map(|index| index + 1);
@@ -805,7 +808,7 @@ fn runner_tagged_integer(raw: &str) -> Option<serde_yaml::Value> {
             return None;
         }
         let bits = u32::from_str_radix(hex, 16).ok()?;
-        f64::from(bits as i32)
+        f64::from(i32::from_ne_bytes(bits.to_ne_bytes()))
     } else if let Some(octal) = raw.strip_prefix("0o") {
         if octal.is_empty() || !octal.bytes().all(|byte| matches!(byte, b'0'..=b'7')) {
             return None;
@@ -921,7 +924,7 @@ fn inspect_runner_yaml_syntax(
     depth: usize,
     syntax: &mut RunnerYamlSyntax,
 ) {
-    use serde_yaml::cst::{GreenChild, SyntaxKind};
+    use serde_yaml::cst::SyntaxKind;
 
     if syntax.exceeded_budget || syntax.tag_error.is_some() {
         return;
@@ -959,176 +962,209 @@ fn inspect_runner_yaml_syntax(
 
     let mut offset = base;
     for child in node.children() {
-        match child {
-            GreenChild::Node(child_node) => {
-                if syntax.pending_tag.is_some() && child_node.kind() == SyntaxKind::MappingEntry {
-                    // A tag at the end of a mapping entry with no scalar
-                    // token belongs to that entry's empty value. CST layout
-                    // places the following mapping entry after the newline,
-                    // so resolve the pending tag before traversing its key.
-                    accept_empty_runner_tag(syntax);
-                }
-                if syntax.pending_tag.is_some() && runner_yaml_collection_kind(child_node.kind()) {
-                    // ActionManifestManager ignores tags when the tagged
-                    // node is a collection. Preserve that behavior instead
-                    // of carrying the tag into the scalar-only preflight.
-                    if let (Some(_raw_tag), Some(tag_start), Some(tag_end)) = (
-                        syntax.pending_tag.take(),
-                        syntax.pending_tag_start.take(),
-                        syntax.pending_tag_end.take(),
-                    ) {
-                        // serde_yaml's value decoder does not accept arbitrary
-                        // collection tags. Remove the ignored tag before the
-                        // Runner-compatible decode while preserving all
-                        // surrounding whitespace and collection source.
-                        syntax
-                            .source_replacements
-                            .push((tag_start, tag_end, String::new()));
-                    }
-                }
-                inspect_runner_yaml_syntax(child_node, source, offset, yaml_depth, syntax);
-            }
-            GreenChild::Token { kind, len } => {
-                if !syntax.count_event() {
-                    return;
-                }
-                let end = offset.saturating_add(*len as usize);
-                let token = source.get(offset..end).unwrap_or_default();
-                match kind {
-                    SyntaxKind::AnchorMark | SyntaxKind::AliasMark => {
-                        syntax.has_anchor_or_alias = true;
-                    }
-                    SyntaxKind::TagMark => {
-                        if syntax.pending_tag.is_some() {
-                            syntax.tag_error = Some("nested YAML tags are not supported".into());
-                            return;
-                        }
-                        syntax.pending_tag = Some(token.to_owned());
-                        syntax.pending_tag_start = Some(offset);
-                        syntax.pending_tag_end = Some(end);
-                    }
-                    SyntaxKind::PlainScalar
-                    | SyntaxKind::SingleQuotedScalar
-                    | SyntaxKind::DoubleQuotedScalar
-                    | SyntaxKind::LiteralScalar
-                    | SyntaxKind::FoldedScalar => {
-                        if !syntax.count_node() {
-                            return;
-                        }
-                        let token_end = end;
-                        if let Some(raw_tag) = syntax.pending_tag.take() {
-                            let Some(replacement_start) = syntax.pending_tag_start.take() else {
-                                syntax.tag_error = Some("YAML tag has no source position".into());
-                                return;
-                            };
-                            let Some(_tag_end) = syntax.pending_tag_end.take() else {
-                                syntax.tag_error = Some("YAML tag has no source range".into());
-                                return;
-                            };
-                            let tag = expand_runner_tag(&raw_tag, &syntax.tag_directives);
-                            match tag.and_then(|tag| runner_tagged_scalar(&tag, *kind, token)) {
-                                Some(value) => {
-                                    let Some(replacement) = runner_yaml_scalar_source(&value)
-                                    else {
-                                        syntax.tag_error = Some(format!(
-                                            "YAML scalar tag `{raw_tag}` cannot be normalized"
-                                        ));
-                                        return;
-                                    };
-                                    let replacement_end =
-                                        runner_yaml_scalar_source_end(*kind, token, token_end);
-                                    syntax.source_replacements.push((
-                                        replacement_start,
-                                        replacement_end,
-                                        replacement,
-                                    ));
-                                }
-                                None => {
-                                    syntax.tag_error = Some(format!(
-                                    "YAML scalar tag `{raw_tag}` is unsupported or has an invalid scalar"
-                                ));
-                                    return;
-                                }
-                            }
-                        } else if *kind == SyntaxKind::PlainScalar
-                            && (token.trim().starts_with("0X") || token.trim().starts_with("0O"))
-                        {
-                            let value = serde_yaml::Value::String(token.trim().to_owned());
-                            if let Some(replacement) = runner_yaml_scalar_source(&value) {
-                                syntax.source_replacements.push((
-                                    offset,
-                                    runner_yaml_scalar_source_end(*kind, token, token_end),
-                                    replacement,
-                                ));
-                            }
-                        } else if *kind == SyntaxKind::PlainScalar
-                            && (token.trim().starts_with("0x") || token.trim().starts_with("0o"))
-                        {
-                            match runner_radix_integer(token) {
-                                Some(value) => {
-                                    if let Some(replacement) = runner_yaml_scalar_source(&value) {
-                                        syntax.source_replacements.push((
-                                            offset,
-                                            runner_yaml_scalar_source_end(*kind, token, token_end),
-                                            replacement,
-                                        ));
-                                    }
-                                }
-                                None => {
-                                    syntax.tag_error = Some(format!(
-                                        "YAML radix integer `{token}` is outside actions/runner's supported range"
-                                    ));
-                                    return;
-                                }
-                            }
-                        } else if *kind == SyntaxKind::PlainScalar
-                            && runner_float_lexeme(token.trim())
-                        {
-                            let number = match token.trim().parse::<f64>() {
-                                Ok(number) => number,
-                                Err(_) => {
-                                    syntax.tag_error = Some(format!(
-                                        "YAML decimal number `{}` cannot be parsed by actions/runner",
-                                        token.trim()
-                                    ));
-                                    return;
-                                }
-                            };
-                            let value = serde_yaml::Value::Number(number.into());
-                            if let Some(replacement) = runner_yaml_scalar_source(&value) {
-                                syntax.source_replacements.push((
-                                    offset,
-                                    runner_yaml_scalar_source_end(*kind, token, token_end),
-                                    replacement,
-                                ));
-                            }
-                        }
-                    }
-                    _ => {
-                        if syntax.pending_tag.is_some() {
-                            if matches!(
-                                kind,
-                                SyntaxKind::Comma
-                                    | SyntaxKind::CloseBracket
-                                    | SyntaxKind::CloseBrace
-                            ) {
-                                accept_empty_runner_tag(syntax);
-                            } else if !matches!(
-                                kind,
-                                SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment
-                            ) {
-                                syntax.tag_error = Some(
-                                    "actions/runner accepts standard scalar YAML tags only on scalars"
-                                        .into(),
-                                );
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        inspect_runner_yaml_child(child, source, offset, yaml_depth, syntax);
         offset += child.text_len();
+    }
+}
+
+fn inspect_runner_yaml_child(
+    child: &serde_yaml::cst::GreenChild,
+    source: &str,
+    offset: usize,
+    depth: usize,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    use serde_yaml::cst::{GreenChild, SyntaxKind};
+
+    match child {
+        GreenChild::Node(child_node) => {
+            if syntax.pending_tag.is_some() && child_node.kind() == SyntaxKind::MappingEntry {
+                // A tag at the end of a mapping entry with no scalar token
+                // belongs to that entry's empty value.
+                accept_empty_runner_tag(syntax);
+            }
+            if syntax.pending_tag.is_some() && runner_yaml_collection_kind(child_node.kind()) {
+                discard_runner_collection_tag(syntax);
+            }
+            inspect_runner_yaml_syntax(child_node, source, offset, depth, syntax);
+        }
+        GreenChild::Token { kind, len } => {
+            if !syntax.count_event() {
+                return;
+            }
+            let end = offset.saturating_add(*len as usize);
+            let token = source.get(offset..end).unwrap_or_default();
+            inspect_runner_yaml_token(*kind, token, offset, end, syntax);
+        }
+    }
+}
+
+fn discard_runner_collection_tag(syntax: &mut RunnerYamlSyntax) {
+    // ActionManifestManager ignores tags when the tagged node is a
+    // collection. Remove the tag before the second, Runner-compatible parse.
+    let (Some(_raw_tag), Some(tag_start), Some(tag_end)) = (
+        syntax.pending_tag.take(),
+        syntax.pending_tag_start.take(),
+        syntax.pending_tag_end.take(),
+    ) else {
+        return;
+    };
+    syntax
+        .source_replacements
+        .push((tag_start, tag_end, String::new()));
+}
+
+fn inspect_runner_yaml_token(
+    kind: serde_yaml::cst::SyntaxKind,
+    token: &str,
+    offset: usize,
+    token_end: usize,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    use serde_yaml::cst::SyntaxKind;
+
+    match kind {
+        SyntaxKind::AnchorMark | SyntaxKind::AliasMark => {
+            syntax.has_anchor_or_alias = true;
+        }
+        SyntaxKind::TagMark => {
+            if syntax.pending_tag.is_some() {
+                syntax.tag_error = Some("nested YAML tags are not supported".into());
+                return;
+            }
+            syntax.pending_tag = Some(token.to_owned());
+            syntax.pending_tag_start = Some(offset);
+            syntax.pending_tag_end = Some(token_end);
+        }
+        kind if runner_yaml_scalar_kind(kind) => {
+            if !syntax.count_node() {
+                return;
+            }
+            inspect_runner_yaml_scalar(kind, token, offset, token_end, syntax);
+        }
+        _ => inspect_runner_yaml_pending_tag(kind, syntax),
+    }
+}
+
+fn runner_yaml_scalar_kind(kind: serde_yaml::cst::SyntaxKind) -> bool {
+    use serde_yaml::cst::SyntaxKind;
+
+    matches!(
+        kind,
+        SyntaxKind::PlainScalar
+            | SyntaxKind::SingleQuotedScalar
+            | SyntaxKind::DoubleQuotedScalar
+            | SyntaxKind::LiteralScalar
+            | SyntaxKind::FoldedScalar
+    )
+}
+
+fn inspect_runner_yaml_scalar(
+    kind: serde_yaml::cst::SyntaxKind,
+    token: &str,
+    offset: usize,
+    token_end: usize,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    if let Some(raw_tag) = syntax.pending_tag.take() {
+        let Some(replacement_start) = syntax.pending_tag_start.take() else {
+            syntax.tag_error = Some("YAML tag has no source position".into());
+            return;
+        };
+        let Some(_tag_end) = syntax.pending_tag_end.take() else {
+            syntax.tag_error = Some("YAML tag has no source range".into());
+            return;
+        };
+        let Some(tag) = expand_runner_tag(&raw_tag, &syntax.tag_directives) else {
+            syntax.tag_error = Some(format!(
+                "YAML scalar tag `{raw_tag}` is unsupported or has an invalid scalar"
+            ));
+            return;
+        };
+        let Some(value) = runner_tagged_scalar(&tag, kind, token) else {
+            syntax.tag_error = Some(format!(
+                "YAML scalar tag `{raw_tag}` is unsupported or has an invalid scalar"
+            ));
+            return;
+        };
+        let Some(replacement) = runner_yaml_scalar_source(&value) else {
+            syntax.tag_error = Some(format!("YAML scalar tag `{raw_tag}` cannot be normalized"));
+            return;
+        };
+        let replacement_end = runner_yaml_scalar_source_end(kind, token, token_end);
+        syntax
+            .source_replacements
+            .push((replacement_start, replacement_end, replacement));
+        return;
+    }
+
+    if kind == serde_yaml::cst::SyntaxKind::PlainScalar {
+        inspect_runner_yaml_plain_scalar(token, offset, token_end, syntax);
+    }
+}
+
+fn inspect_runner_yaml_plain_scalar(
+    token: &str,
+    offset: usize,
+    token_end: usize,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    let trimmed = token.trim();
+    let value = if trimmed.starts_with("0X") || trimmed.starts_with("0O") {
+        Some(serde_yaml::Value::String(trimmed.to_owned()))
+    } else if trimmed.starts_with("0x") || trimmed.starts_with("0o") {
+        let Some(value) = runner_radix_integer(token) else {
+            syntax.tag_error = Some(format!(
+                "YAML radix integer `{token}` is outside actions/runner's supported range"
+            ));
+            return;
+        };
+        Some(value)
+    } else if runner_float_lexeme(trimmed) {
+        let Ok(number) = trimmed.parse::<f64>() else {
+            syntax.tag_error = Some(format!(
+                "YAML decimal number `{trimmed}` cannot be parsed by actions/runner"
+            ));
+            return;
+        };
+        Some(serde_yaml::Value::Number(number.into()))
+    } else {
+        None
+    };
+
+    let Some(value) = value else {
+        return;
+    };
+    let Some(replacement) = runner_yaml_scalar_source(&value) else {
+        return;
+    };
+    syntax.source_replacements.push((
+        offset,
+        runner_yaml_scalar_source_end(serde_yaml::cst::SyntaxKind::PlainScalar, token, token_end),
+        replacement,
+    ));
+}
+
+fn inspect_runner_yaml_pending_tag(
+    kind: serde_yaml::cst::SyntaxKind,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    use serde_yaml::cst::SyntaxKind;
+
+    if syntax.pending_tag.is_none() {
+        return;
+    }
+    if matches!(
+        kind,
+        SyntaxKind::Comma | SyntaxKind::CloseBracket | SyntaxKind::CloseBrace
+    ) {
+        accept_empty_runner_tag(syntax);
+    } else if !matches!(
+        kind,
+        SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment
+    ) {
+        syntax.tag_error =
+            Some("actions/runner accepts standard scalar YAML tags only on scalars".into());
     }
 }
 
@@ -1382,14 +1418,14 @@ fn normalize_runner_yaml_source(
         normalized.push_str(&contents[cursor..*start]);
         normalized.push_str(replacement);
         cursor = *end;
-        if normalized.len() > MAX_ACTION_METADATA_BYTES as usize {
+        if normalized.len() > MAX_ACTION_METADATA_BYTES {
             return Err(crate::s2::GeneratorError::usage(format!(
                 "normalized GitHub Action metadata exceeds {MAX_ACTION_METADATA_BYTES} bytes"
             )));
         }
     }
     normalized.push_str(&contents[cursor..]);
-    if normalized.len() > MAX_ACTION_METADATA_BYTES as usize {
+    if normalized.len() > MAX_ACTION_METADATA_BYTES {
         return Err(crate::s2::GeneratorError::usage(format!(
             "normalized GitHub Action metadata exceeds {MAX_ACTION_METADATA_BYTES} bytes"
         )));
@@ -1502,20 +1538,21 @@ fn read_action_metadata(metadata_file: &Path) -> Result<String, crate::s2::Gener
             crate::s2::GeneratorError::io("inspect GitHub Action metadata", metadata_file, &error)
         })?
         .len();
-    if length > MAX_ACTION_METADATA_BYTES {
+    if length > MAX_ACTION_METADATA_BYTES_U64 {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action metadata {} exceeds {MAX_ACTION_METADATA_BYTES} bytes",
             metadata_file.display()
         )));
     }
 
-    let mut bytes = Vec::with_capacity(length.min(MAX_ACTION_METADATA_BYTES) as usize);
-    file.take(MAX_ACTION_METADATA_BYTES + 1)
+    let capacity = usize::try_from(length).unwrap_or(MAX_ACTION_METADATA_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_ACTION_METADATA_BYTES_U64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
             crate::s2::GeneratorError::io("read GitHub Action metadata", metadata_file, &error)
         })?;
-    if bytes.len() as u64 > MAX_ACTION_METADATA_BYTES {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ACTION_METADATA_BYTES_U64 {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action metadata {} exceeds {MAX_ACTION_METADATA_BYTES} bytes",
             metadata_file.display()
@@ -1794,18 +1831,17 @@ fn discovered_local_action_root(
     root: &Path,
     reference: &str,
 ) -> Result<Option<String>, crate::s2::GeneratorError> {
-    if !is_runner_local_action_reference(reference) {
+    let Some(relative) = reference
+        .strip_prefix("./")
+        .or_else(|| reference.strip_prefix(".\\"))
+    else {
         if is_unsafe_local_action_reference(reference) {
             return Err(crate::s2::GeneratorError::usage(format!(
                 "GitHub local action reference `{reference}` must stay inside the repository workspace"
             )));
         }
         return Ok(None);
-    }
-    let relative = reference
-        .strip_prefix("./")
-        .or_else(|| reference.strip_prefix(".\\"))
-        .expect("shared local action predicate must match its path prefix");
+    };
     if reference.contains('$') || reference.contains("{{") || reference.contains("}}") {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub local action reference `{reference}` must be static"
@@ -2859,6 +2895,7 @@ mod tests {
         reason = "test assertions name missing fixture evidence"
     )]
 
+    use std::fmt::Write as _;
     use std::fs;
     use std::path::PathBuf;
 
@@ -2903,6 +2940,13 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"),
         }
     }
 
@@ -3315,8 +3359,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn runner_scalar_string_schema_matches_runtime_parser() {
+    fn runner_scalar_input_schema_matches_runtime_parser() {
         let input_source = "inputs:\n  boolean:\n    default: false\n  number:\n    DEFAULT: 1e15\n  nullable:\n    default: null\n  7:\n    default: 1e-5\n  large-decimal:\n    default: 2147483648\n  hexadecimal:\n    default: 0xFFFFFFFF\n  octal:\n    default: 0o10\n  uppercase-hex:\n    default: 0X10\n  tagged-string:\n    default: !!str false\n  tagged-number:\n    default: !!int 0xFFFFFFFF\n  tagged-null:\n    default: !!null null\nruns:\n  using: composite\n  steps: []\n";
         let input_root = fixture("input-scalar-coercion");
         must(
@@ -3344,24 +3387,32 @@ mod tests {
             ("tagged-number", "-1"),
             ("tagged-null", ""),
         ] {
-            let definition = scanner.inputs.as_mapping().unwrap().get(name).unwrap();
-            let default = definition
-                .as_mapping()
-                .unwrap()
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case("default"))
-                .unwrap()
-                .1
-                .as_str();
-            assert_eq!(default, Some(expected), "scanner default for {name}");
+            let inputs = some(scanner.inputs.as_mapping(), "scanner inputs mapping");
+            let definition = some(inputs.get(name), "scanner input definition");
+            let definition = some(definition.as_mapping(), "scanner input definition mapping");
+            let (_, default) = some(
+                definition
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("default")),
+                "scanner input default",
+            );
             assert_eq!(
-                runner.inputs.get(name).unwrap().default_value.as_deref(),
+                default.as_str(),
+                Some(expected),
+                "scanner default for {name}"
+            );
+            assert_eq!(
+                some(runner.inputs.get(name), "runtime input definition")
+                    .default_value
+                    .as_deref(),
                 Some(expected),
                 "runtime default for {name}"
             );
         }
         let _ = fs::remove_dir_all(input_root);
+    }
 
+    fn runner_scalar_docker_schema_matches_runtime_parser() {
         let docker_source = "runs:\n  using: docker\n  image: docker://ubuntu\n  args: [false, 7, null, 1e-5]\n  env:\n    BOOL: false\n    COUNT: 7\n    EMPTY: null\n    1e15: key\n";
         let docker_root = fixture("docker-scalar-coercion");
         must(
@@ -3376,30 +3427,29 @@ mod tests {
             velnor_runner::action_contract::parse_action_metadata(docker_source),
             "parse runtime scalar Docker metadata",
         );
-        let scanner_env = scanner
-            .runs
-            .env
-            .as_mapping()
-            .unwrap()
+        let scanner_env = some(scanner.runs.env.as_mapping(), "scanner Docker environment")
             .iter()
-            .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    some(value.as_str(), "scanner Docker environment value").to_owned(),
+                )
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(scanner_env, runner.runs.env);
-        assert_eq!(scanner.runs.args.as_sequence().unwrap().len(), 4);
+        let args = some(scanner.runs.args.as_sequence(), "scanner Docker arguments");
+        assert_eq!(args.len(), 4);
         assert_eq!(
-            scanner
-                .runs
-                .args
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .map(|value| value.as_str().unwrap())
+            args.iter()
+                .map(|value| some(value.as_str(), "scanner Docker argument"))
                 .collect::<Vec<_>>(),
             ["false", "7", "", "1E-05"]
         );
         assert_eq!(runner.runs.args, ["false", "7", "", "1E-05"]);
         let _ = fs::remove_dir_all(docker_root);
+    }
 
+    fn runner_scalar_composite_schema_matches_runtime_parser() {
         let composite_source = "runs:\n  using: composite\n  steps:\n    - uses: actions/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        BOOL: false\n        COUNT: 7\n        EMPTY: null\n        1e15: key\n    - shell: bash\n      run: echo ok\n      env:\n        BOOL: false\n        COUNT: 7\n        EMPTY: null\n";
         let composite_root = fixture("composite-scalar-coercion");
         must(
@@ -3414,29 +3464,37 @@ mod tests {
             velnor_runner::action_contract::parse_action_metadata(composite_source),
             "parse runtime scalar composite metadata",
         );
-        let scanner_steps = scanner.runs.steps.as_deref().unwrap();
-        assert_eq!(
-            scanner_steps[0]
-                .with
-                .as_mapping()
-                .unwrap()
-                .iter()
-                .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
-                .collect::<std::collections::BTreeMap<_, _>>(),
-            runner.runs.steps[0].with
-        );
-        assert_eq!(
-            scanner_steps[1]
-                .env
-                .as_mapping()
-                .unwrap()
-                .iter()
-                .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
-                .collect::<std::collections::BTreeMap<_, _>>(),
-            runner.runs.steps[1].env
-        );
+        let scanner_steps = some(scanner.runs.steps.as_deref(), "scanner composite steps");
+        let with = some(
+            scanner_steps[0].with.as_mapping(),
+            "scanner composite inputs",
+        )
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                some(value.as_str(), "scanner composite input value").to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(with, runner.runs.steps[0].with);
+        let env = some(
+            scanner_steps[1].env.as_mapping(),
+            "scanner composite environment",
+        )
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                some(value.as_str(), "scanner composite environment value").to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(env, runner.runs.steps[1].env);
         let _ = fs::remove_dir_all(composite_root);
+    }
 
+    fn runner_scalar_schema_rejects_non_scalar_values() {
         for (name, source) in [
             (
                 "input-unknown-scalar-tag",
@@ -3497,7 +3555,14 @@ mod tests {
     }
 
     #[test]
-    fn runner_yaml_ignores_collection_tags_and_accepts_empty_null() {
+    fn runner_scalar_string_schema_matches_runtime_parser() {
+        runner_scalar_input_schema_matches_runtime_parser();
+        runner_scalar_docker_schema_matches_runtime_parser();
+        runner_scalar_composite_schema_matches_runtime_parser();
+        runner_scalar_schema_rejects_non_scalar_values();
+    }
+
+    fn runner_yaml_accepts_collection_tags_and_empty_null() {
         for (name, metadata) in [
             (
                 "tagged-flow-collections",
@@ -3581,7 +3646,9 @@ mod tests {
             }
             let _ = fs::remove_dir_all(root);
         }
+    }
 
+    fn runner_yaml_rejects_unknown_tags() {
         for (name, metadata) in [
             (
                 "unknown-empty-tag",
@@ -3619,6 +3686,12 @@ mod tests {
             );
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn runner_yaml_ignores_collection_tags_and_accepts_empty_null() {
+        runner_yaml_accepts_collection_tags_and_empty_null();
+        runner_yaml_rejects_unknown_tags();
     }
 
     #[test]
@@ -3802,18 +3875,11 @@ mod tests {
             super::parse_metadata(&root, "action.yml"),
             "parse implicit empty-key action metadata",
         );
-        let custom = scanner
-            .inputs
-            .as_mapping()
-            .unwrap()
-            .get("good")
-            .unwrap()
-            .as_mapping()
-            .unwrap()
-            .get("custom")
-            .unwrap()
-            .as_mapping()
-            .unwrap();
+        let inputs = some(scanner.inputs.as_mapping(), "scanner inputs mapping");
+        let good = some(inputs.get("good"), "scanner good input");
+        let good = some(good.as_mapping(), "scanner good input mapping");
+        let custom = some(good.get("custom"), "scanner custom metadata");
+        let custom = some(custom.as_mapping(), "scanner custom metadata mapping");
         assert_eq!(
             custom.get("").and_then(serde_yaml::Value::as_str),
             Some("ignored empty key"),
@@ -3833,8 +3899,8 @@ mod tests {
         let base = "runs:\n  using: composite\n  steps: []\n";
         let mut at_limit = base.to_owned();
         at_limit.push('#');
-        at_limit.push_str(&"x".repeat(MAX_ACTION_METADATA_BYTES as usize - at_limit.len()));
-        assert_eq!(at_limit.len(), MAX_ACTION_METADATA_BYTES as usize);
+        at_limit.push_str(&"x".repeat(MAX_ACTION_METADATA_BYTES - at_limit.len()));
+        assert_eq!(at_limit.len(), MAX_ACTION_METADATA_BYTES);
         must(
             fs::write(root.join("action.yml"), &at_limit),
             "write 1 MiB action metadata",
@@ -3856,11 +3922,11 @@ mod tests {
 
         let mut over_node_limit = String::new();
         for index in 0..25_001 {
-            over_node_limit.push_str(&format!("loose-{index}: value\n"));
+            let _ = writeln!(over_node_limit, "loose-{index}: value");
         }
         over_node_limit.push_str(base);
         assert!(
-            over_node_limit.len() < MAX_ACTION_METADATA_BYTES as usize,
+            over_node_limit.len() < MAX_ACTION_METADATA_BYTES,
             "node fixture must remain below the byte limit"
         );
         must(

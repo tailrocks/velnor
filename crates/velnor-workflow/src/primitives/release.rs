@@ -1447,7 +1447,8 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
         package_cmd.push_str(" --guest dist/microvm --target \"${{ matrix.target }}\"");
     }
     let header = if guest {
-        let target_env = "    env:\n      TARGET: ${{ matrix.target }}\n";
+        let target_env =
+            "    env:\n      TARGET: ${{ matrix.target }}\n      MBX_TARGET_VIEWS: \"0\"\n";
         format!(
             "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}{target_env}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
             guest_arch_matrix(config),
@@ -1457,7 +1458,7 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
         )
     } else {
         format!(
-            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {}\n    timeout-minutes: 45\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
+            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {}\n    timeout-minutes: 45\n    env:\n      MBX_TARGET_VIEWS: \"0\"\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
             yaml_scalar(&config.github_runner),
         )
     };
@@ -1664,10 +1665,12 @@ fn render_undebianable_job(config: &ProjectConfig, release: &ReleaseSpec, needs:
 fn identity_debian_lane_env(preview: bool, version: &str) -> String {
     if preview {
         format!(
-            "      VERSION: {version}\n      CRATE_VERSION: ${{{{ needs.identity.outputs.crate_version }}}}\n      SOURCE_COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      VELNOR_RELEASE_BUILD: \"1\"\n      VELNOR_PREVIEW_SOURCE_SHA: ${{{{ needs.identity.outputs.commit }}}}\n"
+            "      VERSION: {version}\n      CRATE_VERSION: ${{{{ needs.identity.outputs.crate_version }}}}\n      SOURCE_COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      VELNOR_RELEASE_BUILD: \"1\"\n      VELNOR_PREVIEW_SOURCE_SHA: ${{{{ needs.identity.outputs.commit }}}}\n      MBX_TARGET_VIEWS: \"0\"\n"
         )
     } else {
-        format!("      VERSION: {version}\n      VELNOR_RELEASE_BUILD: \"1\"\n")
+        format!(
+            "      VERSION: {version}\n      VELNOR_RELEASE_BUILD: \"1\"\n      MBX_TARGET_VIEWS: \"0\"\n"
+        )
     }
 }
 
@@ -6292,11 +6295,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "f05e0d5b8d4353400ef83a04fb3df9afa709e366fddb90b93f89f8e38361575e",
+                "b5fa50840a94386f1ff2198d0dac8da76d4d397c817221ed7e3d2a9899dcfff6",
             ),
             (
                 "preview.yml",
-                "508ba6286c0bf63f331a2348a4189cf4adfe494f0be7defb8f3f0afb668c2eee",
+                "f74230ca3bd1918b6b3a14c91a210c5534aa3ae4beb762055fb5bbdc7eb5bf2c",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7352,6 +7355,7 @@ cp "$record" "$out"
             "{debian}"
         );
         assert!(debian.contains("VELNOR_RELEASE_BUILD: \"1\""), "{debian}");
+        assert!(debian.contains("MBX_TARGET_VIEWS: \"0\""), "{debian}");
         assert!(debian.contains("--features release-build"), "{debian}");
         assert!(debian.contains("cargo install cargo-deb"), "{debian}");
         assert!(debian.contains("release emit"), "{debian}");
@@ -8354,6 +8358,7 @@ cp "$record" "$out"
             debian.contains("VERSION: ${{ needs.identity.outputs.version }}"),
             "{debian}"
         );
+        assert!(debian.contains("MBX_TARGET_VIEWS: \"0\""), "{debian}");
         assert!(
             debian.contains("--asset-name \"example-preview-${{ needs.identity.outputs.version }}-${{ matrix.arch }}.deb\""),
             "{debian}"
@@ -8640,6 +8645,8 @@ cp "$record" "$out"
         );
         assert!(!workflow.contains("sign-deb"), "{workflow}");
         assert!(workflow.contains("Package Debian artifacts"), "{workflow}");
+        let debian = yaml_job(&workflow, "debian");
+        assert!(debian.contains("MBX_TARGET_VIEWS: \"0\""), "{debian}");
         let preview = super::render_preview(&config, Some(release));
         assert!(!preview.contains("VELNOR_RELEASE_BUILD"), "{preview}");
         assert!(!preview.contains("Resolve preview identity"), "{preview}");

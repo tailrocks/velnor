@@ -1667,7 +1667,7 @@ fn policy_preflight_rejects_a_missing_or_aliased_policy_entrypoint() {
 
     write(
         &config_path,
-        &base.replace("[workflow]\n", "[workflow]\nfiles = [\"ci-pr.yml\"]\n"),
+        &base.replace("[workflow]\n", "[workflow]\nfiles = [\"ci-custom.yml\"]\n"),
     );
     let error = must_fail(
         DeclaredTree::read(&root),
