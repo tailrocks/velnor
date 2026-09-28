@@ -81,8 +81,8 @@ its metadata and recursively used local actions, alongside the source and
 nested-action root globs. The same resolved closure supplies `test -f`
 validation and watch ownership, so a change to a repository-root or
 `working-directory` script selects its action consumers
-(`crates/velnor-workflow/src/s2/scan/action.rs:702-824`, regression coverage at
-`crates/velnor-workflow/src/s2/scan/action.rs:3406,3489`).
+(`crates/velnor-workflow/src/s2/scan/action.rs:2332-2399`, regression coverage at
+`crates/velnor-workflow/src/s2/scan/action.rs:4709-4848`).
 
 A rename contributes both sides — target as renamed, source as deleted — so
 the old and new owners both match; a delete keeps its path so its owner still

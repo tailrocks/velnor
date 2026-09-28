@@ -1528,7 +1528,7 @@ fn runner_action_tag_directives(contents: &str) -> Result<BTreeMap<String, Strin
                 line_number + 1
             )
         })?;
-        if fields.next().is_some_and(|field| field != "#") {
+        if fields.next().is_some_and(|field| !field.starts_with('#')) {
             bail!(
                 "YAML %TAG directive on line {} has unexpected trailing fields",
                 line_number + 1
@@ -4174,6 +4174,14 @@ runs:
         )
         .unwrap();
         assert_eq!(directive_tagged.name.as_deref(), Some("false"));
+        let directive_tagged_with_inline_comment = parse_action_metadata(
+            "%TAG !core! tag:yaml.org,2002: #comment\n---\nname: !core!str false\nruns:\n  using: composite\n  steps: []\n",
+        )
+        .unwrap();
+        assert_eq!(
+            directive_tagged_with_inline_comment.name.as_deref(),
+            Some("false")
+        );
         let percent_encoded_directive_tagged = parse_action_metadata(
             "%TAG !core! tag:yaml.org,2002:\n---\nname: !core!%73tr false\nruns:\n  using: composite\n  steps: []\n",
         )
