@@ -4806,23 +4806,16 @@ trap 'cleanup_publication "$?"' EXIT
     }
 
     #[cfg(unix)]
-    fn terminate_fixture_group(child: &mut std::process::Child) {
-        if let Ok(process_group) = owned_fixture_group(child) {
-            terminate_and_reap_fixture_group(child, process_group);
-        } else {
-            let _ = child.kill();
-            for _ in 0..200 {
-                if child.try_wait().ok().flatten().is_some() {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let _ = child.kill();
-            for _ in 0..200 {
-                if child.try_wait().ok().flatten().is_some() {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+    fn terminate_fixture_group(child: &mut std::process::Child) -> Result<(), String> {
+        match owned_fixture_group(child) {
+            Ok(process_group) => terminate_and_reap_fixture_group(child, process_group),
+            Err(group_error) => {
+                let kill_result = child.kill();
+                reap_fixture_child_bounded(child).map_err(|cleanup_error| {
+                    format!(
+                        "fixture group unavailable ({group_error}); direct-child cleanup failed: {cleanup_error}; kill result: {kill_result:?}"
+                    )
+                })
             }
         }
     }
@@ -4839,25 +4832,43 @@ trap 'cleanup_publication "$?"' EXIT
     }
 
     #[cfg(unix)]
+    fn reap_fixture_child_bounded(child: &mut std::process::Child) -> Result<(), String> {
+        for _ in 0..200 {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error) => {
+                    return Err(format!("wait for fixture child {}: {error}", child.id()))
+                }
+            }
+        }
+        Err(format!(
+            "fixture child {} did not exit within the cleanup deadline",
+            child.id()
+        ))
+    }
+
+    #[cfg(unix)]
     fn terminate_and_reap_fixture_group(
         child: &mut std::process::Child,
         process_group: rustix::process::Pid,
-    ) {
+    ) -> Result<(), String> {
         for signal in [rustix::process::Signal::TERM, rustix::process::Signal::KILL] {
             if fixture_group_is_gone(process_group).unwrap_or(false) {
-                let _ = child.try_wait();
-                return;
+                return reap_fixture_child_bounded(child);
             }
             let _ = rustix::process::kill_process_group(process_group, signal);
             for _ in 0..200 {
                 let _ = child.try_wait();
                 if fixture_group_is_gone(process_group).unwrap_or(false) {
-                    return;
+                    return reap_fixture_child_bounded(child);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        let _ = child.try_wait();
+        Err(format!(
+            "fixture process group {process_group} remained after SIGKILL cleanup"
+        ))
     }
 
     #[cfg(unix)]
@@ -4873,8 +4884,12 @@ trap 'cleanup_publication "$?"' EXIT
             let process_group = match owned_fixture_group(&child) {
                 Ok(process_group) => process_group,
                 Err(error) => {
-                    terminate_fixture_group(&mut child);
-                    return Err(error);
+                    return match terminate_fixture_group(&mut child) {
+                        Ok(()) => Err(error),
+                        Err(cleanup_error) => {
+                            Err(format!("{error}; cleanup failed: {cleanup_error}"))
+                        }
+                    };
                 }
             };
             Ok(Self {
@@ -4907,7 +4922,7 @@ trap 'cleanup_publication "$?"' EXIT
             if !self.armed {
                 return;
             }
-            terminate_and_reap_fixture_group(&mut self.child, self.process_group);
+            let _ = terminate_and_reap_fixture_group(&mut self.child, self.process_group);
         }
     }
 
@@ -4926,8 +4941,13 @@ trap 'cleanup_publication "$?"' EXIT
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        terminate_fixture_group(child);
-        Err(format!("verifier did not start: {}", child.id()))
+        match terminate_fixture_group(child) {
+            Ok(()) => Err(format!("verifier did not start: {}", child.id())),
+            Err(error) => Err(format!(
+                "verifier did not start: {}; cleanup failed: {error}",
+                child.id()
+            )),
+        }
     }
 
     #[cfg(unix)]
@@ -4995,16 +5015,25 @@ trap 'cleanup_publication "$?"' EXIT
                 Ok(Some(status)) => return Ok(status),
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
                 Err(error) => {
-                    terminate_fixture_group(child);
-                    return Err(format!("fixture wait failed: {error}"));
+                    return match terminate_fixture_group(child) {
+                        Ok(()) => Err(format!("fixture wait failed: {error}")),
+                        Err(cleanup_error) => Err(format!(
+                            "fixture wait failed: {error}; cleanup failed: {cleanup_error}"
+                        )),
+                    };
                 }
             }
         }
-        terminate_fixture_group(child);
-        Err("fixture did not exit after cancellation".to_owned())
+        match terminate_fixture_group(child) {
+            Ok(()) => Err("fixture did not exit after cancellation".to_owned()),
+            Err(error) => Err(format!(
+                "fixture did not exit after cancellation; cleanup failed: {error}"
+            )),
+        }
     }
 
     #[cfg(unix)]
+    #[allow(clippy::too_many_lines)]
     fn spawn_rolling_cancellation_fixture(
         shell: &str,
         fragment: &str,
@@ -5184,8 +5213,11 @@ trap 'cleanup_publication "$?"' EXIT
             !root.join("after").exists(),
             "cancellation stops publication for {shell} group={signal_group}"
         );
-        wait_for_fixture_processes_gone(process_group_guard.process_group(), &verifier_pids)
-            .unwrap_or_else(|error| panic!("{shell} group={signal_group}: {error}"));
+        assert_eq!(
+            wait_for_fixture_processes_gone(process_group_guard.process_group(), &verifier_pids),
+            Ok(()),
+            "process tree did not exit for {shell} group={signal_group}"
+        );
         process_group_guard.disarm();
         if signal_group {
             assert!(
