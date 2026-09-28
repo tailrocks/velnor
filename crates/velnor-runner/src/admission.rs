@@ -32,7 +32,8 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
 use velnor_model::action_reference::{
-    ActionImageReference, RepositoryActionReference, SafeActionPath,
+    is_runner_local_action_reference, ActionImageReference, RepositoryActionReference,
+    SafeActionPath,
 };
 
 /// Maximum composite nesting depth. Matches the removed local preflight bound.
@@ -806,7 +807,7 @@ pub fn admit_job(
                 .path
                 .as_deref()
                 .or(reference.name.as_deref())
-                .map(|value| value.trim_start_matches("./").to_string())
+                .map(normalize_local_action_subpath)
                 .unwrap_or_default();
             let ancestry = root.child(format!("step '{step_label}' (local ./{subpath})"));
             admit_local(
@@ -1264,10 +1265,10 @@ fn recurse_composite(
                 Vec::new(),
             ));
         }
-        if uses.starts_with('.') {
+        if is_runner_local_action_reference(uses) {
             // A composite-local `uses: ./path` is relative to the current
             // action's repository root; strip only the single `./` prefix.
-            let nested_subpath = uses.strip_prefix("./").unwrap_or(uses);
+            let nested_subpath = normalize_local_action_subpath(uses);
             let ancestry = ancestry.child(format!("nested '{label}' (local ./{nested_subpath})"));
             admit_local(
                 walk,
@@ -1275,7 +1276,7 @@ fn recurse_composite(
                 Some(parent),
                 repo_ctx,
                 ref_ctx,
-                nested_subpath,
+                &nested_subpath,
                 LocalInputSource::Resolved(&child_inputs),
                 depth + 1,
             )?;
@@ -1433,11 +1434,19 @@ fn render_admission_expression(value: &str, context_data: &[(String, Value)]) ->
 }
 
 fn is_local_reference(name: Option<&str>, path: Option<&str>) -> bool {
-    if name.is_some_and(|n| !n.starts_with('.') && n.contains('/')) {
+    if name.is_some_and(|n| !is_runner_local_action_reference(n) && n.contains('/')) {
         return false;
     }
-    path.is_some_and(|value| value.starts_with('.'))
-        || name.is_some_and(|value| value.starts_with('.'))
+    path.is_some_and(is_runner_local_action_reference)
+        || name.is_some_and(is_runner_local_action_reference)
+}
+
+fn normalize_local_action_subpath(value: &str) -> String {
+    value
+        .strip_prefix("./")
+        .or_else(|| value.strip_prefix(".\\"))
+        .unwrap_or(value)
+        .replace('\\', "/")
 }
 
 fn is_full_sha(value: &str) -> bool {
@@ -1623,6 +1632,14 @@ fn validate_metadata_bounds(
         ("runs.post-if", metadata.runs.post_if.as_deref()),
         ("runs.image", metadata.runs.image.as_deref()),
         ("runs.entrypoint", metadata.runs.entrypoint.as_deref()),
+        (
+            "runs.pre-entrypoint",
+            metadata.runs.pre_entrypoint.as_deref(),
+        ),
+        (
+            "runs.post-entrypoint",
+            metadata.runs.post_entrypoint.as_deref(),
+        ),
     ] {
         validate_metadata_text(value, field, &mut total_string_bytes)?;
     }
@@ -1635,6 +1652,7 @@ fn validate_metadata_bounds(
     for value in &metadata.runs.args {
         validate_metadata_text(Some(value), "runs.args", &mut total_string_bytes)?;
     }
+    validate_metadata_string_map(&metadata.runs.env, "runs.env", &mut total_string_bytes)?;
     if metadata.runs.steps.len() > MAX_COMPOSITE_STEPS {
         return Err(MetadataValidationFailure::policy(format!(
             "metadata step count exceeds {MAX_COMPOSITE_STEPS}"
@@ -1818,12 +1836,15 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
         metadata.runs.post_if.as_deref(),
         metadata.runs.image.as_deref(),
         metadata.runs.entrypoint.as_deref(),
+        metadata.runs.pre_entrypoint.as_deref(),
+        metadata.runs.post_entrypoint.as_deref(),
     ] {
         add(&mut total, value);
     }
     for value in &metadata.runs.args {
         total = total.saturating_add(value.len());
     }
+    add_map(&mut total, &metadata.runs.env);
     for step in &metadata.runs.steps {
         for value in [
             step.id.as_deref(),
@@ -2052,6 +2073,130 @@ mod tests {
 
         assert_eq!(error.failure_kind(), AdmissionFailureKind::Policy);
         assert_eq!(error.field, "metadata");
+    }
+
+    #[test]
+    fn runs_env_string_limits_are_admission_policy() {
+        let value = "x".repeat(MAX_METADATA_STRING_BYTES + 1);
+        let yaml =
+            format!("runs:\n  using: docker\n  image: Dockerfile\n  env:\n    VALUE: '{value}'\n");
+        let metadata = crate::action::parse_action_metadata(&yaml).unwrap();
+
+        let error = validate_metadata_bounds(&metadata).unwrap_err();
+
+        assert!(matches!(error, MetadataValidationFailure::Policy(_)));
+        assert_eq!(
+            metadata_retained_bytes(&metadata)
+                - metadata_retained_bytes(&ActionMetadata {
+                    runs: crate::action::ActionRuns {
+                        env: BTreeMap::new(),
+                        ..metadata.runs.clone()
+                    },
+                    ..metadata.clone()
+                }),
+            "VALUE".len() + value.len()
+        );
+    }
+
+    #[test]
+    fn runs_env_entry_count_is_bounded() {
+        let mut yaml = String::from("runs:\n  using: docker\n  image: Dockerfile\n  env:\n");
+        for index in 0..=MAX_METADATA_MAP_ENTRIES {
+            yaml.push_str(&format!("    KEY_{index}: value\n"));
+        }
+        let metadata = crate::action::parse_action_metadata(&yaml).unwrap();
+
+        let error = validate_metadata_bounds(&metadata).unwrap_err();
+
+        assert!(matches!(error, MetadataValidationFailure::Policy(_)));
+    }
+
+    #[test]
+    fn docker_stage_entrypoints_are_bounded_and_counted() {
+        let metadata = crate::action::parse_action_metadata(
+            r#"
+runs:
+  using: docker
+  image: Dockerfile
+  pre-entrypoint: /pre.sh
+  post-entrypoint: /post.sh
+  env:
+    KEY: value
+"#,
+        )
+        .unwrap();
+        let mut without_accounted_fields = metadata.clone();
+        without_accounted_fields.runs.pre_entrypoint = None;
+        without_accounted_fields.runs.post_entrypoint = None;
+        without_accounted_fields.runs.env.clear();
+        assert_eq!(
+            metadata_retained_bytes(&metadata) - metadata_retained_bytes(&without_accounted_fields),
+            "/pre.sh".len() + "/post.sh".len() + "KEY".len() + "value".len()
+        );
+        assert!(validate_metadata_bounds(&metadata).is_ok());
+
+        let too_long = "x".repeat(MAX_METADATA_STRING_BYTES + 1);
+        for field in ["pre-entrypoint", "post-entrypoint"] {
+            let yaml =
+                format!("runs:\n  using: docker\n  image: Dockerfile\n  {field}: '{too_long}'\n");
+            let oversized = crate::action::parse_action_metadata(&yaml).unwrap();
+            assert!(matches!(
+                validate_metadata_bounds(&oversized),
+                Err(MetadataValidationFailure::Policy(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn runs_env_counts_toward_admission_retention_budget() {
+        let repository = "acme/large-env-action";
+        let payload = "x".repeat(60_000);
+        let entries = (0..150)
+            .map(|index| {
+                let sha = format!("{index:040x}");
+                let yaml = format!(
+                    "runs:\n  using: node20\n  main: index.js\n  env:\n    PAYLOAD: '{payload}'\n"
+                );
+                (format!("{repository}@{sha}"), yaml)
+            })
+            .collect::<Vec<_>>();
+        let source = FakeMetadataSource {
+            entries: entries.into_iter().collect(),
+            reads: AtomicUsize::new(0),
+        };
+        let context_data = Vec::new();
+        let mut walk = Walk {
+            graph: AdmissionGraph::default(),
+            source: &source,
+            metadata_cache: BTreeMap::new(),
+            metadata_bytes: 0,
+            expanded: BTreeSet::new(),
+            step_visits: 0,
+            context_data: &context_data,
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        let ancestry = Ancestry::default();
+        let mut budget_rejected = false;
+
+        for index in 0..150 {
+            let sha = format!("{index:040x}");
+            let key = ActionKey::remote(repository, &sha, None);
+            match cached_metadata(&mut walk, &key, repository, &sha, None, &ancestry) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error.field, "metadata");
+                    assert_eq!(error.failure_kind(), AdmissionFailureKind::Policy);
+                    budget_rejected = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            budget_rejected,
+            "runs.env must consume retained metadata budget"
+        );
+        assert!(walk.metadata_bytes <= MAX_ADMISSION_METADATA_BYTES);
     }
 
     #[test]
@@ -2758,9 +2903,19 @@ mod tests {
             Some(".github/actions/report-velnor-ci-outcomes")
         ));
         assert!(!is_local_reference(Some("actions/cache"), Some("restore")));
+        assert!(!is_local_reference(Some(".hidden/action"), None));
+        assert!(!is_local_reference(Some(".../action"), None));
+        assert!(!is_local_reference(
+            Some("actions/cache"),
+            Some(".hidden/action")
+        ));
         assert!(is_local_reference(
             Some("./.github/actions/report-velnor-ci-outcomes"),
             Some("./.github/actions/report-velnor-ci-outcomes")
+        ));
+        assert!(is_local_reference(
+            None,
+            Some(".\\.github\\actions\\report")
         ));
         assert!(is_local_reference(
             None,

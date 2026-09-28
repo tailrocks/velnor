@@ -1,7 +1,6 @@
 //! The generator-owned agent files: every full render — schema-1 and
 //! schema-2, even for minimal repositories — emits `.github/AGENTS.md` with
-//! fixed bytes plus the relative `.github/CLAUDE.md -> AGENTS.md` symlink,
-//! and repeating generation is a byte-identical no-op.
+//! fixed bytes, and repeating generation is a byte-identical no-op.
 
 #![expect(
     clippy::unwrap_used,
@@ -97,41 +96,6 @@ fn regenerate_into(output: &Path, root: &Path, extra: &[&str]) {
     );
 }
 
-/// A retargeted generator-owned link must fail closed even under `--force`:
-/// force bypasses the conflicts guard, never the ownership proof.
-fn assert_retargeted_link_is_refused(root: &Path, output: &Path, extra: &[&str]) {
-    let link = output.join(".github/CLAUDE.md");
-    fs::remove_file(&link).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("/tmp/velnor-agent-files-evil", &link).unwrap();
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file("velnor-agent-files-evil", &link).unwrap();
-    let mut args = vec!["--plain", "--force", "--default-branch", "main", "--output"];
-    args.push(output.to_str().unwrap());
-    args.extend_from_slice(extra);
-    args.push(root.to_str().unwrap());
-    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
-        .args(&args)
-        .output()
-        .expect("run velnor-workflow");
-    assert!(
-        !outcome.status.success(),
-        "a retargeted generator-owned link must fail closed"
-    );
-    let stderr = String::from_utf8_lossy(&outcome.stderr);
-    assert!(
-        stderr.contains("manually modified generator symlink"),
-        "refusal must name the modified link: {stderr}"
-    );
-    assert!(
-        fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink(),
-        "the refused run must leave the link untouched"
-    );
-}
-
 fn check(root: &Path, output: &Path, extra: &[&str]) {
     git_fixture::commit_fixture(root);
     let mut args = vec!["--plain", "--check", "--default-branch", "main", "--output"];
@@ -180,9 +144,8 @@ fn snapshot_tree(output: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     snapshot
 }
 
-fn assert_agent_files(output: &Path) {
+fn assert_agents_file(output: &Path) {
     let agents = output.join(".github/AGENTS.md");
-    let link = output.join(".github/CLAUDE.md");
     let agents_metadata = fs::symlink_metadata(&agents).unwrap();
     assert!(
         agents_metadata.file_type().is_file() && !agents_metadata.file_type().is_symlink(),
@@ -193,27 +156,15 @@ fn assert_agent_files(output: &Path) {
         EXPECTED_AGENTS_MD,
         ".github/AGENTS.md bytes differ from the contract"
     );
-    assert!(
-        fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink(),
-        ".github/CLAUDE.md must be a symlink"
-    );
-    assert_eq!(
-        fs::read_link(&link).unwrap(),
-        PathBuf::from("AGENTS.md"),
-        ".github/CLAUDE.md must point at the relative AGENTS.md"
-    );
+}
+
+fn assert_agent_files(output: &Path) {
+    assert_agents_file(output);
     let state =
         fs::read_to_string(output.join(".github/ci/.github-actions-generator-state")).unwrap();
     assert!(
         state.contains(".github/AGENTS.md\t"),
         "ownership state must record .github/AGENTS.md"
-    );
-    assert!(
-        state.contains(".github/CLAUDE.md\t"),
-        "ownership state must record .github/CLAUDE.md"
     );
 }
 
@@ -223,13 +174,13 @@ fn write_schema1_config(root: &Path) {
     fs::write(
         directory.join("velnor-workflow.toml"),
         "schema = 1\n\
-         \n\
-         [generator]\n\
-         repository = \"example/minimal\"\n\
-         \n\
-         [workflow]\n\
-         runners = \"github\"\n\
-         github_runner = \"ubuntu-24.04\"\n",
+             \n\
+             [generator]\n\
+             repository = \"example/minimal\"\n\
+             \n\
+             [workflow]\n\
+             runners = \"github\"\n\
+             github_runner = \"ubuntu-24.04\"\n",
     )
     .unwrap();
 }
@@ -240,16 +191,16 @@ fn write_schema2_config(root: &Path) {
     fs::write(
         directory.join("velnor-workflow.toml"),
         "schema = 2\n\
-         \n\
-         [generator]\n\
-         repository = \"example/minimal\"\n\
-         \n\
-         [workflow]\n\
-         providers = [\"github-hosted\"]\n\
-         automatic_providers = [\"github-hosted\"]\n\
-         \n\
-         [workflow.selectors.github-hosted]\n\
-         runs_on = [\"ubuntu-24.04\"]\n",
+             \n\
+             [generator]\n\
+             repository = \"example/minimal\"\n\
+             \n\
+             [workflow]\n\
+             providers = [\"github-hosted\"]\n\
+             automatic_providers = [\"github-hosted\"]\n\
+             \n\
+             [workflow.selectors.github-hosted]\n\
+             runs_on = [\"ubuntu-24.04\"]\n",
     )
     .unwrap();
     // The scan path requires visibility evidence bound to the declared
@@ -278,7 +229,6 @@ fn v1_minimal_repo_emits_agent_files_and_regen_is_noop() {
         "repeat generation must leave every byte and link untouched"
     );
     check(&root, &generated.output, &extra);
-    assert_retargeted_link_is_refused(&root, &generated.output, &extra);
 }
 
 #[test]
@@ -296,7 +246,6 @@ fn s2_minimal_repo_emits_agent_files_and_regen_is_noop() {
         "repeat generation must leave every byte and link untouched"
     );
     check(&root, &generated.output, &extra);
-    assert_retargeted_link_is_refused(&root, &generated.output, &extra);
 }
 
 #[test]

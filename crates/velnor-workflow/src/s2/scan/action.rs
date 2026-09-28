@@ -7,17 +7,25 @@
 //! `github-action-fixtures` unit contract.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
 
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use velnor_model::action_reference::{
-    resolve_action_path, ActionImageReference, RepositoryActionReference,
+    is_runner_local_action_reference, resolve_action_path, ActionImageReference,
+    RepositoryActionReference,
 };
 
 use super::file_walk::is_test_support_path;
 use super::{unit, RepositoryShape, ScanContext};
 use crate::s2::{parent_path, shell_quote, UnitKind};
+
+const MAX_ACTION_METADATA_BYTES: u64 = 1024 * 1024;
+const MAX_ACTION_METADATA_DEPTH: usize = 64;
+const MAX_ACTION_METADATA_NODES: usize = 50_000;
+const MAX_ACTION_METADATA_EVENTS: usize = 1_000_000;
+const MAX_ACTION_METADATA_ESTIMATED_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActionSourceKind {
@@ -97,12 +105,12 @@ struct ActionStep {
     env: serde_yaml::Value,
 }
 
-/// Check mapping keys before `serde_yaml::Value` converts them. Runner first
-/// converts scalar keys to strings, then applies schema-specific key checks
-/// and ordinal-ignore-case duplicate detection. `Value` loses enough source
-/// information that those checks must happen during deserialization.
+/// Decode scalar keys and schema String values into Runner-compatible text
+/// before building the scanner's string-keyed `Value` tree. The decoder keeps
+/// map roles so schema keys get non-empty checks while loose nested maps remain
+/// permissive.
 #[derive(Debug)]
-struct RunnerYamlValue;
+struct RunnerYamlValue(serde_yaml::Value);
 
 impl<'de> Deserialize<'de> for RunnerYamlValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -116,7 +124,7 @@ impl<'de> Deserialize<'de> for RunnerYamlValue {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RunnerYamlMapRole {
     Manifest,
     Inputs,
@@ -125,10 +133,12 @@ enum RunnerYamlMapRole {
     OutputDefinition,
     Runs,
     RunEnvironment,
+    StringSequence,
     CompositeSteps,
     CompositeStep,
     StepWith,
     StepEnvironment,
+    ScalarString,
     Any,
 }
 
@@ -139,26 +149,56 @@ impl RunnerYamlMapRole {
 
     fn value_role(self, key: &str) -> Self {
         match self {
-            Self::Manifest if runner_ordinal_ignore_case_eq(key, "inputs") => Self::Inputs,
-            Self::Manifest if runner_ordinal_ignore_case_eq(key, "outputs") => Self::Outputs,
-            Self::Manifest if runner_ordinal_ignore_case_eq(key, "runs") => Self::Runs,
+            Self::RunEnvironment | Self::StepWith | Self::StepEnvironment => Self::ScalarString,
+            Self::Manifest if key == "inputs" => Self::Inputs,
+            Self::Manifest if key == "outputs" => Self::Outputs,
+            Self::Manifest if key == "runs" => Self::Runs,
+            Self::Manifest if matches!(key, "name" | "description") => Self::ScalarString,
             Self::Inputs => Self::InputDefinition,
             Self::Outputs => Self::OutputDefinition,
-            Self::Runs if runner_ordinal_ignore_case_eq(key, "env") => Self::RunEnvironment,
-            Self::Runs if runner_ordinal_ignore_case_eq(key, "steps") => Self::CompositeSteps,
-            Self::CompositeStep if runner_ordinal_ignore_case_eq(key, "with") => Self::StepWith,
-            Self::CompositeStep if runner_ordinal_ignore_case_eq(key, "env") => {
-                Self::StepEnvironment
+            Self::InputDefinition if runner_ordinal_ignore_case_eq(key, "default") => {
+                Self::ScalarString
+            }
+            Self::OutputDefinition if matches!(key, "description" | "value") => Self::ScalarString,
+            Self::Runs if key == "env" => Self::RunEnvironment,
+            Self::Runs if key == "steps" => Self::CompositeSteps,
+            Self::Runs if key == "args" => Self::StringSequence,
+            Self::Runs
+                if matches!(
+                    key,
+                    "using"
+                        | "image"
+                        | "entrypoint"
+                        | "pre-entrypoint"
+                        | "pre-if"
+                        | "post-entrypoint"
+                        | "post-if"
+                        | "main"
+                        | "pre"
+                        | "post"
+                ) =>
+            {
+                Self::ScalarString
+            }
+            Self::CompositeStep if key == "with" => Self::StepWith,
+            Self::CompositeStep if key == "env" => Self::StepEnvironment,
+            Self::CompositeStep
+                if matches!(
+                    key,
+                    "id" | "name" | "if" | "run" | "shell" | "working-directory" | "uses"
+                ) =>
+            {
+                Self::ScalarString
             }
             _ => Self::Any,
         }
     }
 
     fn sequence_element_role(self) -> Self {
-        if matches!(self, Self::CompositeSteps) {
-            Self::CompositeStep
-        } else {
-            Self::Any
+        match self {
+            Self::CompositeSteps => Self::CompositeStep,
+            Self::StringSequence => Self::ScalarString,
+            _ => Self::Any,
         }
     }
 }
@@ -189,36 +229,60 @@ impl<'de> Visitor<'de> for RunnerYamlValueVisitor {
         formatter.write_str("a YAML value with Runner-compatible mapping keys")
     }
 
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::Bool(value))
     }
 
-    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::from(value))
     }
 
-    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::from(value))
     }
 
-    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::from(value))
     }
 
-    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::from(value))
     }
 
-    fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::from(value))
     }
 
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::Null)
     }
 
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(RunnerYamlValue)
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.scalar(serde_yaml::Value::Null)
     }
 
     fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
@@ -240,11 +304,11 @@ impl<'de> Visitor<'de> for RunnerYamlValueVisitor {
         A: SeqAccess<'de>,
     {
         let role = self.role.sequence_element_role();
-        while sequence
-            .next_element_seed(RunnerYamlValueSeed { role })?
-            .is_some()
-        {}
-        Ok(RunnerYamlValue)
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(RunnerYamlValueSeed { role })? {
+            values.push(value.0);
+        }
+        Ok(RunnerYamlValue(serde_yaml::Value::Sequence(values)))
     }
 
     fn visit_map<A>(self, mut mapping: A) -> Result<Self::Value, A::Error>
@@ -253,6 +317,7 @@ impl<'de> Visitor<'de> for RunnerYamlValueVisitor {
     {
         let role = self.role;
         let mut keys = BTreeSet::new();
+        let mut values = serde_yaml::Mapping::new();
         while let Some(key) = mapping.next_key::<RunnerYamlMapKey>()? {
             if role.requires_non_empty_keys() && key.0.is_empty() {
                 return Err(A::Error::custom(
@@ -266,10 +331,26 @@ impl<'de> Visitor<'de> for RunnerYamlValueVisitor {
                 )));
             }
             let value_role = role.value_role(&key.0);
-            let _: RunnerYamlValue =
+            let value: RunnerYamlValue =
                 mapping.next_value_seed(RunnerYamlValueSeed { role: value_role })?;
+            values.insert(key.0, value.0);
         }
-        Ok(RunnerYamlValue)
+        Ok(RunnerYamlValue(serde_yaml::Value::Mapping(values)))
+    }
+}
+
+impl RunnerYamlValueVisitor {
+    fn scalar<E>(self, value: serde_yaml::Value) -> Result<RunnerYamlValue, E>
+    where
+        E: serde::de::Error,
+    {
+        if self.role == RunnerYamlMapRole::ScalarString {
+            runner_scalar_to_string(value)
+                .map(|value| RunnerYamlValue(serde_yaml::Value::String(value)))
+                .map_err(E::custom)
+        } else {
+            Ok(RunnerYamlValue(value))
+        }
     }
 }
 
@@ -334,15 +415,15 @@ impl<'de> Visitor<'de> for RunnerYamlMapKeyVisitor {
     }
 
     fn visit_i64<E>(self, key: i64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlMapKey(key.to_string()))
+        Ok(RunnerYamlMapKey(runner_number_to_string(key as f64)))
     }
 
     fn visit_u64<E>(self, key: u64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlMapKey(key.to_string()))
+        Ok(RunnerYamlMapKey(runner_number_to_string(key as f64)))
     }
 
     fn visit_f64<E>(self, key: f64) -> Result<Self::Value, E> {
-        Ok(RunnerYamlMapKey(key.to_string()))
+        Ok(RunnerYamlMapKey(runner_number_to_string(key)))
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E> {
@@ -379,6 +460,131 @@ impl<'de> Visitor<'de> for RunnerYamlMapKeyVisitor {
     }
 }
 
+fn runner_scalar_to_string(value: serde_yaml::Value) -> Result<String, &'static str> {
+    match value {
+        serde_yaml::Value::Null => Ok(String::new()),
+        serde_yaml::Value::Bool(value) => Ok(value.to_string()),
+        serde_yaml::Value::Number(value) => Ok(runner_number_to_string(value.as_f64())),
+        serde_yaml::Value::String(value) => Ok(value),
+        serde_yaml::Value::Sequence(_)
+        | serde_yaml::Value::Mapping(_)
+        | serde_yaml::Value::Tagged(_) => Err("actions/runner requires a scalar string value"),
+    }
+}
+
+fn runner_yaml_scalar_source(value: &serde_yaml::Value) -> Option<String> {
+    if let serde_yaml::Value::String(value) = value {
+        let mut quoted = String::with_capacity(value.len().saturating_add(2));
+        quoted.push('"');
+        for character in value.chars() {
+            match character {
+                '"' => quoted.push_str("\\\""),
+                '\\' => quoted.push_str("\\\\"),
+                '\0' => quoted.push_str("\\0"),
+                '\u{0008}' => quoted.push_str("\\b"),
+                '\t' => quoted.push_str("\\t"),
+                '\n' => quoted.push_str("\\n"),
+                '\u{000c}' => quoted.push_str("\\f"),
+                '\r' => quoted.push_str("\\r"),
+                '\u{001b}' => quoted.push_str("\\e"),
+                '\u{0085}' => quoted.push_str("\\N"),
+                '\u{2028}' => quoted.push_str("\\L"),
+                '\u{2029}' => quoted.push_str("\\P"),
+                character if character.is_control() => {
+                    use std::fmt::Write as _;
+                    let _ = write!(quoted, "\\u{:04X}", character as u32);
+                }
+                character => quoted.push(character),
+            }
+        }
+        quoted.push('"');
+        return Some(quoted);
+    }
+    serde_yaml::to_string(value)
+        .ok()
+        .map(|source| source.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+fn runner_yaml_scalar_source_end(
+    kind: serde_yaml::cst::SyntaxKind,
+    raw: &str,
+    end: usize,
+) -> usize {
+    use serde_yaml::cst::SyntaxKind;
+
+    if matches!(kind, SyntaxKind::LiteralScalar | SyntaxKind::FoldedScalar) {
+        return end;
+    }
+    end.saturating_sub(
+        raw.len()
+            .saturating_sub(raw.trim_end_matches([' ', '\t', '\r', '\n']).len()),
+    )
+}
+
+/// Match actions/runner's `NumberToken.ToString()` (`G15`, invariant culture).
+fn runner_number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_owned();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_owned();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0".to_owned()
+        } else {
+            "0".to_owned()
+        };
+    }
+
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    let scientific = format!("{:.14e}", value.abs());
+    let Some((mantissa, exponent)) = scientific.split_once('e') else {
+        return value.to_string();
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return value.to_string();
+    };
+    let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+
+    if !(-4..15).contains(&exponent) {
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!("{sign}{mantissa}E{exponent_sign}{:02}", exponent.abs());
+    }
+
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let decimal_index = exponent + 1;
+    let mut result = if decimal_index <= 0 {
+        format!(
+            "0.{}{}",
+            "0".repeat(decimal_index.unsigned_abs() as usize),
+            digits
+        )
+    } else if decimal_index as usize >= digits.len() {
+        format!(
+            "{}{}",
+            digits,
+            "0".repeat(decimal_index as usize - digits.len())
+        )
+    } else {
+        let decimal_index = decimal_index as usize;
+        format!("{}.{}", &digits[..decimal_index], &digits[decimal_index..])
+    };
+    if result.contains('.') {
+        while result.ends_with('0') {
+            result.pop();
+        }
+        if result.ends_with('.') {
+            result.pop();
+        }
+    }
+    format!("{sign}{result}")
+}
+
 #[derive(Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -387,17 +593,356 @@ impl<'de> Visitor<'de> for RunnerYamlMapKeyVisitor {
 struct RunnerYamlSyntax {
     has_anchor_or_alias: bool,
     has_complex_mapping_key: bool,
-    has_non_string_mapping_key: bool,
     has_duplicate_mapping_key: bool,
+    exceeded_budget: bool,
+    exceeded_depth: bool,
+    event_count: usize,
+    node_count: usize,
+    estimated_bytes: usize,
+    pending_tag: Option<String>,
+    pending_tag_start: Option<usize>,
+    pending_tag_end: Option<usize>,
+    tag_error: Option<String>,
+    tag_directives: BTreeMap<String, String>,
+    source_replacements: Vec<(usize, usize, String)>,
+}
+
+impl RunnerYamlSyntax {
+    fn count_event(&mut self) -> bool {
+        self.event_count = match self.event_count.checked_add(1) {
+            Some(count) if count <= MAX_ACTION_METADATA_EVENTS => count,
+            _ => {
+                self.exceeded_budget = true;
+                return false;
+            }
+        };
+        true
+    }
+
+    fn count_node(&mut self) -> bool {
+        self.node_count = match self.node_count.checked_add(1) {
+            Some(count) if count <= MAX_ACTION_METADATA_NODES => count,
+            _ => {
+                self.exceeded_budget = true;
+                return false;
+            }
+        };
+        true
+    }
+}
+
+fn runner_yaml_collection_kind(kind: serde_yaml::cst::SyntaxKind) -> bool {
+    use serde_yaml::cst::SyntaxKind;
+
+    matches!(
+        kind,
+        SyntaxKind::BlockMapping
+            | SyntaxKind::BlockSequence
+            | SyntaxKind::FlowMapping
+            | SyntaxKind::FlowSequence
+    )
+}
+
+fn runner_action_parser_config() -> serde_yaml::ParserConfig {
+    serde_yaml::ParserConfig::new()
+        .max_document_length(MAX_ACTION_METADATA_BYTES as usize)
+        .max_depth(MAX_ACTION_METADATA_DEPTH)
+        .max_nodes(MAX_ACTION_METADATA_NODES)
+        .max_events(MAX_ACTION_METADATA_EVENTS)
+        .max_total_scalar_bytes(MAX_ACTION_METADATA_BYTES as usize)
+        .max_mapping_keys(MAX_ACTION_METADATA_NODES)
+        .max_sequence_length(MAX_ACTION_METADATA_NODES)
+        .max_alias_expansions(0)
+        .max_documents(1)
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Last)
+        .merge_key_policy(serde_yaml::MergeKeyPolicy::AsOrdinary)
+        .with_policy(serde_yaml::policy::DenyAnchors)
+}
+
+fn runner_tag_directives(contents: &str) -> Result<BTreeMap<String, String>, &'static str> {
+    let mut directives = BTreeMap::new();
+    for line in contents.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if is_runner_document_start(line) {
+            break;
+        }
+        // YAML directives are only valid in the document prolog and must
+        // start at column zero. In particular, never treat `%TAG` text inside
+        // an indented block scalar as a directive.
+        if !line.starts_with('%') {
+            break;
+        }
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("%TAG") {
+            continue;
+        }
+        let (Some(handle), Some(prefix)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if fields.next().is_some_and(|field| !field.starts_with('#')) {
+            continue;
+        };
+        if !handle.starts_with('!') {
+            continue;
+        }
+        if directives
+            .insert(handle.to_owned(), prefix.to_owned())
+            .is_some()
+        {
+            return Err("duplicate YAML %TAG directive handle");
+        }
+    }
+    Ok(directives)
+}
+
+fn is_runner_document_start(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("---") else {
+        return false;
+    };
+    rest.is_empty()
+        || rest
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_whitespace() || character == '#')
+}
+
+fn decode_runner_tag_uri(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = bytes
+            .get(index + 1)
+            .and_then(|byte| (*byte as char).to_digit(16))?;
+        let low = bytes
+            .get(index + 2)
+            .and_then(|byte| (*byte as char).to_digit(16))?;
+        decoded.push((high * 16 + low) as u8);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn expand_runner_tag(raw_tag: &str, directives: &BTreeMap<String, String>) -> Option<String> {
+    if let Some(uri) = raw_tag
+        .strip_prefix("!<")
+        .and_then(|tag| tag.strip_suffix('>'))
+    {
+        return decode_runner_tag_uri(uri);
+    }
+    if raw_tag.starts_with("!!") {
+        // A document may override the default secondary handle. Match
+        // Runner's expanded tag URI before applying its built-in default.
+        let prefix = directives
+            .get("!!")
+            .map(String::as_str)
+            .unwrap_or("tag:yaml.org,2002:");
+        return decode_runner_tag_uri(&format!("{prefix}{}", &raw_tag[2..]));
+    }
+
+    let separator = raw_tag[1..].find('!').map(|index| index + 1);
+    let (handle, suffix) = separator.map_or(("!", &raw_tag[1..]), |index| {
+        (&raw_tag[..=index], &raw_tag[index + 1..])
+    });
+    directives
+        .get(handle)
+        .and_then(|prefix| decode_runner_tag_uri(&format!("{prefix}{suffix}")))
+}
+
+fn runner_tagged_scalar(
+    tag: &str,
+    kind: serde_yaml::cst::SyntaxKind,
+    raw: &str,
+) -> Option<serde_yaml::Value> {
+    use serde_yaml::cst::SyntaxKind;
+
+    const YAML_TAG_PREFIX: &str = "tag:yaml.org,2002:";
+    let plain = kind == SyntaxKind::PlainScalar;
+    let lexical = raw.trim();
+    match tag.strip_prefix(YAML_TAG_PREFIX)? {
+        "str" => runner_tagged_string(raw, kind).map(serde_yaml::Value::String),
+        "bool" if plain => match lexical {
+            "true" | "True" | "TRUE" => Some(serde_yaml::Value::Bool(true)),
+            "false" | "False" | "FALSE" => Some(serde_yaml::Value::Bool(false)),
+            _ => None,
+        },
+        "int" if plain => runner_tagged_integer(lexical),
+        "float" if plain => runner_tagged_float(lexical),
+        "null" if plain && runner_null_lexeme(lexical) => Some(serde_yaml::Value::Null),
+        _ => None,
+    }
+}
+
+fn runner_tagged_string(raw: &str, kind: serde_yaml::cst::SyntaxKind) -> Option<String> {
+    use serde_yaml::cst::SyntaxKind;
+
+    if kind == SyntaxKind::PlainScalar {
+        // Plain scalars such as `false` are implicitly typed by YAML; an
+        // explicit Runner string tag must preserve their source spelling.
+        return Some(match serde_yaml::from_str::<serde_yaml::Value>(raw).ok() {
+            Some(serde_yaml::Value::String(value)) => value,
+            _ => raw.trim_end_matches([' ', '\t', '\r', '\n']).to_owned(),
+        });
+    }
+    serde_yaml::from_str::<String>(raw).ok()
+}
+
+fn runner_null_lexeme(raw: &str) -> bool {
+    matches!(raw, "" | "~" | "null" | "Null" | "NULL")
+}
+
+fn runner_tagged_integer(raw: &str) -> Option<serde_yaml::Value> {
+    let number = if let Some(hex) = raw.strip_prefix("0x") {
+        if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let bits = u32::from_str_radix(hex, 16).ok()?;
+        f64::from(bits as i32)
+    } else if let Some(octal) = raw.strip_prefix("0o") {
+        if octal.is_empty() || !octal.bytes().all(|byte| matches!(byte, b'0'..=b'7')) {
+            return None;
+        }
+        f64::from(i32::from_str_radix(octal, 8).ok()?)
+    } else {
+        if !runner_float_lexeme(raw) {
+            return None;
+        }
+        raw.parse::<f64>().ok()?
+    };
+    Some(serde_yaml::Value::Number(number.into()))
+}
+
+fn runner_radix_integer(raw: &str) -> Option<serde_yaml::Value> {
+    let raw = raw.trim();
+    (raw.starts_with("0x") || raw.starts_with("0o")).then(|| runner_tagged_integer(raw))?
+}
+
+fn runner_tagged_float(raw: &str) -> Option<serde_yaml::Value> {
+    let number = match raw {
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => f64::INFINITY,
+        "-.inf" | "-.Inf" | "-.INF" => f64::NEG_INFINITY,
+        ".nan" | ".NaN" | ".NAN" => f64::NAN,
+        _ => {
+            if !runner_float_lexeme(raw) {
+                return None;
+            }
+            raw.parse::<f64>().ok()?
+        }
+    };
+    Some(serde_yaml::Value::Number(number.into()))
+}
+
+fn runner_float_lexeme(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut index = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let integer_start = index;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    let has_integer = index > integer_start;
+    let has_dot = bytes.get(index) == Some(&b'.');
+    let mut has_fraction = false;
+    if has_dot {
+        index += 1;
+        let fraction_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        has_fraction = index > fraction_start;
+    }
+    if !has_integer && !has_fraction {
+        return false;
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return false;
+        }
+    }
+    index == bytes.len()
+}
+
+fn accept_empty_runner_tag(syntax: &mut RunnerYamlSyntax) {
+    let Some(raw_tag) = syntax.pending_tag.take() else {
+        return;
+    };
+    let Some(tag_start) = syntax.pending_tag_start.take() else {
+        syntax.tag_error = Some("YAML tag has no source position".into());
+        return;
+    };
+    let Some(tag_end) = syntax.pending_tag_end.take() else {
+        syntax.tag_error = Some("YAML tag has no source range".into());
+        return;
+    };
+    match expand_runner_tag(&raw_tag, &syntax.tag_directives).as_deref() {
+        Some("tag:yaml.org,2002:null") => {
+            // serde_yaml's value decoder does not accept explicit tags. Runner
+            // treats an empty !!null scalar as an ordinary null value, so
+            // remove only the tag token and preserve the empty source value.
+            syntax
+                .source_replacements
+                .push((tag_start, tag_end, String::new()));
+        }
+        Some("tag:yaml.org,2002:str") => {
+            // ActionManifestManager's string fast path accepts a tag-only
+            // scalar as an empty string. Strip the tag and insert a quoted
+            // empty scalar so the scanner's second parse carries that value.
+            syntax
+                .source_replacements
+                .push((tag_start, tag_end, "\"\"".to_owned()));
+        }
+        _ => {
+            syntax.tag_error = Some(format!(
+                "YAML scalar tag `{raw_tag}` is unsupported or has an invalid empty scalar"
+            ));
+        }
+    }
 }
 
 fn inspect_runner_yaml_syntax(
     node: &serde_yaml::cst::GreenNode,
     source: &str,
     base: usize,
+    depth: usize,
     syntax: &mut RunnerYamlSyntax,
 ) {
     use serde_yaml::cst::{GreenChild, SyntaxKind};
+
+    if syntax.exceeded_budget || syntax.tag_error.is_some() {
+        return;
+    }
+
+    if !syntax.count_event() {
+        return;
+    }
+    let yaml_depth = if runner_yaml_collection_kind(node.kind()) {
+        let depth = depth.saturating_add(1);
+        if depth > MAX_ACTION_METADATA_DEPTH {
+            syntax.exceeded_depth = true;
+            return;
+        }
+        if !syntax.count_node() {
+            return;
+        }
+        depth
+    } else {
+        depth
+    };
 
     match node.kind() {
         SyntaxKind::BlockMapping => {
@@ -416,14 +961,172 @@ fn inspect_runner_yaml_syntax(
     for child in node.children() {
         match child {
             GreenChild::Node(child_node) => {
-                inspect_runner_yaml_syntax(child_node, source, offset, syntax);
-            }
-            GreenChild::Token { kind, .. } => match kind {
-                SyntaxKind::AnchorMark | SyntaxKind::AliasMark => {
-                    syntax.has_anchor_or_alias = true;
+                if syntax.pending_tag.is_some() && child_node.kind() == SyntaxKind::MappingEntry {
+                    // A tag at the end of a mapping entry with no scalar
+                    // token belongs to that entry's empty value. CST layout
+                    // places the following mapping entry after the newline,
+                    // so resolve the pending tag before traversing its key.
+                    accept_empty_runner_tag(syntax);
                 }
-                _ => {}
-            },
+                if syntax.pending_tag.is_some() && runner_yaml_collection_kind(child_node.kind()) {
+                    // ActionManifestManager ignores tags when the tagged
+                    // node is a collection. Preserve that behavior instead
+                    // of carrying the tag into the scalar-only preflight.
+                    if let (Some(_raw_tag), Some(tag_start), Some(tag_end)) = (
+                        syntax.pending_tag.take(),
+                        syntax.pending_tag_start.take(),
+                        syntax.pending_tag_end.take(),
+                    ) {
+                        // serde_yaml's value decoder does not accept arbitrary
+                        // collection tags. Remove the ignored tag before the
+                        // Runner-compatible decode while preserving all
+                        // surrounding whitespace and collection source.
+                        syntax
+                            .source_replacements
+                            .push((tag_start, tag_end, String::new()));
+                    }
+                }
+                inspect_runner_yaml_syntax(child_node, source, offset, yaml_depth, syntax);
+            }
+            GreenChild::Token { kind, len } => {
+                if !syntax.count_event() {
+                    return;
+                }
+                let end = offset.saturating_add(*len as usize);
+                let token = source.get(offset..end).unwrap_or_default();
+                match kind {
+                    SyntaxKind::AnchorMark | SyntaxKind::AliasMark => {
+                        syntax.has_anchor_or_alias = true;
+                    }
+                    SyntaxKind::TagMark => {
+                        if syntax.pending_tag.is_some() {
+                            syntax.tag_error = Some("nested YAML tags are not supported".into());
+                            return;
+                        }
+                        syntax.pending_tag = Some(token.to_owned());
+                        syntax.pending_tag_start = Some(offset);
+                        syntax.pending_tag_end = Some(end);
+                    }
+                    SyntaxKind::PlainScalar
+                    | SyntaxKind::SingleQuotedScalar
+                    | SyntaxKind::DoubleQuotedScalar
+                    | SyntaxKind::LiteralScalar
+                    | SyntaxKind::FoldedScalar => {
+                        if !syntax.count_node() {
+                            return;
+                        }
+                        let token_end = end;
+                        if let Some(raw_tag) = syntax.pending_tag.take() {
+                            let Some(replacement_start) = syntax.pending_tag_start.take() else {
+                                syntax.tag_error = Some("YAML tag has no source position".into());
+                                return;
+                            };
+                            let Some(_tag_end) = syntax.pending_tag_end.take() else {
+                                syntax.tag_error = Some("YAML tag has no source range".into());
+                                return;
+                            };
+                            let tag = expand_runner_tag(&raw_tag, &syntax.tag_directives);
+                            match tag.and_then(|tag| runner_tagged_scalar(&tag, *kind, token)) {
+                                Some(value) => {
+                                    let Some(replacement) = runner_yaml_scalar_source(&value)
+                                    else {
+                                        syntax.tag_error = Some(format!(
+                                            "YAML scalar tag `{raw_tag}` cannot be normalized"
+                                        ));
+                                        return;
+                                    };
+                                    let replacement_end =
+                                        runner_yaml_scalar_source_end(*kind, token, token_end);
+                                    syntax.source_replacements.push((
+                                        replacement_start,
+                                        replacement_end,
+                                        replacement,
+                                    ));
+                                }
+                                None => {
+                                    syntax.tag_error = Some(format!(
+                                    "YAML scalar tag `{raw_tag}` is unsupported or has an invalid scalar"
+                                ));
+                                    return;
+                                }
+                            }
+                        } else if *kind == SyntaxKind::PlainScalar
+                            && (token.trim().starts_with("0X") || token.trim().starts_with("0O"))
+                        {
+                            let value = serde_yaml::Value::String(token.trim().to_owned());
+                            if let Some(replacement) = runner_yaml_scalar_source(&value) {
+                                syntax.source_replacements.push((
+                                    offset,
+                                    runner_yaml_scalar_source_end(*kind, token, token_end),
+                                    replacement,
+                                ));
+                            }
+                        } else if *kind == SyntaxKind::PlainScalar
+                            && (token.trim().starts_with("0x") || token.trim().starts_with("0o"))
+                        {
+                            match runner_radix_integer(token) {
+                                Some(value) => {
+                                    if let Some(replacement) = runner_yaml_scalar_source(&value) {
+                                        syntax.source_replacements.push((
+                                            offset,
+                                            runner_yaml_scalar_source_end(*kind, token, token_end),
+                                            replacement,
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    syntax.tag_error = Some(format!(
+                                        "YAML radix integer `{token}` is outside actions/runner's supported range"
+                                    ));
+                                    return;
+                                }
+                            }
+                        } else if *kind == SyntaxKind::PlainScalar
+                            && runner_float_lexeme(token.trim())
+                        {
+                            let number = match token.trim().parse::<f64>() {
+                                Ok(number) => number,
+                                Err(_) => {
+                                    syntax.tag_error = Some(format!(
+                                        "YAML decimal number `{}` cannot be parsed by actions/runner",
+                                        token.trim()
+                                    ));
+                                    return;
+                                }
+                            };
+                            let value = serde_yaml::Value::Number(number.into());
+                            if let Some(replacement) = runner_yaml_scalar_source(&value) {
+                                syntax.source_replacements.push((
+                                    offset,
+                                    runner_yaml_scalar_source_end(*kind, token, token_end),
+                                    replacement,
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        if syntax.pending_tag.is_some() {
+                            if matches!(
+                                kind,
+                                SyntaxKind::Comma
+                                    | SyntaxKind::CloseBracket
+                                    | SyntaxKind::CloseBrace
+                            ) {
+                                accept_empty_runner_tag(syntax);
+                            } else if !matches!(
+                                kind,
+                                SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment
+                            ) {
+                                syntax.tag_error = Some(
+                                    "actions/runner accepts standard scalar YAML tags only on scalars"
+                                        .into(),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
         }
         offset += child.text_len();
     }
@@ -445,7 +1148,12 @@ fn inspect_runner_block_mapping_keys(
         {
             let raw_key = runner_mapping_entry_key_source(entry, source, offset);
             if let Some(raw_key) = raw_key {
-                inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+                let normalized = runner_source_mapping_key(&raw_key, &syntax.tag_directives);
+                if let Some(key) = normalized.as_deref() {
+                    inspect_runner_mapping_key(key, &mut keys, syntax);
+                } else {
+                    syntax.has_complex_mapping_key = true;
+                }
             }
         }
         offset += child.text_len();
@@ -509,7 +1217,13 @@ fn inspect_runner_flow_mapping_keys(
                     if key_has_collection {
                         syntax.has_complex_mapping_key = true;
                     } else {
-                        inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+                        let normalized =
+                            runner_source_mapping_key(&raw_key, &syntax.tag_directives);
+                        if let Some(key) = normalized.as_deref() {
+                            inspect_runner_mapping_key(key, &mut keys, syntax);
+                        } else {
+                            syntax.has_complex_mapping_key = true;
+                        }
                     }
                     in_key = false;
                 }
@@ -518,7 +1232,13 @@ fn inspect_runner_flow_mapping_keys(
                         if key_has_collection {
                             syntax.has_complex_mapping_key = true;
                         } else {
-                            inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+                            let normalized =
+                                runner_source_mapping_key(&raw_key, &syntax.tag_directives);
+                            if let Some(key) = normalized.as_deref() {
+                                inspect_runner_mapping_key(key, &mut keys, syntax);
+                            } else {
+                                syntax.has_complex_mapping_key = true;
+                            }
                         }
                     }
                     in_key = true;
@@ -530,7 +1250,13 @@ fn inspect_runner_flow_mapping_keys(
                         if key_has_collection {
                             syntax.has_complex_mapping_key = true;
                         } else {
-                            inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+                            let normalized =
+                                runner_source_mapping_key(&raw_key, &syntax.tag_directives);
+                            if let Some(key) = normalized.as_deref() {
+                                inspect_runner_mapping_key(key, &mut keys, syntax);
+                            } else {
+                                syntax.has_complex_mapping_key = true;
+                            }
                         }
                     }
                     break;
@@ -567,43 +1293,54 @@ fn runner_mapping_key_trivia(kind: serde_yaml::cst::SyntaxKind) -> bool {
 }
 
 fn inspect_runner_mapping_key(
-    raw_key: &str,
+    key: &str,
     keys: &mut BTreeSet<String>,
     syntax: &mut RunnerYamlSyntax,
 ) {
-    if !runner_mapping_key_is_string(raw_key) {
-        syntax.has_non_string_mapping_key = true;
-        return;
-    }
-    let key = if raw_key.trim().is_empty() {
-        String::new()
-    } else {
-        let parser_config = serde_yaml::ParserConfig::new()
-            .merge_key_policy(serde_yaml::MergeKeyPolicy::AsOrdinary);
-        let Ok(key) = serde_yaml::from_str_with_config::<RunnerYamlMapKey>(raw_key, &parser_config)
-        else {
-            return;
-        };
-        key.0
-    };
-    if !keys.insert(runner_ordinal_ignore_case_key(&key)) {
+    if !keys.insert(runner_ordinal_ignore_case_key(key)) {
         syntax.has_duplicate_mapping_key = true;
     }
 }
 
-/// actions/runner's manifest mappings require string keys.  Noyalib's normal
-/// mapping deserializer stringifies scalar keys before schema validation, so
-/// classify the source scalar while the CST still preserves whether it was a
-/// number, boolean, null, or quoted/plain string.
-fn runner_mapping_key_is_string(raw_key: &str) -> bool {
+fn runner_source_mapping_key(
+    raw_key: &str,
+    tag_directives: &BTreeMap<String, String>,
+) -> Option<String> {
     let raw_key = raw_key.trim();
     if raw_key.is_empty() {
-        return false;
+        return Some(String::new());
     }
+
+    if raw_key.starts_with('!') {
+        let tag_end = if raw_key.starts_with("!<") {
+            raw_key.find('>')? + 1
+        } else {
+            raw_key.find(char::is_whitespace).unwrap_or(raw_key.len())
+        };
+        let raw_tag = &raw_key[..tag_end];
+        let tag = expand_runner_tag(raw_tag, tag_directives)?;
+        let scalar = raw_key[tag_end..].trim_start();
+        let kind = match scalar.as_bytes().first() {
+            Some(b'\'') => serde_yaml::cst::SyntaxKind::SingleQuotedScalar,
+            Some(b'"') => serde_yaml::cst::SyntaxKind::DoubleQuotedScalar,
+            _ => serde_yaml::cst::SyntaxKind::PlainScalar,
+        };
+        let value = runner_tagged_scalar(&tag, kind, scalar)?;
+        return runner_scalar_to_string(value).ok();
+    }
+
+    if raw_key.starts_with("0x") || raw_key.starts_with("0o") {
+        return runner_scalar_to_string(runner_radix_integer(raw_key)?).ok();
+    }
+    if raw_key.starts_with("0X") || raw_key.starts_with("0O") {
+        return Some(raw_key.to_owned());
+    }
+
     let parser_config =
         serde_yaml::ParserConfig::new().merge_key_policy(serde_yaml::MergeKeyPolicy::AsOrdinary);
-    serde_yaml::from_str_with_config::<serde_yaml::Value>(raw_key, &parser_config)
-        .is_ok_and(|value| matches!(value, serde_yaml::Value::String(value) if !value.is_empty()))
+    serde_yaml::from_str_with_config::<RunnerYamlMapKey>(raw_key, &parser_config)
+        .ok()
+        .map(|key| key.0)
 }
 
 fn inspect_runner_mapping_entry_key(
@@ -627,50 +1364,113 @@ fn inspect_runner_mapping_entry_key(
     }
 }
 
-fn normalize_runner_tags(value: &mut serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
-    match value {
-        serde_yaml::Value::Tagged(tagged) => {
-            let inner = tagged.value().clone();
-            if inner.is_mapping() || inner.is_sequence() {
-                *value = inner;
-                normalize_runner_tags(value)?;
-                return Ok(());
-            }
+fn normalize_runner_yaml_source(
+    contents: &str,
+    replacements: &[(usize, usize, String)],
+) -> Result<Option<String>, crate::s2::GeneratorError> {
+    if replacements.is_empty() {
+        return Ok(None);
+    }
+    let mut normalized = String::with_capacity(contents.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in replacements {
+        if *start < cursor || *end < *start || *end > contents.len() {
+            return Err(crate::s2::GeneratorError::usage(
+                "GitHub Action metadata YAML scalar source ranges overlap or exceed the document",
+            ));
+        }
+        normalized.push_str(&contents[cursor..*start]);
+        normalized.push_str(replacement);
+        cursor = *end;
+        if normalized.len() > MAX_ACTION_METADATA_BYTES as usize {
             return Err(crate::s2::GeneratorError::usage(format!(
-                "GitHub Action metadata scalar tag `{}` is not supported by actions/runner",
-                tagged.tag().as_str()
+                "normalized GitHub Action metadata exceeds {MAX_ACTION_METADATA_BYTES} bytes"
             )));
         }
-        serde_yaml::Value::Mapping(mapping) => {
-            for value in mapping.values_mut() {
-                normalize_runner_tags(value)?;
-            }
-        }
-        serde_yaml::Value::Sequence(sequence) => {
-            for value in sequence {
-                normalize_runner_tags(value)?;
-            }
-        }
-        serde_yaml::Value::Null
-        | serde_yaml::Value::Bool(_)
-        | serde_yaml::Value::Number(_)
-        | serde_yaml::Value::String(_) => {}
     }
-    Ok(())
+    normalized.push_str(&contents[cursor..]);
+    if normalized.len() > MAX_ACTION_METADATA_BYTES as usize {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "normalized GitHub Action metadata exceeds {MAX_ACTION_METADATA_BYTES} bytes"
+        )));
+    }
+    Ok(Some(normalized))
 }
 
 fn validate_runner_yaml_syntax(
     contents: &str,
     metadata_file: &Path,
-) -> Result<(), crate::s2::GeneratorError> {
+) -> Result<RunnerYamlSyntax, crate::s2::GeneratorError> {
+    // Noyalib's CST parser materializes a second tree and has no per-parse
+    // budget parameter. Validate the source through its bounded Value parser
+    // first, then drop that tree before building the CST for source details.
+    serde_yaml::from_str_with_config::<serde_yaml::Value>(contents, &runner_action_parser_config())
+        .map_err(|error| {
+            let detail = if error.to_string().contains("DenyAnchors") {
+                "actions/runner does not support YAML anchors or aliases".to_owned()
+            } else {
+                format!("within scanner limits: {error}")
+            };
+            crate::s2::GeneratorError::usage(format!(
+                "parse GitHub Action metadata {}: {detail}",
+                metadata_file.display()
+            ))
+        })?;
     let document = serde_yaml::cst::parse_document(contents).map_err(|error| {
         crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {}: {error}",
             metadata_file.display()
         ))
     })?;
-    let mut syntax = RunnerYamlSyntax::default();
-    inspect_runner_yaml_syntax(document.syntax(), contents, 0, &mut syntax);
+    let tag_directives = runner_tag_directives(contents).map_err(|error| {
+        crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: {error}",
+            metadata_file.display()
+        ))
+    })?;
+    let mut syntax = RunnerYamlSyntax {
+        tag_directives,
+        ..RunnerYamlSyntax::default()
+    };
+    inspect_runner_yaml_syntax(document.syntax(), contents, 0, 0, &mut syntax);
+    if syntax.exceeded_depth {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: YAML nesting exceeds {MAX_ACTION_METADATA_DEPTH} levels",
+            metadata_file.display()
+        )));
+    }
+    if syntax.exceeded_budget {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: YAML exceeds scanner node/event limits",
+            metadata_file.display()
+        )));
+    }
+    syntax.estimated_bytes = contents
+        .len()
+        .checked_add(syntax.node_count.saturating_mul(64))
+        .and_then(|bytes| bytes.checked_add(syntax.event_count.saturating_mul(8)))
+        .unwrap_or(usize::MAX);
+    if syntax.estimated_bytes > MAX_ACTION_METADATA_ESTIMATED_BYTES {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: estimated YAML parser memory exceeds {MAX_ACTION_METADATA_ESTIMATED_BYTES} bytes",
+            metadata_file.display()
+        )));
+    }
+    if let Some(error) = &syntax.tag_error {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: {error}",
+            metadata_file.display()
+        )));
+    }
+    if syntax.pending_tag.is_some() {
+        accept_empty_runner_tag(&mut syntax);
+        if let Some(error) = &syntax.tag_error {
+            return Err(crate::s2::GeneratorError::usage(format!(
+                "parse GitHub Action metadata {}: {error}",
+                metadata_file.display()
+            )));
+        }
+    }
     if syntax.has_anchor_or_alias {
         return Err(crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {}: actions/runner does not support YAML anchors or aliases",
@@ -683,19 +1483,50 @@ fn validate_runner_yaml_syntax(
             metadata_file.display()
         )));
     }
-    if syntax.has_non_string_mapping_key {
-        return Err(crate::s2::GeneratorError::usage(format!(
-            "parse GitHub Action metadata {}: actions/runner requires mapping keys to be non-empty strings",
-            metadata_file.display()
-        )));
-    }
     if syntax.has_duplicate_mapping_key {
         return Err(crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {}: duplicate YAML mapping key after Runner case-insensitive matching",
             metadata_file.display()
         )));
     }
-    Ok(())
+    Ok(syntax)
+}
+
+fn read_action_metadata(metadata_file: &Path) -> Result<String, crate::s2::GeneratorError> {
+    let file = std::fs::File::open(metadata_file).map_err(|error| {
+        crate::s2::GeneratorError::io("read GitHub Action metadata", metadata_file, &error)
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| {
+            crate::s2::GeneratorError::io("inspect GitHub Action metadata", metadata_file, &error)
+        })?
+        .len();
+    if length > MAX_ACTION_METADATA_BYTES {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata {} exceeds {MAX_ACTION_METADATA_BYTES} bytes",
+            metadata_file.display()
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(length.min(MAX_ACTION_METADATA_BYTES) as usize);
+    file.take(MAX_ACTION_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            crate::s2::GeneratorError::io("read GitHub Action metadata", metadata_file, &error)
+        })?;
+    if bytes.len() as u64 > MAX_ACTION_METADATA_BYTES {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata {} exceeds {MAX_ACTION_METADATA_BYTES} bytes",
+            metadata_file.display()
+        )));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata {} is not UTF-8: {error}",
+            metadata_file.display()
+        ))
+    })
 }
 
 /// Detect every tracked action metadata file outside test support trees.
@@ -705,12 +1536,26 @@ pub(crate) fn detect(
 ) -> Result<(), crate::s2::GeneratorError> {
     for source in discover_action_sources(context.root, context.files)? {
         let (metadata, references) = inspect_action_source(&source, context.root, context.files)?;
+        let dependencies = if let Some(metadata) = metadata.as_ref() {
+            local_action_dependency_closure(
+                context.root,
+                &metadata.runs,
+                references,
+                context.files,
+            )?
+        } else {
+            LocalActionDependencyClosure {
+                references: references.into_iter().collect(),
+                action_roots: BTreeSet::new(),
+            }
+        };
         let mut commands = vec![format!(
             "velnor-workflow verify-action --path {}",
             shell_quote(&source.path)
         )];
         commands.extend(
-            references
+            dependencies
+                .references
                 .iter()
                 .map(|path| format!("test -f {}", shell_quote(path))),
         );
@@ -719,13 +1564,13 @@ pub(crate) fn detect(
         } else {
             format!("{}/**", source.root)
         }];
-        if let Some(metadata) = metadata.as_ref() {
-            watch.extend(local_action_watch_paths(
-                context.root,
-                &metadata.runs,
-                context.files,
-            )?);
-        }
+        watch.extend(dependencies.references.iter().cloned());
+        watch.extend(
+            dependencies
+                .action_roots
+                .into_iter()
+                .map(|path| format!("{path}/**")),
+        );
         let mut action = unit(UnitKind::GithubAction, &source.root, watch, commands, None);
         if source.kind == ActionSourceKind::Dockerfile
             || metadata
@@ -739,27 +1584,41 @@ pub(crate) fn detect(
     Ok(())
 }
 
-fn local_action_watch_paths(
+struct LocalActionDependencyClosure {
+    references: BTreeSet<String>,
+    action_roots: BTreeSet<String>,
+}
+
+fn local_action_dependency_closure(
+    root: &Path,
+    runs: &ActionRuns,
+    references: Vec<String>,
+    files: &[String],
+) -> Result<LocalActionDependencyClosure, crate::s2::GeneratorError> {
+    let candidates = discover_action_source_candidates(files);
+    let mut visited = BTreeSet::new();
+    let mut closure = LocalActionDependencyClosure {
+        references: references.into_iter().collect(),
+        action_roots: BTreeSet::new(),
+    };
+    collect_local_action_dependency_closure(
+        root,
+        runs,
+        files,
+        &candidates,
+        &mut visited,
+        &mut closure,
+    )?;
+    Ok(closure)
+}
+
+fn collect_local_action_dependency_closure(
     root: &Path,
     runs: &ActionRuns,
     files: &[String],
-) -> Result<Vec<String>, crate::s2::GeneratorError> {
-    let candidates = discover_action_source_candidates(files);
-    let mut visited = BTreeSet::new();
-    let mut watched = BTreeSet::new();
-    collect_local_action_watch_paths(root, runs, &candidates, &mut visited, &mut watched)?;
-    Ok(watched
-        .into_iter()
-        .map(|path| format!("{path}/**"))
-        .collect())
-}
-
-fn collect_local_action_watch_paths(
-    root: &Path,
-    runs: &ActionRuns,
     candidates: &BTreeMap<String, ActionSource>,
     visited: &mut BTreeSet<String>,
-    watched: &mut BTreeSet<String>,
+    closure: &mut LocalActionDependencyClosure,
 ) -> Result<(), crate::s2::GeneratorError> {
     if !runs.using.eq_ignore_ascii_case("composite") {
         return Ok(());
@@ -774,12 +1633,22 @@ fn collect_local_action_watch_paths(
         if !visited.insert(dependency_root.clone()) {
             continue;
         }
-        watched.insert(dependency_root.clone());
+        closure.action_roots.insert(dependency_root.clone());
         if let Some(source) = candidates.get(&dependency_root)
             && source.kind == ActionSourceKind::Metadata
         {
-            let metadata = parse_metadata(root, &source.path)?;
-            collect_local_action_watch_paths(root, &metadata.runs, candidates, visited, watched)?;
+            let (metadata, references) = inspect_action_source(source, root, files)?;
+            closure.references.extend(references);
+            if let Some(metadata) = metadata {
+                collect_local_action_dependency_closure(
+                    root,
+                    &metadata.runs,
+                    files,
+                    candidates,
+                    visited,
+                    closure,
+                )?;
+            }
         }
     }
     Ok(())
@@ -925,19 +1794,18 @@ fn discovered_local_action_root(
     root: &Path,
     reference: &str,
 ) -> Result<Option<String>, crate::s2::GeneratorError> {
-    let reference = reference.trim();
-    let relative = if let Some(relative) = reference.strip_prefix("./") {
-        relative
-    } else if let Some(relative) = reference.strip_prefix(".\\") {
-        relative
-    } else {
+    if !is_runner_local_action_reference(reference) {
         if is_unsafe_local_action_reference(reference) {
             return Err(crate::s2::GeneratorError::usage(format!(
                 "GitHub local action reference `{reference}` must stay inside the repository workspace"
             )));
         }
         return Ok(None);
-    };
+    }
+    let relative = reference
+        .strip_prefix("./")
+        .or_else(|| reference.strip_prefix(".\\"))
+        .expect("shared local action predicate must match its path prefix");
     if reference.contains('$') || reference.contains("{{") || reference.contains("}}") {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub local action reference `{reference}` must be static"
@@ -973,11 +1841,6 @@ fn discovered_local_action_root(
     };
     reject_symlink_components(root, &components, reference)?;
     Ok(Some(repository_path))
-}
-
-fn is_runner_local_action_reference(reference: &str) -> bool {
-    let reference = reference.trim();
-    reference.starts_with("./") || reference.starts_with(".\\")
 }
 
 fn is_unsafe_local_action_reference(reference: &str) -> bool {
@@ -1112,37 +1975,30 @@ fn parse_metadata(
     root: &Path,
     metadata_path: &str,
 ) -> Result<ActionMetadata, crate::s2::GeneratorError> {
+    let normalized_metadata_path = metadata_path.replace('\\', "/");
+    let metadata_components = normalized_metadata_path
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    reject_symlink_components(root, &metadata_components, metadata_path)?;
     let metadata_file = root.join(metadata_path);
-    let contents = std::fs::read_to_string(&metadata_file).map_err(|error| {
-        crate::s2::GeneratorError::io("read GitHub Action metadata", &metadata_file, &error)
-    })?;
-    validate_runner_yaml_syntax(&contents, &metadata_file)?;
-    let parser_config = serde_yaml::ParserConfig::new()
-        // The source-aware preflight applies Runner's scalar stringification
-        // and ordinal-ignore-case duplicate rules. Noyalib's Value map has
-        // different scalar coercions, so it must not reject those pairs first.
-        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Last)
-        // actions/runner treats `<<` as an ordinary key and rejects aliases.
-        .merge_key_policy(serde_yaml::MergeKeyPolicy::AsOrdinary);
-    // Inspect source key types before Noyalib's string-keyed Value map erases
-    // them, and mirror Runner's scalar-to-string conversion. Schema-specific
-    // non-empty checks happen after this parse, only on declared mappings.
-    let mut key_preflight =
-        serde_yaml::StreamingDeserializer::with_config(&contents, &parser_config);
-    let _: RunnerYamlValue = RunnerYamlValue::deserialize(&mut key_preflight).map_err(|error| {
+    let contents = read_action_metadata(&metadata_file)?;
+    let syntax = validate_runner_yaml_syntax(&contents, &metadata_file)?;
+    let parser_config = runner_action_parser_config();
+    // Decode the original mapping structure so implicit empty keys and values
+    // survive. Replace only tagged or radix scalars whose source spelling
+    // differs from Runner's scalar semantics; offsets avoid AST key loss.
+    let normalized = normalize_runner_yaml_source(&contents, &syntax.source_replacements)?;
+    let parse_contents = normalized.as_deref().unwrap_or(&contents);
+    let mut deserializer =
+        serde_yaml::StreamingDeserializer::with_config(parse_contents, &parser_config);
+    let decoded = RunnerYamlValue::deserialize(&mut deserializer).map_err(|error| {
         crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {} with Runner-compatible mapping keys: {error}",
             metadata_file.display()
         ))
     })?;
-    let mut document: serde_yaml::Value =
-        serde_yaml::from_str_with_config(&contents, &parser_config).map_err(|error| {
-            crate::s2::GeneratorError::usage(format!(
-                "parse GitHub Action metadata {}: {error}",
-                metadata_file.display()
-            ))
-        })?;
-    normalize_runner_tags(&mut document)?;
+    let RunnerYamlValue(document) = decoded;
     validate_metadata_shape(&document)?;
     let metadata: ActionMetadata = serde_yaml::from_value(&document).map_err(|error| {
         crate::s2::GeneratorError::usage(format!(
@@ -1635,7 +2491,9 @@ fn validate_composite_step(step: &ActionStep) -> Result<(), crate::s2::Generator
     }
     if let Some(continue_on_error) = &step.continue_on_error
         && !continue_on_error.is_bool()
-        && !continue_on_error.is_string()
+        && !continue_on_error
+            .as_str()
+            .is_some_and(is_runner_boolean_expression)
     {
         return Err(crate::s2::GeneratorError::usage(
             "GitHub composite action step `continue-on-error` must be a boolean or expression string",
@@ -1647,6 +2505,14 @@ fn validate_composite_step(step: &ActionStep) -> Result<(), crate::s2::Generator
         ));
     }
     Ok(())
+}
+
+fn is_runner_boolean_expression(value: &str) -> bool {
+    let value = value.trim();
+    value
+        .strip_prefix("${{")
+        .and_then(|expression| expression.strip_suffix("}}"))
+        .is_some_and(|expression| !expression.trim().is_empty())
 }
 
 fn normalize_working_directory(
@@ -1700,6 +2566,12 @@ fn add_action_path_reference(
     root: &Path,
     files: &[String],
 ) -> Result<(), crate::s2::GeneratorError> {
+    let normalized_action_root = action_root.replace('\\', "/");
+    let action_root_components = normalized_action_root
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    reject_symlink_components(root, &action_root_components, action_root)?;
     let action_dir = root.join(action_root);
     let resolved = resolve_action_path(&action_dir, reference).map_err(|error| {
         crate::s2::GeneratorError::usage(format!(
@@ -1715,6 +2587,11 @@ fn add_action_path_reference(
         })?
         .to_string_lossy()
         .replace('\\', "/");
+    let path_components = repository_path
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    reject_symlink_components(root, &path_components, reference)?;
     if !files.iter().any(|file| file == &repository_path)
         && !is_excluded_action_file(root, &repository_path)?
     {
@@ -1835,7 +2712,6 @@ fn add_local_action_reference(
     root: &Path,
     files: &[String],
 ) -> Result<(), crate::s2::GeneratorError> {
-    let reference = reference.trim();
     let Some(directory) = discovered_local_action_root(root, reference)? else {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub composite local action `{reference}` must start with `./` or `.\\`"
@@ -1986,8 +2862,38 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{shell_references, shell_tokens};
+    use super::{
+        shell_references, shell_tokens, MAX_ACTION_METADATA_BYTES, MAX_ACTION_METADATA_DEPTH,
+    };
     use crate::s2::provider::ProviderId;
+
+    fn assert_change_selects_action_unit(action: &crate::s2::Unit, path: &str) {
+        let watched = crate::s2::reuse::WatchedUnit {
+            id: action.id.clone(),
+            watch: action.watch.clone(),
+            depends_on: Vec::new(),
+            kind: action.kind.id_prefix().to_owned(),
+            commands: action.pr_commands.clone(),
+            reads_closed: false,
+        };
+        let selection = must(
+            crate::s2::reuse::select_affected(
+                &[watched],
+                &[crate::s2::reuse::ChangedPath {
+                    path: path.to_owned(),
+                    previous: None,
+                    status: crate::s2::reuse::ChangeKind::Modified,
+                }],
+                &[],
+            ),
+            "select changed action reference",
+        );
+        assert!(
+            selection.required.contains(&action.id),
+            "editing {path} must select action unit {}",
+            action.id
+        );
+    }
 
     #[expect(
         clippy::panic,
@@ -2257,10 +3163,6 @@ mod tests {
                 "inputs:\n  bad: scalar\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
             ),
             (
-                "inputs-child-null",
-                "inputs:\n  bad:\n    default: null\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
-            ),
-            (
                 "input-deprecation-message-case-insensitive-wrong-type",
                 "inputs:\n  good:\n    DEPRECATIONMESSAGE: []\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
             ),
@@ -2275,10 +3177,6 @@ mod tests {
             (
                 "outputs-child-scalar",
                 "outputs:\n  bad: scalar\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
-            ),
-            (
-                "outputs-child-null",
-                "outputs:\n  bad:\n    description: null\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
             ),
             (
                 "outputs-empty-key",
@@ -2321,10 +3219,6 @@ mod tests {
                 "runs:\n  using: docker\n  image: docker://ubuntu\n  env: []\n",
             ),
             (
-                "docker-env-value-null",
-                "runs:\n  using: docker\n  image: docker://ubuntu\n  env:\n    BAD: null\n",
-            ),
-            (
                 "docker-condition-shape",
                 "runs:\n  using: docker\n  image: docker://ubuntu\n  pre-if: []\n",
             ),
@@ -2335,6 +3229,10 @@ mod tests {
             (
                 "node-runtime-disallows-container-args",
                 "runs:\n  using: node20\n  main: index.js\n  args: []\n",
+            ),
+            (
+                "node-runtime-pre-if-without-main",
+                "runs:\n  using: node20\n  pre-if: always()\n",
             ),
             (
                 "runs-env-empty-key",
@@ -2399,6 +3297,386 @@ mod tests {
     }
 
     #[test]
+    fn runner_unknown_root_and_input_metadata_values_are_ignored() {
+        let metadata = "mystery-root:\n  nested: [false, null, {arbitrary: [1, 2]}]\ninputs:\n  value:\n    custom: {nested: [false, null]}\nruns:\n  using: composite\n  steps: []\n";
+        let root = fixture("unknown-schema-metadata");
+        must(
+            fs::write(root.join("action.yml"), metadata),
+            "write unknown schema metadata",
+        );
+        must(
+            super::parse_metadata(&root, "action.yml"),
+            "scanner must ignore unknown root and input metadata values",
+        );
+        must(
+            velnor_runner::action_contract::parse_action_metadata(metadata),
+            "runtime must ignore unknown root and input metadata values",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_scalar_string_schema_matches_runtime_parser() {
+        let input_source = "inputs:\n  boolean:\n    default: false\n  number:\n    DEFAULT: 1e15\n  nullable:\n    default: null\n  7:\n    default: 1e-5\n  large-decimal:\n    default: 2147483648\n  hexadecimal:\n    default: 0xFFFFFFFF\n  octal:\n    default: 0o10\n  uppercase-hex:\n    default: 0X10\n  tagged-string:\n    default: !!str false\n  tagged-number:\n    default: !!int 0xFFFFFFFF\n  tagged-null:\n    default: !!null null\nruns:\n  using: composite\n  steps: []\n";
+        let input_root = fixture("input-scalar-coercion");
+        must(
+            fs::write(input_root.join("action.yml"), input_source),
+            "write scalar input metadata",
+        );
+        let scanner = must(
+            super::parse_metadata(&input_root, "action.yml"),
+            "parse scanner scalar input metadata",
+        );
+        let runner = must(
+            velnor_runner::action_contract::parse_action_metadata(input_source),
+            "parse runtime scalar input metadata",
+        );
+        for (name, expected) in [
+            ("boolean", "false"),
+            ("number", "1E+15"),
+            ("nullable", ""),
+            ("7", "1E-05"),
+            ("large-decimal", "2147483648"),
+            ("hexadecimal", "-1"),
+            ("octal", "8"),
+            ("uppercase-hex", "0X10"),
+            ("tagged-string", "false"),
+            ("tagged-number", "-1"),
+            ("tagged-null", ""),
+        ] {
+            let definition = scanner.inputs.as_mapping().unwrap().get(name).unwrap();
+            let default = definition
+                .as_mapping()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("default"))
+                .unwrap()
+                .1
+                .as_str();
+            assert_eq!(default, Some(expected), "scanner default for {name}");
+            assert_eq!(
+                runner.inputs.get(name).unwrap().default_value.as_deref(),
+                Some(expected),
+                "runtime default for {name}"
+            );
+        }
+        let _ = fs::remove_dir_all(input_root);
+
+        let docker_source = "runs:\n  using: docker\n  image: docker://ubuntu\n  args: [false, 7, null, 1e-5]\n  env:\n    BOOL: false\n    COUNT: 7\n    EMPTY: null\n    1e15: key\n";
+        let docker_root = fixture("docker-scalar-coercion");
+        must(
+            fs::write(docker_root.join("action.yml"), docker_source),
+            "write scalar Docker action metadata",
+        );
+        let scanner = must(
+            super::parse_metadata(&docker_root, "action.yml"),
+            "parse scanner scalar Docker metadata",
+        );
+        let runner = must(
+            velnor_runner::action_contract::parse_action_metadata(docker_source),
+            "parse runtime scalar Docker metadata",
+        );
+        let scanner_env = scanner
+            .runs
+            .env
+            .as_mapping()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(scanner_env, runner.runs.env);
+        assert_eq!(scanner.runs.args.as_sequence().unwrap().len(), 4);
+        assert_eq!(
+            scanner
+                .runs
+                .args
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["false", "7", "", "1E-05"]
+        );
+        assert_eq!(runner.runs.args, ["false", "7", "", "1E-05"]);
+        let _ = fs::remove_dir_all(docker_root);
+
+        let composite_source = "runs:\n  using: composite\n  steps:\n    - uses: actions/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        BOOL: false\n        COUNT: 7\n        EMPTY: null\n        1e15: key\n    - shell: bash\n      run: echo ok\n      env:\n        BOOL: false\n        COUNT: 7\n        EMPTY: null\n";
+        let composite_root = fixture("composite-scalar-coercion");
+        must(
+            fs::write(composite_root.join("action.yml"), composite_source),
+            "write scalar composite action metadata",
+        );
+        let scanner = must(
+            super::parse_metadata(&composite_root, "action.yml"),
+            "parse scanner scalar composite metadata",
+        );
+        let runner = must(
+            velnor_runner::action_contract::parse_action_metadata(composite_source),
+            "parse runtime scalar composite metadata",
+        );
+        let scanner_steps = scanner.runs.steps.as_deref().unwrap();
+        assert_eq!(
+            scanner_steps[0]
+                .with
+                .as_mapping()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            runner.runs.steps[0].with
+        );
+        assert_eq!(
+            scanner_steps[1]
+                .env
+                .as_mapping()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            runner.runs.steps[1].env
+        );
+        let _ = fs::remove_dir_all(composite_root);
+
+        for (name, source) in [
+            (
+                "input-unknown-scalar-tag",
+                "inputs:\n  value:\n    default: !custom false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "input-mismatched-explicit-bool-tag",
+                "inputs:\n  value:\n    default: !!bool \"false\"\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "input-radix-overflow",
+                "inputs:\n  value:\n    default: 0x100000000\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "input-default-collection",
+                "inputs:\n  value:\n    default: [false]\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "docker-env-collection",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  env:\n    VALUE: {nested: value}\n",
+            ),
+            (
+                "composite-with-collection",
+                "runs:\n  using: composite\n  steps:\n    - uses: actions/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        VALUE: [nested]\n",
+            ),
+            (
+                "docker-args-collection",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  args: [{nested: value}]\n",
+            ),
+        ] {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), source),
+                "write collection-valued action metadata",
+            );
+            assert!(
+                super::parse_metadata(&root, "action.yml").is_err(),
+                "scanner accepted non-scalar schema value: {name}"
+            );
+            assert!(
+                velnor_runner::action_contract::parse_action_metadata(source).is_err(),
+                "runtime accepted non-scalar schema value: {name}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+
+        let source = "inputs:\n  value:\n    deprecationMessage: false\nruns:\n  using: composite\n  steps: []\n";
+        let root = fixture("input-deprecation-message-scalar");
+        must(
+            fs::write(root.join("action.yml"), source),
+            "write scalar deprecation message metadata",
+        );
+        assert!(
+            super::parse_metadata(&root, "action.yml").is_err(),
+            "scanner coerced a loose deprecationMessage value"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_yaml_ignores_collection_tags_and_accepts_empty_null() {
+        for (name, metadata) in [
+            (
+                "tagged-flow-collections",
+                "inputs: !custom {value: {default: false}}\nruns: !!map\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "tagged-block-collections",
+                "inputs: !custom\n  value:\n    default: false\nruns: !!map\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "tagged-block-collections-with-comment",
+                "inputs: !custom # ignored collection tag\n  value:\n    default: false\nruns: !!map # ignored collection tag\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "empty-null",
+                "inputs:\n  value:\n    default: !!null\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "empty-null-comment",
+                "inputs:\n  value:\n    default: !!null # empty\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "empty-string",
+                "inputs:\n  value:\n    default: !!str\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "empty-string-directive",
+                "%TAG !empty! tag:yaml.org,2002:str\n---\ninputs:\n  value:\n    default: !empty!\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "empty-string-directive-comment",
+                "%TAG !empty! tag:yaml.org,2002:str # keep this handle\n---\ninputs:\n  value:\n    default: !empty!\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "directive-text-in-block-scalar",
+                "name: !!str false\ndescription: |\n  %TAG !! tag:custom.example,2026:\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "percent-encoded-tag-directive",
+                "%TAG !core! tag:yaml.org,2002:\n---\ninputs:\n  value:\n    default: !core!%73tr false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "percent-encoded-tag-prefix",
+                "%TAG !! tag:yaml.org,2002%3A\n---\nname: !!str false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+        ] {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), metadata),
+                "write Runner tag action metadata",
+            );
+            if name == "percent-encoded-tag-directive" {
+                let directives = super::runner_tag_directives(metadata)
+                    .unwrap_or_else(|error| panic!("tag directive parse failed: {error}"));
+                assert_eq!(
+                    directives.get("!core!").map(String::as_str),
+                    Some("tag:yaml.org,2002:")
+                );
+                assert_eq!(
+                    super::expand_runner_tag("!core!str", &directives).as_deref(),
+                    Some("tag:yaml.org,2002:str")
+                );
+            }
+            let scanner = must(
+                super::parse_metadata(&root, "action.yml"),
+                "scanner must match Runner collection and empty-null tags",
+            );
+            must(
+                velnor_runner::action_contract::parse_action_metadata(metadata),
+                "runtime must accept Runner collection and empty-null tags",
+            );
+            if name.starts_with("empty-string") {
+                let default = scanner
+                    .inputs
+                    .as_mapping()
+                    .and_then(|inputs| inputs.get("value"))
+                    .and_then(serde_yaml::Value::as_mapping)
+                    .and_then(|definition| definition.get("default"))
+                    .and_then(serde_yaml::Value::as_str);
+                assert_eq!(default, Some(""), "scanner empty string value: {name}");
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+
+        for (name, metadata) in [
+            (
+                "unknown-empty-tag",
+                "inputs:\n  value:\n    default: !custom\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "unknown-scalar-tag",
+                "inputs:\n  value:\n    default: !custom false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "overridden-secondary-tag-handle",
+                "%TAG !! tag:custom.example,2026:\n---\ninputs:\n  value:\n    default: !!str false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "overridden-secondary-tag-handle-custom-prefix",
+                "%TAG !! !custom-\n---\ninputs:\n  value:\n    default: !!str false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "overridden-primary-tag-handle-custom-prefix",
+                "%TAG ! !custom-\n---\ninputs:\n  value:\n    default: !str false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "duplicate-tag-directive-handle",
+                "%TAG !core! tag:yaml.org,2002:\n%TAG !core! tag:custom.example,2026:\n---\ninputs:\n  value:\n    default: !core!str false\nruns:\n  using: composite\n  steps: []\n",
+            ),
+        ] {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), metadata),
+                "write unknown-tag action metadata",
+            );
+            assert!(
+                super::parse_metadata(&root, "action.yml").is_err(),
+                "scanner accepted unknown scalar tag: {name}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn local_uses_detection_preserves_raw_runner_whitespace() {
+        let cases = [
+            ("exact", "./nested", None),
+            (
+                "leading-space",
+                " ./nested",
+                Some("must use a full 40-character SHA pin"),
+            ),
+            (
+                "trailing-space",
+                "./nested ",
+                Some("has no action metadata or Dockerfile under `nested `"),
+            ),
+        ];
+
+        for (name, reference, expected_error) in cases {
+            let root = fixture(&format!("uses-whitespace-{name}"));
+            must(
+                fs::create_dir_all(root.join("nested")),
+                "create local action target",
+            );
+            must(
+                fs::write(
+                    root.join("action.yml"),
+                    format!("runs:\n  using: composite\n  steps:\n    - uses: \"{reference}\"\n"),
+                ),
+                "write parent action metadata",
+            );
+            must(
+                fs::write(
+                    root.join("nested/action.yml"),
+                    "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo child\n",
+                ),
+                "write child action metadata",
+            );
+
+            let result = super::super::scan_shape_for_tests(&root, &providers(), "main", &[]);
+            match expected_error {
+                Some(expected) => assert!(
+                    result
+                        .err()
+                        .unwrap_or_else(|| panic!("whitespace action reference passed: {name}"))
+                        .to_string()
+                        .contains(expected),
+                    "wrong diagnostic for raw uses value {reference:?}"
+                ),
+                None => {
+                    must(result, "scan exact local action marker");
+                }
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn runner_yaml_rejects_collection_keys_and_anchors() {
         let collection_keys = [
             ("block-sequence", "? [complex, key]\n: ignored\n"),
@@ -2440,6 +3718,7 @@ mod tests {
             ("ascii-case", "name: first\nNAME: second\n"),
             ("unicode-case", "É: first\né: second\n"),
             ("scalar-equivalent", "1: first\n\"1\": second\n"),
+            ("g15-number-equivalent", "1e15: first\n\"1E+15\": second\n"),
             ("null-empty-equivalent", "null: first\n\"\": second\n"),
             ("tagged-scalar-equivalent", "!!str 1: first\n\"1\": second\n"),
             ("flow-map", "{name: first, NAME: second}\n"),
@@ -2456,49 +3735,18 @@ mod tests {
                         panic!("Runner duplicate mapping keys passed preflight: {name}")
                     });
             let message = error.to_string();
-            match name {
-                "scalar-equivalent" => assert!(
-                    message.contains("non-empty strings")
-                        || message
-                            .contains("distinct mapping keys collide after string conversion"),
-                    "unexpected scalar-key error for {name}: {message}"
-                ),
-                "null-empty-equivalent" => assert!(
-                    message.contains("non-empty strings"),
-                    "unexpected scalar-key error for {name}: {message}"
-                ),
-                "tagged-scalar-equivalent" => assert!(
-                    message.contains("non-empty strings")
-                        || message.contains(
-                            "duplicate YAML mapping key after Runner case-insensitive matching"
-                        ),
-                    "unexpected scalar-key error for {name}: {message}"
-                ),
-                _ => assert!(
-                    message.contains(
-                        "duplicate YAML mapping key after Runner case-insensitive matching"
-                    ),
-                    "unexpected duplicate-key error for {name}: {message}"
-                ),
-            }
+            assert!(
+                message
+                    .contains("duplicate YAML mapping key after Runner case-insensitive matching")
+                    || message.contains("distinct mapping keys collide after string conversion"),
+                "unexpected duplicate-key error for {name}: {message}"
+            );
         }
     }
 
     #[test]
-    fn runner_scalar_mapping_keys_fail_closed_before_schema_coercion() {
+    fn runner_scalar_mapping_keys_are_coerced_by_schema_role() {
         let cases = [
-            (
-                "root-numeric-key",
-                "1: unknown root metadata\nruns:\n  using: composite\n  steps: []\n",
-            ),
-            (
-                "root-float-key",
-                "1.5: unknown root metadata\nruns:\n  using: composite\n  steps: []\n",
-            ),
-            (
-                "root-boolean-key",
-                "true: unknown root metadata\nruns:\n  using: composite\n  steps: []\n",
-            ),
             (
                 "input-numeric-key",
                 "inputs:\n  1:\n    default: numeric input name\nruns:\n  using: composite\n  steps: []\n",
@@ -2506,6 +3754,14 @@ mod tests {
             (
                 "input-boolean-key",
                 "inputs:\n  true:\n    default: boolean input name\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "docker-env-numeric-key",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  env:\n    1e15: numeric env key\n",
+            ),
+            (
+                "composite-with-boolean-key",
+                "runs:\n  using: composite\n  steps:\n    - uses: actions/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        true: boolean input key\n",
             ),
             (
                 "empty-key-in-any-value",
@@ -2522,17 +3778,175 @@ mod tests {
                 fs::write(root.join("action.yml"), metadata),
                 "write Runner scalar-key action metadata",
             );
-            let error = super::super::scan_shape_for_tests(&root, &providers(), "main", &[])
-                .err()
-                .unwrap_or_else(|| {
-                    panic!("Runner-incompatible scalar-key metadata passed: {name}")
-                });
-            assert!(
-                error.to_string().contains("non-empty strings"),
-                "unexpected scalar-key error for {name}: {error}"
+            must(
+                super::parse_metadata(&root, "action.yml"),
+                "parse scalar-key action metadata",
+            );
+            must(
+                velnor_runner::action_contract::parse_action_metadata(metadata),
+                "parse runtime scalar-key action metadata",
             );
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn implicit_empty_mapping_key_does_not_shift_tagged_scalar_source_indices() {
+        let metadata = "inputs:\n  good:\n    custom:\n      : ignored empty key\n      tagged: !!int 0xFFFFFFFF\nruns:\n  using: composite\n  steps: []\n";
+        let root = fixture("empty-key-tag-source-index");
+        must(
+            fs::write(root.join("action.yml"), metadata),
+            "write action metadata with implicit empty key",
+        );
+        let scanner = must(
+            super::parse_metadata(&root, "action.yml"),
+            "parse implicit empty-key action metadata",
+        );
+        let custom = scanner
+            .inputs
+            .as_mapping()
+            .unwrap()
+            .get("good")
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .get("custom")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert_eq!(
+            custom.get("").and_then(serde_yaml::Value::as_str),
+            Some("ignored empty key"),
+            "normalized custom metadata: {custom:?}"
+        );
+        assert_eq!(
+            custom.get("tagged").and_then(serde_yaml::Value::as_f64),
+            Some(-1.0),
+            "normalized custom metadata: {custom:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn action_metadata_admission_enforces_byte_node_and_depth_limits() {
+        let root = fixture("metadata-admission-limits");
+        let base = "runs:\n  using: composite\n  steps: []\n";
+        let mut at_limit = base.to_owned();
+        at_limit.push('#');
+        at_limit.push_str(&"x".repeat(MAX_ACTION_METADATA_BYTES as usize - at_limit.len()));
+        assert_eq!(at_limit.len(), MAX_ACTION_METADATA_BYTES as usize);
+        must(
+            fs::write(root.join("action.yml"), &at_limit),
+            "write 1 MiB action metadata",
+        );
+        must(
+            super::parse_metadata(&root, "action.yml"),
+            "parse action metadata at byte limit",
+        );
+
+        at_limit.push('x');
+        must(
+            fs::write(root.join("action.yml"), &at_limit),
+            "write over-limit action metadata",
+        );
+        assert!(
+            super::parse_metadata(&root, "action.yml").is_err(),
+            "scanner accepted metadata larger than 1 MiB"
+        );
+
+        let mut over_node_limit = String::new();
+        for index in 0..25_001 {
+            over_node_limit.push_str(&format!("loose-{index}: value\n"));
+        }
+        over_node_limit.push_str(base);
+        assert!(
+            over_node_limit.len() < MAX_ACTION_METADATA_BYTES as usize,
+            "node fixture must remain below the byte limit"
+        );
+        must(
+            fs::write(root.join("action.yml"), &over_node_limit),
+            "write over-node-limit action metadata",
+        );
+        assert!(
+            super::parse_metadata(&root, "action.yml").is_err(),
+            "scanner accepted more than 50,000 YAML nodes"
+        );
+
+        let depth_fixture = |nested_sequences: usize| {
+            format!(
+                "ignored: {}null{}\nruns:\n  using: composite\n  steps: []\n",
+                "[".repeat(nested_sequences),
+                "]".repeat(nested_sequences)
+            )
+        };
+        must(
+            fs::write(
+                root.join("action.yml"),
+                depth_fixture(MAX_ACTION_METADATA_DEPTH - 1),
+            ),
+            "write action metadata at depth limit",
+        );
+        must(
+            super::parse_metadata(&root, "action.yml"),
+            "parse action metadata at depth limit",
+        );
+        must(
+            fs::write(
+                root.join("action.yml"),
+                depth_fixture(MAX_ACTION_METADATA_DEPTH),
+            ),
+            "write action metadata over depth limit",
+        );
+        assert!(
+            super::parse_metadata(&root, "action.yml").is_err(),
+            "scanner accepted 65 nested mapping/sequence levels"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_well_known_field_names_match_exact_case() {
+        for (name, metadata) in [
+            ("uppercase-runs", "RUNS:\n  using: composite\n  steps: []\n"),
+            (
+                "uppercase-using",
+                "runs:\n  Using: composite\n  steps: []\n",
+            ),
+        ] {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), metadata),
+                "write case-sensitive action metadata",
+            );
+            assert!(
+                super::parse_metadata(&root, "action.yml").is_err(),
+                "scanner treated fixed schema field as case-insensitive: {name}"
+            );
+            assert!(
+                velnor_runner::action_contract::parse_action_metadata(metadata).is_err(),
+                "runtime treated fixed schema field as case-insensitive: {name}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+
+        let metadata =
+            "INPUTS:\n  value:\n    default: ignored\nruns:\n  using: composite\n  steps: []\n";
+        let root = fixture("uppercase-inputs");
+        must(
+            fs::write(root.join("action.yml"), metadata),
+            "write case-sensitive input field metadata",
+        );
+        let scanner = must(
+            super::parse_metadata(&root, "action.yml"),
+            "parse case-sensitive input field metadata",
+        );
+        let runner = must(
+            velnor_runner::action_contract::parse_action_metadata(metadata),
+            "parse runtime case-sensitive input field metadata",
+        );
+        assert!(scanner.inputs.is_null());
+        assert!(runner.inputs.is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2675,6 +4089,34 @@ mod tests {
             "unexpected missing composite steps error: {error}"
         );
         let _ = fs::remove_dir_all(missing);
+    }
+
+    #[test]
+    fn composite_continue_on_error_accepts_only_boolean_or_expression() {
+        for (name, value, accepted) in [
+            ("false", "false", true),
+            ("expression", "${{ inputs.enabled }}", true),
+            ("quoted-boolean", "\"true\"", false),
+            ("number", "1", false),
+            ("null", "null", false),
+            ("embedded-expression", "before ${{ inputs.enabled }}", false),
+        ] {
+            let metadata = format!(
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n      continue-on-error: {value}\n"
+            );
+            let root = fixture(&format!("continue-on-error-{name}"));
+            must(
+                fs::write(root.join("action.yml"), &metadata),
+                "write continue-on-error metadata",
+            );
+            let scanner_accepts =
+                super::super::scan_shape_for_tests(&root, &providers(), "main", &[]).is_ok();
+            let runtime_accepts =
+                velnor_runner::action_contract::parse_action_metadata(&metadata).is_ok();
+            assert_eq!(scanner_accepts, accepted, "scanner result for {name}");
+            assert_eq!(runtime_accepts, accepted, "runtime result for {name}");
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -3246,6 +4688,98 @@ mod tests {
                 "scripts/workspace.js"
             ]
         );
+        let shape = must(
+            super::super::scan_shape_for_tests(&root, &providers(), "main", &[]),
+            "scan composite working-directory fixture",
+        );
+        let action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "actions/child")
+            .unwrap_or_else(|| panic!("composite action unit missing"));
+        assert!(action.watch.iter().any(|path| path == "actions/child/**"));
+        for path in [
+            "actions/child/scripts/action.js",
+            "root.js",
+            "scripts/workspace.js",
+        ] {
+            assert!(
+                action.watch.iter().any(|watched| watched == path),
+                "action watch must include exact local reference {path}: {:?}",
+                action.watch
+            );
+            assert!(
+                action
+                    .pr_commands
+                    .iter()
+                    .any(|command| command.contains(path)),
+                "action validation must check local reference {path}: {:?}",
+                action.pr_commands
+            );
+        }
+        assert_change_selects_action_unit(action, "root.js");
+        assert_change_selects_action_unit(action, "scripts/workspace.js");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_composite_working_directory_references_select_consumers() {
+        let root = fixture("nested-composite-working-directory");
+        must(
+            fs::create_dir_all(root.join("actions/parent")),
+            "create parent composite directory",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/child")),
+            "create child composite directory",
+        );
+        must(
+            fs::create_dir_all(root.join("shared")),
+            "create nested composite working directory",
+        );
+        must(
+            fs::write(
+                root.join("actions/parent/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./actions/child\n",
+            ),
+            "write parent composite metadata",
+        );
+        must(
+            fs::write(
+                root.join("actions/child/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      working-directory: shared\n      run: node ./child.js\n",
+            ),
+            "write child composite metadata",
+        );
+        must(
+            fs::write(root.join("shared/child.js"), "process.exit(0)\n"),
+            "write child working-directory script",
+        );
+
+        let shape = must(
+            super::super::scan_shape_for_tests(&root, &providers(), "main", &[]),
+            "scan nested composite fixture",
+        );
+        let parent = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "actions/parent")
+            .unwrap_or_else(|| panic!("parent action unit missing"));
+        assert!(parent.watch.iter().any(|path| path == "actions/child/**"));
+        assert!(
+            parent.watch.iter().any(|path| path == "shared/child.js"),
+            "parent action watch must include nested exact reference: {:?}",
+            parent.watch
+        );
+        assert!(
+            parent
+                .pr_commands
+                .iter()
+                .any(|command| command.contains("shared/child.js")),
+            "parent action validation must check nested exact reference: {:?}",
+            parent.pr_commands
+        );
+        assert_change_selects_action_unit(parent, "shared/child.js");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3264,7 +4798,7 @@ mod tests {
                 "Runner local marker did not resolve: {reference}"
             );
         }
-        for reference in ["actions/child", ".actions/child"] {
+        for reference in ["actions/child", ".actions/child", "..actions/child"] {
             assert_eq!(
                 super::discovered_local_action_root(&root, reference)
                     .unwrap_or_else(|error| panic!("{error}")),
@@ -3297,6 +4831,39 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("symlinked action component was accepted"));
             assert!(error.to_string().contains("traverses symlink"), "{error}");
+
+            must(
+                fs::create_dir_all(root.join("real-root/child")),
+                "create symlinked action ancestor target",
+            );
+            must(
+                symlink(root.join("real-root"), root.join("linked-root")),
+                "create symlinked action ancestor",
+            );
+            let error = super::discovered_local_action_root(&root, "./linked-root/child")
+                .err()
+                .unwrap_or_else(|| panic!("symlinked action root ancestor was accepted"));
+            assert!(error.to_string().contains("traverses symlink"), "{error}");
+
+            must(
+                fs::create_dir_all(root.join("real-root/action")),
+                "create symlinked action entrypoint target",
+            );
+            must(
+                fs::write(root.join("real-root/action/main.js"), "process.exit(0)\n"),
+                "write symlinked action entrypoint target",
+            );
+            let mut references = std::collections::BTreeSet::new();
+            let error = super::add_action_path_reference(
+                &mut references,
+                "main.js",
+                "linked-root/action",
+                &root,
+                &["linked-root/action/main.js".to_owned()],
+            )
+            .err()
+            .unwrap_or_else(|| panic!("symlinked action root ancestor entrypoint was accepted"));
+            assert!(error.to_string().contains("symlink"), "{error}");
         }
         let _ = fs::remove_dir_all(root);
     }

@@ -188,12 +188,34 @@ impl SafeActionPath {
 }
 
 /// Resolve a metadata path below `action_root` and reject symlink traversal.
-/// Missing final files are allowed so callers can report their own metadata
-/// missing-file diagnostic; every existing component is checked without
-/// following links.
+/// Missing roots and final files are allowed so callers can report their own
+/// missing-file diagnostics; every existing component under the root is
+/// checked without following links.
 pub fn resolve_action_path(action_root: &Path, raw: &str) -> Result<PathBuf, InvalidActionPath> {
     let relative = SafeActionPath::parse(raw)?;
     let resolved = action_root.join(relative.as_path());
+    match std::fs::symlink_metadata(action_root) {
+        Ok(root_metadata) if root_metadata.file_type().is_symlink() => {
+            return Err(invalid_action_path("action root is a symlink"));
+        }
+        Ok(root_metadata) if !root_metadata.is_dir() => {
+            return Err(invalid_action_path("action root is not a directory"));
+        }
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            // Preserve missing-path resolution: callers can report missing
+            // payloads themselves, and invocation planning may only need the
+            // path string. Runner callers separately prove the root remains
+            // inside its workspace/cache boundary before reading metadata.
+            return Ok(resolved);
+        }
+        Err(error) => return Err(InvalidActionPath::Io(error)),
+    }
     let mut existing = action_root.to_path_buf();
     for component in relative.as_path().components() {
         existing.push(component.as_os_str());
@@ -225,19 +247,31 @@ fn has_windows_drive_prefix(path: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
+/// Return whether an action reference uses the GitHub Actions runner's local
+/// path prefixes.
+///
+/// The runner recognizes only `./` and `.\\` as local action references. A
+/// leading dot by itself is not sufficient: hidden paths, parent traversal,
+/// and other dot-prefixed values remain non-local references.
+#[must_use]
+pub fn is_runner_local_action_reference(reference: &str) -> bool {
+    reference.starts_with("./") || reference.starts_with(".\\")
+}
+
 /// The runner's two supported `runs.image` classes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionImageReference {
     /// A remote image after removing the case-insensitive `docker://` scheme.
     DockerImage(ImageReference),
-    /// A host-local Dockerfile path classified by the runner's basename rule.
+    /// A host-local Dockerfile path classified by the GitHub Actions runner rule.
     Dockerfile(String),
 }
 
 impl ActionImageReference {
     /// Parse the metadata `runs.image` value using the runner's classification
     /// order: an ordinal-ignore-case `docker://` scheme always means an image;
-    /// otherwise only a Dockerfile basename is a local build source.
+    /// otherwise the case-insensitive runner basename rule classifies a path
+    /// ending in `Dockerfile` or starting with `Dockerfile.` as a local build source.
     pub fn parse(raw: &str) -> Result<Self, InvalidImageReference> {
         if raw.is_empty() {
             return Err(invalid("empty action image"));
@@ -512,12 +546,23 @@ mod tests {
     }
 
     #[test]
-    fn dockerfile_basename_is_the_only_local_image_class() {
-        assert!(matches!(
-            ActionImageReference::parse("./nested/Dockerfile"),
-            Ok(ActionImageReference::Dockerfile(_))
-        ));
-        assert!(ActionImageReference::parse("./nested/Dockerfile ").is_err());
+    fn dockerfile_basename_uses_runner_case_insensitive_rule() {
+        for value in [
+            "./nested/Dockerfile",
+            "./nested/dockerfile",
+            "./nested/Dockerfile.prod",
+            "./nested/dockerfile.Prod",
+            "./nested/mydockerfile",
+            "./nested/notdockerfile",
+        ] {
+            assert!(matches!(
+                ActionImageReference::parse(value),
+                Ok(ActionImageReference::Dockerfile(_))
+            ));
+        }
+        for value in ["./nested/Dockerfile ", "./nested/Dockerfile/build-context"] {
+            assert!(ActionImageReference::parse(value).is_err(), "{value}");
+        }
         assert!(ImageReference::parse("ubuntu:24.04").is_ok());
     }
 
@@ -572,6 +617,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runner_local_action_reference_requires_dot_slash_prefix() {
+        for value in ["./", "./nested/action", ".\\", ".\\nested\\action"] {
+            assert!(super::is_runner_local_action_reference(value), "{value:?}");
+        }
+        for value in [".hidden/action", ".../action", "../action", "foo"] {
+            assert!(!super::is_runner_local_action_reference(value), "{value:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn safe_action_path_rejects_symlink_components() {
@@ -582,11 +637,14 @@ mod tests {
             std::env::temp_dir().join(format!("velnor-safe-action-path-{}", std::process::id()));
         let outside = root.join("outside");
         let action = root.join("action");
+        let action_link = root.join("action-link");
         let _ = fs::remove_dir_all(&root);
         assert!(fs::create_dir_all(&outside).is_ok());
         assert!(fs::create_dir_all(&action).is_ok());
         assert!(symlink(&outside, action.join("link")).is_ok());
+        assert!(symlink(&action, &action_link).is_ok());
         assert!(resolve_action_path(&action, "link/entry.js").is_err());
+        assert!(resolve_action_path(&action_link, "entry.js").is_err());
         let _ = fs::remove_dir_all(root);
     }
 }

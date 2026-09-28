@@ -6100,6 +6100,53 @@ pub(crate) mod tests {
         Ok((root, base, head))
     }
 
+    fn nested_action_selection_git_fixture(
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        let id = crate::unique_suffix();
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-nested-action-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let run = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        let write = |path: &str, contents: &str| -> Result<(), Box<dyn Error>> {
+            let path = root.join(path);
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "fixture parent")
+            })?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(path, contents)?;
+            Ok(())
+        };
+        run(&["init", "-q"])?;
+        run(&["config", "user.email", "test@example.invalid"])?;
+        run(&["config", "user.name", "Velnor test"])?;
+        write(
+            "actions/parent/action.yml",
+            "runs:\n  using: composite\n  steps:\n    - uses: ./actions/child\n",
+        )?;
+        write(
+            "actions/child/action.yml",
+            "runs:\n  using: composite\n  steps:\n    - shell: bash\n      working-directory: shared\n      run: node ./child.js\n",
+        )?;
+        write("shared/child.js", "process.exit(0)\n")?;
+        run(&["add", "."])?;
+        run(&["commit", "-qm", "base"])?;
+        let base = git_fixture_head(&root)?;
+        write("shared/child.js", "process.exit(1)\n")?;
+        run(&["add", "shared/child.js"])?;
+        run(&["commit", "-qm", "change nested action input"])?;
+        let head = git_fixture_head(&root)?;
+        Ok((root, base, head))
+    }
+
     fn git_fixture_head(root: &std::path::Path) -> Result<String, Box<dyn Error>> {
         Ok(String::from_utf8(
             std::process::Command::new("git")
@@ -7243,6 +7290,71 @@ workspace_check = true
             ["app", "consumer"].into_iter().map(str::to_owned).collect()
         );
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn nested_action_input_plans_github_action_consumer() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = nested_action_selection_git_fixture()?;
+        let dir = s4_dir("nested-action-plan");
+        let config_path = dir.join("project.toml");
+        must(
+            std::fs::write(&config_path, NESTED_ACTION_PLAN_CONFIG_TOML),
+            "write nested action plan config",
+        );
+        let config = read_config(&config_path)?;
+
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let selected = selection
+            .units
+            .iter()
+            .map(|unit| unit.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            selected,
+            BTreeSet::from([
+                "github-action-actions-child",
+                "github-action-actions-parent",
+            ]),
+            "the referenced file selects its child and the GitHub Action that consumes it"
+        );
+
+        let expected_path = dir.join("expected.json");
+        must(
+            plan_with(
+                &config_path,
+                &PlanInputs {
+                    root: root.clone(),
+                    event: "pull_request".to_owned(),
+                    scope_override: None,
+                    base: base.clone(),
+                    head: head.clone(),
+                    providers: "github-hosted".to_owned(),
+                    event_trusted: String::new(),
+                    selection_file: None,
+                    expected_file: Some(expected_path.clone()),
+                    github_output: None,
+                },
+            ),
+            "plan the nested action input change",
+        );
+        let expected = must(
+            std::fs::read_to_string(&expected_path),
+            "read nested action expected work",
+        );
+        let document: serde_json::Value = serde_json::from_str(&expected)?;
+        let planned = document
+            .get("units")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("the plan must write its unit array")?
+            .iter()
+            .filter_map(|unit| unit.get("id").and_then(serde_json::Value::as_str))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(planned, selected);
+        assert_eq!(document["planned_no_work"].as_bool(), Some(false));
+
+        std::fs::remove_dir_all(root)?;
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 
@@ -9871,6 +9983,36 @@ workspace_check = true
         );
         Ok((root, dir, expected))
     }
+
+    const NESTED_ACTION_PLAN_CONFIG_TOML: &str = r#"schema = 3
+repository = "example/nested-action"
+profile = "nested-action-plan"
+verified = true
+default_branch = "main"
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+
+[[unit]]
+id = "github-action-actions-child"
+kind = "github-action"
+root = "actions/child"
+watch = ["actions/child/**", "shared/child.js"]
+pr_commands = ["velnor-workflow verify-action --path actions/child/action.yml", "test -f 'shared/child.js'"]
+full_commands = ["velnor-workflow verify-action --path actions/child/action.yml", "test -f 'shared/child.js'"]
+platform = "linux-x64"
+trust = "untrusted-ok"
+
+[[unit]]
+id = "github-action-actions-parent"
+kind = "github-action"
+root = "actions/parent"
+watch = ["actions/parent/**", "actions/child/**", "actions/child/action.yml", "shared/child.js"]
+pr_commands = ["velnor-workflow verify-action --path actions/parent/action.yml", "test -f 'actions/child/action.yml'", "test -f 'shared/child.js'"]
+full_commands = ["velnor-workflow verify-action --path actions/parent/action.yml", "test -f 'actions/child/action.yml'", "test -f 'shared/child.js'"]
+platform = "linux-x64"
+trust = "untrusted-ok"
+"#;
 
     const S4_RUN_CONFIG_TOML: &str = r#"schema = 3
 repository = "example/s4"

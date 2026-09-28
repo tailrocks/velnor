@@ -76,6 +76,14 @@ Opacity is per unit, never per path. An empty changed path and a quoted diff
 path are `UNKNOWN` by construction
 (`crates/velnor-workflow/src/reuse.rs:717-731`).
 
+`CURRENT`: each GitHub Action unit watches the exact local files resolved from
+its metadata and recursively used local actions, alongside the source and
+nested-action root globs. The same resolved closure supplies `test -f`
+validation and watch ownership, so a change to a repository-root or
+`working-directory` script selects its action consumers
+(`crates/velnor-workflow/src/s2/scan/action.rs:702-824`, regression coverage at
+`crates/velnor-workflow/src/s2/scan/action.rs:3406,3489`).
+
 A rename contributes both sides — target as renamed, source as deleted — so
 the old and new owners both match; a delete keeps its path so its owner still
 matches (`crates/velnor-workflow/src/reuse.rs:141-156`). There is no blanket

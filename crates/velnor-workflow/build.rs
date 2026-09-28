@@ -152,12 +152,7 @@ fn self_closure(manifest_dir: &Path) -> Option<String> {
 }
 
 fn has_unsafe_closure_symlink(lines: &[&str]) -> bool {
-    lines.iter().any(|line| {
-        line.starts_with("120000 ")
-            && line
-                .split_once('\t')
-                .is_some_and(|(_, path)| path != "crates/velnor-workflow/CLAUDE.md")
-    })
+    lines.iter().any(|line| line.starts_with("120000 "))
 }
 
 fn has_dependency_root(lines: &[&str], dependency_root: &str) -> bool {
@@ -545,15 +540,12 @@ path = "tools/shared"
     }
 
     #[test]
-    fn build_stamp_rejects_dependency_symlinks_but_keeps_legacy_links() {
+    fn build_stamp_rejects_symlinks_in_the_source_closure() {
         assert!(has_unsafe_closure_symlink(&[
             "120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/helper/src/linked.rs"
         ]));
-        assert!(!has_unsafe_closure_symlink(
-            &["120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/CLAUDE.md"]
-        ));
         assert!(has_unsafe_closure_symlink(
-            &["120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/src/linked.rs"]
+            &["120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/src/linked.rs"]
         ));
     }
 

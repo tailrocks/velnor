@@ -71,9 +71,12 @@ recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
 When `[workflow].files` replaces the default list, it must still include
 `ci-policy.yml`, the base-owned policy entrypoint. `[[static_files]]` cannot
-claim that path. Policy audits every checked-in workflow; unknown workflow
-files fail generated-tree ownership checks and must be migrated into generator
-inputs before they can pass.
+claim `ci-policy.yml`, `ci-pr.yml`, or the owner-only `ci-runtime-products.yml`.
+It also cannot alias any output rendered by the generator, including paths
+that differ only by case or a supported filesystem alias. Non-colliding static
+files remain available. Policy audits every checked-in workflow; unknown
+workflow files fail generated-tree ownership checks and must be migrated into
+generator inputs before they can pass.
 
 The schema-1 Swift scanner fails closed for executable Swift products and
 recognized XcodeGen specs because it cannot emit their complete phase and

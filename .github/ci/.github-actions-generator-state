@@ -26,4 +26,3 @@ generator	72
 .github/workflows/preview.yml	a1161aa2633b4524
 .github/workflows/release.yml	95923b4481fc5dd0
 config/fleet/velnor-host.env	d14b419216449423
-.github/CLAUDE.md	78a740c6ccf6937a

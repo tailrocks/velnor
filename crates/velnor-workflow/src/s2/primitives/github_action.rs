@@ -971,6 +971,86 @@ mod tests {
                 .any(|path| path == Path::new(".github/workflows/velnor-action-consumer-github-action-tests-fixtures-github-action-consumer-workflow-yml.yml")),
             "generated action consumer workflow must be part of the primitive surface"
         );
+        let generation_config_dir = root.join(".github-gen");
+        must(
+            fs::create_dir_all(&generation_config_dir),
+            "create generation config directory for full render",
+        );
+        must(
+            fs::write(
+                root.join(crate::s2::config::GENERATION_CONFIG_PATH),
+                include_bytes!(
+                    "../../../tests/fixtures/github-action-consumer/velnor-workflow.toml"
+                ),
+            ),
+            "write action consumer generation config",
+        );
+        must(
+            fs::write(
+                generation_config_dir.join("visibility.toml"),
+                "repository = \"example/action-consumer-fixture\"\nvisibility = \"public\"\n",
+            ),
+            "write repository visibility evidence",
+        );
+        let tree = must(
+            crate::s2::render_tree(&root, None, "main"),
+            "render full action consumer tree",
+        );
+        let consumer_path = Path::new(
+            ".github/workflows/velnor-action-consumer-github-action-tests-fixtures-github-action-consumer-workflow-yml.yml",
+        );
+        let generated_consumer = tree
+            .files
+            .get(consumer_path)
+            .unwrap_or_else(|| panic!("full rendered tree is missing {}", consumer_path.display()));
+        let consumer_name = consumer_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| panic!("consumer workflow name is not valid UTF-8"));
+        assert!(
+            tree.config
+                .workflow_files
+                .iter()
+                .any(|file| file == consumer_name),
+            "runtime workflow list must include primitive-emitted workflows"
+        );
+        let project_toml = tree
+            .files
+            .get(Path::new(".github/ci/project.toml"))
+            .unwrap_or_else(|| panic!("full rendered tree is missing project.toml"));
+        assert!(
+            project_toml.contains(&format!("\"{consumer_name}\"")),
+            "generated project.toml must list primitive-emitted workflows: {project_toml}"
+        );
+        let mut alias_config = tree.config.clone();
+        alias_config
+            .workflow_files
+            .push("CI-UNIT-RUST.yml".to_owned());
+        let alias_surface = crate::s2::primitives::Surface {
+            files: BTreeMap::from([(
+                PathBuf::from(".github/workflows/CI-UNIT-RUST.yml"),
+                "aliased workflow".to_owned(),
+            )]),
+            units: Vec::new(),
+            contracts: BTreeMap::new(),
+            added_files: Vec::new(),
+        };
+        let Err(alias_error) =
+            crate::s2::add_surface_workflow_files(&mut alias_config, &alias_surface)
+        else {
+            panic!("surface workflow alias to a generated unit workflow was accepted")
+        };
+        assert!(
+            alias_error
+                .to_string()
+                .contains("aliases generated unit workflow `ci-unit-rust.yml`"),
+            "generated unit workflow alias must be named: {alias_error}"
+        );
+        assert!(generated_consumer.contains("uses: ./"));
+        assert!(
+            !generated_consumer.contains(super::ACTION_PATH_MARKER),
+            "full rendered consumer must substitute the scanned action path"
+        );
         let success = update
             .pr_commands
             .iter()
@@ -1159,6 +1239,7 @@ runs:
             composite_action_invocations(
                 &LocalActionPlan {
                     step_id: "consumer".to_owned(),
+                    workspace_root: root.to_path_buf(),
                     action_dir,
                     inputs: BTreeMap::from([
                         ("mode".to_owned(), mode.to_owned()),
@@ -1212,6 +1293,7 @@ runs:
             composite_action_invocations(
                 &LocalActionPlan {
                     step_id: step_id.to_owned(),
+                    workspace_root: root.to_path_buf(),
                     action_dir,
                     inputs,
                 },

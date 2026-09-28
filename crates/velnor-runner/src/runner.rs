@@ -25326,6 +25326,7 @@ jobs:
         let script_steps = crate::script_step::github_script_steps(&job.steps, "/__w").unwrap();
         let local_plan = LocalActionPlan {
             step_id: "aggregate".into(),
+            workspace_root: Path::new("/tmp/workspace").into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/aggregate-needs"),
             inputs: [("workflow-label".to_string(), "CI".to_string())].into(),
         };
@@ -25417,6 +25418,7 @@ runs:
         .unwrap();
         let local_plan = LocalActionPlan {
             step_id: "closure".into(),
+            workspace_root: Path::new("/tmp/workspace").into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/l2-root"),
             inputs: BTreeMap::new(),
         };
@@ -25633,6 +25635,7 @@ runs:
         .unwrap();
         let local_plan = LocalActionPlan {
             step_id: "docs".into(),
+            workspace_root: Path::new("/tmp/workspace").into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/check-deployed-docs"),
             inputs: [("github-token".to_string(), "ghs_token".to_string())].into(),
         };
@@ -27932,6 +27935,7 @@ runs:
         .unwrap();
         let plan = LocalActionPlan {
             step_id: "download-ci-xtask".into(),
+            workspace_root: Path::new("/path/that/does/not/exist").into(),
             action_dir: Path::new("/path/that/does/not/exist").into(),
             inputs: BTreeMap::new(),
         };
