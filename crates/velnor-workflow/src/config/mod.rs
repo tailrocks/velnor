@@ -2295,15 +2295,42 @@ fn reject_generator_owned_workflow_name(
     owner: &str,
     allow_canonical: bool,
 ) -> Result<(), GeneratorError> {
-    if crate::generator_owned_workflow_name(file) == Some(crate::CI_POLICY_WORKFLOW)
-        && (!allow_canonical || file != "ci-policy.yml")
-    {
+    let Some(reserved) = crate::generator_owned_workflow_name(file) else {
+        return Ok(());
+    };
+    if reserved == crate::CI_PR_LEGACY_WORKFLOW {
         return Err(GeneratorError::usage(format!(
-            "{owner} must name the policy enforcement entrypoint exactly as `ci-policy.yml`; `{file}` aliases `{}`",
-            crate::CI_POLICY_WORKFLOW
+            "{owner} must use canonical PR workflow name `ci-pr.yml`; `{file}` aliases retired `{reserved}`"
         )));
     }
-    Ok(())
+    let Some(canonical) = Path::new(reserved)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return Err(GeneratorError::usage(format!(
+            "{owner} cannot resolve generator-owned workflow path `{reserved}`"
+        )));
+    };
+    // Policy is mandatory in the configurable surface. The canonical PR
+    // aggregate may be selected or declared by its primitive. Runtime-products
+    // is owner-only and appended by assembly. Reject aliases before exact-name
+    // dispatch could silently omit an output.
+    let canonical_allowed = file == canonical
+        && ((allow_canonical
+            && reserved != crate::CI_RUNTIME_PRODUCTS_WORKFLOW
+            && (reserved == crate::CI_POLICY_WORKFLOW || reserved == crate::CI_PR_WORKFLOW))
+            || (!allow_canonical && reserved == crate::CI_PR_WORKFLOW));
+    if canonical_allowed {
+        return Ok(());
+    }
+    if reserved == crate::CI_POLICY_WORKFLOW {
+        return Err(GeneratorError::usage(format!(
+            "{owner} must name the policy enforcement entrypoint exactly as `ci-policy.yml`; `{file}` aliases `{reserved}`"
+        )));
+    }
+    Err(GeneratorError::usage(format!(
+        "{owner} must not name generator-owned workflow `{canonical}`; `{file}` aliases `{reserved}`"
+    )))
 }
 
 /// A mise tool id renders verbatim into a job's `install_args`, so its shape
@@ -4450,7 +4477,7 @@ mod tests {
     fn policy_entrypoint_is_required_in_the_rendered_surface() {
         let missing = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [workflow]\nfiles = [\"ci-pr.yml\"]\n",
+             [workflow]\nfiles = [\"ci-custom.yml\"]\n",
         );
         let error = must_fail(
             missing.validate(&[], &[], &BTreeSet::new()),
@@ -4463,7 +4490,7 @@ mod tests {
 
         let alias = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [workflow]\nfiles = [\"ci-pr.yml\", \"CI-POLICY.yml\"]\n",
+             [workflow]\nfiles = [\"ci-custom.yml\", \"CI-POLICY.yml\"]\n",
         );
         let error = must_fail(
             alias.validate(&[], &[], &BTreeSet::new()),
@@ -4478,7 +4505,7 @@ mod tests {
 
         let duplicate = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [workflow]\nfiles = [\"ci-pr.yml\", \"CI-PR.yml\", \"ci-policy.yml\"]\n",
+             [workflow]\nfiles = [\"ci-custom.yml\", \"CI-CUSTOM.yml\", \"ci-policy.yml\"]\n",
         );
         let error = must_fail(
             duplicate.validate(&[], &[], &BTreeSet::new()),
@@ -4493,11 +4520,54 @@ mod tests {
 
         let valid = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [workflow]\nfiles = [\"ci-pr.yml\", \"ci-policy.yml\"]\n",
+             [workflow]\nfiles = [\"ci-custom.yml\", \"ci-policy.yml\"]\n",
         );
         must(
             valid.validate(&[], &[], &BTreeSet::new()),
             "canonical policy entrypoint remains a valid custom workflow surface",
+        );
+    }
+
+    #[test]
+    fn owner_workflow_aliases_and_owner_only_workflow_are_rejected() {
+        for file in [
+            "CI-PR.yml",
+            "CI-RUNTIME-PRODUCTS.yml",
+            "ci－runtime-products.yml",
+            "ci-pull-request.yml",
+            "CI-PULL-REQUEST.yml",
+            "ci－pull－request.yml",
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-custom.yml\", \"{file}\", \"ci-policy.yml\"]\n"
+            ));
+            assert!(
+                config.validate(&[], &[], &BTreeSet::new()).is_err(),
+                "reserved workflow alias must fail: {file}"
+            );
+        }
+
+        let owner_only = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-runtime-products.yml\", \"ci-policy.yml\"]\n",
+        );
+        assert!(
+            owner_only.validate(&[], &[], &BTreeSet::new()).is_err(),
+            "owner-only runtime producer cannot be declared in workflow.files"
+        );
+
+        let declared_pr = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[declare]]\nprimitive = \"unit-aggregation\"\nfile = \"ci-pr.yml\"\n",
+        );
+        must(
+            declared_pr.validate(&[], &[], &BTreeSet::new()),
+            "canonical PR workflow may be declared by its primitive",
+        );
+        let legacy_pr = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[declare]]\nprimitive = \"unit-aggregation\"\nfile = \"ci-pull-request.yml\"\n",
+        );
+        assert!(
+            legacy_pr.validate(&[], &[], &BTreeSet::new()).is_err(),
+            "legacy PR aggregate alias must fail"
         );
     }
 
@@ -4563,7 +4633,7 @@ mod tests {
         ];
         for file in invalid_workflow_files {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-pr.yml\", \"{file}\", \"ci-policy.yml\"]\n"
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-custom.yml\", \"{file}\", \"ci-policy.yml\"]\n"
             ));
             assert!(
                 config.validate(&[], &[], &BTreeSet::new()).is_err(),
@@ -4582,7 +4652,7 @@ mod tests {
         }
 
         let valid = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-pr.yml\", \"ci-policy.yml\"]\n",
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nfiles = [\"ci-custom.yml\", \"ci-policy.yml\"]\n",
         );
         must(
             valid.validate(&[], &[], &BTreeSet::new()),
@@ -7272,5 +7342,22 @@ mod tests {
             error.to_string().contains("must be `reviewed-allowlist`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn retired_pr_workflow_aliases_are_rejected_as_static_outputs() {
+        for file in [
+            "ci-pull-request.yml",
+            "CI-PULL-REQUEST.yml",
+            "ci－pull－request.yml",
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/{file}\"\nsource = \"config/source.yml\"\n"
+            ));
+            assert!(
+                config.validate(&[], &[], &BTreeSet::new()).is_err(),
+                "retired PR aggregate alias must fail: {file}"
+            );
+        }
     }
 }

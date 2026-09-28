@@ -79,7 +79,6 @@ const ADMITTED_FILES: &[&str] = &[
     "src/s2/estate.rs",
     "tests/generic_surface_literals.rs",
     "AGENTS.md",
-    "CLAUDE.md",
 ];
 
 /// The `termrock` toolkit enters the crate as a dev-dependency of the TUI; the

@@ -64,6 +64,9 @@ pub(crate) const CLOSURE_VERSION: u8 = 1;
 
 /// Cargo profile of Stage-0 release products.
 pub(crate) const PROFILE_RELEASE: &str = "release";
+const LEGACY_DOCS_SYMLINK_REVISION: &str = "9567d50ca2b404e64d818dca845beec747518565";
+const LEGACY_DOCS_SYMLINK_BLOB: &str = "47dc3e3d863cfb5727b87d785d09abf9743c0a72";
+const LEGACY_DOCS_SYMLINK_PATH: &str = "crates/velnor-workflow/CLAUDE.md";
 /// Cargo profile of candidate products (verified against the unit job's test
 /// build before any reuse).
 pub(crate) const PROFILE_DEBUG: &str = "debug";
@@ -180,7 +183,10 @@ pub(crate) fn closure_of_tree(
         .lines()
         .map(str::to_owned)
         .collect();
-    if lines.iter().any(|line| is_unsafe_closure_symlink(line)) {
+    if lines
+        .iter()
+        .any(|line| is_unsafe_closure_symlink(line, rev))
+    {
         return Err(GeneratorError::usage(format!(
             "revision {rev} contains a symlink in the source closure"
         )));
@@ -194,11 +200,16 @@ pub(crate) fn closure_of_tree(
     Ok(canonical_digest(&lines, features, profile))
 }
 
-fn is_unsafe_closure_symlink(line: &str) -> bool {
-    line.starts_with("120000 ")
-        && line
-            .split_once('\t')
-            .is_some_and(|(_, path)| path != "crates/velnor-workflow/CLAUDE.md")
+fn is_unsafe_closure_symlink(line: &str, revision: &str) -> bool {
+    if !line.starts_with("120000 ") {
+        return false;
+    }
+    let Some((header, path)) = line.split_once('\t') else {
+        return true;
+    };
+    !(revision == LEGACY_DOCS_SYMLINK_REVISION
+        && header == format!("120000 blob {LEGACY_DOCS_SYMLINK_BLOB}")
+        && path == LEGACY_DOCS_SYMLINK_PATH)
 }
 
 fn reject_transitive_path_dependencies(
@@ -383,6 +394,69 @@ mod tests {
     }
 
     #[test]
+    fn closure_allows_only_the_legacy_docs_symlink() {
+        let allowed = format!("120000 blob {LEGACY_DOCS_SYMLINK_BLOB}\t{LEGACY_DOCS_SYMLINK_PATH}");
+        assert!(!is_unsafe_closure_symlink(
+            &allowed,
+            LEGACY_DOCS_SYMLINK_REVISION
+        ));
+        assert!(is_unsafe_closure_symlink(
+            &allowed,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(is_unsafe_closure_symlink(
+            "120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/OTHER.md",
+            LEGACY_DOCS_SYMLINK_REVISION
+        ));
+        assert!(is_unsafe_closure_symlink(
+            "120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/CLAUDE.md/child",
+            LEGACY_DOCS_SYMLINK_REVISION
+        ));
+        assert!(is_unsafe_closure_symlink(
+            "120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/CLAUDE.md\tother",
+            LEGACY_DOCS_SYMLINK_REVISION
+        ));
+    }
+
+    #[cfg(unix)]
+    #[expect(clippy::expect_used, reason = "symlink fixture failures need context")]
+    #[test]
+    fn closure_rejects_docs_symlinks_outside_the_legacy_pinned_revision() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-base-symlink-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        std::os::unix::fs::symlink(
+            "../../AGENTS.md",
+            root.join("crates/velnor-workflow/CLAUDE.md"),
+        )
+        .expect("known Claude compatibility link");
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "known base symlink",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert!(closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
+            .expect_err("source closure rejects docs symlink outside legacy pin")
+            .to_string()
+            .contains("symlink"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn dev_features_pin_the_candidate_build() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let content = must(
@@ -402,17 +476,15 @@ mod tests {
     }
 
     #[test]
-    fn stamped_features_match_dev_features() {
-        // The candidate gate compares a binary's stamped features closure
-        // against `candidate_closure_of_tree`, so a default build must stamp
-        // exactly DEV_FEATURES: if `build.rs` spelled the set any other way
-        // (for example by keeping cargo's synthetic `default` marker), no
-        // default build would ever match its own closure and every candidate
-        // publish would fail closed.
+    fn stamped_features_match_compiled_features() {
+        // The stamp must describe this compilation's enabled features. Derive
+        // the expectation from Cargo's feature cfgs so the no-default-features
+        // build correctly expects an empty set instead of the default set.
+        let compiled_features = if cfg!(feature = "tui") { "tui" } else { "" };
         assert_eq!(
             env!("VELNOR_WORKFLOW_FEATURES"),
-            DEV_FEATURES,
-            "build.rs and the canonical closure form must spell the default feature set identically"
+            compiled_features,
+            "build.rs must stamp the feature set enabled for this compilation"
         );
     }
 
@@ -761,68 +833,6 @@ mod tests {
         let error = closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
             .expect_err("dependency symlink cannot be hidden by a blob digest");
         assert!(error.to_string().contains("symlink"), "{error}");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[expect(clippy::expect_used, reason = "symlink fixture failures need context")]
-    #[test]
-    fn closure_allows_only_the_known_non_runtime_claude_symlink_in_base_paths() {
-        let root = std::env::temp_dir().join(format!(
-            "velnor-closure-base-symlink-{}",
-            crate::unique_suffix()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        write_closure_fixture(&root);
-        std::os::unix::fs::symlink(
-            "../../AGENTS.md",
-            root.join("crates/velnor-workflow/CLAUDE.md"),
-        )
-        .expect("known Claude compatibility link");
-        git_in(&root, &["init", "--quiet"]);
-        git_in(&root, &["add", "-A"]);
-        git_in(
-            &root,
-            &[
-                "-c",
-                "user.email=closure@test",
-                "-c",
-                "user.name=closure",
-                "commit",
-                "--quiet",
-                "--message",
-                "known base symlink",
-            ],
-        );
-        let rev = git_output(&root, &["rev-parse", "HEAD"]);
-        must(
-            closure_of_tree(&root, &rev, "", PROFILE_RELEASE),
-            "known Claude symlink remains hash-compatible",
-        );
-        std::os::unix::fs::symlink(
-            "../../../../UNRELATED.md",
-            root.join("crates/velnor-workflow/src/linked.rs"),
-        )
-        .expect("unsafe source symlink");
-        git_in(&root, &["add", "-A"]);
-        git_in(
-            &root,
-            &[
-                "-c",
-                "user.email=closure@test",
-                "-c",
-                "user.name=closure",
-                "commit",
-                "--quiet",
-                "--message",
-                "unsafe base symlink",
-            ],
-        );
-        let rev = git_output(&root, &["rev-parse", "HEAD"]);
-        assert!(closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
-            .expect_err("source closure rejects unsafe base symlink")
-            .to_string()
-            .contains("symlink"));
         let _ = std::fs::remove_dir_all(root);
     }
 

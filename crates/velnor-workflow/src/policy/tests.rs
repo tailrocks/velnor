@@ -1667,7 +1667,7 @@ fn policy_preflight_rejects_a_missing_or_aliased_policy_entrypoint() {
 
     write(
         &config_path,
-        &base.replace("[workflow]\n", "[workflow]\nfiles = [\"ci-pr.yml\"]\n"),
+        &base.replace("[workflow]\n", "[workflow]\nfiles = [\"ci-custom.yml\"]\n"),
     );
     let error = must_fail(
         DeclaredTree::read(&root),
@@ -1688,6 +1688,44 @@ fn policy_preflight_rejects_a_missing_or_aliased_policy_entrypoint() {
     )
     .to_string();
     assert!(error.contains("generator owns this path"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn policy_preflight_rejects_static_replacements_of_ci_pr_and_runtime_products() {
+    let root = velnor_tree(
+        "policy-owned-workflow-static-overrides",
+        &gated_trusted_job(),
+    );
+    let config_path = root.join(GENERATION_CONFIG);
+    let base = must(
+        fs::read_to_string(&config_path),
+        "read generation config for owned workflow policy preflight",
+    );
+    let base = base.replace(
+        "repository = \"example/consumer\"",
+        &format!(
+            "repository = \"{}\"",
+            crate::workflow_setup_action_repository()
+        ),
+    );
+
+    for path in [crate::CI_PR_WORKFLOW, crate::CI_RUNTIME_PRODUCTS_WORKFLOW] {
+        write(
+            &config_path,
+            &format!(
+                "{base}\n[[static_files]]\nfile = \"{path}\"\nsource = \".github-gen/static.yml\"\n"
+            ),
+        );
+        let error = must_fail(
+            DeclaredTree::read(&root),
+            "policy preflight must reject a static replacement of an owned workflow",
+        )
+        .to_string();
+        assert!(error.contains("generator owns this path"), "{error}");
+        assert!(error.contains(path), "{error}");
+    }
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2115,7 +2153,7 @@ root="$1"; shift
 [ "$1" = --output ] || exit 3
 output="$2"
 mkdir -p "$output"
-/usr/bin/setsid /bin/sh -c 'parent=$1; output=$2; while kill -0 "$parent" 2>/dev/null; do /bin/sleep 0.01; done; /bin/sleep 0.25; while :; do printf late > "$output/late-file"; done' candidate-descendant "$$" "$output" >/dev/null 2>&1 &
+/usr/bin/setsid /bin/sh -c 'parent=$1; output=$2; while kill -0 "$parent" 2>/dev/null; do /bin/sleep 0.01; done; /bin/sleep 0.25; count=0; while :; do count=$((count + 1)); printf "late-%s" "$count" > "$output/late-file"; done' candidate-descendant "$$" "$output" >/dev/null 2>&1 &
 cp -R "$root/.github" "$output/"
 "#
             ),
@@ -2142,18 +2180,52 @@ fn candidate_descendant_cannot_mutate_render_after_parent_exits() {
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
-            "candidate with a late descendant reproduces the tree",
-        )
-        .as_deref(),
-        Some(wanted.as_str())
+    let rendered = must(
+        render_with_candidate(&root, &root, &scratch, "main", &lookup),
+        "candidate with a late descendant renders",
     );
-    assert!(
-        !scratch.join("late-file").exists(),
-        "a detached candidate descendant must be killed before output collection"
-    );
+    let late_file = scratch.join("late-file");
+    let late_file_at_return = fs::read(&late_file).ok();
+    match (rendered.as_deref(), late_file_at_return.as_deref()) {
+        (Some(closure), None) => assert_eq!(closure, wanted),
+        (None, Some(_)) => {
+            // The candidate was rejected only if the frozen archive proves
+            // the writer changed output before the container pause.
+            let differences = must(
+                compare_rendered_tree(&scratch, &root),
+                "compare the candidate output changed before pause",
+            );
+            assert_eq!(differences.len(), 1);
+            assert_eq!(
+                differences[0], "late-file: missing from the tree",
+                "the archived late write must be the reason candidate output is rejected"
+            );
+        }
+        (Some(_), Some(_)) => panic!("candidate output containing a late write was accepted"),
+        (None, None) => panic!("candidate rejection had no captured late write to explain it"),
+    }
+
+    // Candidate descendants write only inside the container's output volume;
+    // `scratch` is the extracted archive and cleanup removes the container
+    // before render returns. Poll beyond the deliberate delay to prove the
+    // copied output and checkout stay stable after return.
+    let root_late_file = root.join("late-file");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    loop {
+        assert_eq!(
+            fs::read(&late_file).ok(),
+            late_file_at_return,
+            "candidate descendant changed copied output after render returned"
+        );
+        assert!(
+            fs::symlink_metadata(&root_late_file).is_err(),
+            "candidate descendant changed the read-only checkout after render returned"
+        );
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
 }
@@ -3300,8 +3372,8 @@ fn confined_render_symlink_compares_clean() {
     let tree = temporary_directory("render-symlink-confined-tree");
     write(&rendered.join(".github/AGENTS.md"), "agents\n");
     write(&tree.join(".github/AGENTS.md"), "agents\n");
-    link(Path::new("AGENTS.md"), &rendered.join(".github/CLAUDE.md"));
-    link(Path::new("AGENTS.md"), &tree.join(".github/CLAUDE.md"));
+    link(Path::new("AGENTS.md"), &rendered.join(".github/link.txt"));
+    link(Path::new("AGENTS.md"), &tree.join(".github/link.txt"));
     let differences = must(
         compare_rendered_tree(&rendered, &tree),
         "a confined in-render symlink compares by target",
@@ -3322,7 +3394,7 @@ fn render_symlink_escaping_its_root_is_an_error() {
     let secret = outside.join("secret.txt");
     write(&secret, "outside\n");
     write(&rendered.join(".github/AGENTS.md"), "agents\n");
-    link(&secret, &rendered.join(".github/CLAUDE.md"));
+    link(&secret, &rendered.join(".github/link.txt"));
     let tree = temporary_directory("render-symlink-escape-tree");
     let error = must_fail(
         compare_rendered_tree(&rendered, &tree),
@@ -3340,7 +3412,7 @@ fn render_symlink_escaping_its_root_is_an_error() {
 fn dangling_render_symlink_is_an_error() {
     let rendered = temporary_directory("render-symlink-dangling");
     write(&rendered.join(".github/AGENTS.md"), "agents\n");
-    link(Path::new("MISSING.md"), &rendered.join(".github/CLAUDE.md"));
+    link(Path::new("MISSING.md"), &rendered.join(".github/link.txt"));
     let tree = temporary_directory("render-symlink-dangling-tree");
     let error = must_fail(
         compare_rendered_tree(&rendered, &tree),
@@ -3361,7 +3433,7 @@ fn render_symlink_to_directory_is_an_error() {
         fs::create_dir_all(rendered.join(".github/nested")),
         "create in-render directory",
     );
-    link(Path::new("nested"), &rendered.join(".github/CLAUDE.md"));
+    link(Path::new("nested"), &rendered.join(".github/link.txt"));
     let tree = temporary_directory("render-symlink-directory-tree");
     let error = must_fail(
         compare_rendered_tree(&rendered, &tree),

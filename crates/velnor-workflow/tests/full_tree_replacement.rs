@@ -223,8 +223,6 @@ enum Drift {
     ExtraFile(&'static str),
     ExtraDir(&'static str),
     MakeExecutable(&'static str),
-    RetargetLink,
-    LinkToFile,
 }
 
 fn apply_drift(output: &Path, drift: &Drift) {
@@ -251,16 +249,6 @@ fn apply_drift(output: &Path, drift: &Drift) {
         Drift::MakeExecutable(relative) => make_executable(&output.join(relative)),
         #[cfg(not(unix))]
         Drift::MakeExecutable(_) => {}
-        Drift::RetargetLink => {
-            let link = output.join(".github/CLAUDE.md");
-            fs::remove_file(&link).unwrap();
-            symlink(&PathBuf::from("actionlint.yaml"), &link);
-        }
-        Drift::LinkToFile => {
-            let link = output.join(".github/CLAUDE.md");
-            fs::remove_file(&link).unwrap();
-            fs::write(&link, "squatter\n").unwrap();
-        }
     }
 }
 
@@ -272,14 +260,11 @@ fn check_rejects_every_drift_class(pipeline: Pipeline, drift: &Drift, label: &st
         !outcome.status.success(),
         "{label}: check must fail on drift"
     );
-    // A hand edit, a retargeted link, and a file squatting the link are
-    // the drifts `--force` must not repair: the ownership proof refuses
-    // them, so the tree cannot silently absorb a manual change.
+    // A hand edit is never repaired: the ownership proof refuses it, so the
+    // tree cannot silently absorb a manual change.
     let force = run_generate(&root, &output, true);
     let refusal = match drift {
         Drift::Edit(_) => Some("manually modified"),
-        Drift::RetargetLink => Some("manually modified generator symlink"),
-        Drift::LinkToFile => Some("expected generator-owned symlink"),
         Drift::Delete(_) | Drift::ExtraFile(_) | Drift::ExtraDir(_) | Drift::MakeExecutable(_) => {
             None
         }
@@ -411,26 +396,6 @@ fn s2_check_rejects_executable_mode() {
         &Drift::MakeExecutable(".github/workflows/nightly.yml"),
         "s2-mode",
     );
-}
-
-#[test]
-fn v1_check_rejects_retargeted_link() {
-    check_rejects_every_drift_class(Pipeline::V1, &Drift::RetargetLink, "v1-retarget");
-}
-
-#[test]
-fn s2_check_rejects_retargeted_link() {
-    check_rejects_every_drift_class(Pipeline::S2, &Drift::RetargetLink, "s2-retarget");
-}
-
-#[test]
-fn v1_check_rejects_file_squatting_link() {
-    check_rejects_every_drift_class(Pipeline::V1, &Drift::LinkToFile, "v1-squatter");
-}
-
-#[test]
-fn s2_check_rejects_file_squatting_link() {
-    check_rejects_every_drift_class(Pipeline::S2, &Drift::LinkToFile, "s2-squatter");
 }
 
 #[cfg(unix)]
@@ -836,45 +801,4 @@ fn force_normalizes_executable_modes() {
         );
         check_ok(&root, &output);
     }
-}
-
-/// Incident regression: a policy-checkout-shaped tree — a full render
-/// whose committed state records the generator-owned `.github/CLAUDE.md`
-/// symlink with the link on disk — must plan, check, and publish clean
-/// under every mode. The owned link is expected output: never stale,
-/// never unknown, never refused.
-fn owned_symlink_renders_clean_in_policy_checkout_shape(pipeline: Pipeline) {
-    let (root, output) = fixture(pipeline, "owned-link-clean");
-    let link = output.join(".github/CLAUDE.md");
-    assert_eq!(
-        fs::read_link(&link).unwrap(),
-        PathBuf::from("AGENTS.md"),
-        "the render must carry the owned link"
-    );
-    let state =
-        fs::read_to_string(output.join(".github/ci/.github-actions-generator-state")).unwrap();
-    assert!(
-        state.contains(".github/CLAUDE.md"),
-        "the committed state must record the owned link"
-    );
-    generate_ok(&root, &output, false);
-    check_ok(&root, &output);
-    generate_ok(&root, &output, true);
-    assert_eq!(
-        fs::read_link(&link).unwrap(),
-        PathBuf::from("AGENTS.md"),
-        "every mode must leave the owned link alone"
-    );
-    check_ok(&root, &output);
-    assert_no_staging_leftovers(&output);
-}
-
-#[test]
-fn v1_owned_symlink_renders_clean_in_policy_checkout_shape() {
-    owned_symlink_renders_clean_in_policy_checkout_shape(Pipeline::V1);
-}
-
-#[test]
-fn s2_owned_symlink_renders_clean_in_policy_checkout_shape() {
-    owned_symlink_renders_clean_in_policy_checkout_shape(Pipeline::S2);
 }

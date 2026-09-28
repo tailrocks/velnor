@@ -546,7 +546,8 @@ impl App {
             );
             return;
         };
-        let plan = match plan_generated_write(output_root, &files, &generated_symlinks(), &inputs) {
+        let symlinks = generated_symlinks();
+        let plan = match plan_generated_write(output_root, &files, &symlinks, &inputs) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());

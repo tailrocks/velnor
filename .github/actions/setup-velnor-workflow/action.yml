@@ -261,7 +261,7 @@ runs:
 
         PY
         }
-        [[ "$(awk -F '\t' '$1 ~ /^120000 / && $2 != "crates/velnor-workflow/CLAUDE.md" { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
+        [[ "$(awk -F '\t' -v revision="$INSTALL_REV" '$1 ~ /^120000 / && !(revision == "9567d50ca2b404e64d818dca845beec747518565" && NF == 2 && $1 == "120000 blob 47dc3e3d863cfb5727b87d785d09abf9743c0a72" && $2 == "crates/velnor-workflow/CLAUDE.md") { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
         while IFS= read -r dependency_path; do
           [[ "$dependency_path" != '' ]] || continue
           dependency_tree="$(git -C "${CHECKOUT_PATH}" ls-tree -r "${INSTALL_REV}" -- ":(literal)$dependency_path")"
@@ -454,7 +454,7 @@ runs:
                 if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
         PY
         }
-        [[ "$(awk -F '\t' '$1 ~ /^120000 / && $2 != "crates/velnor-workflow/CLAUDE.md" { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
+        jq -e --arg revision "$INSTALL_REV" '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | select(.mode == "120000") | select(($revision == "9567d50ca2b404e64d818dca845beec747518565" and .type == "blob" and .sha == "47dc3e3d863cfb5727b87d785d09abf9743c0a72" and .path == "crates/velnor-workflow/CLAUDE.md") | not)] | length == 0' <<<"$tree" >/dev/null || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
         while IFS= read -r dependency_path; do
           [[ "$dependency_path" != '' ]] || continue
           dependency_tree="$(jq -r --arg path "$dependency_path" '[.tree[] | select(.type != "tree") | select(.path == $path or (.path | startswith($path + "/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"

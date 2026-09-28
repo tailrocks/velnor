@@ -740,7 +740,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "8ca12b20166c"
+      mbx_compat: "2215190534a5"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -818,6 +818,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-model,rust-velnor-runner"
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') && (true) }}
