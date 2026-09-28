@@ -105,7 +105,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           DEFAULT_BRANCH: main
-          BASE_PIN: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          BASE_PIN: 9567d50ca2b404e64d818dca845beec747518565
         run: |
           set -euo pipefail
           pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
@@ -226,7 +226,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          VELNOR_WORKFLOW_POLICY_REVISION: 9567d50ca2b404e64d818dca845beec747518565
         run: |
           set -euo pipefail
           velnor-workflow policy \

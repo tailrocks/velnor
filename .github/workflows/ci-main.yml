@@ -64,9 +64,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          rev: 9567d50ca2b404e64d818dca845beec747518565
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9b4348919d71d751d1af2bc2eac34cd7db738295" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9567d50ca2b404e64d818dca845beec747518565" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -93,7 +93,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          EXPECTED_REVISION: 9567d50ca2b404e64d818dca845beec747518565
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -112,7 +112,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-9b4348919d71d751d1af2bc2eac34cd7db738295-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-9567d50ca2b404e64d818dca845beec747518565-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -207,7 +207,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           DEFAULT_BRANCH: main
-          BASE_PIN: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          BASE_PIN: 9567d50ca2b404e64d818dca845beec747518565
         run: |
           set -euo pipefail
           pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
@@ -328,7 +328,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          VELNOR_WORKFLOW_POLICY_REVISION: 9567d50ca2b404e64d818dca845beec747518565
         run: |
           set -euo pipefail
           velnor-workflow policy \
@@ -973,7 +973,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "8ca12b20166c"
+      mbx_compat: "2215190534a5"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1051,6 +1051,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-model,rust-velnor-runner"
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') && (true) }}
@@ -1245,12 +1246,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-9b4348919d71d751d1af2bc2eac34cd7db738295-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-9567d50ca2b404e64d818dca845beec747518565-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          EXPECTED_REVISION: 9567d50ca2b404e64d818dca845beec747518565
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -1264,7 +1265,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 9b4348919d71d751d1af2bc2eac34cd7db738295
+          EXPECTED_REVISION: 9567d50ca2b404e64d818dca845beec747518565
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
