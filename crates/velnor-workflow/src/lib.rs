@@ -803,6 +803,22 @@ rm -rf "$manifests"
             }
 
             fn execute(&self, api: bool, resolver: &str) -> std::process::Output {
+                let tree = self.api_tree();
+                self.execute_with_tree(
+                    api,
+                    resolver,
+                    &tree,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+            }
+
+            fn execute_with_tree(
+                &self,
+                api: bool,
+                resolver: &str,
+                tree: &str,
+                pinned_revision: &str,
+            ) -> std::process::Output {
                 let revision = Self::run_git(&self.repo, &["rev-parse", "HEAD"]);
                 let mut shell = String::from("set -euo pipefail\n");
                 if api {
@@ -818,10 +834,7 @@ rm -rf "$manifests"
                     .env("CHECKOUT_PATH", &self.repo)
                     .env("INSTALL_REV", &revision)
                     .env("PRODUCT_REPOSITORY", "fixture/repo")
-                    .env(
-                        "PINNED_REVISION",
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    )
+                    .env("PINNED_REVISION", pinned_revision)
                     .env(
                         "PATH",
                         format!(
@@ -831,7 +844,7 @@ rm -rf "$manifests"
                         ),
                     );
                 if api {
-                    command.env("TREE_JSON", self.api_tree());
+                    command.env("TREE_JSON", tree);
                 }
                 command.output().expect("run resolver fixture")
             }
@@ -1159,6 +1172,54 @@ path = "../native-helper"
         #[test]
         fn api_resolver_includes_target_model_once_and_fails_closed() {
             assert_resolver_includes_model_and_fails_closed(true);
+        }
+
+        #[test]
+        fn api_resolver_scopes_legacy_symlink_exception_to_closure_path() {
+            let fixture = ResolverFixture::new();
+            let resolver = api_shell_resolver("");
+            let mut tree: serde_json::Value =
+                serde_json::from_str(&fixture.api_tree()).expect("fixture tree is valid JSON");
+            tree["tree"]
+                .as_array_mut()
+                .expect("tree entries")
+                .push(serde_json::json!({
+                    "mode": "120000",
+                    "type": "blob",
+                    "sha": "47dc3e3d863cfb5727b87d785d09abf9743c0a72",
+                    "path": ".github/CLAUDE.md"
+                }));
+            let outside_closure = fixture.execute_with_tree(
+                true,
+                &resolver,
+                &tree.to_string(),
+                "9567d50ca2b404e64d818dca845beec747518565",
+            );
+            assert!(
+                outside_closure.status.success(),
+                "outside-closure symlink is irrelevant: {}",
+                String::from_utf8_lossy(&outside_closure.stderr)
+            );
+
+            tree["tree"]
+                .as_array_mut()
+                .expect("tree entries")
+                .push(serde_json::json!({
+                    "mode": "120000",
+                    "type": "blob",
+                    "sha": "47dc3e3d863cfb5727b87d785d09abf9743c0a72",
+                    "path": "crates/velnor-workflow/CLAUDE.md\tattacker"
+                }));
+            let lookalike_path = fixture.execute_with_tree(
+                true,
+                &resolver,
+                &tree.to_string(),
+                "9567d50ca2b404e64d818dca845beec747518565",
+            );
+            assert!(
+                !lookalike_path.status.success(),
+                "tab-suffixed path must not match the exact legacy path"
+            );
         }
 
         #[test]
