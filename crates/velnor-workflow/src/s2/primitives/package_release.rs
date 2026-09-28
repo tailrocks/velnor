@@ -4824,12 +4824,94 @@ trap 'cleanup_publication "$?"' EXIT
     }
 
     #[cfg(unix)]
-    fn fixture_group_is_gone(process_group: rustix::process::Pid) -> Result<bool, String> {
-        match rustix::process::test_kill_process_group(process_group) {
-            Ok(()) => Ok(false),
-            Err(error) if error == rustix::io::Errno::SRCH => Ok(true),
+    fn fixture_process_state(process: rustix::process::Pid) -> Result<Option<String>, String> {
+        let pid = process.as_raw_pid().to_string();
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid])
+            .output()
+            .map_err(|error| format!("read fixture process {process} state with ps: {error}"))?;
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && !state.is_empty() {
+            return Ok(Some(state));
+        }
+        match rustix::process::test_kill_process(process) {
+            Err(error) if error == rustix::io::Errno::SRCH => Ok(None),
+            Ok(()) => Err(format!(
+                "ps did not report state for signalable fixture process {process} (status {}, stderr {:?})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
             Err(error) => Err(format!(
-                "check fixture process group {process_group}: {error}"
+                "recheck fixture process {process} after ps failure: {error}"
+            )),
+        }
+    }
+
+    #[cfg(unix)]
+    fn fixture_process_state_is_terminal(state: &str) -> bool {
+        if state.starts_with('Z') {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        return state.starts_with('X');
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
+    #[cfg(unix)]
+    fn fixture_group_is_stopped(process_group: rustix::process::Pid) -> Result<bool, String> {
+        match rustix::process::test_kill_process_group(process_group) {
+            Ok(()) => {}
+            Err(error) if error == rustix::io::Errno::SRCH => return Ok(true),
+            Err(error) if error == rustix::io::Errno::PERM => {}
+            Err(error) => {
+                return Err(format!(
+                    "check fixture process group {process_group}: {error}"
+                ));
+            }
+        }
+        let output = std::process::Command::new("ps")
+            .args(["-A", "-o", "pgid=", "-o", "stat="])
+            .output()
+            .map_err(|error| {
+                format!("list fixture process group {process_group} with ps: {error}")
+            })?;
+        if !output.status.success() {
+            return Err(format!(
+                "list fixture process group {process_group} with ps failed (status {}, stderr {:?})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let mut group_member_found = false;
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut columns = line.split_whitespace();
+            let Some(raw_group) = columns.next() else {
+                continue;
+            };
+            let raw_group = raw_group
+                .parse::<i32>()
+                .map_err(|error| format!("parse process group from ps output {line:?}: {error}"))?;
+            let state = columns.next().ok_or_else(|| {
+                format!("missing process state in ps output for group {raw_group}: {line:?}")
+            })?;
+            if raw_group == process_group.as_raw_pid() {
+                group_member_found = true;
+                if !fixture_process_state_is_terminal(state) {
+                    return Ok(false);
+                }
+            }
+        }
+        if group_member_found {
+            return Ok(true);
+        }
+        match rustix::process::test_kill_process_group(process_group) {
+            Err(error) if error == rustix::io::Errno::SRCH => Ok(true),
+            Ok(()) => Err(format!(
+                "ps omitted fixture process group {process_group}, but killpg(0) still finds it"
+            )),
+            Err(error) => Err(format!(
+                "recheck fixture process group {process_group} after ps omitted it: {error}"
             )),
         }
     }
@@ -4852,19 +4934,45 @@ trap 'cleanup_publication "$?"' EXIT
     }
 
     #[cfg(unix)]
+    fn fail_group_cleanup_after_probe_error(
+        child: &mut std::process::Child,
+        process_group: rustix::process::Pid,
+        probe_error: &str,
+    ) -> Result<(), String> {
+        let kill_result =
+            rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+        match reap_fixture_child_bounded(child) {
+            Ok(()) => Err(format!(
+                "cannot verify fixture process group {process_group}: {probe_error}; sent SIGKILL ({kill_result:?}) and reaped direct child, but group cleanup remains unverifiable"
+            )),
+            Err(reap_error) => Err(format!(
+                "cannot verify fixture process group {process_group}: {probe_error}; SIGKILL result: {kill_result:?}; direct-child reap failed: {reap_error}"
+            )),
+        }
+    }
+
+    #[cfg(unix)]
     fn terminate_and_reap_fixture_group(
         child: &mut std::process::Child,
         process_group: rustix::process::Pid,
     ) -> Result<(), String> {
         for signal in [rustix::process::Signal::TERM, rustix::process::Signal::KILL] {
-            if fixture_group_is_gone(process_group).unwrap_or(false) {
-                return reap_fixture_child_bounded(child);
+            match fixture_group_is_stopped(process_group) {
+                Ok(true) => return reap_fixture_child_bounded(child),
+                Ok(false) => {}
+                Err(error) => {
+                    return fail_group_cleanup_after_probe_error(child, process_group, &error)
+                }
             }
             let _ = rustix::process::kill_process_group(process_group, signal);
             for _ in 0..200 {
                 let _ = child.try_wait();
-                if fixture_group_is_gone(process_group).unwrap_or(false) {
-                    return reap_fixture_child_bounded(child);
+                match fixture_group_is_stopped(process_group) {
+                    Ok(true) => return reap_fixture_child_bounded(child),
+                    Ok(false) => {}
+                    Err(error) => {
+                        return fail_group_cleanup_after_probe_error(child, process_group, &error)
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -4970,29 +5078,37 @@ trap 'cleanup_publication "$?"' EXIT
     }
 
     #[cfg(unix)]
-    fn fixture_pid_is_gone(raw_pid: i32) -> Result<bool, String> {
+    fn fixture_process_is_stopped(raw_pid: i32) -> Result<bool, String> {
         let process = validated_fixture_process(raw_pid)?;
         match rustix::process::test_kill_process(process) {
-            Ok(()) => Ok(false),
             Err(error) if error == rustix::io::Errno::SRCH => Ok(true),
+            Err(error) if error == rustix::io::Errno::PERM => match fixture_process_state(process)?
+            {
+                None => Ok(true),
+                Some(state) => Ok(fixture_process_state_is_terminal(&state)),
+            },
             Err(error) => Err(format!("check fixture process {process}: {error}")),
+            Ok(()) => match fixture_process_state(process)? {
+                None => Ok(true),
+                Some(state) => Ok(fixture_process_state_is_terminal(&state)),
+            },
         }
     }
 
     #[cfg(unix)]
-    fn wait_for_fixture_processes_gone(
+    fn wait_for_fixture_processes_stopped(
         process_group: rustix::process::Pid,
         pids: &[i32],
     ) -> Result<(), String> {
         for _ in 0..200 {
-            if fixture_processes_are_gone(process_group, pids)? {
+            if fixture_processes_are_stopped(process_group, pids)? {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
         for _ in 0..200 {
-            if fixture_processes_are_gone(process_group, pids)? {
+            if fixture_processes_are_stopped(process_group, pids)? {
                 return Err(format!(
                     "fixture required SIGKILL after TERM: group={process_group}, pids={pids:?}"
                 ));
@@ -5000,21 +5116,21 @@ trap 'cleanup_publication "$?"' EXIT
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         Err(format!(
-            "fixture processes remain after SIGKILL: group={process_group}, pids={pids:?}"
+            "fixture processes remained live after SIGKILL: group={process_group}, pids={pids:?}"
         ))
     }
 
     #[cfg(unix)]
-    fn fixture_processes_are_gone(
+    fn fixture_processes_are_stopped(
         process_group: rustix::process::Pid,
         pids: &[i32],
     ) -> Result<bool, String> {
         for pid in pids {
-            if !fixture_pid_is_gone(*pid)? {
+            if !fixture_process_is_stopped(*pid)? {
                 return Ok(false);
             }
         }
-        fixture_group_is_gone(process_group)
+        fixture_group_is_stopped(process_group)
     }
 
     #[cfg(unix)]
@@ -5225,9 +5341,9 @@ trap 'cleanup_publication "$?"' EXIT
             "cancellation stops publication for {shell} group={signal_group}"
         );
         assert_eq!(
-            wait_for_fixture_processes_gone(process_group_guard.process_group(), &verifier_pids),
+            wait_for_fixture_processes_stopped(process_group_guard.process_group(), &verifier_pids),
             Ok(()),
-            "process tree did not exit for {shell} group={signal_group}"
+            "process tree did not stop for {shell} group={signal_group}"
         );
         process_group_guard.disarm();
         if signal_group {
@@ -5245,6 +5361,63 @@ trap 'cleanup_publication "$?"' EXIT
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_liveness_treats_zombie_only_process_group_as_stopped() {
+        use std::os::unix::process::CommandExt;
+
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .expect("start isolated process-group fixture");
+        let mut guard = FixtureProcessGroupGuard::new(child).expect("own fixture process group");
+        let pid = rustix::process::Pid::from_child(guard.child()).as_raw_pid();
+        let process_group = guard.process_group();
+
+        assert!(
+            !fixture_group_is_stopped(process_group).expect("inspect live fixture group"),
+            "running fixture process must keep its group live"
+        );
+        guard
+            .child_mut()
+            .kill()
+            .expect("kill fixture child but leave it unreaped");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let state = fixture_process_state(
+                validated_fixture_process(pid).expect("validate fixture PID"),
+            )
+            .expect("inspect killed fixture child")
+            .expect("unreaped child remains visible to ps");
+            if state.starts_with('Z') {
+                assert!(fixture_process_state_is_terminal(&state));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture child never reached a zombie state (last state {state:?})"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            fixture_process_is_stopped(pid).expect("inspect zombie fixture child"),
+            "zombie child is terminated even while its parent has not reaped it"
+        );
+        assert!(
+            fixture_group_is_stopped(process_group).expect("inspect zombie-only group"),
+            "zombie-only process group has no live members"
+        );
+        assert_eq!(
+            terminate_and_reap_fixture_group(guard.child_mut(), process_group),
+            Ok(()),
+            "group cleanup accepts zombies and reaps its direct child"
+        );
+        guard.disarm();
     }
 
     #[cfg(unix)]
@@ -5312,7 +5485,7 @@ while :; do :; done
 
     #[cfg(unix)]
     #[test]
-    fn rolling_production_verifier_group_term_reaps_verifier_process_tree() {
+    fn rolling_production_verifier_group_term_stops_verifier_process_tree() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let script = verification_script(&spec);
         let verification = PublishVerification {
