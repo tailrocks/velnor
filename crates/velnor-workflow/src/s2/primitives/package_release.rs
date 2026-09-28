@@ -4807,27 +4807,103 @@ trap 'cleanup_publication "$?"' EXIT
 
     #[cfg(unix)]
     fn terminate_fixture_group(child: &mut std::process::Child) {
-        let process_group = owned_fixture_group(child).ok();
-        if let Some(process_group) = process_group {
-            let _ =
-                rustix::process::kill_process_group(process_group, rustix::process::Signal::TERM);
+        if let Ok(process_group) = owned_fixture_group(child) {
+            terminate_and_reap_fixture_group(child, process_group);
         } else {
             let _ = child.kill();
+            for _ in 0..200 {
+                if child.try_wait().ok().flatten().is_some() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
         }
-        for _ in 0..200 {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                Err(_) => break,
+    }
+
+    #[cfg(unix)]
+    fn fixture_group_is_gone(process_group: rustix::process::Pid) -> Result<bool, String> {
+        match rustix::process::test_kill_process_group(process_group) {
+            Ok(()) => Ok(false),
+            Err(error) if error == rustix::io::Errno::SRCH => Ok(true),
+            Err(error) => Err(format!(
+                "check fixture process group {process_group}: {error}"
+            )),
+        }
+    }
+
+    #[cfg(unix)]
+    fn terminate_and_reap_fixture_group(
+        child: &mut std::process::Child,
+        process_group: rustix::process::Pid,
+    ) {
+        for signal in [rustix::process::Signal::TERM, rustix::process::Signal::KILL] {
+            if fixture_group_is_gone(process_group).unwrap_or(false) {
+                let _ = child.try_wait();
+                return;
+            }
+            let _ = rustix::process::kill_process_group(process_group, signal);
+            for _ in 0..200 {
+                let _ = child.try_wait();
+                if fixture_group_is_gone(process_group).unwrap_or(false) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        if let Some(process_group) = process_group {
-            let _ =
-                rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
-        } else {
-            let _ = child.kill();
+        let _ = child.try_wait();
+    }
+
+    #[cfg(unix)]
+    struct FixtureProcessGroupGuard {
+        child: std::process::Child,
+        process_group: rustix::process::Pid,
+        armed: bool,
+    }
+
+    #[cfg(unix)]
+    impl FixtureProcessGroupGuard {
+        fn new(mut child: std::process::Child) -> Result<Self, String> {
+            let process_group = match owned_fixture_group(&child) {
+                Ok(process_group) => process_group,
+                Err(error) => {
+                    terminate_fixture_group(&mut child);
+                    return Err(error);
+                }
+            };
+            Ok(Self {
+                child,
+                process_group,
+                armed: true,
+            })
         }
-        let _ = child.wait();
+
+        fn child(&self) -> &std::process::Child {
+            &self.child
+        }
+
+        fn child_mut(&mut self) -> &mut std::process::Child {
+            &mut self.child
+        }
+
+        fn process_group(&self) -> rustix::process::Pid {
+            self.process_group
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FixtureProcessGroupGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            terminate_and_reap_fixture_group(&mut self.child, self.process_group);
+        }
     }
 
     #[cfg(unix)]
@@ -4873,30 +4949,36 @@ trap 'cleanup_publication "$?"' EXIT
         pids: &[i32],
     ) -> Result<(), String> {
         for _ in 0..200 {
-            let mut all_gone = true;
-            for pid in pids {
-                if !fixture_pid_is_gone(*pid)? {
-                    all_gone = false;
-                }
-            }
-            match rustix::process::test_kill_process_group(process_group) {
-                Ok(()) => all_gone = false,
-                Err(error) if error == rustix::io::Errno::SRCH => {}
-                Err(error) => {
-                    return Err(format!(
-                        "check fixture process group {process_group}: {error}"
-                    ));
-                }
-            }
-            if all_gone {
+            if fixture_processes_are_gone(process_group, pids)? {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+        for _ in 0..200 {
+            if fixture_processes_are_gone(process_group, pids)? {
+                return Err(format!(
+                    "fixture required SIGKILL after TERM: group={process_group}, pids={pids:?}"
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         Err(format!(
-            "fixture processes remain after TERM: group={process_group}, pids={pids:?}"
+            "fixture processes remain after SIGKILL: group={process_group}, pids={pids:?}"
         ))
+    }
+
+    #[cfg(unix)]
+    fn fixture_processes_are_gone(
+        process_group: rustix::process::Pid,
+        pids: &[i32],
+    ) -> Result<bool, String> {
+        for pid in pids {
+            if !fixture_pid_is_gone(*pid)? {
+                return Ok(false);
+            }
+        }
+        fixture_group_is_gone(process_group)
     }
 
     #[cfg(unix)]
@@ -5045,7 +5127,7 @@ trap 'cleanup_publication "$?"' EXIT
         production_verifier: bool,
     ) {
         use std::fs;
-        let (root, mut child, verifier_pid, verifier_pids) = spawn_rolling_cancellation_fixture(
+        let (root, child, verifier_pid, verifier_pids) = spawn_rolling_cancellation_fixture(
             shell,
             fragment,
             lock_script,
@@ -5053,26 +5135,27 @@ trap 'cleanup_publication "$?"' EXIT
             signal_group,
             production_verifier,
         );
-        let process_group = owned_fixture_group(&child).expect("owned cancellation group");
+        let mut process_group_guard =
+            FixtureProcessGroupGuard::new(child).expect("owned cancellation group");
         for verifier_pid in &verifier_pids {
-            owned_fixture_process(&child, *verifier_pid)
+            owned_fixture_process(process_group_guard.child(), *verifier_pid)
                 .expect("verifier process tree shares cancellation group");
         }
         let signal_result = signal_fixture(
-            &child,
+            process_group_guard.child(),
             verifier_pid,
             signal_group,
             rustix::process::Signal::TERM,
         );
         if let Err(error) = &signal_result {
-            terminate_fixture_group(&mut child);
             assert!(
                 signal_result.is_ok(),
                 "signal failed for {shell} group={signal_group}: {error}"
             );
             return;
         }
-        let status = wait_for_fixture_exit(&mut child).expect("fixture cancellation exit");
+        let status = wait_for_fixture_exit(process_group_guard.child_mut())
+            .expect("fixture cancellation exit");
         assert!(
             !status.success(),
             "{shell} group={signal_group}: {status:?}"
@@ -5096,9 +5179,9 @@ trap 'cleanup_publication "$?"' EXIT
             !root.join("after").exists(),
             "cancellation stops publication for {shell} group={signal_group}"
         );
-        wait_for_fixture_processes_gone(process_group, &verifier_pids).unwrap_or_else(|error| {
-            panic!("{shell} group={signal_group}: {error}");
-        });
+        wait_for_fixture_processes_gone(process_group_guard.process_group(), &verifier_pids)
+            .unwrap_or_else(|error| panic!("{shell} group={signal_group}: {error}"));
+        process_group_guard.disarm();
         if signal_group {
             assert!(
                 !root.join("rollback-count").exists(),
