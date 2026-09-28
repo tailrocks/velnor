@@ -168,21 +168,43 @@ artifacts, scratch files, and linked-worktree `.git` files never enter the
 recorded scan input. A sidecar written by an older schema is never parsed:
 rerun generate on a byte-matching tree to move it to schema 2.
 
-Generated jobs install the runtime through the versioned composite action
-(mise-action model: declare a revision, get the binary on PATH, cached)
-instead of an inline `cargo install`, so toolchain setup stays centralized:
+## Hosted workflow runtime product
+
+Generated GitHub-hosted jobs acquire a prebuilt runtime through the composite
+action. The action never compiles Velnor or falls back to `cargo install`:
 
 ```yaml
 - name: Set up Velnor workflow runtime
   if: ${{ runner.environment == 'github-hosted' }}
-  uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@<full-SHA>
+  uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@<action-commit-SHA>
   with:
-    rev: <full-SHA>
+    rev: <generator-commit-SHA>
 ```
 
-The action isolates the install from job-level toolchain wrappers (for
-example an `RUSTC_WRAPPER` pointing at an `sccache` that is set up later in
-the job) and caches the cargo install keyed by revision and runner OS.
+Both values are full commit SHAs with separate roles: `uses` selects the
+composite action code; `rev` selects the generator source whose closure
+identifies the runtime product. The action resolves that source closure from
+the checkout when available, or from the GitHub trees API. It downloads the
+platform binary and manifest from the immutable
+`velnor-workflow-runtime-v1-<closure-prefix>` release in `tailrocks/velnor`.
+The tag is only a locator. The action verifies the manifest and binary
+attestations against the mainline runtime-product publisher, checks the
+manifest's closure and platform, recomputes the binary SHA-256, then checks
+the binary's reported closure and revision. Missing products, unverifiable
+attestations, and mismatches fail closed; consumers never build the runtime.
+
+The Actions cache is only an acceleration, keyed by runner OS, architecture,
+and source closure. Every restored product has its manifest, digest, and
+runtime-reported closure and revision checked again. A cache miss downloads
+the published release product; it does not compile it.
+
+For a `pull_request_target` run, GitHub executes the base branch's trusted
+`ci-policy.yml` and its referenced action code. A candidate PR cannot change
+the validator used to judge itself. If an action or closure-protocol change
+needs a newer resolver, the trusted base workflow must first advance through
+the repository maintainers' approved bootstrap; consumer pin adoption must
+wait until that base update and the immutable product for the target closure
+are available.
 
 ## Scheduled-check token capabilities
 
