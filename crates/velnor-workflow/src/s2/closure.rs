@@ -64,6 +64,9 @@ pub(crate) const CLOSURE_VERSION: u8 = 1;
 
 /// Cargo profile of Stage-0 release products.
 pub(crate) const PROFILE_RELEASE: &str = "release";
+const LEGACY_DOCS_SYMLINK_REVISION: &str = "9567d50ca2b404e64d818dca845beec747518565";
+const LEGACY_DOCS_SYMLINK_BLOB: &str = "47dc3e3d863cfb5727b87d785d09abf9743c0a72";
+const LEGACY_DOCS_SYMLINK_PATH: &str = "crates/velnor-workflow/CLAUDE.md";
 /// Cargo profile of candidate products (verified against the unit job's test
 /// build before any reuse).
 pub(crate) const PROFILE_DEBUG: &str = "debug";
@@ -180,7 +183,10 @@ pub(crate) fn closure_of_tree(
         .lines()
         .map(str::to_owned)
         .collect();
-    if lines.iter().any(|line| is_unsafe_closure_symlink(line)) {
+    if lines
+        .iter()
+        .any(|line| is_unsafe_closure_symlink(line, rev))
+    {
         return Err(GeneratorError::usage(format!(
             "revision {rev} contains a Cargo/runtime symlink in the source closure"
         )));
@@ -194,14 +200,16 @@ pub(crate) fn closure_of_tree(
     Ok(canonical_digest(&lines, features, profile))
 }
 
-fn is_unsafe_closure_symlink(line: &str) -> bool {
+fn is_unsafe_closure_symlink(line: &str, revision: &str) -> bool {
     if !line.starts_with("120000 ") {
         return false;
     }
-    match line.split_once('\t') {
-        Some((_, path)) => path != "crates/velnor-workflow/CLAUDE.md",
-        None => true,
-    }
+    let Some((header, path)) = line.split_once('\t') else {
+        return true;
+    };
+    !(revision == LEGACY_DOCS_SYMLINK_REVISION
+        && header == format!("120000 blob {LEGACY_DOCS_SYMLINK_BLOB}")
+        && path == LEGACY_DOCS_SYMLINK_PATH)
 }
 
 fn reject_transitive_path_dependencies(
@@ -410,21 +418,33 @@ mod tests {
 
     #[test]
     fn closure_allows_only_the_legacy_docs_symlink() {
+        let allowed = format!("120000 blob {LEGACY_DOCS_SYMLINK_BLOB}\t{LEGACY_DOCS_SYMLINK_PATH}");
         assert!(!is_unsafe_closure_symlink(
-            "120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/velnor-workflow/CLAUDE.md"
+            &allowed,
+            LEGACY_DOCS_SYMLINK_REVISION
         ));
         assert!(is_unsafe_closure_symlink(
-            "120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/OTHER.md"
+            &allowed,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ));
         assert!(is_unsafe_closure_symlink(
-            "120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/CLAUDE.md/child"
+            "120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/OTHER.md",
+            LEGACY_DOCS_SYMLINK_REVISION
+        ));
+        assert!(is_unsafe_closure_symlink(
+            "120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/CLAUDE.md/child",
+            LEGACY_DOCS_SYMLINK_REVISION
+        ));
+        assert!(is_unsafe_closure_symlink(
+            "120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/CLAUDE.md\tother",
+            LEGACY_DOCS_SYMLINK_REVISION
         ));
     }
 
     #[cfg(unix)]
     #[expect(clippy::expect_used, reason = "symlink fixture failures need context")]
     #[test]
-    fn closure_allows_the_legacy_docs_symlink_in_the_source_tree() {
+    fn closure_rejects_docs_symlinks_outside_the_legacy_pinned_revision() {
         let root = std::env::temp_dir().join(format!(
             "velnor-s2-closure-base-symlink-{}",
             crate::unique_suffix()
@@ -453,31 +473,8 @@ mod tests {
             ],
         );
         let rev = git_output(&root, &["rev-parse", "HEAD"]);
-        must(
-            closure_of_tree(&root, &rev, "", PROFILE_RELEASE),
-            "known legacy CLAUDE link is allowed",
-        );
-
-        std::fs::remove_file(root.join("Cargo.lock")).expect("remove lockfile");
-        std::os::unix::fs::symlink("UNRELATED.md", root.join("Cargo.lock"))
-            .expect("unsafe base lockfile symlink");
-        git_in(&root, &["add", "-A"]);
-        git_in(
-            &root,
-            &[
-                "-c",
-                "user.email=closure@test",
-                "-c",
-                "user.name=closure",
-                "commit",
-                "--quiet",
-                "--message",
-                "unsafe base symlink",
-            ],
-        );
-        let rev = git_output(&root, &["rev-parse", "HEAD"]);
         let error = closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
-            .expect_err("base runtime symlink must fail closed");
+            .expect_err("docs symlink outside legacy pin must fail closed");
         assert!(error.to_string().contains("symlink"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
     }
