@@ -4831,12 +4831,13 @@ trap 'cleanup_publication "$?"' EXIT
     }
 
     #[cfg(unix)]
-    fn wait_for_fixture_pid(
+    fn wait_for_fixture_file_pid(
         root: &std::path::Path,
         child: &mut std::process::Child,
+        file_name: &str,
     ) -> Result<i32, String> {
         for _ in 0..200 {
-            if let Some(pid) = std::fs::read_to_string(root.join("verifier-pid"))
+            if let Some(pid) = std::fs::read_to_string(root.join(file_name))
                 .ok()
                 .and_then(|pid| pid.trim().parse::<i32>().ok())
             {
@@ -4846,6 +4847,56 @@ trap 'cleanup_publication "$?"' EXIT
         }
         terminate_fixture_group(child);
         Err(format!("verifier did not start: {}", child.id()))
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fixture_pid(
+        root: &std::path::Path,
+        child: &mut std::process::Child,
+    ) -> Result<i32, String> {
+        wait_for_fixture_file_pid(root, child, "verifier-pid")
+    }
+
+    #[cfg(unix)]
+    fn fixture_pid_is_gone(raw_pid: i32) -> Result<bool, String> {
+        let process = validated_fixture_process(raw_pid)?;
+        match rustix::process::test_kill_process(process) {
+            Ok(()) => Ok(false),
+            Err(error) if error == rustix::io::Errno::SRCH => Ok(true),
+            Err(error) => Err(format!("check fixture process {process}: {error}")),
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fixture_processes_gone(
+        process_group: rustix::process::Pid,
+        pids: &[i32],
+    ) -> Result<(), String> {
+        for _ in 0..200 {
+            let mut all_gone = true;
+            for pid in pids {
+                if !fixture_pid_is_gone(*pid)? {
+                    all_gone = false;
+                }
+            }
+            match rustix::process::test_kill_process_group(process_group) {
+                Ok(()) => all_gone = false,
+                Err(error) if error == rustix::io::Errno::SRCH => {}
+                Err(error) => {
+                    return Err(format!(
+                        "check fixture process group {process_group}: {error}"
+                    ));
+                }
+            }
+            if all_gone {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+        Err(format!(
+            "fixture processes remain after TERM: group={process_group}, pids={pids:?}"
+        ))
     }
 
     #[cfg(unix)]
@@ -4873,9 +4924,10 @@ trap 'cleanup_publication "$?"' EXIT
         lock_script: &str,
         cleanup: &str,
         signal_group: bool,
-    ) -> (std::path::PathBuf, std::process::Child, i32) {
+        production_verifier: bool,
+    ) -> (std::path::PathBuf, std::process::Child, i32, Vec<i32>) {
         use std::fs;
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{symlink, PermissionsExt};
         use std::os::unix::process::CommandExt;
         use std::process::Command;
 
@@ -4887,6 +4939,31 @@ trap 'cleanup_publication "$?"' EXIT
         let bin = root.join("bin");
         fs::create_dir_all(&bin).expect("create cancellation fixture");
         symlink(shell, bin.join("bash")).expect("link tested bash into PATH");
+        let find = bin.join("find");
+        fs::write(
+            &find,
+            r#"#!/bin/bash
+printf '%s\n' "$PPID" > "$TEST_TMPDIR/verifier-pid"
+printf '%s\n' "$$" > "$TEST_TMPDIR/verifier-find-pid"
+if [ "$TEST_SPAWN_VERIFIER_CHILD" = 1 ]; then
+  sleep 60 &
+  printf '%s\n' "$!" > "$TEST_TMPDIR/verifier-child-pid"
+  wait "$!"
+fi
+"#,
+        )
+        .expect("write find cancellation shim");
+        let mut find_permissions = fs::metadata(&find)
+            .expect("read find cancellation shim metadata")
+            .permissions();
+        find_permissions.set_mode(0o755);
+        fs::set_permissions(&find, find_permissions).expect("make find shim executable");
+        let verified_package = root.join("verified-package");
+        fs::create_dir_all(&verified_package).expect("create verified package directory");
+        fs::write(verified_package.join("release-manifest.json"), b"fixture\n")
+            .expect("seed package manifest");
+        fs::write(verified_package.join("identity.json"), b"fixture\n")
+            .expect("seed package identity");
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = vec![bin];
         paths.extend(std::env::split_paths(&path));
@@ -4930,12 +5007,32 @@ trap 'cleanup_publication "$?"' EXIT
                 "VELNOR_PUBLICATION_LOCK_SHA",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
+            .env("VELNOR_VERIFIED_PACKAGE_DIR", &verified_package)
+            .env(
+                "TEST_SPAWN_VERIFIER_CHILD",
+                if signal_group { "1" } else { "0" },
+            )
             .env("PATH", &path)
             .process_group(0)
             .spawn()
             .expect("start cancellation fixture");
         let verifier_pid = wait_for_fixture_pid(&root, &mut child).expect("verifier startup");
-        (root, child, verifier_pid)
+        let mut verifier_pids = vec![verifier_pid];
+        if signal_group && production_verifier {
+            let verifier_find_pid =
+                wait_for_fixture_file_pid(&root, &mut child, "verifier-find-pid")
+                    .expect("verifier find child startup");
+            let verifier_child_pid =
+                wait_for_fixture_file_pid(&root, &mut child, "verifier-child-pid")
+                    .expect("verifier descendant startup");
+            verifier_pids.extend([verifier_find_pid, verifier_child_pid]);
+        } else if signal_group {
+            verifier_pids.push(
+                wait_for_fixture_file_pid(&root, &mut child, "verifier-child-pid")
+                    .expect("verifier child startup"),
+            );
+        }
+        (root, child, verifier_pid, verifier_pids)
     }
 
     #[cfg(unix)]
@@ -4945,10 +5042,22 @@ trap 'cleanup_publication "$?"' EXIT
         lock_script: &str,
         cleanup: &str,
         signal_group: bool,
+        production_verifier: bool,
     ) {
         use std::fs;
-        let (root, mut child, verifier_pid) =
-            spawn_rolling_cancellation_fixture(shell, fragment, lock_script, cleanup, signal_group);
+        let (root, mut child, verifier_pid, verifier_pids) = spawn_rolling_cancellation_fixture(
+            shell,
+            fragment,
+            lock_script,
+            cleanup,
+            signal_group,
+            production_verifier,
+        );
+        let process_group = owned_fixture_group(&child).expect("owned cancellation group");
+        for verifier_pid in &verifier_pids {
+            owned_fixture_process(&child, *verifier_pid)
+                .expect("verifier process tree shares cancellation group");
+        }
         let signal_result = signal_fixture(
             &child,
             verifier_pid,
@@ -4987,6 +5096,9 @@ trap 'cleanup_publication "$?"' EXIT
             !root.join("after").exists(),
             "cancellation stops publication for {shell} group={signal_group}"
         );
+        wait_for_fixture_processes_gone(process_group, &verifier_pids).unwrap_or_else(|error| {
+            panic!("{shell} group={signal_group}: {error}");
+        });
         if signal_group {
             assert!(
                 !root.join("rollback-count").exists(),
@@ -4999,10 +5111,6 @@ trap 'cleanup_publication "$?"' EXIT
                     .as_deref(),
                 Some("1\n"),
                 "child cancellation rolls back exactly once for {shell}"
-            );
-            assert!(
-                root.join("verifier-term").exists(),
-                "child receives TERM for {shell}"
             );
         }
         let _ = fs::remove_dir_all(root);
@@ -5041,8 +5149,11 @@ trap 'cleanup_publication "$?"' EXIT
             }
             let verification = PublishVerification {
                 script: r#"set -euo pipefail
-trap ': > "$TEST_TMPDIR/verifier-term"; exit 143' TERM
 printf '%s\n' "$$" > "$TEST_TMPDIR/verifier-pid"
+if [ "$TEST_SPAWN_VERIFIER_CHILD" = 1 ]; then
+  sleep 60 &
+  printf '%s\n' "$!" > "$TEST_TMPDIR/verifier-child-pid"
+fi
 while :; do :; done
 "#,
                 attestation_flags: "",
@@ -5063,8 +5174,41 @@ while :; do :; done
                 .find("\ntrap 'rollback")
                 .expect("publication cleanup end");
             let cleanup = &rolling[cleanup_start + 1..cleanup_end];
-            run_rolling_cancellation_case(shell, fragment, &lock_script, cleanup, false);
-            run_rolling_cancellation_case(shell, fragment, &lock_script, cleanup, true);
+            run_rolling_cancellation_case(shell, fragment, &lock_script, cleanup, false, false);
+            run_rolling_cancellation_case(shell, fragment, &lock_script, cleanup, true, false);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_production_verifier_group_term_reaps_verifier_process_tree() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let script = verification_script(&spec);
+        let verification = PublishVerification {
+            script: &script,
+            attestation_flags: "",
+        };
+        let rolling = render_rolling_refresh_script("", "", "", &verification);
+        let start = rolling
+            .find("\nif bash -euo pipefail -c ")
+            .expect("production verification child");
+        let end = rolling
+            .find("\n\nfor payload")
+            .expect("production verification child end");
+        let fragment = &rolling[start..end];
+        let lock_script = render_publication_lock_script(true);
+        let cleanup_start = rolling
+            .find("\ncleanup_publication() {")
+            .expect("publication cleanup");
+        let cleanup_end = rolling
+            .find("\ntrap 'rollback")
+            .expect("publication cleanup end");
+        let cleanup = &rolling[cleanup_start + 1..cleanup_end];
+
+        for shell in ["/bin/bash", "/opt/homebrew/bin/bash"] {
+            if std::path::Path::new(shell).is_file() {
+                run_rolling_cancellation_case(shell, fragment, &lock_script, cleanup, true, true);
+            }
         }
     }
 
