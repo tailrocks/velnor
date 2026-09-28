@@ -224,7 +224,7 @@ for dependencies in sections:
             return String::new();
         }
         let mut script = String::from(
-            "[[ \"$(awk -F '\\t' '$1 ~ /^120000 / { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \\\"::error::source closure contains a Cargo/runtime symlink\\\" >&2; exit 1; }\n",
+            "[[ \"$(awk -F '\\t' '$1 ~ /^120000 / && $2 != \"crates/velnor-workflow/CLAUDE.md\" { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \\\"::error::source closure contains a Cargo/runtime symlink\\\" >&2; exit 1; }\n",
         );
         script.push_str("closure_guard_revision=\"${");
         script.push_str(revision);
@@ -270,7 +270,7 @@ for dependencies in sections:
         script.push_str("\nPY\n)\"\nelse\necho \"::error::workflow manifest unavailable at ${revision}\" >&2\nexit 1\nfi\ncheck_transitive_manifest() { python3 - \"$1\" \"$manifests/workspace.toml\" \"$2\" \"$3\" <<'PY'\n");
         script.push_str(PYTHON_TRANSITIVE_PATH_GUARD);
         script.push_str(
-            "\nPY\n}\n[[ \"$(awk -F '\\t' '$1 ~ /^120000 / { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \"::error::source closure contains a Cargo/runtime symlink\" >&2; exit 1; }\nwhile IFS= read -r dependency_path; do\n  [[ \"$dependency_path\" != '' ]] || continue\n  dependency_tree=\"$(git -C \"${checkout}\" ls-tree -r \"${revision}\" -- \":(literal)$dependency_path\")\"\n  test \"$dependency_tree\" != '' || { echo \"::error::local Cargo dependency has no tracked source tree: $dependency_path\" >&2; exit 1; }\n  [[ \"$(awk '$1 == 120000 { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \"::error::local Cargo dependency contains a symlink: $dependency_path\" >&2; exit 1; }\n  while IFS= read -r manifest_path; do\n    [[ \"$manifest_path\" == */Cargo.toml || \"$manifest_path\" == Cargo.toml ]] || continue\n    git -C \"${checkout}\" show \"${revision}:$manifest_path\" > \"$manifests/dependency.toml\"\n    check_transitive_manifest \"$manifests/dependency.toml\" \"$dependency_path\" \"$manifest_path\"\n  done < <(git -C \"${checkout}\" ls-tree -r --name-only \"${revision}\" -- \":(literal)$dependency_path\")\n  listing+=$'\\n'\"$dependency_tree\"\ndone < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep=\"\\n\")' <<<\"$dependency_paths\")\nrm -rf \"$manifests\"\n",
+            "\nPY\n}\n[[ \"$(awk -F '\\t' '$1 ~ /^120000 / && $2 != \"crates/velnor-workflow/CLAUDE.md\" { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \"::error::source closure contains a Cargo/runtime symlink\" >&2; exit 1; }\nwhile IFS= read -r dependency_path; do\n  [[ \"$dependency_path\" != '' ]] || continue\n  dependency_tree=\"$(git -C \"${checkout}\" ls-tree -r \"${revision}\" -- \":(literal)$dependency_path\")\"\n  test \"$dependency_tree\" != '' || { echo \"::error::local Cargo dependency has no tracked source tree: $dependency_path\" >&2; exit 1; }\n  [[ \"$(awk '$1 == 120000 { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \"::error::local Cargo dependency contains a symlink: $dependency_path\" >&2; exit 1; }\n  while IFS= read -r manifest_path; do\n    [[ \"$manifest_path\" == */Cargo.toml || \"$manifest_path\" == Cargo.toml ]] || continue\n    git -C \"${checkout}\" show \"${revision}:$manifest_path\" > \"$manifests/dependency.toml\"\n    check_transitive_manifest \"$manifests/dependency.toml\" \"$dependency_path\" \"$manifest_path\"\n  done < <(git -C \"${checkout}\" ls-tree -r --name-only \"${revision}\" -- \":(literal)$dependency_path\")\n  listing+=$'\\n'\"$dependency_tree\"\ndone < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep=\"\\n\")' <<<\"$dependency_paths\")\nrm -rf \"$manifests\"\n",
         );
         let script = script
             .replace("${checkout}", &format!("${{{checkout}}}"))
@@ -343,7 +343,7 @@ for dependencies in sections:
         if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
 PY
 }
-[[ "$(awk -F '\t' '$1 ~ /^120000 / { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
+[[ "$(awk -F '\t' '$1 ~ /^120000 / && $2 != "crates/velnor-workflow/CLAUDE.md" { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
 while IFS= read -r dependency_path; do
   [[ "$dependency_path" != '' ]] || continue
   dependency_tree="$(jq -r --arg path "$dependency_path" '[.tree[] | select(.type != "tree") | select(.path == $path or (.path | startswith($path + "/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
@@ -1079,6 +1079,19 @@ path = "../native-helper"
             assert!(rendered.contains("import tomllib"));
             assert!(rendered.contains("listing+=$'\\n'\"$dependency_tree\""));
             assert!(rendered.contains("local Cargo dependency contains a symlink"));
+            let legacy_docs_symlink_guard = "awk -F '\\t' '$1 ~ /^120000 / && $2 != \"crates/velnor-workflow/CLAUDE.md\" { found=1 } END { print found+0 }'";
+            assert_eq!(
+                rendered.matches(legacy_docs_symlink_guard).count(),
+                2,
+                "local and API closure checks must allow only the legacy docs symlink"
+            );
+            let mut product_closure = BASE_CLOSURE_PATHS
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect::<Vec<_>>();
+            product_closure.push("crates/velnor-helper".to_owned());
+            assert!(producer_closure_validation(&product_closure, "head")
+                .contains(legacy_docs_symlink_guard));
             assert!(rendered.contains("unproven nested workspace inheritance"));
             assert!(rendered.contains("'dev-dependencies'"));
             assert!(rendered.contains("manifest_path != dependency_root + '/Cargo.toml'"));

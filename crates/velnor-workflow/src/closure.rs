@@ -195,7 +195,13 @@ pub(crate) fn closure_of_tree(
 }
 
 fn is_unsafe_closure_symlink(line: &str) -> bool {
-    line.starts_with("120000 ")
+    if !line.starts_with("120000 ") {
+        return false;
+    }
+    match line.split_once('\t') {
+        Some((_, path)) => path != "crates/velnor-workflow/CLAUDE.md",
+        None => true,
+    }
 }
 
 fn reject_transitive_path_dependencies(
@@ -377,6 +383,82 @@ mod tests {
         let mut changed = fixture_lines();
         changed[0] = changed[0].replace('a', "d");
         assert_ne!(base, canonical_digest(&changed, "", PROFILE_RELEASE));
+    }
+
+    #[test]
+    fn closure_allows_only_the_legacy_docs_symlink() {
+        assert!(!is_unsafe_closure_symlink(
+            "120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/velnor-workflow/CLAUDE.md"
+        ));
+        assert!(is_unsafe_closure_symlink(
+            "120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/OTHER.md"
+        ));
+        assert!(is_unsafe_closure_symlink(
+            "120000 blob cccccccccccccccccccccccccccccccccccccccc\tcrates/velnor-workflow/CLAUDE.md/child"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[expect(clippy::expect_used, reason = "symlink fixture failures need context")]
+    #[test]
+    fn closure_allows_the_legacy_docs_symlink_in_the_source_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-closure-base-symlink-{}",
+            crate::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_closure_fixture(&root);
+        std::os::unix::fs::symlink(
+            "../../AGENTS.md",
+            root.join("crates/velnor-workflow/CLAUDE.md"),
+        )
+        .expect("known Claude compatibility link");
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "known base symlink",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        must(
+            closure_of_tree(&root, &rev, "", PROFILE_RELEASE),
+            "known Claude symlink remains hash-compatible",
+        );
+
+        std::os::unix::fs::symlink(
+            "../../../../UNRELATED.md",
+            root.join("crates/velnor-workflow/src/linked.rs"),
+        )
+        .expect("unsafe source symlink");
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "unsafe base symlink",
+            ],
+        );
+        let rev = git_output(&root, &["rev-parse", "HEAD"]);
+        assert!(closure_of_tree(&root, &rev, "", PROFILE_RELEASE)
+            .expect_err("source closure rejects unsafe base symlink")
+            .to_string()
+            .contains("symlink"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

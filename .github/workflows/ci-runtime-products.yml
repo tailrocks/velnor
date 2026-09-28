@@ -64,7 +64,7 @@ jobs:
           head="$(git rev-parse HEAD)"
           [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::HEAD is not a commit SHA: $head" >&2; exit 1; }
           listing="$(git ls-tree -r HEAD -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo ':(literal)crates/velnor-model')"
-          [[ "$(awk -F '\t' '$1 ~ /^120000 / { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo \"::error::source closure contains a Cargo/runtime symlink\" >&2; exit 1; }
+          [[ "$(awk -F '\t' '$1 ~ /^120000 / && $2 != "crates/velnor-workflow/CLAUDE.md" { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]] || { echo \"::error::source closure contains a Cargo/runtime symlink\" >&2; exit 1; }
           closure_guard_revision="${head}"
           closure_guard_dir="$(mktemp -d)"
           trap 'rm -rf "$closure_guard_dir"' EXIT
