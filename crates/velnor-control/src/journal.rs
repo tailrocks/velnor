@@ -24,18 +24,50 @@ use crate::store::error::{StoreError, StoreResult};
 pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 
 /// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
-/// must not apply events (N-1 must not clobber an N writer's log).
+/// must not apply events (N-1 must not clobber an N writer's log). Version 9
+/// fences pre-baseline schema-8 writers that would otherwise delete the
+/// replay anchor from `meta` during their next state persist.
 ///
 /// Every terminal-affecting event rides a bump here. `Journal::open` stamps
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 8;
+///
+/// This migration is forward-only. To recover with a v8 binary, stop every
+/// journal writer and restore a consistent pre-v9 SQLite backup as one set:
+/// the main database plus its `-wal` and `-shm` sidecars when present. Never
+/// lower `user_version`, drop the replay-baseline keys, or delete the fence on
+/// a live v9 database; those actions destroy the migration boundary.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 9;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
 const SETUP_BACKOFF_STEP: Duration = Duration::from_millis(40);
 const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
+const REPLAY_BASELINE_KEY: &str = "replay_baseline_v1";
+const REPLAY_BASELINE_CHECKSUM_KEY: &str = "replay_baseline_sha256_v1";
+const JOURNAL_WRITE_GATE_TABLE: &str = "journal_write_gate";
+const JOURNAL_WRITE_FENCE_REASON: &str = "journal.write.fenced";
+const LEGACY_REPLAY_BASELINE_DELETE_FENCE_TRIGGER: &str = "replay_baseline_delete_fence";
+const LEGACY_REPLAY_BASELINE_RENAME_FENCE_TRIGGER: &str = "replay_baseline_rename_fence";
+
+const JOURNAL_WRITE_FENCE_TRIGGERS: [(&str, &str, &str); 15] = [
+    ("journal_write_fence_events_insert", "events", "INSERT"),
+    ("journal_write_fence_events_update", "events", "UPDATE"),
+    ("journal_write_fence_events_delete", "events", "DELETE"),
+    ("journal_write_fence_slots_insert", "slots", "INSERT"),
+    ("journal_write_fence_slots_update", "slots", "UPDATE"),
+    ("journal_write_fence_slots_delete", "slots", "DELETE"),
+    ("journal_write_fence_jobs_insert", "jobs", "INSERT"),
+    ("journal_write_fence_jobs_update", "jobs", "UPDATE"),
+    ("journal_write_fence_jobs_delete", "jobs", "DELETE"),
+    ("journal_write_fence_outbox_insert", "outbox", "INSERT"),
+    ("journal_write_fence_outbox_update", "outbox", "UPDATE"),
+    ("journal_write_fence_outbox_delete", "outbox", "DELETE"),
+    ("journal_write_fence_meta_insert", "meta", "INSERT"),
+    ("journal_write_fence_meta_update", "meta", "UPDATE"),
+    ("journal_write_fence_meta_delete", "meta", "DELETE"),
+];
 
 /// Durable send attempts a completion may burn before it is unresolvable.
 /// Each attempt is one full transport retry loop, not one HTTP request.
@@ -118,6 +150,9 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS journal_write_gate (
+    id INTEGER PRIMARY KEY CHECK (id = 1)
 );
 ";
 
@@ -492,6 +527,269 @@ impl OutboxRecord {
         self.permanent
             || self.attempts >= MAX_COMPLETION_ATTEMPTS
             || (self.deadline_unix > 0 && now >= self.deadline_unix)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReplayBaselineSource {
+    Empty,
+    LegacyMaterialized,
+}
+
+/// Versioned, closed baseline envelope. Keep this shape strict: a baseline is
+/// replay input, so silently accepting a missing or future semantic field
+/// would produce a state that only looks valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaseline {
+    format_version: u32,
+    source: ReplayBaselineSource,
+    state: ReplayBaselineState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineState {
+    control_live: bool,
+    journal_writable: bool,
+    github_reachable: bool,
+    routing_valid: bool,
+    runner_group_valid: bool,
+    desired_ready: u32,
+    canary: CanaryStatus,
+    package_generation: u64,
+    package_apt_version: String,
+    execution_backend: ExecutionBackendKind,
+    capacity_declared: bool,
+    capacity_invalid: bool,
+    slots: Vec<ReplayBaselineSlot>,
+    jobs: Vec<ReplayBaselineJob>,
+    outbox: Vec<ReplayBaselineOutbox>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineSlot {
+    slot_id: SlotId,
+    generation: Generation,
+    phase: SlotPhase2,
+    permit_held: bool,
+    routing_valid: bool,
+    session_live: bool,
+    executor_proven: bool,
+    registered: bool,
+    pid: Option<u32>,
+    heartbeat_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineJob {
+    job_id: JobId,
+    slot_id: SlotId,
+    generation: Generation,
+    attempt: u32,
+    worker: String,
+    phase: JobPhase2,
+    accepted_unix: u64,
+    terminal_conclusion: Option<String>,
+    provisional: bool,
+    plan_id: String,
+    run_service_url: String,
+    probe_attempts: u32,
+    probe_deadline_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineOutbox {
+    job_id: JobId,
+    slot_id: SlotId,
+    generation: Generation,
+    payload_sha256: String,
+    intended: bool,
+    send_started: bool,
+    remote_acked: bool,
+    created_unix: u64,
+    attempts: u32,
+    deadline_unix: u64,
+    permanent: bool,
+    abandoned: bool,
+}
+
+impl ReplayBaselineState {
+    fn from_fleet(state: &FleetState) -> Self {
+        Self {
+            control_live: state.control_live,
+            journal_writable: state.journal_writable,
+            github_reachable: state.github_reachable,
+            routing_valid: state.routing_valid,
+            runner_group_valid: state.runner_group_valid,
+            desired_ready: state.desired_ready,
+            canary: state.canary,
+            package_generation: state.package_generation,
+            package_apt_version: state.package_apt_version.clone(),
+            execution_backend: state.execution_backend,
+            capacity_declared: state.capacity_declared,
+            capacity_invalid: state.capacity_invalid,
+            slots: state
+                .slots
+                .iter()
+                .cloned()
+                .map(ReplayBaselineSlot::from)
+                .collect(),
+            jobs: state
+                .jobs
+                .iter()
+                .cloned()
+                .map(ReplayBaselineJob::from)
+                .collect(),
+            outbox: state
+                .outbox
+                .iter()
+                .cloned()
+                .map(ReplayBaselineOutbox::from)
+                .collect(),
+        }
+    }
+
+    fn into_fleet(self) -> FleetState {
+        FleetState {
+            control_live: self.control_live,
+            journal_writable: self.journal_writable,
+            github_reachable: self.github_reachable,
+            routing_valid: self.routing_valid,
+            runner_group_valid: self.runner_group_valid,
+            // Drain and admission are lifecycle meta overlays, not replay
+            // events. They are read from the current materialized snapshot.
+            drain_active: false,
+            drain_version: 0,
+            admission_blocked: false,
+            admission_version: 0,
+            desired_ready: self.desired_ready,
+            canary: self.canary,
+            package_generation: self.package_generation,
+            package_apt_version: self.package_apt_version,
+            execution_backend: self.execution_backend,
+            capacity_declared: self.capacity_declared,
+            capacity_invalid: self.capacity_invalid,
+            slots: self.slots.into_iter().map(Into::into).collect(),
+            jobs: self.jobs.into_iter().map(Into::into).collect(),
+            outbox: self.outbox.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<SlotRecord> for ReplayBaselineSlot {
+    fn from(slot: SlotRecord) -> Self {
+        Self {
+            slot_id: slot.slot_id,
+            generation: slot.generation,
+            phase: slot.phase,
+            permit_held: slot.permit_held,
+            routing_valid: slot.routing_valid,
+            session_live: slot.session_live,
+            executor_proven: slot.executor_proven,
+            registered: slot.registered,
+            pid: slot.pid,
+            heartbeat_unix: slot.heartbeat_unix,
+        }
+    }
+}
+
+impl From<ReplayBaselineSlot> for SlotRecord {
+    fn from(slot: ReplayBaselineSlot) -> Self {
+        Self {
+            slot_id: slot.slot_id,
+            generation: slot.generation,
+            phase: slot.phase,
+            permit_held: slot.permit_held,
+            routing_valid: slot.routing_valid,
+            session_live: slot.session_live,
+            executor_proven: slot.executor_proven,
+            registered: slot.registered,
+            pid: slot.pid,
+            heartbeat_unix: slot.heartbeat_unix,
+        }
+    }
+}
+
+impl From<JobRecord> for ReplayBaselineJob {
+    fn from(job: JobRecord) -> Self {
+        Self {
+            job_id: job.job_id,
+            slot_id: job.slot_id,
+            generation: job.generation,
+            attempt: job.attempt,
+            worker: job.worker,
+            phase: job.phase,
+            accepted_unix: job.accepted_unix,
+            terminal_conclusion: job.terminal_conclusion,
+            provisional: job.provisional,
+            plan_id: job.plan_id,
+            run_service_url: job.run_service_url,
+            probe_attempts: job.probe_attempts,
+            probe_deadline_unix: job.probe_deadline_unix,
+        }
+    }
+}
+
+impl From<ReplayBaselineJob> for JobRecord {
+    fn from(job: ReplayBaselineJob) -> Self {
+        Self {
+            job_id: job.job_id,
+            slot_id: job.slot_id,
+            generation: job.generation,
+            attempt: job.attempt,
+            worker: job.worker,
+            phase: job.phase,
+            accepted_unix: job.accepted_unix,
+            terminal_conclusion: job.terminal_conclusion,
+            provisional: job.provisional,
+            plan_id: job.plan_id,
+            run_service_url: job.run_service_url,
+            probe_attempts: job.probe_attempts,
+            probe_deadline_unix: job.probe_deadline_unix,
+        }
+    }
+}
+
+impl From<OutboxRecord> for ReplayBaselineOutbox {
+    fn from(row: OutboxRecord) -> Self {
+        Self {
+            job_id: row.job_id,
+            slot_id: row.slot_id,
+            generation: row.generation,
+            payload_sha256: row.payload_sha256,
+            intended: row.intended,
+            send_started: row.send_started,
+            remote_acked: row.remote_acked,
+            created_unix: row.created_unix,
+            attempts: row.attempts,
+            deadline_unix: row.deadline_unix,
+            permanent: row.permanent,
+            abandoned: row.abandoned,
+        }
+    }
+}
+
+impl From<ReplayBaselineOutbox> for OutboxRecord {
+    fn from(row: ReplayBaselineOutbox) -> Self {
+        Self {
+            job_id: row.job_id,
+            slot_id: row.slot_id,
+            generation: row.generation,
+            payload_sha256: row.payload_sha256,
+            intended: row.intended,
+            send_started: row.send_started,
+            remote_acked: row.remote_acked,
+            created_unix: row.created_unix,
+            attempts: row.attempts,
+            deadline_unix: row.deadline_unix,
+            permanent: row.permanent,
+            abandoned: row.abandoned,
+        }
     }
 }
 
@@ -1491,6 +1789,7 @@ impl Journal {
     /// SQLite reads or invalid materialized values.
     pub fn materialized_state(&self) -> StoreResult<FleetState> {
         let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_integrity_before_read(&transaction)?;
         let state = load_materialized_state(&transaction)?;
         transaction.commit()?;
         Ok(state)
@@ -1554,6 +1853,8 @@ impl Journal {
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        begin_journal_write_gate(&transaction)?;
         let mut state = load_materialized_state(&transaction)?;
         if state.capacity_invalid {
             return Err(StoreError::new(
@@ -1584,6 +1885,8 @@ impl Journal {
             outcomes.push(outcome);
         }
         if pending.is_empty() {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
             return Ok(outcomes);
         }
 
@@ -1596,6 +1899,7 @@ impl Journal {
             )?;
         }
         persist_state(&tx, &state)?;
+        end_journal_write_gate(&tx)?;
         tx.commit()?;
         Ok(outcomes)
     }
@@ -1605,7 +1909,7 @@ impl Journal {
     /// # Errors
     /// SQLite or payload decode failures.
     pub fn load_state(&self) -> StoreResult<FleetState> {
-        load_state_from_conn(&self.conn)
+        load_current_state_checked(&self.conn)
     }
 
     /// Check durable terminal acknowledgement evidence without replaying the
@@ -1617,7 +1921,7 @@ impl Journal {
         generation: Generation,
     ) -> StoreResult<bool> {
         let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
+            "SELECT generation, kind, payload, checksum
              FROM events
              WHERE generation = ?1
                AND kind IN ('remote_acked', 'remote_observed_terminal')
@@ -1626,7 +1930,14 @@ impl Journal {
         )?;
         let rows = statement.query_map(
             params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )?;
         let mut scanned = 0;
         for row in rows {
@@ -1640,20 +1951,8 @@ impl Journal {
                     "the terminal acknowledgement history exceeded the bounded recovery scan; preserve the journal and compact it through the retention path",
                 ));
             }
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Conflict,
-                    "journal.checksum.mismatch",
-                )
-                .with_remediation(
-                    "the terminal acknowledgement event failed integrity verification",
-                ));
-            }
-            let event: Event = serde_json::from_str(&payload).map_err(|_| {
-                StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
-                    .with_remediation("the terminal acknowledgement event could not be decoded")
-            })?;
+            let (generation_sql, kind, payload, checksum) = row?;
+            let event = decode_checked_event(generation_sql, &kind, &payload, &checksum)?;
             if matches!(
                 event,
                 Event::RemoteAcked {
@@ -1698,29 +1997,24 @@ impl Journal {
     /// SQLite reads, checksum mismatch, or an undecodable event.
     pub fn unresolvable_completions(&self) -> StoreResult<Vec<UnresolvableCompletion>> {
         let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
+            "SELECT generation, kind, payload, checksum
              FROM events
              WHERE kind IN ('completion_unresolvable', 'completion_payload_lost')
              ORDER BY id DESC
              LIMIT ?1",
         )?;
         let rows = statement.query_map(params![MAX_TERMINAL_ACK_SCAN_ROWS], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         let mut found = Vec::new();
         for row in rows {
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Conflict,
-                    "journal.checksum.mismatch",
-                )
-                .with_remediation("an abandoned completion event failed integrity verification"));
-            }
-            let event: Event = serde_json::from_str(&payload).map_err(|_| {
-                StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
-                    .with_remediation("an abandoned completion event could not be decoded")
-            })?;
+            let (generation_sql, kind, payload, checksum) = row?;
+            let event = decode_checked_event(generation_sql, &kind, &payload, &checksum)?;
             match event {
                 Event::CompletionUnresolvable {
                     job_id,
@@ -1760,8 +2054,8 @@ impl Journal {
     /// effective value is a no-op, and the recorded version never regresses.
     ///
     /// This is a direct `meta` write in its own immediate transaction, never a
-    /// new `Event` variant: older binaries must keep opening (and ignoring)
-    /// this state, and the event vocabulary is frozen for drain purposes.
+    /// new `Event` variant: v9-capable binaries that do not use this marker
+    /// may ignore it, while pre-v9 writers are fenced from state rewrites.
     ///
     /// # Errors
     /// SQLite write failures.
@@ -1769,6 +2063,8 @@ impl Journal {
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        begin_journal_write_gate(&transaction)?;
         let existing: Option<String> = transaction
             .query_row("SELECT value FROM meta WHERE key = 'drain'", [], |row| {
                 row.get(0)
@@ -1781,6 +2077,7 @@ impl Journal {
             .unwrap_or(version);
         let value = format!("requested:{effective}");
         if existing.as_deref() == Some(value.as_str()) {
+            end_journal_write_gate(&transaction)?;
             transaction.commit()?;
             return Ok(false);
         }
@@ -1789,6 +2086,7 @@ impl Journal {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![value],
         )?;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -1804,7 +2102,10 @@ impl Journal {
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        begin_journal_write_gate(&transaction)?;
         let removed = transaction.execute("DELETE FROM meta WHERE key = 'drain'", [])? > 0;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(removed)
     }
@@ -1821,6 +2122,8 @@ impl Journal {
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        begin_journal_write_gate(&transaction)?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT value FROM meta WHERE key = 'admission'",
@@ -1837,6 +2140,7 @@ impl Journal {
         };
         let value = format!("blocked:{effective}");
         if existing.as_deref() == Some(value.as_str()) {
+            end_journal_write_gate(&transaction)?;
             transaction.commit()?;
             return Ok(false);
         }
@@ -1845,6 +2149,7 @@ impl Journal {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![value],
         )?;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -1866,11 +2171,14 @@ impl Journal {
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        begin_journal_write_gate(&transaction)?;
         let expected = format!("blocked:{expected_version}");
         let removed = transaction.execute(
             "DELETE FROM meta WHERE key = 'admission' AND value = ?1",
             params![expected],
         )? > 0;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(removed)
     }
@@ -2008,6 +2316,13 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     let (stored, outbox_shape) = preflight_schema_snapshot(&transaction)?;
     repair_historic_jobs_shape(&transaction, stored)?;
     transaction.execute_batch(SCHEMA)?;
+    // Older schemas may carry an earlier fence implementation. Remove it
+    // before migrations touch guarded tables. A v9 journal already has the
+    // complete fence; leave an exact installation byte-stable on reopen.
+    if stored < JOURNAL_SCHEMA_VERSION {
+        remove_journal_write_fence_triggers(&transaction)?;
+    }
+    let legacy_eventless = legacy_eventless_source(&transaction, stored, outbox_shape)?;
     if matches!(outbox_shape, OutboxSchema::V2) {
         migrate_v2_to_v3(&transaction)?;
     }
@@ -2020,7 +2335,102 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     migrate_v5_to_v6(&transaction)?;
     migrate_v6_to_v7(&transaction)?;
     migrate_v7_to_v8(&transaction)?;
+    migrate_v8_to_v9(&transaction, legacy_eventless)?;
+    ensure_journal_write_fence(&transaction)?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// The pre-event schema could contain live materialized rows without any
+/// corresponding event history. Record that fact before migrations alter the
+/// physical shape; setup installs the actual state snapshot after migrations.
+fn legacy_eventless_source(
+    tx: &rusqlite::Transaction<'_>,
+    stored: u32,
+    outbox_shape: OutboxSchema,
+) -> StoreResult<bool> {
+    if stored >= JOURNAL_SCHEMA_VERSION {
+        return Ok(false);
+    }
+    let event_count: i64 = tx.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+    if event_count != 0 {
+        return Ok(false);
+    }
+    let materialized_exists: i64 = tx.query_row(
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM slots)
+                          OR EXISTS (SELECT 1 FROM jobs)
+                          OR EXISTS (SELECT 1 FROM outbox)
+                          OR EXISTS (SELECT 1 FROM meta)
+                     THEN 1 ELSE 0 END",
+        [],
+        |row| row.get(0),
+    )?;
+    if materialized_exists == 0 {
+        return Ok(false);
+    }
+    // The pre-v8 version is the provenance boundary: those versions are the
+    // documented materialized-state migrations, including the v2 fixture.
+    // A nonempty eventless v8 (or a newer physical shape stamped as v8) could
+    // be a writer that lost its events, so guessing a replay origin would
+    // make deletion invisible. Preserve it unchanged and fail closed.
+    if stored < 8
+        && matches!(
+            outbox_shape,
+            OutboxSchema::V2 | OutboxSchema::V3 | OutboxSchema::V4
+        )
+    {
+        return Ok(true);
+    }
+    Err(replay_baseline_provenance(stored, outbox_shape))
+}
+
+/// Install a strict replay anchor. Legacy eventless files use their current
+/// materialized state; all other upgrades use the reducer's empty origin and
+/// replay their complete event log.
+fn install_replay_baseline(
+    tx: &rusqlite::Transaction<'_>,
+    legacy_eventless: bool,
+) -> StoreResult<()> {
+    let mut state = if legacy_eventless {
+        load_materialized_state(tx)?
+    } else {
+        FleetState {
+            journal_writable: true,
+            ..FleetState::default()
+        }
+    };
+    // These latches are lifecycle metadata, not event projections. The
+    // materialized read overlays the live values after replay validation.
+    state.drain_active = false;
+    state.drain_version = 0;
+    state.admission_blocked = false;
+    state.admission_version = 0;
+    let baseline = ReplayBaseline {
+        format_version: 1,
+        source: if legacy_eventless {
+            ReplayBaselineSource::LegacyMaterialized
+        } else {
+            ReplayBaselineSource::Empty
+        },
+        state: ReplayBaselineState::from_fleet(&state),
+    };
+    let serialized = serde_json::to_string(&baseline).map_err(|error| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.replay.baseline.encode",
+        )
+        .with_remediation(error.to_string())
+    })?;
+    let checksum = sha256_hex(serialized.as_bytes());
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2), (?3, ?4)",
+        params![
+            REPLAY_BASELINE_KEY,
+            serialized,
+            REPLAY_BASELINE_CHECKSUM_KEY,
+            checksum
+        ],
+    )?;
     Ok(())
 }
 
@@ -2055,8 +2465,12 @@ fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchem
             "preserve the schema-v1 journal unchanged for forensics and perform an explicit verified migration",
         ));
     }
-    if stored > JOURNAL_SCHEMA_VERSION {
-        return Err(journal_schema_newer());
+    ensure_supported_schema(stored, JOURNAL_SCHEMA_VERSION)?;
+    if stored == JOURNAL_SCHEMA_VERSION {
+        require_replay_baseline_keys(conn)?;
+        if load_replay_baseline(conn)?.is_none() {
+            return Err(replay_baseline_missing());
+        }
     }
     // Physical shape ahead of the recorded version means a writer mutated
     // the tables without stamping `PRAGMA user_version`. Refuse rather than
@@ -2088,43 +2502,495 @@ fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchem
     Ok((stored, outbox_shape))
 }
 
-fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
-    // Journal open succeeded, so the file is writable unless a later apply
-    // fails; recovery treats an opened journal as writable.
-    let mut state = FleetState {
-        journal_writable: true,
-        ..FleetState::default()
+fn ensure_supported_schema(stored: u32, supported: u32) -> StoreResult<()> {
+    if stored > supported {
+        return Err(journal_schema_newer());
+    }
+    Ok(())
+}
+
+fn require_replay_baseline_keys(conn: &Connection) -> StoreResult<()> {
+    let meta_exists: i64 = conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if meta_exists == 0 {
+        return Err(replay_baseline_missing());
+    }
+    let baseline_exists: i64 = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
+        [REPLAY_BASELINE_KEY],
+        |row| row.get(0),
+    )?;
+    let checksum_exists: i64 = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
+        [REPLAY_BASELINE_CHECKSUM_KEY],
+        |row| row.get(0),
+    )?;
+    if baseline_exists == 0 || checksum_exists == 0 {
+        return Err(replay_baseline_missing());
+    }
+    Ok(())
+}
+
+/// Remove all write-fence triggers while setup owns the immediate migration
+/// transaction. This also upgrades databases produced by the earlier
+/// baseline-delete-only fence.
+fn remove_journal_write_fence_triggers(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    for (name, _, _) in JOURNAL_WRITE_FENCE_TRIGGERS {
+        tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))?;
+    }
+    tx.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS {delete_trigger};
+         DROP TRIGGER IF EXISTS {rename_trigger};",
+        delete_trigger = LEGACY_REPLAY_BASELINE_DELETE_FENCE_TRIGGER,
+        rename_trigger = LEGACY_REPLAY_BASELINE_RENAME_FENCE_TRIGGER,
+    ))?;
+    Ok(())
+}
+
+/// Install and verify the durable mixed-version fence after the v9 anchor
+/// exists. `PRAGMA user_version` is only an open-time convention: an already
+/// open v8 connection can otherwise issue every old DML write path after a
+/// different connection completes migration. The persistent gate row exists
+/// only inside a current writer's transaction; all fifteen table-operation
+/// triggers reject writes made without that row. The complete replacement is
+/// one atomic setup transaction.
+fn ensure_journal_write_fence(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    if journal_write_fence_is_exact(tx)? {
+        // An older v9 build used these names for a narrower baseline-only
+        // fence. They are harmless when absent and must not survive beside
+        // the complete table-operation fence.
+        tx.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS {delete_trigger};
+             DROP TRIGGER IF EXISTS {rename_trigger};",
+            delete_trigger = LEGACY_REPLAY_BASELINE_DELETE_FENCE_TRIGGER,
+            rename_trigger = LEGACY_REPLAY_BASELINE_RENAME_FENCE_TRIGGER,
+        ))?;
+        return Ok(());
+    }
+
+    // Replace an incomplete or malformed installation while the setup
+    // transaction owns the write lock. There is no observable interval in
+    // which the migrated v9 tables are writable without the fence.
+    remove_journal_write_fence_triggers(tx)?;
+    tx.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {gate} (
+             id INTEGER PRIMARY KEY CHECK (id = 1)
+         );",
+        gate = JOURNAL_WRITE_GATE_TABLE,
+    ))?;
+    for (name, table, operation) in JOURNAL_WRITE_FENCE_TRIGGERS {
+        let sql = journal_write_fence_trigger_sql(name, table, operation);
+        tx.execute_batch(&sql)?;
+    }
+
+    if !journal_write_fence_is_exact(tx)? {
+        return Err(journal_write_fence_invalid(
+            "installed trigger set or definition is not exact".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn journal_write_fence_is_exact(tx: &rusqlite::Transaction<'_>) -> StoreResult<bool> {
+    let gate_schema: Option<String> = tx
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [JOURNAL_WRITE_GATE_TABLE],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(gate_schema) = gate_schema else {
+        return Ok(false);
     };
-    let mut stmt = conn.prepare("SELECT payload, checksum FROM events ORDER BY id ASC")?;
+    if normalize_sql(&gate_schema) != normalize_sql(journal_write_gate_table_sql()) {
+        return Ok(false);
+    }
+    let gate_rows: i64 = tx.query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+        row.get(0)
+    })?;
+    if gate_rows != 0 {
+        return Ok(false);
+    }
+
+    // The expected triggers are the complete schema boundary. Count every
+    // trigger attached to a guarded table, including the gate itself, so a
+    // differently named BEFORE/AFTER trigger cannot open the gate indirectly.
+    // Temporary triggers are connection-local and are never part of this
+    // journal schema; reject them on the same tables as well.
+    for catalog in ["sqlite_master", "sqlite_temp_master"] {
+        let trigger_count: i64 = tx.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {catalog}
+                 WHERE type = 'trigger'
+                   AND lower(tbl_name) IN (
+                       'events', 'slots', 'jobs', 'outbox', 'meta',
+                       'journal_write_gate'
+                   )"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        let expected = if catalog == "sqlite_master" {
+            JOURNAL_WRITE_FENCE_TRIGGERS.len() as i64
+        } else {
+            0
+        };
+        if trigger_count != expected {
+            return Ok(false);
+        }
+    }
+
+    for (name, table, operation) in JOURNAL_WRITE_FENCE_TRIGGERS {
+        let actual: Option<(String, String)> = tx
+            .query_row(
+                "SELECT tbl_name, sql
+                 FROM sqlite_master
+                 WHERE type = 'trigger' AND name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((actual_table, actual_sql)) = actual else {
+            return Ok(false);
+        };
+        let expected = journal_write_fence_trigger_sql(name, table, operation);
+        if !actual_table.eq_ignore_ascii_case(table)
+            || normalize_sql(&actual_sql) != normalize_sql(&expected)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn journal_write_gate_table_sql() -> &'static str {
+    "CREATE TABLE journal_write_gate (
+         id INTEGER PRIMARY KEY CHECK (id = 1)
+     );"
+}
+
+fn journal_write_fence_trigger_sql(name: &str, table: &str, operation: &str) -> String {
+    format!(
+        "CREATE TRIGGER {name}
+             BEFORE {operation} ON {table}
+             FOR EACH ROW
+             WHEN NOT EXISTS (
+                 SELECT 1 FROM {gate} WHERE id = 1
+             )
+             BEGIN
+                 SELECT RAISE(ROLLBACK, '{reason}');
+             END;",
+        gate = JOURNAL_WRITE_GATE_TABLE,
+        reason = JOURNAL_WRITE_FENCE_REASON,
+    )
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn begin_journal_write_gate(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    if !journal_write_fence_is_exact(tx)? {
+        return Err(journal_write_fence_invalid(
+            "gate schema, trigger set, or empty gate row is not exact".to_owned(),
+        ));
+    }
+    let inserted = tx.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])?;
+    if inserted != 1 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate insert affected {inserted} rows"
+        )));
+    }
+    let gate_rows: i64 = tx.query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+        row.get(0)
+    })?;
+    if gate_rows != 1 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate row count after insert is {gate_rows}"
+        )));
+    }
+    Ok(())
+}
+
+fn end_journal_write_gate(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let deleted = tx.execute("DELETE FROM journal_write_gate WHERE id = 1", [])?;
+    if deleted != 1 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate delete affected {deleted} rows"
+        )));
+    }
+    let gate_rows: i64 = tx.query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+        row.get(0)
+    })?;
+    if gate_rows != 0 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate row count after delete is {gate_rows}"
+        )));
+    }
+    Ok(())
+}
+
+/// Every public state/overlay write must validate the v9 anchor before it can
+/// delete or replace materialized rows. This closes the already-open-handle
+/// case where the file is tampered with after `Journal::open` completed.
+fn validate_replay_baseline_before_write(conn: &Connection) -> StoreResult<()> {
+    let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).ok() != Some(JOURNAL_SCHEMA_VERSION) {
+        return Err(replay_baseline_write_fenced(
+            u32::try_from(stored).unwrap_or(0),
+        ));
+    }
+    require_replay_baseline_keys(conn)?;
+    if load_replay_baseline(conn)?.is_none() {
+        return Err(replay_baseline_missing());
+    }
+    Ok(())
+}
+
+fn validate_replay_integrity_before_read(conn: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).ok() != Some(JOURNAL_SCHEMA_VERSION) {
+        return Err(replay_baseline_read_fenced(
+            u32::try_from(stored).unwrap_or(0),
+        ));
+    }
+    require_replay_baseline_keys(conn)?;
+    if load_replay_baseline(conn)?.is_none() {
+        return Err(replay_baseline_missing());
+    }
+    if !journal_write_fence_is_exact(conn)? {
+        return Err(journal_write_fence_invalid(
+            "gate schema, trigger set, or empty gate row is not exact".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn load_state_from_conn_seed(conn: &Connection, mut state: FleetState) -> StoreResult<FleetState> {
+    state.journal_writable = true;
+    let mut stmt =
+        conn.prepare("SELECT generation, kind, payload, checksum FROM events ORDER BY id ASC")?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
     })?;
     for row in rows {
-        let (payload, checksum) = row?;
-        if sha256_hex(payload.as_bytes()) != checksum {
+        let (generation, kind, payload, checksum) = row?;
+        // The version gate in `open` already refused a journal newer than this
+        // binary; a decoded event must still agree with its stored metadata.
+        let event = decode_checked_event(generation, &kind, &payload, &checksum)?;
+        let outcome = reduce(state, event);
+        if outcome.rejected {
             return Err(StoreError::new(
                 velnor_model::ExitClass::Conflict,
-                "journal.checksum.mismatch",
+                "journal.event.rejected",
             )
-            .with_remediation("the event log failed integrity verification"));
+            .with_remediation(
+                "preserve the journal unchanged; replay rejected an event that was previously materialized",
+            ));
         }
-        // The version gate in `open` already refused a journal newer than this
-        // binary and stamped the current version onto an older one, so every
-        // event in a journal we accepted must decode. An envelope that does
-        // not is a writer that changed the vocabulary without bumping
-        // `JOURNAL_SCHEMA_VERSION`; skipping it would silently drop terminal
-        // state and re-drive a completion that was already resolved.
-        let event: Event = serde_json::from_str(&payload).map_err(|error| {
-            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
-                .with_remediation(format!(
-                    "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
-                ))
-        })?;
-        let outcome = reduce(state, event);
         state = outcome.state;
     }
-    state.capacity_invalid = state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
+    state.capacity_invalid =
+        state.capacity_invalid || state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
     Ok(state)
+}
+
+fn load_replay_baseline(conn: &Connection) -> StoreResult<Option<FleetState>> {
+    let serialized: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [REPLAY_BASELINE_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let checksum: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [REPLAY_BASELINE_CHECKSUM_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match (serialized, checksum) {
+        (None, None) => Ok(None),
+        (Some(serialized), Some(checksum)) => {
+            if sha256_hex(serialized.as_bytes()) != checksum {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.checksum",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; the legacy replay baseline failed integrity verification",
+                ));
+            }
+            let baseline: ReplayBaseline = serde_json::from_str(&serialized).map_err(|error| {
+                StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.invalid",
+                )
+                .with_remediation(format!(
+                    "preserve the journal unchanged; the legacy replay baseline could not be decoded: {error}"
+                ))
+            })?;
+            if baseline.format_version != 1 {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.version",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; the replay baseline format is unsupported",
+                ));
+            }
+            let ReplayBaseline {
+                format_version: _,
+                source,
+                state: baseline_state,
+            } = baseline;
+            let state = baseline_state.into_fleet();
+            if matches!(source, ReplayBaselineSource::Empty)
+                && state
+                    != (FleetState {
+                        journal_writable: true,
+                        ..FleetState::default()
+                    })
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.invalid",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; an empty replay baseline contains semantic state",
+                ));
+            }
+            Ok(Some(state))
+        }
+        _ => Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.replay.baseline.invalid",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; the legacy replay baseline is incomplete",
+        )),
+    }
+}
+
+fn load_state_from_conn_legacy_aware(conn: &Connection) -> StoreResult<FleetState> {
+    // A pre-event migration supplies the materialized snapshot as the replay
+    // origin. A v9 journal always carries an explicit baseline; the checked
+    // read caller validates its presence before reaching this helper.
+    let baseline = load_replay_baseline(conn)?;
+    load_state_from_conn_seed(
+        conn,
+        baseline.unwrap_or(FleetState {
+            journal_writable: true,
+            ..FleetState::default()
+        }),
+    )
+}
+
+fn load_current_state_checked(conn: &Connection) -> StoreResult<FleetState> {
+    // Replay and materialized reads must observe one SQLite snapshot. Reading
+    // them through separate connections would turn a legitimate concurrent
+    // commit into a false corruption report.
+    let transaction = conn.unchecked_transaction()?;
+    validate_replay_integrity_before_read(&transaction)?;
+    let replayed = load_state_from_conn_legacy_aware(&transaction)?;
+    let materialized = load_materialized_state(&transaction)?;
+    // Compare even when the event table is empty. A legacy baseline is part
+    // of the replay input; it is not a bypass around this check.
+    let mismatch =
+        canonical_projection(replayed.clone()) != canonical_projection(materialized.clone());
+    if mismatch && !materialized.capacity_invalid {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.materialized.replay.mismatch",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; replayed event history differs from materialized state",
+        ));
+    }
+    transaction.commit()?;
+
+    // Drain and admission are meta overlays, not event projections. Return
+    // replayed state for a normal journal, with those durable latches overlaid
+    // from the same snapshot used for validation. A capacity-invalid
+    // materialization is forensic evidence; preserve that exact state instead
+    // of hiding an unlogged row behind a clean replay result.
+    let materialized_capacity_invalid = materialized.capacity_invalid;
+    let materialized_drain_active = materialized.drain_active;
+    let materialized_drain_version = materialized.drain_version;
+    let materialized_admission_blocked = materialized.admission_blocked;
+    let materialized_admission_version = materialized.admission_version;
+    let mut state = if materialized_capacity_invalid {
+        materialized
+    } else {
+        replayed
+    };
+    state.drain_active = materialized_drain_active;
+    state.drain_version = materialized_drain_version;
+    state.admission_blocked = materialized_admission_blocked;
+    state.admission_version = materialized_admission_version;
+    Ok(state)
+}
+
+/// Stable projection used for replay validation.
+///
+/// The v8 reducer stamps heartbeat and outbox timing from wall clock during
+/// replay, so those fields are intentionally excluded until durable event
+/// timestamps can be introduced in a separate migration. Terminal outbox
+/// rows are immutable evidence and are absent from materialized state; only
+/// pending rows participate in the comparison. Drain/admission are meta-only
+/// overlays and are copied after validation.
+fn canonical_projection(mut state: FleetState) -> FleetState {
+    state.drain_active = false;
+    state.drain_version = 0;
+    state.admission_blocked = false;
+    state.admission_version = 0;
+    for slot in &mut state.slots {
+        slot.heartbeat_unix = 0;
+    }
+    for job in &mut state.jobs {
+        job.accepted_unix = 0;
+        job.probe_deadline_unix = 0;
+    }
+    for row in &mut state.outbox {
+        row.created_unix = 0;
+        row.deadline_unix = 0;
+    }
+    state.outbox.retain(OutboxRecord::is_pending);
+    state.slots.sort_by(|left, right| {
+        left.slot_id
+            .0
+            .cmp(&right.slot_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    state.jobs.sort_by(|left, right| {
+        left.job_id
+            .0
+            .cmp(&right.job_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    state.outbox.sort_by(|left, right| {
+        left.job_id
+            .0
+            .cmp(&right.job_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    state
 }
 
 fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
@@ -2450,10 +3316,22 @@ fn outbox_owner_unknown(job_id: &str, generation: i64) -> StoreError {
 }
 
 fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreResult<()> {
+    // Validate the anchor before deleting any materialized row. The caller
+    // performs the same check before reducing, and this defense keeps the
+    // persistence primitive safe if another writer invokes it later.
+    if load_replay_baseline(tx)?.is_none() {
+        return Err(replay_baseline_missing());
+    }
     tx.execute("DELETE FROM slots", [])?;
     tx.execute("DELETE FROM jobs", [])?;
     tx.execute("DELETE FROM outbox", [])?;
-    tx.execute("DELETE FROM meta", [])?;
+    // Keep the anchor rows in place. Besides avoiding a replace-trigger on the
+    // v9 fence, this makes an old v8 `DELETE FROM meta` observably fail while
+    // allowing current writers to refresh the ordinary materialized keys.
+    tx.execute(
+        "DELETE FROM meta WHERE key NOT IN (?1, ?2)",
+        params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+    )?;
     for slot in &state.slots {
         tx.execute(
             "INSERT INTO slots (
@@ -2552,16 +3430,14 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
     ];
     // Every `apply` loads the materialized state (drain and admission
     // included) under the same immediate transaction it persists under, so
-    // re-emitting both markers from state keeps them sticky across unrelated
-    // event writes with no new event and no schema bump. Absent when inactive,
-    // so old journals keep their exact meta shape.
+    // Re-emitting both lifecycle markers from state keeps them sticky across
+    // unrelated event writes with no new event and no schema bump. Absent when
+    // inactive, so old journals keep their exact meta shape.
     //
     // Mixed-version warning: this rewrite drops every `meta` key it does
-    // not know, and an older binary's `persist_state` does not know the
-    // drain/admission keys — any write by an older binary clears a latched
-    // marker. Forward tolerance is read-only: old binaries open fenced
-    // journals fine but must not share one journal with a newer lifecycle
-    // writer across an upgrade.
+    // not know. The v9 baseline-delete trigger prevents a pre-v9 writer from
+    // completing this rewrite; binaries that understand v9 but do not know
+    // newer lifecycle overlays remain read-only with respect to those keys.
     let drain = state
         .drain_active
         .then(|| ("drain", format!("requested:{}", state.drain_version)));
@@ -2724,6 +3600,56 @@ fn journal_schema_newer() -> StoreError {
         .with_remediation(
             "preserve the journal unchanged and reopen it with a binary that supports its PRAGMA user_version",
         )
+}
+
+fn replay_baseline_missing() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.missing",
+    )
+    .with_remediation(
+        "preserve the journal unchanged and reopen it with the migration that writes both replay baseline keys",
+    )
+}
+
+fn replay_baseline_provenance(version: u32, shape: OutboxSchema) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.provenance",
+    )
+    .with_remediation(format!(
+        "preserve the eventless journal unchanged: PRAGMA user_version={version} with physical outbox shape {shape:?} has no trusted replay origin"
+    ))
+}
+
+fn replay_baseline_write_fenced(version: u32) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.fenced",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged: state writes require schema v{JOURNAL_SCHEMA_VERSION} with a valid replay baseline, found PRAGMA user_version={version}"
+    ))
+}
+
+fn replay_baseline_read_fenced(version: u32) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.fenced",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged: checked reads require schema v{JOURNAL_SCHEMA_VERSION} with a valid replay baseline and write fence, found PRAGMA user_version={version}"
+    ))
+}
+
+fn journal_write_fence_invalid(detail: String) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.write.fence.invalid",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged; the v9 write-fence schema is invalid: {detail}"
+    ))
 }
 
 fn outbox_schema_mismatch(version: u32, shape: OutboxSchema) -> StoreError {
@@ -2928,6 +3854,145 @@ fn migrate_v7_to_v8(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     Ok(())
 }
 
+/// v9 installs a replay anchor and fences every older writer. A journal that
+/// already has event history starts from the reducer's empty state; an
+/// eventless legacy materialization starts from its explicit snapshot. Older
+/// v8 writers did not persist generation metadata for acquisition events, so
+/// that narrow, derivable backfill happens in this same transaction before
+/// the v9 stamp becomes visible.
+fn migrate_v8_to_v9(tx: &rusqlite::Transaction<'_>, legacy_eventless: bool) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 9 {
+        return Ok(());
+    }
+    backfill_v8_acquisition_generations(tx)?;
+    install_replay_baseline(tx, legacy_eventless)?;
+    validate_replay_against_materialized(tx)?;
+    tx.pragma_update(None, "user_version", 9u32)?;
+    Ok(())
+}
+
+/// Validate the complete v8 event log against its materialized projection
+/// before the migration stamps v9. Keeping this inside the setup transaction
+/// means checksum, decode, reducer, and projection failures roll back the
+/// baseline, generation backfill, and version stamp together.
+fn validate_replay_against_materialized(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let replayed = load_state_from_conn_legacy_aware(tx)?;
+    let materialized = load_materialized_state(tx)?;
+    if canonical_projection(replayed) != canonical_projection(materialized.clone())
+        && !materialized.capacity_invalid
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.materialized.replay.mismatch",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; v8 replay differs from materialized state during v9 migration",
+        ));
+    }
+    Ok(())
+}
+
+/// Backfill only the metadata v8 omitted for acquisition events. The payload
+/// remains the source of truth: a zero generation is repaired, a nonzero
+/// disagreement is corruption, and every failure rolls back with the schema
+/// migration. No other event kind is rewritten here.
+fn backfill_v8_acquisition_generations(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let mut statement = tx.prepare(
+        "SELECT id, generation, kind, payload, checksum
+         FROM events
+         WHERE kind IN (
+             'job_acquisition_intended',
+             'job_acquisition_resolved',
+             'acquisition_probe_failed',
+             'job_acquisition_lost'
+         )
+         ORDER BY id ASC",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for (id, generation, kind, payload, checksum) in rows {
+        if sha256_hex(payload.as_bytes()) != checksum {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.checksum.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; an acquisition event failed checksum verification during v9 migration",
+            ));
+        }
+        let event: Event = serde_json::from_str(&payload).map_err(|error| {
+            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+                .with_remediation(format!(
+                    "preserve the journal unchanged; an acquisition event could not be decoded during v9 migration: {error}"
+                ))
+        })?;
+        if kind != event_kind(&event) {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event kind does not match its payload during v9 migration",
+            ));
+        }
+        let expected = event_generation(&event).0;
+        if expected == 0 {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event payload has no derivable generation during v9 migration",
+            ));
+        }
+        let stored_generation = u64::try_from(generation).map_err(|_| {
+            StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event generation is negative during v9 migration",
+            )
+        })?;
+        if stored_generation == 0 {
+            let expected_sql = i64::try_from(expected).map_err(|_| {
+                StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.metadata.mismatch",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; acquisition event generation exceeds SQLite's integer range",
+                )
+            })?;
+            tx.execute(
+                "UPDATE events SET generation = ?1 WHERE id = ?2 AND generation = 0",
+                params![expected_sql, id],
+            )?;
+        } else if stored_generation != expected {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event generation disagrees with its payload during v9 migration",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Repair the one historical migration poison that can pass the version gate.
 ///
 /// The v5 bump once stamped a v4 `jobs` table as version 5. A later opener
@@ -3061,6 +4126,10 @@ fn event_generation(event: &Event) -> Generation {
         | Event::Registered { generation, .. }
         | Event::RegistrationLost { generation, .. }
         | Event::ReadyAttempt { generation, .. }
+        | Event::JobAcquisitionIntended { generation, .. }
+        | Event::JobAcquisitionResolved { generation, .. }
+        | Event::AcquisitionProbeFailed { generation, .. }
+        | Event::JobAcquisitionLost { generation, .. }
         | Event::JobOwned { generation, .. }
         | Event::JobStarted { generation, .. }
         | Event::JobTerminalResult { generation, .. }
@@ -3162,6 +4231,47 @@ fn parse_sqlite_version(raw: &str) -> Option<(u32, u32, u32)> {
 #[must_use]
 pub fn payload_checksum(bytes: &[u8]) -> String {
     sha256_hex(bytes)
+}
+
+fn decode_checked_event(
+    generation: i64,
+    kind: &str,
+    payload: &str,
+    checksum: &str,
+) -> StoreResult<Event> {
+    if sha256_hex(payload.as_bytes()) != checksum {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.checksum.mismatch",
+        )
+        .with_remediation("the event log failed integrity verification"));
+    }
+    let event: Event = serde_json::from_str(payload).map_err(|error| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+            .with_remediation(format!(
+                "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
+            ))
+    })?;
+    let stored_generation = u64::try_from(generation).map_err(|_| {
+        StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.event.metadata.mismatch",
+        )
+        .with_remediation("event generation is negative")
+    })?;
+    let expected_generation = event_generation(&event).0;
+    if kind != event_kind(&event)
+        || (expected_generation != 0 && stored_generation != expected_generation)
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.event.metadata.mismatch",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; event kind or generation does not match its payload",
+        ));
+    }
+    Ok(event)
 }
 
 #[cfg(test)]
@@ -3456,24 +4566,34 @@ mod tests {
     #[test]
     fn materialized_state_tolerates_unknown_meta_keys_and_rejects_malformed_drain() {
         let (dir, journal) = open_tmp("drain-meta-tolerance");
-        journal
-            .conn
-            .execute(
-                "INSERT INTO meta (key, value) VALUES ('future_key', 'anything')",
-                [],
-            )
-            .unwrap();
+        {
+            let transaction = journal.conn.unchecked_transaction().unwrap();
+            begin_journal_write_gate(&transaction).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES ('future_key', 'anything')",
+                    [],
+                )
+                .unwrap();
+            end_journal_write_gate(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
         let state = journal.materialized_state().unwrap();
         assert!(!state.drain_active);
 
-        journal
-            .conn
-            .execute(
-                "INSERT INTO meta (key, value) VALUES ('drain', 'bogus')
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [],
-            )
-            .unwrap();
+        {
+            let transaction = journal.conn.unchecked_transaction().unwrap();
+            begin_journal_write_gate(&transaction).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES ('drain', 'bogus')
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [],
+                )
+                .unwrap();
+            end_journal_write_gate(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
         let error = journal.materialized_state().unwrap_err();
         assert_eq!(error.envelope.reason, "journal.materialized.invalid");
         std::fs::remove_dir_all(dir).unwrap();
@@ -3482,6 +4602,7 @@ mod tests {
     #[test]
     fn persist_state_drops_unknown_meta_keys_on_apply() {
         let (dir, mut journal) = open_tmp("drain-meta-apply-drops");
+        drop_replay_baseline_fence(&journal.conn);
         journal
             .conn
             .execute(
@@ -3489,6 +4610,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        restore_journal_write_fence(&journal.conn);
         journal.apply(Event::ControlLive).unwrap();
         let raw: Option<String> = journal
             .conn
@@ -3514,39 +4636,25 @@ mod tests {
     }
 
     #[test]
-    fn pre_drain_binary_write_clears_the_drain_marker() {
+    fn pre_drain_binary_write_is_fenced_without_clearing_marker() {
         let (dir, mut journal) = open_tmp("drain-old-writer");
         assert!(journal.set_drain(7).unwrap());
-        // A pre-drain binary's `persist_state` (see base 97281ce7) rewrites
-        // every `meta` row it knows and drops the drain key it cannot know.
-        // Replay that exact shape: keep all known rows, omit the marker.
-        let kept: Vec<(String, String)> = {
-            let mut statement = journal
-                .conn
-                .prepare("SELECT key, value FROM meta WHERE key != 'drain'")
-                .unwrap();
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap()
-                .map(|row| row.unwrap())
-                .collect()
-        };
-        journal.conn.execute("DELETE FROM meta", []).unwrap();
-        for (key, value) in &kept {
-            journal
-                .conn
-                .execute(
-                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-                    params![key.as_str(), value.as_str()],
-                )
-                .unwrap();
-        }
-        // The marker is gone although no drain-clear path ran: mixed-version
-        // fleets sharing one journal can unlatch a drain mid-flight.
+        // A pre-v9 binary's persist_state would rewrite every meta row it
+        // knows and drop the drain key. The durable v9 fence rejects that
+        // stale write before it can unlatch the fleet.
+        let old_writer = Connection::open(&dir.join("journal.db")).unwrap();
+        let error = old_writer.execute("DELETE FROM meta", []).unwrap_err();
+        assert!(error.to_string().contains(JOURNAL_WRITE_FENCE_REASON));
         let state = journal.materialized_state().unwrap();
-        assert!(!state.drain_active);
-        assert_eq!(state.drain_version, 0);
-        assert_eq!(read_drain_state(&dir.join("journal.db")), Ok(None));
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 7);
+        assert_eq!(
+            read_drain_state(&dir.join("journal.db")),
+            Ok(Some(DrainState {
+                active: true,
+                version: 7
+            }))
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3611,6 +4719,7 @@ mod tests {
         ));
         let malformed = dir.join("malformed.db");
         let malformed_journal = Journal::open(&malformed).unwrap();
+        drop_replay_baseline_fence(&malformed_journal.conn);
         malformed_journal
             .conn
             .execute(
@@ -3635,6 +4744,7 @@ mod tests {
             read_admission_state(&path).unwrap(),
             Some(AdmissionState { version: 5 })
         );
+        drop_replay_baseline_fence(&journal.conn);
         journal
             .conn
             .execute(
@@ -4639,6 +5749,7 @@ mod tests {
         // Journal::apply must reject this state. Seed the intentionally stale
         // N+1 materialization directly so the test exercises forensic safety.
         let seed = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&seed);
         seed.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -4781,13 +5892,12 @@ mod tests {
         for _ in 0..2 {
             let mut reopened = Journal::open(&path).unwrap();
             // This fixture intentionally corrupts only the materialized
-            // tables. Event replay is an integrity/recovery view and must
-            // not infer materialized-only rows; the controller's hot path
-            // uses materialized_state(), which is the authoritative view for
-            // capacity safety and must detect the stale N+1 slot.
+            // tables. Both read APIs preserve the forensic capacity-invalid
+            // materialized state instead of hiding the stale N+1 slot behind
+            // a clean replay result.
             let replayed = reopened.load_state().unwrap();
-            assert!(!replayed.capacity_invalid);
-            assert!(replayed.slots.is_empty());
+            assert!(replayed.capacity_invalid);
+            assert_eq!(replayed.slots.len(), 3);
 
             let state = reopened.materialized_state().unwrap();
             assert!(state.capacity_invalid);
@@ -4819,6 +5929,7 @@ mod tests {
 
     fn seed_v2_outbox(path: &Path, version: i64) {
         let conn = Connection::open(path).unwrap();
+        drop_replay_baseline_fence(&conn);
         conn.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -4844,6 +5955,92 @@ mod tests {
         )
         .unwrap();
         conn.pragma_update(None, "user_version", version).unwrap();
+    }
+
+    fn demote_eventful_journal_to_v8(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+    }
+
+    fn assert_schema8_migration_rejected(path: &Path, reason: &str) {
+        let error = Journal::open(path).unwrap_err();
+        assert_eq!(error.envelope.reason, reason);
+        let conn = Connection::open(path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert!(load_replay_baseline(&conn).unwrap().is_none());
+        let trigger_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'trigger'
+                   AND lower(tbl_name) IN (
+                       'events', 'slots', 'jobs', 'outbox', 'meta',
+                       'journal_write_gate'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 0);
+    }
+
+    fn rewrite_replay_baseline(path: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+        let conn = Connection::open(path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        let serialized: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        mutate(&mut value);
+        let serialized = serde_json::to_string(&value).unwrap();
+        let checksum = sha256_hex(serialized.as_bytes());
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = ?2",
+            params![serialized, REPLAY_BASELINE_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = ?2",
+            params![checksum, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+    }
+
+    /// Model a pre-v9 database or an explicit forensic tamper fixture. Live
+    /// v9 writers must never remove the durable fence.
+    fn drop_replay_baseline_fence(conn: &Connection) {
+        for (name, _, _) in JOURNAL_WRITE_FENCE_TRIGGERS {
+            conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))
+                .unwrap();
+        }
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS replay_baseline_delete_fence;
+             DROP TRIGGER IF EXISTS replay_baseline_rename_fence;",
+        )
+        .unwrap();
+    }
+
+    fn restore_journal_write_fence(conn: &Connection) {
+        let transaction = conn.unchecked_transaction().unwrap();
+        ensure_journal_write_fence(&transaction).unwrap();
+        transaction.commit().unwrap();
     }
 
     #[test]
@@ -4902,9 +6099,29 @@ mod tests {
         seed_v2_outbox(&path, 0);
 
         let migrated = Journal::open(&path).unwrap();
+        let replayed = migrated.load_state().unwrap();
         let state = migrated.materialized_state().unwrap();
+        assert_eq!(
+            canonical_projection(replayed),
+            canonical_projection(state.clone())
+        );
         assert_eq!(state.outbox[0].slot_id, slot("scope-1"));
         let conn = Connection::open(&path).unwrap();
+        let baseline: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let baseline_checksum: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_CHECKSUM_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sha256_hex(baseline.as_bytes()), baseline_checksum);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -4917,6 +6134,791 @@ mod tests {
             )
             .unwrap();
         assert_eq!(slot_id_not_null, 1);
+    }
+
+    #[test]
+    fn schema8_upgrade_seeds_anchor_and_fences_schema8_writer() {
+        let (dir, journal) = open_tmp("schema8-to-schema9-anchor");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let upgraded = Journal::open(&path).unwrap();
+        let version: u32 = upgraded
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map(|value| u32::try_from(value).unwrap())
+            .unwrap();
+        assert_eq!(version, 9);
+        assert!(load_replay_baseline(&upgraded.conn).unwrap().is_some());
+        let before = upgraded
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let error = ensure_supported_schema(version, 8).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.newer");
+        let after = upgraded
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(before, after, "a schema-8 writer must not touch v9 state");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_eventful_upgrade_backfills_acquisition_generation_atomically() {
+        let (dir, mut journal) = open_tmp("schema8-eventful-acquisition-backfill");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE events SET generation = 0 WHERE kind = 'job_acquisition_intended'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let upgraded = Journal::open(&path).unwrap();
+        let generation: i64 = upgraded
+            .conn
+            .query_row(
+                "SELECT generation FROM events WHERE kind = 'job_acquisition_intended'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 1);
+        assert_eq!(
+            upgraded.load_state().unwrap().jobs[0].job_id,
+            job("request-1")
+        );
+        assert_eq!(
+            upgraded
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_acquisition_generation_mismatch_rolls_back_without_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-acquisition-backfill-rollback");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE events SET generation = 2 WHERE kind = 'job_acquisition_intended'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT generation FROM events WHERE kind = 'job_acquisition_intended'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(load_replay_baseline(&conn).unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_eventless_nonempty_state_fails_closed_without_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-eventless-nonempty");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.provenance");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_nonacquisition_checksum_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-checksum");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events SET checksum = 'tampered' WHERE kind = 'control_live'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.checksum.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_unknown_event_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-unknown-event");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let payload = r#"{"type":"future_envelope","x":1}"#;
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events SET kind = 'future_envelope', payload = ?1, checksum = ?2 WHERE id = 1",
+            params![payload, payload_checksum(payload.as_bytes())],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.event.unknown");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_reducer_event_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-reducer-rejection");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let event = Event::SlotStale {
+            slot_id: slot("scope-1"),
+            generation: r#gen().next(),
+        };
+        let payload = serde_json::to_string(&event).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events
+             SET generation = ?1, kind = ?2, payload = ?3, checksum = ?4
+             WHERE id = 1",
+            params![
+                event_generation(&event).0 as i64,
+                event_kind(&event),
+                payload,
+                payload_checksum(payload.as_bytes()),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.event.rejected");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_replay_materialized_drift_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-projection-drift");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'control_live'", [])
+            .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.materialized.replay.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_sql_fence_blocks_an_already_open_v8_writer() {
+        let (dir, mut journal) = open_tmp("schema9-already-open-v8-writer");
+        // Seed one row in every guarded materialized table through the normal
+        // v9 writer. The stale connection must then be unable to exercise any
+        // INSERT, UPDATE, or DELETE path, including rows an empty fixture
+        // would not visit for UPDATE/DELETE triggers.
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation,
+                    payload_sha256: "payload".into(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let setup = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&setup);
+        setup
+            .execute(
+                "DELETE FROM meta WHERE key IN (?1, ?2)",
+                params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+            )
+            .unwrap();
+        setup.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(setup);
+
+        // This connection represents a v8 process that opened before the
+        // migration and therefore cannot be protected by a fresh-read
+        // `PRAGMA user_version` check.
+        let old_writer = Connection::open(&path).unwrap();
+        let mut prepared_delete = old_writer.prepare("DELETE FROM meta").unwrap();
+        let mut upgraded = Journal::open(&path).unwrap();
+        let before_events = event_count(&upgraded);
+        let before_state = upgraded.materialized_state().unwrap();
+        let before_baseline = load_replay_baseline(&upgraded.conn).unwrap();
+
+        // SQLite may invalidate and transparently recompile a statement when
+        // migration installs triggers. Either outcome must fail closed; the
+        // prepared pre-migration statement must never delete post-migration
+        // metadata.
+        let prepared_error = prepared_delete.execute([]).unwrap_err();
+        assert!(
+            prepared_error
+                .to_string()
+                .contains(JOURNAL_WRITE_FENCE_REASON)
+                || prepared_error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("schema has changed"),
+            "prepared stale write was rejected for the wrong reason: {prepared_error}"
+        );
+        drop(prepared_delete);
+
+        let blocked_writes = [
+            (
+                "events insert",
+                "INSERT INTO events (generation, kind, payload, checksum) VALUES (0, 'tampered', '{}', 'bad')",
+            ),
+            (
+                "events update",
+                "UPDATE events SET payload = 'tampered' WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "events delete",
+                "DELETE FROM events WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "slots insert",
+                "INSERT INTO slots (slot_id, generation, phase, permit_held, routing_valid, session_live, executor_proven, registered, pid, heartbeat_unix) VALUES ('stale-slot', 1, 'ready', 0, 0, 0, 0, 0, NULL, 0)",
+            ),
+            (
+                "slots update",
+                "UPDATE slots SET phase = 'tampered' WHERE slot_id = 'scope-1'",
+            ),
+            (
+                "slots delete",
+                "DELETE FROM slots WHERE slot_id = 'scope-1'",
+            ),
+            (
+                "jobs insert",
+                "INSERT INTO jobs (job_id, slot_id, generation, attempt, worker, phase, accepted_unix) VALUES ('stale-job', 'scope-1', 1, 1, 'stale', 'assigned', 0)",
+            ),
+            (
+                "jobs update",
+                "UPDATE jobs SET phase = 'tampered' WHERE job_id = 'job-1'",
+            ),
+            (
+                "jobs delete",
+                "DELETE FROM jobs WHERE job_id = 'job-1'",
+            ),
+            (
+                "outbox insert",
+                "INSERT INTO outbox (job_id, slot_id, generation, payload_sha256, created_unix) VALUES ('stale-job', 'scope-1', 1, 'stale', 0)",
+            ),
+            (
+                "outbox update",
+                "UPDATE outbox SET payload_sha256 = 'tampered' WHERE job_id = 'job-1'",
+            ),
+            (
+                "outbox delete",
+                "DELETE FROM outbox WHERE job_id = 'job-1'",
+            ),
+            (
+                "meta insert",
+                "INSERT INTO meta (key, value) VALUES ('stale', 'tampered')",
+            ),
+            (
+                "meta update",
+                "UPDATE meta SET value = 'tampered' WHERE key = 'replay_baseline_sha256_v1'",
+            ),
+            (
+                "meta delete",
+                "DELETE FROM meta WHERE key = 'replay_baseline_v1'",
+            ),
+        ];
+        assert_eq!(blocked_writes.len(), JOURNAL_WRITE_FENCE_TRIGGERS.len());
+        for (label, sql) in blocked_writes {
+            let error = match old_writer.execute(sql, []) {
+                Ok(changed) => panic!("{label} unexpectedly changed {changed} rows"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(JOURNAL_WRITE_FENCE_REASON),
+                "{label} was rejected for the wrong reason: {error}"
+            );
+        }
+
+        assert_eq!(event_count(&upgraded), before_events);
+        assert_eq!(upgraded.materialized_state().unwrap(), before_state);
+        assert_eq!(
+            load_replay_baseline(&upgraded.conn).unwrap(),
+            before_baseline
+        );
+
+        // The same database remains writable through the current API. These
+        // calls exercise both ordinary event materialization and direct meta
+        // overlays while the stale connection remains open.
+        assert!(
+            !upgraded
+                .apply(Event::SlotHeartbeat {
+                    slot_id: slot("scope-1"),
+                    generation,
+                    pid: 42,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(upgraded.set_drain(17).unwrap());
+        assert!(upgraded.clear_drain().unwrap());
+        assert!(upgraded.set_admission_blocked(18).unwrap());
+        assert!(upgraded.clear_admission_blocked_if(Some(18)).unwrap());
+        assert!(event_count(&upgraded) > before_events);
+        assert!(load_replay_baseline(&upgraded.conn).unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_trigger_census_rejects_case_variant_persistent_and_temp_triggers() {
+        let (dir, mut journal) = open_tmp("schema9-case-variant-trigger-census");
+        let guarded_tables = [
+            ("events", "EVENTS", "INSERT"),
+            ("slots", "SLOTS", "INSERT"),
+            ("jobs", "JOBS", "INSERT"),
+            ("outbox", "OUTBOX", "INSERT"),
+            ("meta", "META", "INSERT"),
+            ("journal_write_gate", "JOURNAL_WRITE_GATE", "DELETE"),
+        ];
+        for (index, (_table, case_variant, operation)) in guarded_tables.iter().enumerate() {
+            let persistent_name = format!("rogue_case_persistent_{index}");
+            journal
+                .conn
+                .execute_batch(&format!(
+                    "CREATE TRIGGER {persistent_name}
+                     AFTER {operation} ON \"{case_variant}\"
+                     FOR EACH ROW BEGIN SELECT 1; END;"
+                ))
+                .unwrap();
+            let error = journal.set_drain(index as u64 + 1).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+            journal
+                .conn
+                .execute_batch(&format!("DROP TRIGGER {persistent_name};"))
+                .unwrap();
+
+            let temp_name = format!("rogue_case_temp_{index}");
+            journal
+                .conn
+                .execute_batch(&format!(
+                    "CREATE TEMP TRIGGER {temp_name}
+                     AFTER {operation} ON \"{case_variant}\"
+                     FOR EACH ROW BEGIN SELECT 1; END;"
+                ))
+                .unwrap();
+            let error = journal.set_drain(index as u64 + 100).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+            journal
+                .conn
+                .execute_batch(&format!("DROP TRIGGER {temp_name};"))
+                .unwrap();
+        }
+        assert_eq!(read_drain_state(&dir.join("journal.db")), Ok(None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_v9_writer_rejects_gate_after_delete_reentrancy() {
+        let (dir, mut journal) = open_tmp("schema9-rogue-gate-after-delete");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch(
+                "CREATE TRIGGER rogue_gate_after_delete
+                 AFTER DELETE ON journal_write_gate
+                 FOR EACH ROW
+                 BEGIN
+                     INSERT INTO journal_write_gate (id) VALUES (1);
+                 END;",
+            )
+            .unwrap();
+
+        let error = journal.set_drain(17).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        assert_eq!(read_drain_state(&path), Ok(None));
+        assert_eq!(event_count(&journal), 0);
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_v9_writer_rejects_before_dml_gate_injection() {
+        let (dir, mut journal) = open_tmp("schema9-rogue-before-dml");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch(
+                "CREATE TRIGGER rogue_events_before_insert
+                 BEFORE INSERT ON events
+                 FOR EACH ROW
+                 BEGIN
+                     INSERT OR IGNORE INTO journal_write_gate (id) VALUES (1);
+                 END;",
+            )
+            .unwrap();
+
+        let error = journal.apply(Event::ControlLive).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        assert_eq!(event_count(&journal), 0);
+        assert!(load_replay_baseline(&journal.conn).unwrap().is_some());
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_v9_handle_rejects_fence_removal_before_writing() {
+        let (dir, mut journal) = open_tmp("schema9-fence-removed-live-handle");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&external);
+
+        let error = journal.set_drain(17).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        assert_eq!(read_drain_state(&path), Ok(None));
+
+        restore_journal_write_fence(&external);
+        assert!(journal.set_drain(17).unwrap());
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn checked_reads_reject_baseline_or_fence_tamper_on_open_handle() {
+        let (dir, journal) = open_tmp("schema9-checked-read-tamper");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&external);
+        let error = journal.materialized_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        let error = journal.load_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+
+        restore_journal_write_fence(&external);
+        drop_replay_baseline_fence(&external);
+        external
+            .execute(
+                "DELETE FROM meta WHERE key IN (?1, ?2)",
+                params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+            )
+            .unwrap();
+        restore_journal_write_fence(&external);
+        let error = journal.materialized_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        let error = journal.load_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_rejects_malformed_write_gate_schema_without_installing_fence() {
+        let (dir, journal) = open_tmp("schema9-malformed-write-gate");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute_batch(
+            "DROP TABLE journal_write_gate;
+             CREATE TABLE journal_write_gate (id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+
+        let check = Connection::open(&path).unwrap();
+        let gate_schema: String = check
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'journal_write_gate'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            normalize_sql(&gate_schema),
+            normalize_sql("CREATE TABLE journal_write_gate (id INTEGER PRIMARY KEY);")
+        );
+        let trigger_count: i64 = check
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'journal_write_fence_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 0);
+        assert_eq!(
+            check
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            JOURNAL_SCHEMA_VERSION as i64
+        );
+        assert!(load_replay_baseline(&check).unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_handle_rejects_baseline_deletion_before_state_or_overlay_writes() {
+        let (dir, mut journal) = open_tmp("schema9-write-baseline-missing");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        let direct_error = external
+            .execute("DELETE FROM meta WHERE key = ?1", [REPLAY_BASELINE_KEY])
+            .unwrap_err();
+        assert!(direct_error
+            .to_string()
+            .contains(JOURNAL_WRITE_FENCE_REASON));
+        drop_replay_baseline_fence(&external);
+        external
+            .execute(
+                "DELETE FROM meta WHERE key IN (?1, ?2)",
+                params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+            )
+            .unwrap();
+        drop(external);
+
+        let before_events = event_count(&journal);
+        let error = journal.apply(Event::ControlLive).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        assert_eq!(event_count(&journal), before_events);
+        let error = journal.set_drain(7).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        assert_eq!(read_drain_state(&path), Ok(None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_handle_rejects_baseline_checksum_tamper_before_overlay_write() {
+        let (dir, mut journal) = open_tmp("schema9-write-baseline-checksum");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&external);
+        external
+            .execute(
+                "UPDATE meta SET value = 'tampered' WHERE key = ?1",
+                [REPLAY_BASELINE_CHECKSUM_KEY],
+            )
+            .unwrap();
+        drop(external);
+        let error = journal.set_admission_blocked(11).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.checksum");
+        assert_eq!(read_admission_state(&path), Ok(None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_missing_both_replay_baseline_keys_fails_closed() {
+        let (dir, journal) = open_tmp("schema9-missing-baseline");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_upgrade_baseline_excludes_drain_and_admission_overlays() {
+        let (dir, journal) = open_tmp("legacy-baseline-overlays");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES
+                ('drain', 'requested:7'),
+                ('admission', 'blocked:11')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reopened = Journal::open(&path).unwrap();
+        let baseline: serde_json::Value = serde_json::from_str(
+            &reopened
+                .conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    [REPLAY_BASELINE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let baseline_state = baseline.get("state").unwrap();
+        assert!(baseline_state.get("drain_active").is_none());
+        assert!(baseline_state.get("admission_blocked").is_none());
+        let state = reopened.load_state().unwrap();
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 7);
+        assert!(state.admission_blocked);
+        assert_eq!(state.admission_version, 11);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_rejects_missing_and_unknown_baseline_fields() {
+        fn assert_malformed_baseline(label: &str, mutate: fn(&mut serde_json::Value)) {
+            let (dir, journal) = open_tmp(label);
+            let path = dir.join("journal.db");
+            drop(journal);
+            rewrite_replay_baseline(&path, mutate);
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+        assert_malformed_baseline("missing-state", |value| {
+            value.as_object_mut().unwrap().remove("state");
+        });
+        assert_malformed_baseline("unknown-field", |value| {
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("future_semantic_field".into(), true.into());
+        });
+        assert_malformed_baseline("missing-state-field", |value| {
+            value
+                .get_mut("state")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("control_live");
+        });
+        assert_malformed_baseline("unknown-state-field", |value| {
+            value
+                .get_mut("state")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("future_state_field".into(), true.into());
+        });
+    }
+
+    #[test]
+    fn legacy_v2_migration_writes_and_reloads_from_replay_baseline() {
+        let (dir, journal) = open_tmp("legacy-v2-baseline-write");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+
+        let mut migrated = Journal::open(&path).unwrap();
+        assert!(!migrated.apply(Event::ControlLive).unwrap().rejected);
+        drop(migrated);
+
+        let reopened = Journal::open(&path).unwrap();
+        let state = reopened.load_state().unwrap();
+        assert!(state.control_live);
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.outbox.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_v2_delete_all_post_migration_events_is_rejected() {
+        let (dir, journal) = open_tmp("legacy-v2-delete-all-events");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+
+        let mut migrated = Journal::open(&path).unwrap();
+        migrated.apply(Event::ControlLive).unwrap();
+        drop(migrated);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5051,21 +7053,31 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
 
-        let seed = Connection::open(&path).unwrap();
-        seed.execute(
-            "INSERT INTO slots (
-                 slot_id, generation, phase, permit_held, routing_valid,
-                 session_live, executor_proven, registered, pid, heartbeat_unix
-             ) VALUES ('scope-extra', 1, 'provisioning', 0, 0, 0, 0, 0, NULL, 0)",
-            [],
-        )
-        .unwrap();
+        let mut seed = Connection::open(&path).unwrap();
+        let transaction = seed
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        begin_journal_write_gate(&transaction).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO slots (
+                     slot_id, generation, phase, permit_held, routing_valid,
+                     session_live, executor_proven, registered, pid, heartbeat_unix
+                 ) VALUES ('scope-extra', 1, 'provisioning', 0, 0, 0, 0, 0, NULL, 0)",
+                [],
+            )
+            .unwrap();
+        end_journal_write_gate(&transaction).unwrap();
+        transaction.commit().unwrap();
         seed.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
         drop(seed);
 
         let before = std::fs::read(&path).unwrap();
         let mut reopened = Journal::open(&path).unwrap();
+        let replayed = reopened.load_state().unwrap();
+        assert!(replayed.capacity_invalid);
+        assert_eq!(replayed.slots.len(), 3);
         let state = reopened.materialized_state().unwrap();
         assert!(state.capacity_invalid);
         assert_eq!(state.slots.len(), 3);
@@ -5121,6 +7133,7 @@ mod tests {
 
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
         conn.execute(
             "ALTER TABLE slots ADD COLUMN surge INTEGER NOT NULL DEFAULT 0",
             [],
@@ -5204,6 +7217,7 @@ mod tests {
 
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
         conn.execute_batch(
             "ALTER TABLE jobs RENAME TO jobs_v2;
              CREATE TABLE jobs (
@@ -5568,6 +7582,220 @@ mod tests {
             journal.materialized_state().unwrap().jobs[0].accepted_unix,
             123
         );
+    }
+
+    #[test]
+    fn schema9_reopen_replay_validates_current_event_projection() {
+        let (dir, mut journal) = open_tmp("schema9-replay-valid");
+        journal.apply(Event::ControlLive).unwrap();
+        journal
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap();
+        drop(journal);
+
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        let state = reopened.load_state().unwrap();
+        assert!(state.control_live);
+        assert!(state.github_reachable);
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_materialized_projection_drift() {
+        let (dir, mut journal) = open_tmp("replay-projection-drift");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'control_live'", [])
+            .unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_event_deletion_that_breaks_projection() {
+        let (dir, mut journal) = open_tmp("replay-event-deletion");
+        journal.apply(Event::ControlLive).unwrap();
+        journal
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("DELETE FROM events WHERE kind = 'control_live'", [])
+            .unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_deleting_all_events_with_materialized_state() {
+        let (dir, mut journal) = open_tmp("replay-delete-all-events");
+        journal.apply(Event::ControlLive).unwrap();
+        journal
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_event_payload_checksum_tamper() {
+        let (dir, mut journal) = open_tmp("replay-event-checksum");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "UPDATE events SET payload = '{\"type\":\"dependency\",\"github_reachable\":false}' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.checksum.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_decoded_event_metadata_mismatch() {
+        let (dir, mut journal) = open_tmp("replay-event-metadata");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("UPDATE events SET kind = 'dependency' WHERE id = 1", [])
+            .unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_acquisition_generation_metadata_tamper() {
+        let (dir, mut journal) = open_tmp("replay-acquisition-generation");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "UPDATE events SET generation = 2 WHERE kind = 'job_acquisition_intended'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acquisition_events_bind_generation_metadata() {
+        let generation = Generation(7);
+        let events = [
+            Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("request-1"),
+                generation,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("job-1"),
+                plan_id: "plan-1".into(),
+                generation,
+            },
+            Event::AcquisitionProbeFailed {
+                job_id: job("request-1"),
+                generation,
+            },
+            Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation,
+                reason: "lost".into(),
+            },
+        ];
+        for event in events {
+            assert_eq!(event_generation(&event), generation);
+        }
+    }
+
+    #[test]
+    fn replay_rejects_event_that_reducer_now_rejects() {
+        let (dir, mut journal) = open_tmp("replay-event-rejection");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let event = Event::SlotStale {
+            slot_id: slot("scope-1"),
+            generation: r#gen().next(),
+        };
+        let payload = serde_json::to_string(&event).unwrap();
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "UPDATE events
+             SET generation = ?1, kind = ?2, payload = ?3, checksum = ?4
+             WHERE id = 1",
+            params![
+                event_generation(&event).0 as i64,
+                event_kind(&event),
+                payload,
+                payload_checksum(payload.as_bytes()),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.rejected");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6245,6 +8473,7 @@ mod tests {
         drop(journal);
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
         let payload = r#"{"type":"future_envelope","x":1}"#;
         let checksum = payload_checksum(payload.as_bytes());
         conn.execute(
@@ -6514,7 +8743,7 @@ mod tests {
             .unwrap();
         assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
         assert_eq!(
-            JOURNAL_SCHEMA_VERSION, 8,
+            JOURNAL_SCHEMA_VERSION, 9,
             "this test pins the current upgrade"
         );
         for column in [
@@ -7201,6 +9430,7 @@ mod tests {
         prime_running_job(&mut journal, "scope-1", "job-1");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
         conn.execute("UPDATE slots SET phase = 'running'", [])
             .unwrap();
         conn.pragma_update(None, "user_version", 7u32).unwrap();
