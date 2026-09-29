@@ -45,6 +45,348 @@ pub const JOB_CONTAINER_NAME_PREFIX: &str = "velnor-job-";
 pub const BUILDKIT_CONTAINER_NAME_PREFIX: &str = "buildx_buildkit_velnor-builder-";
 const UNIX_SOCKET_PATH_LIMIT: usize = 100;
 
+/// The immutable Docker handle retained after a successful create/inspect.
+/// Names are discovery keys only; lifecycle mutations use this ID so a
+/// same-name replacement cannot be stopped or removed by retry cleanup.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DockerObjectIds {
+    pub(crate) job_container: Option<String>,
+    pub(crate) services: BTreeMap<String, String>,
+    pub(crate) network: Option<String>,
+}
+
+/// Docker's inspect projection used by runner-owned cleanup preflight. It
+/// deliberately excludes `.Config.Env`, which can contain workflow secrets.
+pub(crate) const CONTAINER_IDENTITY_FORMAT: &str = r#"{{json .Id}}{{"\t"}}{{json .Name}}{{"\t"}}{{json .Config.Image}}{{"\t"}}{{json .Config.Labels}}{{"\t"}}{{json .HostConfig.NetworkMode}}{{"\t"}}{{json .Path}}{{"\t"}}{{json .Args}}{{"\t"}}{{json .State.Status}}"#;
+pub(crate) const NETWORK_IDENTITY_FORMAT: &str =
+    r#"{{json .Id}}{{"\t"}}{{json .Name}}{{"\t"}}{{json .Driver}}{{"\t"}}{{json .Labels}}"#;
+pub(crate) const VOLUME_IDENTITY_FORMAT: &str =
+    r#"{{json .Name}}{{"\t"}}{{json .Driver}}{{"\t"}}{{json .Labels}}"#;
+
+pub(crate) fn inspect_container_identity_args(target: &str) -> Vec<String> {
+    vec![
+        "inspect".into(),
+        "--format".into(),
+        CONTAINER_IDENTITY_FORMAT.into(),
+        "--".into(),
+        target.into(),
+    ]
+}
+
+pub(crate) fn inspect_network_identity_args(target: &str) -> Vec<String> {
+    vec![
+        "network".into(),
+        "inspect".into(),
+        "--format".into(),
+        NETWORK_IDENTITY_FORMAT.into(),
+        "--".into(),
+        target.into(),
+    ]
+}
+
+pub(crate) fn inspect_volume_identity_args(target: &str) -> Vec<String> {
+    vec![
+        "volume".into(),
+        "inspect".into(),
+        "--format".into(),
+        VOLUME_IDENTITY_FORMAT.into(),
+        "--".into(),
+        target.into(),
+    ]
+}
+
+/// Parse the single object ID printed by `docker create`, `docker run --detach`,
+/// or `docker network create`. Empty output is retained as `None` for test
+/// doubles and older Docker wrappers; production cleanup then performs the
+/// attested name lookup before mutating anything.
+pub(crate) fn parse_created_object_id(stdout: &str) -> Option<String> {
+    let id = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    validate_owned_resource_id(id, "created Docker object").ok()
+}
+
+fn parse_identity_fields<'a>(output: &'a str, expected: usize, kind: &str) -> Result<Vec<&'a str>> {
+    let fields = output.trim().split('\t').collect::<Vec<_>>();
+    if fields.len() != expected || fields.iter().any(|field| field.trim().is_empty()) {
+        bail!("Docker {kind} identity projection is malformed: expected {expected} fields");
+    }
+    Ok(fields)
+}
+
+fn parse_identity_json<T: serde::de::DeserializeOwned>(field: &str, kind: &str) -> Result<T> {
+    serde_json::from_str(field).with_context(|| format!("parse Docker {kind} identity field"))
+}
+
+fn ids_match(expected: Option<&str>, observed: &str) -> bool {
+    expected.is_none_or(|expected| expected == observed)
+}
+
+/// Verify one runner-owned container's immutable image, labels, network mode,
+/// command, and lifecycle projection, returning its full daemon ID.
+pub(crate) fn attest_container_identity(
+    output: &str,
+    expected_id: Option<&str>,
+    expected_name: &str,
+    expected_image: &str,
+    expected_network: &str,
+    job_id: &str,
+    daemon_id: &str,
+    expected_command: Option<&[&str]>,
+) -> Result<String> {
+    attest_container_identity_impl(
+        output,
+        expected_id,
+        expected_name,
+        expected_image,
+        expected_network,
+        Some((job_id, daemon_id)),
+        expected_command,
+    )
+}
+
+/// Attest a runner-started service container. Services are created by the
+/// host runner's Docker CLI and historically do not carry the lease labels;
+/// their immutable create ID, image, and network still bind cleanup safely.
+pub(crate) fn attest_service_container_identity(
+    output: &str,
+    expected_id: Option<&str>,
+    expected_name: &str,
+    expected_image: &str,
+    expected_network: &str,
+) -> Result<String> {
+    attest_container_identity_impl(
+        output,
+        expected_id,
+        expected_name,
+        expected_image,
+        expected_network,
+        None,
+        None,
+    )
+}
+
+fn attest_container_identity_impl(
+    output: &str,
+    expected_id: Option<&str>,
+    expected_name: &str,
+    expected_image: &str,
+    expected_network: &str,
+    expected_labels: Option<(&str, &str)>,
+    expected_command: Option<&[&str]>,
+) -> Result<String> {
+    let fields = parse_identity_fields(output, 8, "container")?;
+    let id: String = parse_identity_json(fields[0], "container id")?;
+    let name: String = parse_identity_json(fields[1], "container name")?;
+    let image: String = parse_identity_json(fields[2], "container image")?;
+    let labels: Option<BTreeMap<String, String>> =
+        parse_identity_json(fields[3], "container labels")?;
+    let network: String = parse_identity_json(fields[4], "container network")?;
+    let path: String = parse_identity_json(fields[5], "container command path")?;
+    let args: Vec<String> = parse_identity_json(fields[6], "container command args")?;
+    let state: String = parse_identity_json(fields[7], "container state")?;
+    let labels = match (expected_labels, labels) {
+        (Some(_), None) => bail!("Docker container identity omitted ownership labels"),
+        (_, Some(labels)) => labels,
+        (None, None) => BTreeMap::new(),
+    };
+    if id.is_empty() || !ids_match(expected_id, &id) {
+        bail!("Docker container identity ID mismatch");
+    }
+    let observed_name = name.strip_prefix('/').unwrap_or(name.as_str());
+    if observed_name != expected_name {
+        bail!("Docker container name mismatch: expected {expected_name:?}, found {name:?}");
+    }
+    if image != expected_image {
+        bail!("Docker container image mismatch: expected {expected_image:?}, found {image:?}");
+    }
+    if let Some((job_id, daemon_id)) = expected_labels
+        && (labels.get(JOB_ID_LABEL).map(String::as_str) != Some(job_id)
+            || labels.get(DAEMON_ID_LABEL).map(String::as_str) != Some(daemon_id))
+    {
+        bail!("Docker container ownership labels do not match the recorded job");
+    }
+    if network != expected_network {
+        bail!(
+            "Docker container network mismatch: expected {expected_network:?}, found {network:?}"
+        );
+    }
+    if let Some(expected) = expected_command {
+        let mut observed = Vec::with_capacity(1 + args.len());
+        // Docker may render the image's shell as `sh` or its resolved
+        // `/bin/sh`; a custom image entrypoint may prefix the requested
+        // command, so require the runner supervisor command as the exact
+        // final argv suffix while retaining every byte.
+        observed.push(path.rsplit('/').next().unwrap_or(path.as_str()));
+        observed.extend(args.iter().map(String::as_str));
+        if observed != expected && !observed.ends_with(expected) {
+            bail!("Docker container command mismatch");
+        }
+    }
+    if crate::docker::client::ContainerState::parse(&state).is_none() {
+        bail!("Docker container identity returned unknown lifecycle state {state:?}");
+    }
+    Ok(id)
+}
+
+/// Verify a runner-owned network's immutable driver and labels, returning its
+/// full daemon ID.
+pub(crate) fn attest_network_identity(
+    output: &str,
+    expected_id: Option<&str>,
+    expected_name: &str,
+    job_id: &str,
+    daemon_id: &str,
+) -> Result<String> {
+    let fields = parse_identity_fields(output, 4, "network")?;
+    let id: String = parse_identity_json(fields[0], "network id")?;
+    let name: String = parse_identity_json(fields[1], "network name")?;
+    let driver: String = parse_identity_json(fields[2], "network driver")?;
+    let labels: Option<BTreeMap<String, String>> =
+        parse_identity_json(fields[3], "network labels")?;
+    let labels = labels.context("Docker network identity omitted ownership labels")?;
+    if id.is_empty() || !ids_match(expected_id, &id) {
+        bail!("Docker network identity ID mismatch for {expected_name}");
+    }
+    if name != expected_name {
+        bail!("Docker network name mismatch: expected {expected_name:?}, found {name:?}");
+    }
+    if driver != "bridge" {
+        bail!("Docker network {expected_name} has unexpected driver {driver:?}");
+    }
+    if labels.get(JOB_ID_LABEL).map(String::as_str) != Some(job_id)
+        || labels.get(DAEMON_ID_LABEL).map(String::as_str) != Some(daemon_id)
+    {
+        bail!("Docker network {expected_name} ownership labels do not match the recorded job");
+    }
+    Ok(id)
+}
+
+/// Verify a named volume's immutable name, driver, and ownership labels. A
+/// Docker volume has no separate daemon ID; its exact name is its identity.
+pub(crate) fn attest_volume_identity(
+    output: &str,
+    expected_name: &str,
+    job_id: &str,
+    daemon_id: Option<&str>,
+) -> Result<String> {
+    let identity = parse_volume_identity(output)?;
+    attest_volume_identity_fields(&identity, expected_name, job_id, daemon_id)
+}
+
+#[derive(Debug, Clone)]
+struct VolumeIdentity {
+    name: String,
+    driver: String,
+    labels: BTreeMap<String, String>,
+}
+
+fn parse_volume_identity(output: &str) -> Result<VolumeIdentity> {
+    let fields = parse_identity_fields(output, 3, "volume")?;
+    let name: String = parse_identity_json(fields[0], "volume name")?;
+    let driver: String = parse_identity_json(fields[1], "volume driver")?;
+    let labels: Option<BTreeMap<String, String>> = parse_identity_json(fields[2], "volume labels")?;
+    Ok(VolumeIdentity {
+        name,
+        driver,
+        labels: labels.context("Docker volume identity omitted ownership labels")?,
+    })
+}
+
+fn attest_volume_identity_fields(
+    identity: &VolumeIdentity,
+    expected_name: &str,
+    job_id: &str,
+    daemon_id: Option<&str>,
+) -> Result<String> {
+    if identity.name != expected_name {
+        bail!(
+            "Docker volume identity name mismatch: expected {expected_name:?}, found {:?}",
+            identity.name
+        );
+    }
+    if identity.driver != "local" {
+        bail!(
+            "Docker volume {expected_name} has unexpected driver {:?}",
+            identity.driver
+        );
+    }
+    if identity.labels.get(JOB_ID_LABEL).map(String::as_str) != Some(job_id) {
+        bail!("Docker volume {expected_name} job ownership label mismatch");
+    }
+    if let Some(daemon_id) = daemon_id
+        && identity.labels.get(DAEMON_ID_LABEL).map(String::as_str) != Some(daemon_id)
+    {
+        bail!("Docker volume {expected_name} daemon ownership label mismatch");
+    }
+    Ok(identity.name.clone())
+}
+
+/// Return the BuildKit builder scope encoded by a state volume name. The
+/// suffix is a structural check only; ownership comes from the inspected
+/// `velnor.job-id` label, never from a name-derived default job ID.
+fn buildkit_volume_scope(name: &str) -> Option<&str> {
+    if crate::buildkit::is_persistent_builder_object(name) {
+        return None;
+    }
+    let scope = name
+        .strip_prefix(BUILDKIT_CONTAINER_NAME_PREFIX)?
+        .strip_suffix("_state")?
+        .strip_suffix('0')?;
+    if scope.is_empty() || matches!(scope, "." | "..") {
+        return None;
+    }
+    scope
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+        .then_some(scope)
+}
+
+/// Attest a generic orphan BuildKit volume. The job ID is taken from the
+/// current inspect labels and validated again by callers immediately before
+/// removal. This accepts legacy custom builder names as well as the default
+/// name while excluding persistent shared state.
+fn attest_orphan_buildkit_volume(
+    output: &str,
+    expected_name: &str,
+    protected_jobs: &BTreeSet<String>,
+    daemon_id: Option<&str>,
+) -> Result<Option<String>> {
+    let identity = parse_volume_identity(output)?;
+    let Some(_scope) = buildkit_volume_scope(expected_name) else {
+        bail!("Docker volume {expected_name} is not a removable legacy BuildKit state volume");
+    };
+    if identity.name != expected_name {
+        bail!(
+            "Docker volume identity name mismatch: expected {expected_name:?}, found {:?}",
+            identity.name
+        );
+    }
+    if identity.driver != "local" {
+        bail!(
+            "Docker volume {expected_name} has unexpected driver {:?}",
+            identity.driver
+        );
+    }
+    let Some(job_id) = identity
+        .labels
+        .get(JOB_ID_LABEL)
+        .filter(|id| !id.is_empty())
+    else {
+        bail!("Docker volume {expected_name} omitted the Velnor job ownership label");
+    };
+    if protected_jobs.contains(job_id) {
+        return Ok(None);
+    }
+    if let Some(daemon_id) = daemon_id
+        && identity.labels.get(DAEMON_ID_LABEL).map(String::as_str) != Some(daemon_id)
+    {
+        bail!("Docker volume {expected_name} daemon ownership label mismatch");
+    }
+    Ok(Some(job_id.clone()))
+}
+
 const MAX_PROXY_BODY: usize = 32 * 1024 * 1024;
 const MAX_PROXY_HEADER: usize = 64 * 1024;
 const MAX_PROXY_LINE: usize = 8 * 1024;
@@ -832,22 +1174,32 @@ pub fn force_remove_network_args(ids: &[String]) -> Vec<String> {
 /// network removal itself failed — used to leak the network. Enough leaked
 /// `velnor-net-*` networks exhaust Docker's address pool and then EVERY new
 /// job fails ("all predefined address pools have been fully subnetted"). The
-/// guard makes the executor own the network for its whole lifetime: dropping
-/// it while still armed removes the network. Docker refuses to remove a
-/// network with active endpoints, so a guard that fires while a job container
-/// is still attached cannot break a live job — it fails best-effort and the
-/// periodic empty-network sweep removes it once the job is gone.
+/// guard makes the executor own the network for its whole lifetime when its
+/// immutable ID is known: dropping it while still armed removes that ID.
+/// Unknown identities fail closed. Docker refuses to remove a network with
+/// active endpoints, so a guard that fires while a job container is still
+/// attached cannot break a live job — it fails best-effort and the periodic
+/// empty-network sweep removes it once the job is gone.
 pub struct JobNetworkGuard {
     network: String,
+    network_id: Option<String>,
     armed: bool,
 }
 
 impl JobNetworkGuard {
     /// Arm the guard for `network`. Call [`JobNetworkGuard::defuse`] after
     /// terminal cleanup has removed the network itself.
+    #[allow(dead_code)]
     pub fn arm(network: impl Into<String>) -> Self {
+        Self::arm_with_id(network, None)
+    }
+
+    /// Arm the guard with the ID returned by `network create` or an attested
+    /// inspect. The name remains for diagnostics only; Drop mutates by ID.
+    pub fn arm_with_id(network: impl Into<String>, network_id: Option<String>) -> Self {
         Self {
             network: network.into(),
+            network_id,
             armed: true,
         }
     }
@@ -865,7 +1217,14 @@ impl Drop for JobNetworkGuard {
             return;
         }
         self.armed = false;
-        let args = force_remove_network_args(std::slice::from_ref(&self.network));
+        let Some(network_id) = self.network_id.as_deref() else {
+            eprintln!(
+                "Warning: refusing job network drop cleanup for {}: immutable ID is unknown",
+                self.network
+            );
+            return;
+        };
+        let args = force_remove_network_args(&[network_id.to_owned()]);
         if let Err(error) = docker_client::host_call(&args) {
             eprintln!(
                 "Warning: job network drop-guard removal failed for {}: {error:#}",
@@ -897,6 +1256,20 @@ fn reclaim_orphan_job_buildkit(
         daemon_id,
         docker,
     )
+}
+
+fn refresh_live_buildkit_jobs(
+    daemon_id: Option<&str>,
+    docker: &mut impl FnMut(&[String]) -> Result<String>,
+) -> Result<BTreeSet<String>> {
+    let formatted = match daemon_id {
+        Some(_) => docker(&list_daemon_owned_job_format_args())?,
+        None => docker(&list_owned_job_format_args())?,
+    };
+    Ok(match daemon_id {
+        Some(daemon_id) => docker_client::live_daemon_job_ids(&formatted, daemon_id),
+        None => docker_client::live_job_ids(&formatted),
+    })
 }
 
 fn reclaim_orphan_job_buildkit_with_live(
@@ -932,52 +1305,108 @@ fn reclaim_orphan_job_buildkit_with_live(
     if !ids.is_empty() {
         remove_containers_serially(&ids, |args| docker(args).map(|_| ()))?;
     }
-    // Re-list jobs immediately before volume deletion. A job can become live
-    // after the container revalidation above, and a not-yet-attached BuildKit
-    // volume is otherwise removable even though the job now owns it.
-    let volume_protected_jobs = match daemon_id {
-        Some(_) => docker(&list_daemon_owned_job_format_args())?,
-        None => docker(&list_owned_job_format_args())?,
-    };
-    let volume_protected_jobs = match daemon_id {
-        Some(daemon_id) => docker_client::live_daemon_job_ids(&volume_protected_jobs, daemon_id),
-        None => docker_client::live_job_ids(&volume_protected_jobs),
-    };
     let volume_ids = match daemon_id {
         Some(daemon_id) => {
-            let volumes = docker(&list_daemon_owned_job_buildkit_volume_format_args())?;
-            docker_client::daemon_owned_buildkit_volume_names(
-                &volumes,
-                daemon_id,
-                &volume_protected_jobs,
-            )
+            let listed = docker(&list_daemon_owned_job_buildkit_volume_format_args())?;
+            let initial = daemon_owned_orphan_buildkit_volume_names(&listed, daemon_id);
+            if initial.is_empty() {
+                Vec::new()
+            } else {
+                let revalidated = docker(&list_daemon_owned_job_buildkit_volume_format_args())?;
+                let revalidated =
+                    daemon_owned_orphan_buildkit_volume_names(&revalidated, daemon_id);
+                initial
+                    .into_iter()
+                    .filter(|name| revalidated.binary_search(name).is_ok())
+                    .collect()
+            }
         }
         None => {
-            let volumes = docker(&list_job_buildkit_volume_args())?;
-            volumes
-                .lines()
-                .map(str::trim)
-                .filter(|name| !name.is_empty() && name.contains(BUILDKIT_CONTAINER_NAME_PREFIX))
-                .filter(|name| {
-                    let scope = name
-                        .strip_prefix(BUILDKIT_CONTAINER_NAME_PREFIX)
-                        .unwrap_or(name);
-                    let scope = scope.strip_suffix("_state").unwrap_or(scope);
-                    let scope = scope.strip_suffix('0').unwrap_or(scope);
-                    let job = format!("velnor-job-{scope}");
-                    !volume_protected_jobs.contains(&job)
-                        && !volume_protected_jobs
-                            .iter()
-                            .any(|live| name.contains(live.trim_start_matches("velnor-job-")))
-                })
-                .map(ToOwned::to_owned)
-                .collect()
+            let listed = docker(&list_job_buildkit_volume_args())?;
+            let initial = orphan_job_buildkit_volume_names(&listed);
+            if initial.is_empty() {
+                Vec::new()
+            } else {
+                // A name-only volume listing is a discovery hint. Re-list
+                // immediately before any inspect/delete so a volume created
+                // after the first scan cannot enter the mutation set.
+                let revalidated = docker(&list_job_buildkit_volume_args())?;
+                let revalidated = orphan_job_buildkit_volume_names(&revalidated);
+                initial
+                    .into_iter()
+                    .filter(|name| revalidated.binary_search(name).is_ok())
+                    .collect()
+            }
         }
     };
-    if !volume_ids.is_empty() {
-        docker(&remove_volume_args(&volume_ids)).map(|_| ())?;
+    // Volumes have no immutable daemon ID. Before each name-based delete,
+    // require the exact local driver, name, and Velnor job label. Persistent
+    // BuildKit state is excluded by the candidate parser above. A replacement
+    // or malformed projection is left untouched; a missing volume is already
+    // clean.
+    for volume in volume_ids {
+        let inspected = match docker(&inspect_volume_identity_args(&volume)) {
+            Ok(inspected) => inspected,
+            Err(error) if docker_client::is_not_found(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let Ok(Some(job_id)) =
+            attest_orphan_buildkit_volume(&inspected, &volume, &BTreeSet::new(), daemon_id)
+        else {
+            continue;
+        };
+        // A volume has no compare-and-delete handle. Re-attest the exact
+        // name, local driver, scope, job label, and daemon label directly
+        // before the one-name removal so a same-name replacement is left
+        // untouched.
+        let current = match docker(&inspect_volume_identity_args(&volume)) {
+            Ok(current) => current,
+            Err(error) if docker_client::is_not_found(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        // Refresh liveness immediately before each state-volume deletion. A
+        // job can start after the candidate scan; one snapshot for the whole
+        // batch would let a newly live job lose its BuildKit state volume.
+        let current_live_jobs = refresh_live_buildkit_jobs(daemon_id, docker)?;
+        let Ok(Some(current_job_id)) =
+            attest_orphan_buildkit_volume(&current, &volume, &current_live_jobs, daemon_id)
+        else {
+            continue;
+        };
+        if current_job_id != job_id {
+            continue;
+        }
+        match docker(&remove_volume_args(std::slice::from_ref(&volume))) {
+            Ok(_) => {}
+            Err(error) if docker_client::is_not_found(&error) => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(())
+}
+
+fn orphan_job_buildkit_volume_names(formatted: &str) -> Vec<String> {
+    let mut names = formatted
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter(|name| buildkit_volume_scope(name).is_some())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn daemon_owned_orphan_buildkit_volume_names(formatted: &str, daemon_id: &str) -> Vec<String> {
+    let mut names =
+        docker_client::daemon_owned_buildkit_volume_names(formatted, daemon_id, &BTreeSet::new())
+            .into_iter()
+            .filter(|name| buildkit_volume_scope(name).is_some())
+            .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 #[allow(dead_code)]
@@ -2011,6 +2440,16 @@ pub struct JobOwnedSnapshot {
     pub volumes: Vec<String>,
 }
 
+/// Outcome of the two-snapshot startup reclaim gate. A live job is a safety
+/// boundary, not a successful cleanup: callers must preserve its immutable
+/// handles and stop before resetting the retry generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaleJobReclaim {
+    Reclaimed,
+    ProtectedLive,
+    Unknown,
+}
+
 /// List the three owned kinds through the Engine-routed facade: one API
 /// call each on the fast path, the historical `ps`/`network ls`/`volume ls`
 /// on fallback.
@@ -2047,8 +2486,17 @@ pub fn remove_job_owned(
     if !snapshot.networks.is_empty() {
         remove(&force_remove_network_args(&snapshot.networks))?;
     }
-    if !snapshot.volumes.is_empty() {
-        remove(&force_remove_volume_args(&snapshot.volumes))?;
+    // Persistent BuildKit state is shared across jobs. Claim release and the
+    // dedicated BuildKit cleanup own those names; generic job teardown must
+    // never remove them just because the creating job label is present.
+    let volumes = snapshot
+        .volumes
+        .iter()
+        .filter(|volume| !crate::buildkit::is_persistent_builder_object(volume))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !volumes.is_empty() {
+        remove(&force_remove_volume_args(&volumes))?;
     }
     Ok(())
 }
@@ -2091,12 +2539,43 @@ pub fn reclaim_stale_job_owned(
         &mut docker,
         force_remove_network_args,
     )?;
-    reclaim_listed(
-        &list_owned_volumes_args(job_id),
-        &mut docker,
-        remove_volume_args,
-    )?;
+    reclaim_listed_non_persistent_volumes(job_id, &list_owned_volumes_args(job_id), &mut docker)?;
     Ok(())
+}
+
+/// Startup-retry variant of [`reclaim_stale_job_owned`] that removes only
+/// stopped, revalidated containers. The caller owns the immutable network and
+/// service handles and must attest those objects separately before deletion;
+/// a label-only network/volume sweep here would erase an object whose create
+/// response was lost during a partial start.
+pub fn reclaim_stale_job_owned_containers(
+    job_id: &str,
+    mut docker: impl FnMut(&[String]) -> Result<String>,
+) -> Result<StaleJobReclaim> {
+    let list_args = list_owned_containers_state_args(job_id);
+    let initial = docker(&list_args)?;
+    let Some(initial) = docker_client::stale_job_owned_snapshot(job_id, &initial) else {
+        return Ok(StaleJobReclaim::Unknown);
+    };
+    if !initial.job_container_absent_or_stopped {
+        return Ok(StaleJobReclaim::ProtectedLive);
+    }
+    let revalidated = docker(&list_args)?;
+    let Some(revalidated) = docker_client::stale_job_owned_snapshot(job_id, &revalidated) else {
+        return Ok(StaleJobReclaim::Unknown);
+    };
+    if !revalidated.job_container_absent_or_stopped {
+        return Ok(StaleJobReclaim::ProtectedLive);
+    }
+    let ids = initial
+        .stopped_container_ids
+        .into_iter()
+        .filter(|id| revalidated.stopped_container_ids.binary_search(id).is_ok())
+        .collect::<Vec<_>>();
+    if !ids.is_empty() {
+        remove_containers_serially(&ids, |args| docker(args).map(|_| ()))?;
+    }
+    Ok(StaleJobReclaim::Reclaimed)
 }
 
 /// Force-remove every container carrying `velnor.job-id=<job_id>`, running or
@@ -2194,6 +2673,70 @@ fn reclaim_listed(
         return Ok(());
     }
     docker(&remove_args(&ids)).map(|_| ())
+}
+
+fn reclaim_listed_non_persistent_volumes(
+    job_id: &str,
+    list_args: &[String],
+    docker: &mut impl FnMut(&[String]) -> Result<String>,
+) -> Result<()> {
+    let listed = docker(list_args)?;
+    let names = docker_client::parse_id_list(&listed)
+        .into_iter()
+        .filter(|name| !crate::buildkit::is_persistent_builder_object(name))
+        .collect::<Vec<_>>();
+    for name in names {
+        // The initial label-filtered list is discovery only. Re-list this
+        // exact name immediately before each inspect so a replacement that
+        // appeared after the scan cannot be treated as the old volume.
+        let current = docker(list_args)?;
+        if !docker_client::parse_id_list(&current)
+            .iter()
+            .any(|id| id == &name)
+        {
+            continue;
+        }
+        let inspected = match docker(&inspect_volume_identity_args(&name)) {
+            Ok(inspected) => inspected,
+            Err(error) if docker_client::is_not_found(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if attest_volume_identity(&inspected, &name, job_id, None).is_err() {
+            continue;
+        }
+        // Re-list and re-inspect directly before removal. Docker volume rm
+        // accepts only the name, so these two checks are the ownership guard
+        // against a same-name replacement between inspect and rm.
+        let current = docker(list_args)?;
+        if !docker_client::parse_id_list(&current)
+            .iter()
+            .any(|id| id == &name)
+        {
+            continue;
+        }
+        let reattested = match docker(&inspect_volume_identity_args(&name)) {
+            Ok(reattested) => reattested,
+            Err(error) if docker_client::is_not_found(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if attest_volume_identity(&reattested, &name, job_id, None).is_err() {
+            continue;
+        }
+        // Startup reclaim begins from a stopped snapshot, but the owner can
+        // restart between that snapshot and this name-based delete. Refresh
+        // the owner listing immediately before every legacy state-volume rm;
+        // a live owner wins and all remaining volumes stay untouched.
+        let owner_listing = docker(&list_owned_job_format_args())?;
+        if docker_client::live_job_ids(&owner_listing).contains(job_id) {
+            return Ok(());
+        }
+        match docker(&remove_volume_args(std::slice::from_ref(&name))) {
+            Ok(_) => {}
+            Err(error) if docker_client::is_not_found(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 pub struct DockerLeaseGuard {
@@ -3821,13 +4364,21 @@ mod tests {
     }
 
     #[test]
+    fn job_network_guard_without_id_refuses_name_fallback() {
+        // A partial create has no safe mutation handle. Drop must leave the
+        // deterministic name untouched rather than resolving a replacement.
+        drop(JobNetworkGuard::arm_with_id("velnor-net-unknown", None));
+    }
+
+    #[test]
     fn job_network_guard_armed_drop_attempts_forced_removal() {
         // Armed drop shells out to the host docker CLI (no injectable runner),
         // so only assert the removable-args contract it relies on: a forced
-        // `network rm` of exactly the guarded network.
-        let args = force_remove_network_args(&["velnor-net-guarded".to_string()]);
-        assert_eq!(args, vec!["network", "rm", "velnor-net-guarded"]);
-        let guard = JobNetworkGuard::arm("velnor-net-guarded");
+        // `network rm` of exactly the captured immutable network ID.
+        let args = force_remove_network_args(&["network-id".to_string()]);
+        assert_eq!(args, vec!["network", "rm", "network-id"]);
+        let guard =
+            JobNetworkGuard::arm_with_id("velnor-net-guarded", Some("network-id".to_owned()));
         drop(guard);
     }
 
@@ -3849,6 +4400,123 @@ mod tests {
             String::from_utf8_lossy(body)
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn immutable_identity_attestation_binds_id_labels_image_network_and_command() {
+        let labels = BTreeMap::from([
+            (JOB_ID_LABEL.to_owned(), "job".to_owned()),
+            (DAEMON_ID_LABEL.to_owned(), "daemon".to_owned()),
+        ]);
+        let output = [
+            serde_json::to_string("container-full-id").unwrap(),
+            serde_json::to_string("/velnor-job-job").unwrap(),
+            serde_json::to_string("ubuntu@sha256:image").unwrap(),
+            serde_json::to_string(&labels).unwrap(),
+            serde_json::to_string("velnor-net").unwrap(),
+            serde_json::to_string("/bin/sh").unwrap(),
+            serde_json::to_string(&vec!["-c", "runner-command"]).unwrap(),
+            serde_json::to_string("exited").unwrap(),
+        ]
+        .join("\t");
+        let id = attest_container_identity(
+            &output,
+            Some("container-full-id"),
+            "velnor-job-job",
+            "ubuntu@sha256:image",
+            "velnor-net",
+            "job",
+            "daemon",
+            Some(&["sh", "-c", "runner-command"]),
+        )
+        .unwrap();
+        assert_eq!(id, "container-full-id");
+        let custom_entrypoint = [
+            serde_json::to_string("container-full-id").unwrap(),
+            serde_json::to_string("/velnor-job-job").unwrap(),
+            serde_json::to_string("ubuntu@sha256:image").unwrap(),
+            serde_json::to_string(&labels).unwrap(),
+            serde_json::to_string("velnor-net").unwrap(),
+            serde_json::to_string("/usr/local/bin/entrypoint").unwrap(),
+            serde_json::to_string(&vec!["sh", "-c", "runner-command"]).unwrap(),
+            serde_json::to_string("exited").unwrap(),
+        ]
+        .join("\t");
+        assert_eq!(
+            attest_container_identity(
+                &custom_entrypoint,
+                Some("container-full-id"),
+                "velnor-job-job",
+                "ubuntu@sha256:image",
+                "velnor-net",
+                "job",
+                "daemon",
+                Some(&["sh", "-c", "runner-command"]),
+            )
+            .unwrap(),
+            "container-full-id"
+        );
+        let error = attest_container_identity(
+            &output,
+            Some("replacement-id"),
+            "velnor-job-job",
+            "ubuntu@sha256:image",
+            "velnor-net",
+            "job",
+            "daemon",
+            Some(&["sh", "-c", "runner-command"]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("identity ID mismatch"));
+    }
+
+    #[test]
+    fn immutable_identity_attestation_rejects_foreign_network_and_volume() {
+        let labels = BTreeMap::from([
+            (JOB_ID_LABEL.to_owned(), "job".to_owned()),
+            (DAEMON_ID_LABEL.to_owned(), "daemon".to_owned()),
+        ]);
+        let network = [
+            serde_json::to_string("network-full-id").unwrap(),
+            serde_json::to_string("velnor-net").unwrap(),
+            serde_json::to_string("bridge").unwrap(),
+            serde_json::to_string(&labels).unwrap(),
+        ]
+        .join("\t");
+        assert_eq!(
+            attest_network_identity(
+                &network,
+                Some("network-full-id"),
+                "velnor-net",
+                "job",
+                "daemon"
+            )
+            .unwrap(),
+            "network-full-id"
+        );
+        let mut foreign = labels.clone();
+        foreign.insert(JOB_ID_LABEL.to_owned(), "other-job".to_owned());
+        let foreign_network = [
+            serde_json::to_string("network-full-id").unwrap(),
+            serde_json::to_string("velnor-net").unwrap(),
+            serde_json::to_string("bridge").unwrap(),
+            serde_json::to_string(&foreign).unwrap(),
+        ]
+        .join("\t");
+        assert!(
+            attest_network_identity(&foreign_network, None, "velnor-net", "job", "daemon").is_err()
+        );
+
+        let volume = [
+            serde_json::to_string("volume-job").unwrap(),
+            serde_json::to_string("local").unwrap(),
+            serde_json::to_string(&labels).unwrap(),
+        ]
+        .join("\t");
+        assert_eq!(
+            attest_volume_identity(&volume, "volume-job", "job", Some("daemon")).unwrap(),
+            "volume-job"
+        );
     }
 
     #[cfg(unix)]
@@ -5152,6 +5820,29 @@ mod tests {
     }
 
     #[test]
+    fn remove_job_owned_preserves_persistent_buildkit_volumes() {
+        let snapshot = JobOwnedSnapshot {
+            containers: Vec::new(),
+            networks: Vec::new(),
+            volumes: vec![
+                "job-cache".into(),
+                "buildx_buildkit_velnor-builder-shared-repo_state".into(),
+            ],
+        };
+        let mut removals = Vec::new();
+        remove_job_owned(&snapshot, |args| {
+            removals.push(args.to_vec());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            removals,
+            vec![force_remove_volume_args(&["job-cache".into()])]
+        );
+    }
+
+    #[test]
     fn reclaim_stale_job_owned_skips_all_deletes_for_unknown_state() {
         let job_id = "velnor-job-unknown";
         let mut calls = Vec::new();
@@ -5203,6 +5894,36 @@ mod tests {
     }
 
     #[test]
+    fn reclaim_stale_job_owned_refreshes_liveness_before_volume_remove() {
+        let job_id = "velnor-job-volume-live-race";
+        let snapshot = format!("guest-id\tguest-container\t{job_id}\texited\n");
+        let volume = "job-cache";
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            snapshot.clone(),
+            snapshot,
+            String::new(),
+            String::new(),
+            format!("{volume}\n"),
+            format!("{volume}\n"),
+            format!("{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"{job_id}\"}}\n"),
+            format!("{volume}\n"),
+            format!("{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"{job_id}\"}}\n"),
+            format!("{job_id}\t{job_id}\trunning\n"),
+        ];
+        reclaim_stale_job_owned(job_id, |args| {
+            calls.push(args.to_vec());
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+
+        assert_eq!(calls.last().unwrap(), &list_owned_job_format_args());
+        assert!(!calls
+            .iter()
+            .any(|call| call == &remove_volume_args(&[volume.to_owned()])));
+    }
+
+    #[test]
     fn reclaim_stale_job_owned_removes_without_force() {
         let job_id = "velnor-job-stale";
         let snapshot = format!("guest-id\tguest-container\t{job_id}\texited\n");
@@ -5214,6 +5935,11 @@ mod tests {
             "guest-net\n".to_string(),
             String::new(),
             "guest-vol\n".to_string(),
+            "guest-vol\n".to_string(),
+            "\"guest-vol\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-stale\"}\n".to_string(),
+            "guest-vol\n".to_string(),
+            "\"guest-vol\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-stale\"}\n".to_string(),
+            format!("velnor-job-stale\tvelnor-job-stale\texited\n"),
             String::new(),
         ];
         reclaim_stale_job_owned(job_id, |args| {
@@ -5222,12 +5948,90 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(calls[2], remove_container_args(&["guest-id".into()]));
-        assert_eq!(calls[4], force_remove_network_args(&["guest-net".into()]));
-        assert_eq!(calls[6], remove_volume_args(&["guest-vol".into()]));
+        assert!(calls
+            .iter()
+            .any(|call| call == &remove_container_args(&["guest-id".into()])));
+        assert!(calls
+            .iter()
+            .any(|call| call == &force_remove_network_args(&["guest-net".into()])));
+        assert!(calls
+            .iter()
+            .any(|call| call == &remove_volume_args(&["guest-vol".into()])));
         assert!(calls
             .iter()
             .all(|call| !call.iter().any(|arg| arg == "--force")));
+    }
+
+    #[test]
+    fn reclaim_stale_job_owned_preserves_persistent_buildkit_volumes() {
+        let job_id = "velnor-job-stale-buildkit";
+        let snapshot = format!("guest-id\tguest-container\t{job_id}\texited\n");
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            snapshot.clone(),
+            snapshot,
+            String::new(),
+            String::new(),
+            "job-cache\nbuildx_buildkit_velnor-builder-shared-repo_state\n".to_string(),
+            "job-cache\n".to_string(),
+            "\"job-cache\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-stale-buildkit\"}\n"
+                .to_string(),
+            "job-cache\n".to_string(),
+            "\"job-cache\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-stale-buildkit\"}\n"
+                .to_string(),
+            format!("velnor-job-stale-buildkit\tvelnor-job-stale-buildkit\texited\n"),
+            String::new(),
+        ];
+        reclaim_stale_job_owned(job_id, |args| {
+            calls.push(args.to_vec());
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+
+        assert_eq!(
+            calls.last().unwrap(),
+            &remove_volume_args(&["job-cache".into()])
+        );
+    }
+
+    #[test]
+    fn reclaim_stale_job_owned_containers_leaves_network_for_attested_cleanup() {
+        let job_id = "velnor-job-partial";
+        let snapshot = format!("guest-id\tguest-container\t{job_id}\texited\n");
+        let mut calls = Vec::new();
+        let mut outputs = vec![snapshot.clone(), snapshot];
+        reclaim_stale_job_owned_containers(job_id, |args| {
+            calls.push(args.to_vec());
+            if args == remove_container_args(&["guest-id".into()]) {
+                return Ok(String::new());
+            }
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0], list_owned_containers_state_args(job_id));
+        assert_eq!(calls[1], list_owned_containers_state_args(job_id));
+        assert_eq!(calls[2], remove_container_args(&["guest-id".into()]));
+        assert!(calls
+            .iter()
+            .all(|call| { !call.iter().any(|arg| arg == "network" || arg == "volume") }));
+    }
+
+    #[test]
+    fn reclaim_stale_job_owned_containers_reports_live_job_without_cleanup() {
+        let job_id = "velnor-job-live-partial";
+        let snapshot = format!("job-id\t{job_id}\t{job_id}\trunning\n");
+        let mut calls = Vec::new();
+        let mut outputs = vec![snapshot];
+        let outcome = reclaim_stale_job_owned_containers(job_id, |args| {
+            calls.push(args.to_vec());
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+
+        assert_eq!(outcome, StaleJobReclaim::ProtectedLive);
+        assert_eq!(calls, vec![list_owned_containers_state_args(job_id)]);
     }
 
     #[test]
@@ -5316,6 +6120,11 @@ mod tests {
             String::new(),
             String::new(),
             "attached-volume\n".to_string(),
+            "attached-volume\n".to_string(),
+            format!("\"attached-volume\"\t\"local\"\t{{\"velnor.job-id\":\"{job_id}\"}}\n"),
+            "attached-volume\n".to_string(),
+            format!("\"attached-volume\"\t\"local\"\t{{\"velnor.job-id\":\"{job_id}\"}}\n"),
+            format!("{job_id}\t{job_id}\texited\n"),
         ];
         let result = reclaim_stale_job_owned(job_id, |args| {
             calls.push(args.to_vec());
@@ -5333,6 +6142,34 @@ mod tests {
         assert!(!calls
             .iter()
             .any(|call| { call.starts_with(&["volume".into(), "rm".into(), "--force".into()]) }));
+    }
+
+    #[test]
+    fn reclaim_stale_job_owned_skips_same_name_volume_replacement() {
+        let job_id = "velnor-job-volume-replaced";
+        let snapshot = format!("guest-id\tguest-container\t{job_id}\texited\n");
+        let volume = "job-cache";
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            snapshot.clone(),
+            snapshot,
+            String::new(),
+            String::new(),
+            format!("{volume}\n"),
+            format!("{volume}\n"),
+            format!("{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"{job_id}\"}}\n"),
+            format!("{volume}\n"),
+            format!("{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"velnor-job-foreign\"}}\n"),
+        ];
+        reclaim_stale_job_owned(job_id, |args| {
+            calls.push(args.to_vec());
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+
+        assert!(!calls
+            .iter()
+            .any(|call| call == &remove_volume_args(&[volume.to_owned()])));
     }
 
     #[test]
@@ -5481,6 +6318,88 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
     }
 
     #[test]
+    fn daemonless_buildkit_volume_candidates_accept_custom_names_and_skip_persistent() {
+        let listed = "buildx_buildkit_velnor-builder-dead0_state\n\
+            buildx_buildkit_velnor-builder-live0_state\n\
+            buildx_buildkit_velnor-builder-shared-trusted-repo_state\n\
+            buildx_buildkit_velnor-builder-dead-shadow0_state\n\
+            buildx_buildkit_velnor-builder-requested-name-slot-3_0_state\n";
+        assert_eq!(
+            orphan_job_buildkit_volume_names(listed),
+            vec![
+                "buildx_buildkit_velnor-builder-dead-shadow0_state".to_string(),
+                "buildx_buildkit_velnor-builder-dead0_state".to_string(),
+                "buildx_buildkit_velnor-builder-live0_state".to_string(),
+                "buildx_buildkit_velnor-builder-requested-name-slot-3_0_state".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn daemonless_buildkit_volume_reclaim_rechecks_identity_before_delete() {
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            String::new(),
+            String::new(),
+            "buildx_buildkit_velnor-builder-race0_state\n\
+             buildx_buildkit_velnor-builder-shared-trusted-repo_state\n"
+                .to_string(),
+            "buildx_buildkit_velnor-builder-race0_state\n\
+             buildx_buildkit_velnor-builder-shared-trusted-repo_state\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-dead\"}\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-foreign\"}\n"
+                .to_string(),
+            String::new(),
+        ];
+        reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
+            calls.push(args.to_vec());
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+
+        assert!(calls.iter().any(|call| call
+            == &inspect_volume_identity_args("buildx_buildkit_velnor-builder-race0_state")));
+        assert!(!calls.iter().any(|call| {
+            call == &remove_volume_args(&["buildx_buildkit_velnor-builder-race0_state".into()])
+        }));
+        assert!(!calls.iter().any(|call| {
+            call.iter()
+                .any(|arg| arg == "buildx_buildkit_velnor-builder-shared-trusted-repo_state")
+                && call.first().is_some_and(|arg| arg == "volume")
+                && call.get(1).is_some_and(|arg| arg == "rm")
+        }));
+    }
+
+    #[test]
+    fn daemonless_buildkit_volume_reclaim_uses_custom_name_label_identity() {
+        let volume = "buildx_buildkit_velnor-builder-requested-name-slot-3_0_state";
+        let identity =
+            format!("{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"velnor-job-custom\"}}\n");
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            String::new(),
+            String::new(),
+            format!("{volume}\n"),
+            format!("{volume}\n"),
+            identity.clone(),
+            identity,
+            String::new(),
+            String::new(),
+        ];
+        reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
+            calls.push(args.to_vec());
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+
+        assert!(calls
+            .iter()
+            .any(|call| call == &remove_volume_args(&[volume.to_owned()])));
+    }
+
+    #[test]
     fn reclaim_orphan_job_buildkit_removes_created_removing_of_ended_jobs_without_force() {
         let mut calls = Vec::new();
         let mut outputs = vec![
@@ -5502,11 +6421,25 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
                 .to_string(),
             String::new(),
             String::new(),
+            "buildx_buildkit_velnor-builder-dead0_state\nbuildx_buildkit_velnor-builder-live0_state\n\
+             buildx_buildkit_velnor-builder-shared-trusted-repo_state\n"
+                .to_string(),
+            "buildx_buildkit_velnor-builder-dead0_state\nbuildx_buildkit_velnor-builder-live0_state\n\
+             buildx_buildkit_velnor-builder-shared-trusted-repo_state\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-dead0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-dead\"}\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-dead0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-dead\"}\n"
+                .to_string(),
             "velnor-job-live\tvelnor-job-live\trunning\nvelnor-job-dead\tvelnor-job-dead\texited\n"
                 .to_string(),
-            "buildx_buildkit_velnor-builder-dead0_state\nbuildx_buildkit_velnor-builder-live0_state\n"
-                .to_string(),
             String::new(),
+            "\"buildx_buildkit_velnor-builder-live0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-live\"}\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-live0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-live\"}\n"
+                .to_string(),
+            "velnor-job-live\tvelnor-job-live\trunning\nvelnor-job-dead\tvelnor-job-dead\texited\n"
+                .to_string(),
         ];
         reclaim_orphan_jobs(|args| {
             calls.push(args.to_vec());
@@ -5539,6 +6472,13 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
                 && !call.contains(&"buildx_buildkit_velnor-builder-live0_state".to_string())
         }));
         assert!(!calls.iter().any(|call| {
+            call.first().is_some_and(|arg| arg == "volume")
+                && call.get(1).is_some_and(|arg| arg == "rm")
+                && call
+                    .iter()
+                    .any(|arg| arg.contains("shared-trusted-repo_state"))
+        }));
+        assert!(!calls.iter().any(|call| {
             call.get(2) == Some(&"id-live".to_string()) && call.first().is_some_and(|a| a == "rm")
         }));
     }
@@ -5552,8 +6492,13 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
             buildkit.to_string(),
             "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
             buildkit.to_string(),
-            "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
             "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
+            "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-race\"}\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-race\"}\n"
+                .to_string(),
+            "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
         ];
         reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
             calls.push(args.to_vec());
@@ -5564,8 +6509,9 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
         assert_eq!(calls[0], list_job_buildkit_format_args());
         assert_eq!(calls[1], list_owned_job_format_args());
         assert_eq!(calls[2], list_job_buildkit_format_args());
-        assert_eq!(calls[3], list_owned_job_format_args());
+        assert_eq!(calls[3], list_job_buildkit_volume_args());
         assert_eq!(calls[4], list_job_buildkit_volume_args());
+        assert_eq!(calls[7], list_owned_job_format_args());
         assert!(!calls
             .iter()
             .any(|call| call.first().is_some_and(|a| a == "rm")));
@@ -5584,8 +6530,13 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
             String::new(),
             buildkit.to_string(),
             String::new(),
-            String::new(),
             "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
+            "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-race\"}\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-race\"}\n"
+                .to_string(),
+            String::new(),
         ];
         let result = reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
             calls.push(args.to_vec());
@@ -5597,10 +6548,9 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
 
         assert!(result.is_err());
         assert_eq!(calls[3], remove_one_container_args("id-race"));
-        assert_eq!(
-            calls[6],
-            remove_volume_args(&["buildx_buildkit_velnor-builder-race0_state".into()])
-        );
+        assert!(calls.iter().any(|call| {
+            call == &remove_volume_args(&["buildx_buildkit_velnor-builder-race0_state".into()])
+        }));
         assert!(calls
             .iter()
             .all(|call| !call.iter().any(|arg| arg == "--force")));
@@ -5612,8 +6562,13 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
         let mut outputs = vec![
             String::new(),
             String::new(),
-            "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
             "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
+            "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-race\"}\n"
+                .to_string(),
+            "\"buildx_buildkit_velnor-builder-race0_state\"\t\"local\"\t{\"velnor.job-id\":\"velnor-job-race\"}\n"
+                .to_string(),
+            "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
         ];
         reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
             calls.push(args.to_vec());
@@ -5623,8 +6578,9 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
 
         assert_eq!(calls[0], list_job_buildkit_format_args());
         assert_eq!(calls[1], list_owned_job_format_args());
-        assert_eq!(calls[2], list_owned_job_format_args());
+        assert_eq!(calls[2], list_job_buildkit_volume_args());
         assert_eq!(calls[3], list_job_buildkit_volume_args());
+        assert_eq!(calls[6], list_owned_job_format_args());
         assert!(!calls
             .iter()
             .any(|call| { call.starts_with(&["volume".into(), "rm".into(), "--force".into()]) }));
