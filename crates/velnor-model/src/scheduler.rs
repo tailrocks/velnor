@@ -975,7 +975,10 @@ mod tests {
         assert_eq!(response_json["messageId"], 0);
         assert_eq!(response_json["messageType"], "");
         assert_eq!(response_json["body"], "");
-        assert_eq!(response_json["statistics"], serde_json::Value::Null);
+        assert_eq!(
+            response_json.get("statistics"),
+            Some(&serde_json::Value::Null)
+        );
 
         let started: ScaleSetJobStarted =
             serde_json::from_str(r#"{"runnerId":null,"runnerName":null}"#).unwrap();
