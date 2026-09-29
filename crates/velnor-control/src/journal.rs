@@ -1383,8 +1383,20 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             }
         }
         Event::JobStarted { job_id, generation } => {
+            let job_slot_id = state
+                .jobs
+                .iter()
+                .find(|job| job.job_id == job_id)
+                .map(|job| job.slot_id.clone());
+            let slot_generation = job_slot_id.and_then(|slot_id| {
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.slot_id == slot_id)
+                    .map(|slot| slot.generation)
+            });
             if let Some(job) = state.jobs.iter_mut().find(|job| job.job_id == job_id) {
-                if job.generation != generation {
+                if job.generation != generation || slot_generation != Some(generation) {
                     rejected = true;
                 } else {
                     job.phase = JobPhase2::Running;
@@ -1515,12 +1527,25 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         }
         Event::RemoteAcked { job_id, generation }
         | Event::RemoteObservedTerminal { job_id, generation } => {
+            let job_slot_generation =
+                state
+                    .jobs
+                    .iter()
+                    .find(|job| job.job_id == job_id)
+                    .and_then(|job| {
+                        state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .map(|slot| (job.generation, slot.generation))
+                    });
             if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
                 let valid = {
                     let row = &state.outbox[index];
                     row.generation == generation
                         && row.is_pending()
                         && row.send_started
+                        && job_slot_generation == Some((generation, generation))
                         && outbox_owner_is_proven(&state, row)
                 };
                 if valid {
@@ -1636,7 +1661,14 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         Event::JobWorkerLost { job_id, generation } => {
             let job = state.jobs.iter().find(|job| job.job_id == job_id);
             match job {
-                Some(job) if job.generation == generation => {
+                Some(job)
+                    if job.generation == generation
+                        && state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .is_some_and(|slot| slot.generation == generation) =>
+                {
                     // A completing job may still have an outbox payload to
                     // send; preserve its slot ownership until remote
                     // terminal acknowledgement supplies the second proof.
@@ -7444,6 +7476,219 @@ mod tests {
             assert!(outcome.rejected, "phase {phase:?}");
             assert!(outcome.commands.is_empty());
             assert_eq!(outcome.state, state);
+        }
+    }
+
+    fn migrated_generation_mismatch_state(phase: JobPhase2) -> FleetState {
+        let slot_id = slot("scope-1");
+        FleetState {
+            slots: vec![SlotRecord {
+                slot_id: slot_id.clone(),
+                generation: Generation(2),
+                phase: SlotPhase2::Assigned,
+                permit_held: true,
+                ..SlotRecord::new(slot_id.clone())
+            }],
+            jobs: vec![JobRecord {
+                job_id: job("job-1"),
+                slot_id,
+                generation: r#gen(),
+                attempt: 1,
+                worker: "worker-1".to_owned(),
+                phase,
+                accepted_unix: 1,
+                terminal_conclusion: None,
+                provisional: false,
+                plan_id: String::new(),
+                run_service_url: String::new(),
+                probe_attempts: 0,
+                probe_deadline_unix: 0,
+            }],
+            ..FleetState::default()
+        }
+    }
+
+    fn migrated_completion_generation_mismatch_state() -> FleetState {
+        let mut state = migrated_generation_mismatch_state(JobPhase2::Completing);
+        state.outbox.push(OutboxRecord {
+            job_id: job("job-1"),
+            slot_id: slot("scope-1"),
+            generation: r#gen(),
+            payload_sha256: "payload".to_owned(),
+            intended: true,
+            send_started: true,
+            remote_acked: false,
+            created_unix: 1,
+            attempts: 0,
+            deadline_unix: 2,
+            permanent: false,
+            abandoned: false,
+        });
+        state
+    }
+
+    #[test]
+    fn job_started_rejects_migrated_slot_generation_mismatch_without_mutation() {
+        let state = migrated_generation_mismatch_state(JobPhase2::Assigned);
+        let outcome = reduce(
+            state.clone(),
+            Event::JobStarted {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        );
+
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+        assert_eq!(outcome.state, state);
+    }
+
+    #[test]
+    fn job_worker_lost_rejects_migrated_slot_generation_mismatch_without_mutation() {
+        let state = migrated_generation_mismatch_state(JobPhase2::Running);
+        let outcome = reduce(
+            state.clone(),
+            Event::JobWorkerLost {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        );
+
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+        assert_eq!(outcome.state, state);
+    }
+
+    #[test]
+    fn schema7_eventless_migration_preserves_generation_mismatch_evidence() {
+        let (dir, journal) = open_tmp("schema7-generation-mismatch");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO slots (
+                 slot_id, generation, phase, permit_held, routing_valid,
+                 session_live, executor_proven, registered, pid, heartbeat_unix
+             ) VALUES ('scope-1', 2, 'assigned', 1, 1, 1, 1, 1, NULL, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO jobs (
+                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                 terminal_conclusion, provisional, plan_id, run_service_url,
+                 probe_attempts, probe_deadline_unix
+             ) VALUES ('job-1', 'scope-1', 1, 1, 'worker-1', 'assigned', 1,
+                       NULL, 0, '', '', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 7u32).unwrap();
+        drop(conn);
+
+        let mut migrated = Journal::open(&path).unwrap();
+        let before = migrated.load_state().unwrap();
+        assert_eq!(before.slots[0].generation, Generation(2));
+        assert_eq!(before.jobs[0].generation, r#gen());
+        let events_before = event_count(&migrated);
+
+        for event in [
+            Event::JobStarted {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+            Event::JobWorkerLost {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        ] {
+            let outcome = migrated.apply(event).unwrap();
+            assert!(outcome.rejected);
+            assert!(outcome.commands.is_empty());
+            assert_eq!(outcome.state, before);
+        }
+
+        assert_eq!(migrated.load_state().unwrap(), before);
+        assert_eq!(event_count(&migrated), events_before);
+    }
+
+    #[test]
+    fn terminal_observation_rejects_migrated_slot_generation_mismatch_without_mutation() {
+        let state = migrated_completion_generation_mismatch_state();
+
+        for event in [
+            Event::RemoteAcked {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+            Event::RemoteObservedTerminal {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        ] {
+            let outcome = reduce(state.clone(), event);
+            assert!(outcome.rejected);
+            assert!(outcome.commands.is_empty());
+            assert_eq!(outcome.state, state);
+        }
+    }
+
+    #[test]
+    fn terminal_observation_accepts_matching_job_and_slot_generation() {
+        for (suffix, event) in [
+            (
+                "acked",
+                Event::RemoteAcked {
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                },
+            ),
+            (
+                "observed",
+                Event::RemoteObservedTerminal {
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                },
+            ),
+        ] {
+            let (_dir, mut journal) = open_tmp(&format!("terminal-observation-{suffix}"));
+            let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+            journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation,
+                    payload_sha256: "payload".to_owned(),
+                })
+                .unwrap();
+            journal
+                .apply(Event::CompletionSendStarted {
+                    job_id: job("job-1"),
+                    generation,
+                })
+                .unwrap();
+
+            let outcome = journal.apply(event).unwrap();
+            assert!(!outcome.rejected, "{suffix}");
+            assert!(outcome.commands.iter().any(|command| matches!(
+                command,
+                SideEffect::DeleteOutbox {
+                    job_id,
+                    generation: command_generation
+                } if *job_id == job("job-1") && *command_generation == generation
+            )));
+            assert!(outcome.state.jobs.is_empty());
+            assert!(outcome
+                .state
+                .outbox
+                .iter()
+                .any(|row| row.job_id == job("job-1") && row.remote_acked));
         }
     }
 
