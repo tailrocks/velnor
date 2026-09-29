@@ -134,6 +134,26 @@ const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
 /// baseline it is, never as a rolling compiler snapshot.
 const DOCKER_SEED_SNAPSHOT_NAMESPACE: &str = "velnor-docker-seed";
 
+/// Add the unit identity to the schema-1 hosted cargo-bin cache key.
+///
+/// The cache directory is shared by all cargo-bin tools in one job, but its
+/// contents are unit-specific. A key without the unit lets a job for one
+/// unit restore another unit's tool set and skip an install. Keep this
+/// parameterization at the render boundary so collapsed kind jobs use their
+/// dispatch input while direct unit jobs use the concrete unit id.
+fn parameterize_cargo_bin_cache_key(rendered: String, unit_key: &str) -> String {
+    const HASH_SEGMENT: &str = "${{ hashFiles('mise.lock', 'mise.toml') }}";
+    const KEY_PREFIX: &str = "velnor-cargo-bin-v2-${{ runner.os }}-${{ runner.arch }}";
+    let unscoped = format!("{KEY_PREFIX}-{HASH_SEGMENT}");
+    let scoped = format!("{KEY_PREFIX}-{unit_key}-{HASH_SEGMENT}");
+    assert_eq!(
+        rendered.matches(&unscoped).count(),
+        1,
+        "hosted cargo-bin helper must emit exactly one canonical cache key"
+    );
+    rendered.replacen(&unscoped, &scoped, 1)
+}
+
 /// Dependency-closure inputs a unit snapshot hashes at restore time: the Cargo
 /// configuration, manifests, and lockfiles of the unit and of every workspace
 /// unit it depends on. A change to any of them mints a new dependency segment,
@@ -673,6 +693,42 @@ mod tests {
                 "undeclared provisioning on {lane:?} mentions no prepared tool"
             );
         }
+    }
+
+    #[test]
+    fn cargo_bin_cache_key_is_scoped_to_the_rendered_unit() {
+        let mut unit = rust_unit("rust-policy", ".");
+        unit.pr_commands = vec!["cargo deny check".to_owned()];
+        unit.full_commands = vec!["cargo deny check".to_owned()];
+        let ir = owner_test_ir("example/cargo-bin-cache", vec![unit.clone()]);
+        let unscoped_key =
+            "velnor-cargo-bin-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}";
+
+        let mut direct = String::new();
+        ir.render_tool_provisioning(&mut direct, RunnerMode::Github, &unit, true);
+        assert_eq!(
+            direct
+                .matches("-rust-policy-${{ hashFiles('mise.lock', 'mise.toml') }}")
+                .count(),
+            2,
+            "direct restore and save keys both name the concrete unit: {direct}"
+        );
+        assert!(
+            !direct.contains(unscoped_key),
+            "direct rendering must not use a cross-unit key: {direct}"
+        );
+
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert_eq!(
+            kind.matches("-${{ inputs.unit }}-${{ hashFiles('mise.lock', 'mise.toml') }}")
+                .count(),
+            2,
+            "collapsed restore and save keys both name the dispatch unit: {kind}"
+        );
+        assert!(
+            !kind.contains(unscoped_key),
+            "collapsed rendering must not use a cross-unit key: {kind}"
+        );
     }
 
     fn prepared_need(
@@ -1487,6 +1543,17 @@ mod tests {
             assert!(
                 candidate.contains(&format!("git cat-file -e {probe}")),
                 "the fetch is skipped when {probe} is already local: {candidate}"
+            );
+        }
+        for resolution in [
+            "PR_HEAD=\"$(git rev-parse \"$PR_HEAD^{commit}\")\"",
+            "PR_HEAD=\"$(git rev-parse FETCH_HEAD)\"",
+            "BASE=\"$(git rev-parse \"$BASE^{commit}\")\"",
+            "BASE=\"$(git rev-parse FETCH_HEAD)\"",
+        ] {
+            assert!(
+                candidate.contains(resolution),
+                "candidate resolves refs to immutable commits: {resolution}: {candidate}"
             );
         }
         assert!(
@@ -2823,12 +2890,18 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           set -euo pipefail
           PR_HEAD="$CANDIDATE_PR_HEAD_SHA"
           BASE="$CANDIDATE_BASE_SHA"
-          if ! git cat-file -e "$PR_HEAD^{{commit}}" 2>/dev/null; then
+          if git cat-file -e "$PR_HEAD^{{commit}}" 2>/dev/null; then
+            PR_HEAD="$(git rev-parse "$PR_HEAD^{{commit}}")"
+          else
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PR_HEAD"
+            PR_HEAD="$(git rev-parse FETCH_HEAD)"
           fi
           head_closure="$(velnor-workflow closure --rev="$PR_HEAD" --candidate)"
-          if ! git cat-file -e "$BASE^{{commit}}" 2>/dev/null; then
+          if git cat-file -e "$BASE^{{commit}}" 2>/dev/null; then
+            BASE="$(git rev-parse "$BASE^{{commit}}")"
+          else
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+            BASE="$(git rev-parse FETCH_HEAD)"
           fi
           base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{{40}})".*/\1/p' | head -n 1)"
           test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{{40}}).*/\1/p' | head -n 1)"
@@ -6076,6 +6149,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.render_cargo_bin_tool_steps(
                 &mut block,
                 &lane_input::expression(lane_input::CARGO_BIN_TOOLS),
+                &lane_input::expression("unit"),
                 cache_save,
             );
             output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS));
@@ -7445,11 +7519,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         .collect()
     }
 
-    /// The single cargo-bin install step: restore the shared `~/.cargo/bin`
+    /// The single cargo-bin install step: restore the unit-scoped `~/.cargo/bin`
     /// toolchain cache, then install every listed tool through one pinned
     /// install-action invocation (the action accepts a comma-separated list).
-    fn render_cargo_bin_tool_steps(&self, output: &mut String, tool_list: &str, cache_save: bool) {
-        output.push_str(&hosted_cargo_bin_toolchain_restore());
+    /// `unit_key` is a reusable input expression for collapsed kind jobs and a
+    /// concrete unit id for direct renders.
+    fn render_cargo_bin_tool_steps(
+        &self,
+        output: &mut String,
+        tool_list: &str,
+        unit_key: &str,
+        cache_save: bool,
+    ) {
+        output.push_str(&parameterize_cargo_bin_cache_key(
+            hosted_cargo_bin_toolchain_restore(),
+            unit_key,
+        ));
         output.push_str(&hosted_cargo_bin_toolchain_verify(tool_list));
         let _ = writeln!(
             output,
@@ -7457,7 +7542,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.pins.rust_tool
         );
         if cache_save {
-            output.push_str(&hosted_cargo_bin_toolchain_save(&self.default_branch));
+            output.push_str(&parameterize_cargo_bin_cache_key(
+                hosted_cargo_bin_toolchain_save(&self.default_branch),
+                unit_key,
+            ));
         }
     }
 
@@ -7567,7 +7655,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         let install_action_tools = self.cargo_bin_tools(&tools);
         if github_lane && !install_action_tools.is_empty() {
-            self.render_cargo_bin_tool_steps(output, &install_action_tools.join(","), cache_save);
+            self.render_cargo_bin_tool_steps(
+                output,
+                &install_action_tools.join(","),
+                &unit.id,
+                cache_save,
+            );
         }
         if !unit.prepared_tools.is_empty() {
             // Declared prepared tools restore after every lane-local
