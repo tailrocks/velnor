@@ -50,6 +50,9 @@ velnor-runner = { path = "../velnor-runner", features = ["test-support"] }
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] }
 
+[target.'cfg(windows)'.dependencies]
+same-file = { workspace = true }
+
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
 

@@ -28,7 +28,8 @@ use super::s2::dispatch::dir_is_schema2;
 use super::s2::policy::GENERATION_CONFIG;
 use super::s2::provider::{ProviderId, ProviderSet};
 use super::s2::{
-    ownership_state_content, render_tree, write_generated_with_options, OWNERSHIP_STATE,
+    ownership_state_content, render_tree, write_generated_with_static_sources_with_options,
+    OWNERSHIP_STATE,
 };
 use super::{
     create_generator_symlink, is_full_revision, resolve_default_branch, GeneratorError, RunnerMode,
@@ -133,7 +134,18 @@ pub(crate) fn run_promote(options: &PromoteOptions) -> Result<PromoteReport, Gen
         Some(branch) => branch.clone(),
         None => resolve_default_branch(&repo)?,
     };
-    let mut snapshot = Snapshot::capture(&repo, [PathBuf::from(GENERATION_CONFIG)])?;
+    // Capture the old sidecar's complete output set before stamping the pin.
+    // The next render may stop emitting a previously recorded path; that path
+    // still belongs in rollback so a failed promotion cannot lose it.
+    let previous_outputs = super::s2::generator_owned_output_paths(&repo)
+        .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    let mut snapshot = Snapshot::capture(
+        &repo,
+        previous_outputs.into_iter().chain([
+            PathBuf::from(GENERATION_CONFIG),
+            PathBuf::from(OWNERSHIP_STATE),
+        ]),
+    )?;
     std::fs::write(&pin_path, &stamped)
         .map_err(|error| GeneratorError::io("write generation config", &pin_path, &error))?;
     let outcome = promote_rendered_tree(
@@ -343,11 +355,12 @@ impl PromotedRender {
     fn write(&self, repo: &Path) -> Result<(), GeneratorError> {
         match self {
             Self::V1(rendered) => {
-                super::write_generated_with_options(
+                super::write_generated_with_static_sources_with_options(
                     repo,
                     &rendered.files,
                     &rendered.symlinks,
                     &rendered.inputs,
+                    &rendered.static_sources,
                     false,
                     false,
                     true,
@@ -356,11 +369,12 @@ impl PromotedRender {
                 Ok(())
             }
             Self::V2(rendered) => {
-                write_generated_with_options(
+                write_generated_with_static_sources_with_options(
                     repo,
                     &rendered.files,
                     &rendered.symlinks,
                     &rendered.inputs,
+                    &rendered.static_sources,
                     false,
                     false,
                     true,
@@ -649,7 +663,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, GeneratorError> {
 /// record their target: reading through a link would restore a symlink as a
 /// regular file holding its target's bytes.
 enum SnapshotPreimage {
-    Bytes(Vec<u8>),
+    Bytes {
+        bytes: Vec<u8>,
+        permissions: std::fs::Permissions,
+    },
     Symlink(PathBuf),
 }
 
@@ -687,12 +704,22 @@ impl Snapshot {
                         .map_err(|error| GeneratorError::io("read preimage", &path, &error))?;
                     Some(SnapshotPreimage::Symlink(target))
                 }
-                Ok(_) => match std::fs::read(&path) {
-                    Ok(bytes) => Some(SnapshotPreimage::Bytes(bytes)),
-                    Err(error) => {
-                        return Err(GeneratorError::io("read preimage", &path, &error));
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    let permissions = metadata.permissions();
+                    match std::fs::read(&path) {
+                        Ok(bytes) => Some(SnapshotPreimage::Bytes { bytes, permissions }),
+                        Err(error) => {
+                            return Err(GeneratorError::io("read preimage", &path, &error));
+                        }
                     }
-                },
+                }
+                Ok(metadata) => {
+                    return Err(GeneratorError::usage(format!(
+                        "refusing non-regular promotion preimage: {} ({:?})",
+                        path.display(),
+                        metadata.file_type()
+                    )));
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(GeneratorError::io("read preimage", &path, &error)),
             };
@@ -710,8 +737,19 @@ impl Snapshot {
         for (relative, preimage) in &self.entries {
             let path = repo.join(relative);
             let result = match preimage {
-                Some(SnapshotPreimage::Bytes(bytes)) => std::fs::write(&path, bytes)
-                    .map_err(|error| format!("restore {}: {error}", path.display())),
+                Some(SnapshotPreimage::Bytes { bytes, permissions }) => {
+                    let restore = (|| {
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        if std::fs::symlink_metadata(&path).is_ok() {
+                            std::fs::remove_file(&path)?;
+                        }
+                        std::fs::write(&path, bytes)?;
+                        std::fs::set_permissions(&path, permissions.clone())
+                    })();
+                    restore.map_err(|error| format!("restore {}: {error}", path.display()))
+                }
                 Some(SnapshotPreimage::Symlink(target)) => restore_symlink(&path, target),
                 None => {
                     if std::fs::symlink_metadata(&path).is_ok() {
@@ -818,6 +856,134 @@ mod tests {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error.to_string(),
         }
+    }
+
+    #[test]
+    fn promotion_snapshot_restores_recorded_stale_output_and_mode() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-promote-stale-{}-{nonce}",
+            std::process::id()
+        ));
+        let output = PathBuf::from("config/fleet/velnor-host.env");
+        let output_path = root.join(&output);
+        let output_parent = output_path.parent().unwrap_or(&root);
+        must(
+            std::fs::create_dir_all(output_parent),
+            "create old output parent",
+        );
+        must(
+            std::fs::write(&output_path, b"old generated source\n"),
+            "write old output",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            must(
+                std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o751)),
+                "set old output mode",
+            );
+        }
+        let files = BTreeMap::from([(output.clone(), String::from("old generated source\n"))]);
+        let state_path = root.join(OWNERSHIP_STATE);
+        let state_parent = state_path.parent().unwrap_or(&root);
+        must(
+            std::fs::create_dir_all(state_parent),
+            "create ownership state parent",
+        );
+        must(
+            std::fs::write(
+                &state_path,
+                ownership_state_content(
+                    &files,
+                    &BTreeMap::new(),
+                    &crate::s2::GenerationInputs::parts(1, 2),
+                ),
+            ),
+            "write ownership state",
+        );
+
+        let previous_outputs = must(
+            super::super::s2::generator_owned_output_paths(&root),
+            "read prior generator-owned outputs",
+        );
+        assert!(previous_outputs.contains(&output));
+        let state_before = must(std::fs::read(&state_path), "read prior ownership state");
+        let mut snapshot = must(
+            Snapshot::capture(&root, previous_outputs),
+            "capture promotion preimages",
+        );
+        must(std::fs::remove_file(&output_path), "remove old output");
+        must(
+            std::fs::remove_file(&state_path),
+            "remove old ownership state",
+        );
+        must(
+            std::fs::remove_dir_all(output_parent),
+            "remove old output parents",
+        );
+        must(
+            snapshot.restore(&root),
+            "restore stale output after failed promotion",
+        );
+
+        assert_eq!(
+            must(std::fs::read(&output_path), "read restored output"),
+            b"old generated source\n"
+        );
+        assert_eq!(
+            must(std::fs::read(&state_path), "read restored ownership state"),
+            state_before
+        );
+        assert!(must(
+            std::fs::symlink_metadata(&output_path),
+            "inspect restored output"
+        )
+        .file_type()
+        .is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                must(std::fs::metadata(&output_path), "inspect restored mode")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o751
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promotion_snapshot_rejects_special_preimage_without_reading() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-promote-special-{pid}-{nonce}",
+            pid = std::process::id()
+        ));
+        let relative = PathBuf::from(".github/workflows/forged-output.yml");
+        let path = root.join(&relative);
+        must(
+            std::fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create special preimage parent",
+        );
+        let status = must(
+            std::process::Command::new("mkfifo").arg(&path).status(),
+            "mkfifo must be available for the Unix safety test",
+        );
+        assert!(status.success(), "mkfifo failed with {status}");
+        let error = must_fail(
+            Snapshot::capture(&root, [relative]),
+            "special promotion preimage must fail closed",
+        );
+        assert!(error.contains("non-regular promotion preimage"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

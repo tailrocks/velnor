@@ -15,9 +15,66 @@ pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
 ) -> Result<Vec<String>, GeneratorError> {
+    repository_files_with_static_sources(root, exclude, &[])
+}
+
+pub(crate) fn repository_files_with_static_sources(
+    root: &Path,
+    exclude: &[String],
+    static_sources: &[String],
+) -> Result<Vec<String>, GeneratorError> {
+    repository_files_with_static_files(root, exclude, static_sources, &[])
+}
+
+pub(crate) fn repository_files_with_static_files(
+    root: &Path,
+    exclude: &[String],
+    static_sources: &[String],
+    static_outputs: &[String],
+) -> Result<Vec<String>, GeneratorError> {
+    repository_files_with_static_files_and_owned_paths(
+        root,
+        exclude,
+        static_sources,
+        static_outputs,
+        None,
+    )
+}
+
+pub(crate) fn repository_files_with_static_files_and_owned_paths(
+    root: &Path,
+    exclude: &[String],
+    static_sources: &[String],
+    static_outputs: &[String],
+    verified_owned_paths: Option<&BTreeSet<PathBuf>>,
+) -> Result<Vec<String>, GeneratorError> {
     validate_scan_root(root)?;
-    let generator_owned = crate::s2::generator_owned_output_paths(root)
-        .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    let generator_owned = match verified_owned_paths {
+        Some(verified_owned_paths) => {
+            let mut paths = crate::s2::generator_fixed_output_paths_with_static_files(
+                root,
+                static_sources,
+                static_outputs,
+            )
+            .map_err(|error| GeneratorError::usage(error.to_string()))?;
+            paths.extend(verified_owned_paths.iter().cloned());
+            paths
+        }
+        // A sidecar is not scanner authority until its claims have been
+        // checked against this renderer.  The first pass keeps only fixed
+        // generator paths and declared static outputs.
+        None => crate::s2::generator_fixed_output_paths_with_static_files(
+            root,
+            static_sources,
+            static_outputs,
+        )
+        .map_err(|error| GeneratorError::usage(error.to_string()))?,
+    };
+    let owned_paths = generator_owned
+        .iter()
+        .filter_map(|path| path.to_str().map(str::to_owned))
+        .chain(static_outputs.iter().cloned())
+        .collect::<Vec<_>>();
     // Generation must stay a function of the committed repository, not of the
     // checkout: untracked CI runtime artifacts, scratch files, and the `.git`
     // file of a linked worktree would otherwise enter the scan and make the
@@ -35,11 +92,17 @@ pub(crate) fn repository_files(
     // Dependency trees are never repository inputs, regardless of whether a
     // committed index entry or a physical walk supplied the path. Keep this
     // boundary here so every detector sees the same filtered file set.
-    files.retain(|file| {
-        !excludes.is_match(file)
-            && !generator_owned.contains(Path::new(file))
-            && !is_node_modules_path(file)
-    });
+    let mut retained = Vec::with_capacity(files.len());
+    for file in files {
+        if excludes.is_match(&file)
+            || crate::scanner_path_matches_any_owned_path(root, &file, &owned_paths)?
+            || is_node_modules_path(&file)
+        {
+            continue;
+        }
+        retained.push(file);
+    }
+    files = retained;
     files.sort();
     Ok(files)
 }
@@ -55,7 +118,14 @@ pub(crate) fn repository_files(
 /// device-backed read, so both fail closed. The preflight uses the same
 /// boundary as the physical walk: root-level tool/output directories and
 /// `.git`/`node_modules` at every depth are outside the scan boundary.
-pub(crate) fn validate_scan_root(root: &Path) -> Result<(), GeneratorError> {
+/// Check only the caller-supplied root boundary without following the root or
+/// any of its parent components. Callers that bind an identity handle use this
+/// before opening that handle, then run the complete tree validation.
+pub(crate) fn validate_scan_root_boundary(root: &Path) -> Result<(), GeneratorError> {
+    validated_scan_root_path(root).map(|_| ())
+}
+
+fn validated_scan_root_path(root: &Path) -> Result<PathBuf, GeneratorError> {
     let root = absolute_normalized_path(root)?;
     reject_symlinked_root_components(&root)?;
     let root_metadata = fs::symlink_metadata(&root)
@@ -72,6 +142,11 @@ pub(crate) fn validate_scan_root(root: &Path) -> Result<(), GeneratorError> {
             root.display()
         )));
     }
+    Ok(root)
+}
+
+pub(crate) fn validate_scan_root(root: &Path) -> Result<(), GeneratorError> {
+    let root = validated_scan_root_path(root)?;
     let canonical_root = normalize_macos_system_alias(
         root.canonicalize()
             .map_err(|error| GeneratorError::io("canonicalize repository root", &root, &error))?,
@@ -191,13 +266,15 @@ fn validate_scan_directory(
         let at_root = directory == root;
 
         if metadata.file_type().is_symlink() {
-            if is_scan_pruned_directory(&name, at_root) && !is_opaque_root_output(&name, at_root) {
+            if is_scan_pruned_directory(directory, &name, at_root)
+                && !is_opaque_root_output(directory, &name, at_root)
+            {
                 return Err(GeneratorError::usage(format!(
                     "repository excluded directory must not be a symlink: {}",
                     path.display()
                 )));
             }
-            if is_opaque_root_output(&name, at_root) {
+            if is_opaque_root_output(directory, &name, at_root) {
                 // CI may materialize the root build cache as a symlink. It is
                 // outside the scan boundary, so lstat it and prune it without
                 // resolving or reading its target.
@@ -208,7 +285,7 @@ fn validate_scan_directory(
         }
 
         if metadata.is_dir() {
-            if is_scan_pruned_directory(&name, at_root) {
+            if is_scan_pruned_directory(directory, &name, at_root) {
                 continue;
             }
             validate_scan_directory(root, canonical_root, &path)?;
@@ -257,17 +334,41 @@ fn validate_confined_symlink(path: &Path, canonical_root: &Path) -> Result<(), G
     Ok(())
 }
 
-fn is_scan_pruned_directory(name: &std::ffi::OsStr, at_root: bool) -> bool {
+fn filesystem_path_alias(left: &Path, right: &Path) -> bool {
+    let Ok(left) = fs::canonicalize(left) else {
+        return false;
+    };
+    let Ok(right) = fs::canonicalize(right) else {
+        return false;
+    };
+    left == right
+}
+
+fn is_scan_pruned_directory(parent: &Path, name: &std::ffi::OsStr, at_root: bool) -> bool {
     let name = name.to_string_lossy();
-    name == ".git" || name == "node_modules" || at_root && is_excluded_directory(&name)
+    if name == ".git" || name == "node_modules" || at_root && is_excluded_directory(&name) {
+        return true;
+    }
+    let path = parent.join(&*name);
+    [".git", "node_modules"]
+        .into_iter()
+        .chain(at_root.then_some("target"))
+        .chain(at_root.then_some(".output"))
+        .chain(at_root.then_some(".build"))
+        .chain(at_root.then_some(".gradle"))
+        .chain(at_root.then_some(".terraform"))
+        .chain(at_root.then_some("dist"))
+        .chain(at_root.then_some("coverage"))
+        .any(|expected| filesystem_path_alias(&path, &parent.join(expected)))
 }
 
 /// Root build output is an opaque scanner exclusion. In particular, CI may
 /// mount a cache at `target` through a symlink to a location outside the
 /// checkout; checking only its link metadata keeps the scanner from following
 /// or reading that cache.
-fn is_opaque_root_output(name: &std::ffi::OsStr, at_root: bool) -> bool {
-    at_root && name == "target"
+fn is_opaque_root_output(parent: &Path, name: &std::ffi::OsStr, at_root: bool) -> bool {
+    at_root
+        && (name == "target" || filesystem_path_alias(&parent.join(name), &parent.join("target")))
 }
 
 fn exclude_set(patterns: &[String]) -> Result<GlobSet, GeneratorError> {
@@ -330,12 +431,9 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
             GeneratorError::usage(format!("repository path is not utf-8: {error}"))
         })?;
         let relative = Path::new(relative);
-        let Some(Component::Normal(leading)) = relative.components().next() else {
-            return Ok(None);
-        };
         // Generated `.github` content is output, not project input, and the
         // remaining directories are tool or package-manager output.
-        if is_excluded_directory(&leading.to_string_lossy()) {
+        if path_has_scan_pruned_component(root, relative) {
             continue;
         }
         let Some(metadata) = tracked_file_metadata(root, relative) else {
@@ -393,6 +491,21 @@ fn is_excluded_directory(name: &str) -> bool {
     )
 }
 
+fn path_has_scan_pruned_component(root: &Path, relative: &Path) -> bool {
+    let mut parent = root.to_path_buf();
+    for (index, component) in relative.components().enumerate() {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let at_root = index == 0;
+        if is_scan_pruned_directory(&parent, name, at_root) {
+            return true;
+        }
+        parent.push(name);
+    }
+    false
+}
+
 fn collect_files(
     root: &Path,
     directory: &Path,
@@ -405,10 +518,13 @@ fn collect_files(
             entry.map_err(|error| GeneratorError::io("read directory entry", directory, &error))?;
         let path = entry.path();
         let name = entry.file_name();
-        let name = name.to_string_lossy();
         let kind = entry
             .file_type()
             .map_err(|error| GeneratorError::io("read file type", &path, &error))?;
+        let at_root = directory == root;
+        if is_scan_pruned_directory(directory, &name, at_root) {
+            continue;
+        }
         if kind.is_symlink() {
             continue;
         }
@@ -418,19 +534,9 @@ fn collect_files(
         // remain scan inputs. `.git` metadata is never an input at any depth —
         // the index never lists it, and a linked worktree's `.git` pointer file
         // must not enter the scan either.
-        if name.as_ref() == ".git" {
-            continue;
-        }
-        let at_root = directory == root;
         if kind.is_dir() {
-            if name.as_ref() == "node_modules" || at_root && is_excluded_directory(name.as_ref()) {
-                continue;
-            }
             collect_files(root, &path, files)?;
         } else if kind.is_file() {
-            if at_root && is_excluded_directory(name.as_ref()) {
-                continue;
-            }
             let relative = path.strip_prefix(root).map_err(|error| {
                 GeneratorError::usage(format!("make repository path relative: {error}"))
             })?;
@@ -575,6 +681,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
 #[cfg(test)]
 mod tests {
     use super::{files_named, repository_files, validate_scan_root};
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -714,7 +821,7 @@ mod tests {
         );
         must(
             fs::write(
-                root.join(".github/workflows/generated.yml"),
+                root.join(".github/workflows/Generated.yml"),
                 "name: generated\n",
             ),
             "write recorded output",
@@ -745,8 +852,34 @@ mod tests {
         assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
         assert!(files.contains(&".github/workflows/forged.yml".to_owned()));
         assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
-        assert!(!files.contains(&".github/workflows/generated.yml".to_owned()));
+        // The initial scan has no renderer-bound sidecar proof. A recorded
+        // dynamic path therefore remains an input until the convergence pass.
+        assert!(files.contains(&".github/workflows/Generated.yml".to_owned()));
         assert!(!files.contains(&crate::s2::OWNERSHIP_STATE.to_owned()));
+
+        let verified = BTreeSet::from([PathBuf::from(".github/workflows/generated.yml")]);
+        let files = must(
+            super::repository_files_with_static_files_and_owned_paths(
+                &root,
+                &[],
+                &[],
+                &[],
+                Some(&verified),
+            ),
+            "scan with renderer-bound ownership",
+        );
+        let recorded_path_is_alias = match (
+            fs::canonicalize(root.join(".github/workflows/generated.yml")),
+            fs::canonicalize(root.join(".github/workflows/Generated.yml")),
+        ) {
+            (Ok(recorded), Ok(candidate)) => recorded == candidate,
+            _ => false,
+        };
+        assert_eq!(
+            files.contains(&".github/workflows/Generated.yml".to_owned()),
+            !recorded_path_is_alias,
+            "a distinct case path stays an input on case-sensitive filesystems"
+        );
 
         must(
             fs::write(
@@ -762,7 +895,39 @@ mod tests {
             repository_files(&root, &[]),
             "scan after fleet config ownership is recorded",
         );
-        assert!(!files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+
+        let declared_source = vec!["config/fleet/velnor-host.env".to_owned()];
+        let files = must(
+            super::repository_files_with_static_sources(&root, &[], &declared_source),
+            "scan declared fleet config source",
+        );
+        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+
+        let unrelated_source = vec!["config/fleet/other.env".to_owned()];
+        let files = must(
+            super::repository_files_with_static_sources(&root, &[], &unrelated_source),
+            "scan without a matching static source",
+        );
+        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+    }
+
+    #[test]
+    fn declared_static_outputs_are_excluded_on_the_first_scan() {
+        let root = scratch("declared-static-output");
+        let output = root.join(".github/workflows/static.yml");
+        must(
+            fs::create_dir_all(output.parent().unwrap_or(&root)),
+            "create static output directory",
+        );
+        must(fs::write(&output, "name: static\n"), "write static output");
+        let outputs = vec![".github/workflows/static.yml".to_owned()];
+        let files = must(
+            super::repository_files_with_static_files(&root, &[], &[], &outputs),
+            "scan declared static output",
+        );
+        assert!(!files.contains(&outputs[0]));
+        must(fs::remove_dir_all(root), "remove static-output root");
     }
 
     #[test]
@@ -1347,5 +1512,32 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_case_and_short_excluded_directory_aliases_are_pruned() {
+        let root = scratch("windows-excluded-aliases");
+        for name in [".GIT", "TARGET", "node_modules"] {
+            must(
+                fs::create_dir_all(root.join(name)),
+                "create excluded directory",
+            );
+            must(
+                fs::write(root.join(name).join("must-not-scan.txt"), "cache\n"),
+                "write excluded sentinel",
+            );
+        }
+        let short_alias = root.join("NODE_M~1");
+        if fs::canonicalize(&short_alias).is_ok() {
+            assert!(super::is_scan_pruned_directory(
+                &root,
+                std::ffi::OsStr::new("NODE_M~1"),
+                true
+            ));
+        }
+        let files = must(repository_files(&root, &[]), "scan Windows aliases");
+        assert!(files.is_empty(), "excluded aliases entered scan: {files:?}");
+        let _ = fs::remove_dir_all(root);
     }
 }

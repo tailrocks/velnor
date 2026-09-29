@@ -18,7 +18,7 @@ mod signals;
 mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -31,13 +31,61 @@ use crate::{
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn scan_shape(
     root: &Path,
     runners: RunnerMode,
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    scan_shape_with_static_sources(root, runners, default_branch, exclude, &[])
+}
+
+pub(crate) fn scan_shape_with_static_sources(
+    root: &Path,
+    runners: RunnerMode,
+    default_branch: &str,
+    exclude: &[String],
+    static_sources: &[String],
+) -> Result<RepositoryShape, GeneratorError> {
+    scan_shape_with_static_files(root, runners, default_branch, exclude, static_sources, &[])
+}
+
+pub(crate) fn scan_shape_with_static_files(
+    root: &Path,
+    runners: RunnerMode,
+    default_branch: &str,
+    exclude: &[String],
+    static_sources: &[String],
+    static_outputs: &[String],
+) -> Result<RepositoryShape, GeneratorError> {
+    scan_shape_with_static_files_and_owned_paths(
+        root,
+        runners,
+        default_branch,
+        exclude,
+        static_sources,
+        static_outputs,
+        None,
+    )
+}
+
+pub(crate) fn scan_shape_with_static_files_and_owned_paths(
+    root: &Path,
+    runners: RunnerMode,
+    default_branch: &str,
+    exclude: &[String],
+    static_sources: &[String],
+    static_outputs: &[String],
+    verified_owned_paths: Option<&BTreeSet<PathBuf>>,
+) -> Result<RepositoryShape, GeneratorError> {
+    let files = file_walk::repository_files_with_static_files_and_owned_paths(
+        root,
+        exclude,
+        static_sources,
+        static_outputs,
+        verified_owned_paths,
+    )?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,

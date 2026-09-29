@@ -786,6 +786,271 @@ fn s2_stale_recorded_file_removes_without_force() {
     stale_recorded_file_removes_without_force(Pipeline::S2);
 }
 
+fn generated_static_source_is_retained_during_output_migration(pipeline: Pipeline) {
+    let root = minimal_root(&format!("{}-static-source-retention", pipeline.name()));
+    write_config(pipeline, &root);
+    let output = root.clone();
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let base = fs::read_to_string(&config).unwrap();
+
+    // First generate and commit the exact sidecar that the renderer already
+    // owns. The next config explicitly adopts that path as static input.
+    fs::write(
+        &config,
+        format!("{base}\n[cache.velnor]\nbudget_bytes = 53687091200\n"),
+    )
+    .unwrap();
+    generate_ok(&root, &output, false);
+    let source = root.join("config/fleet/velnor-host.env");
+    assert!(
+        source.is_file(),
+        "cache config must generate the source sidecar"
+    );
+    let migrated_output = root.join(".github/migrated.env");
+    fs::write(&migrated_output, fs::read(&source).unwrap()).unwrap();
+    common::commit_fixture(&root);
+
+    fs::write(
+        &config,
+        format!(
+            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"config/fleet/velnor-host.env\"\n"
+        ),
+    )
+    .unwrap();
+    generate_ok(&root, &output, false);
+
+    let source_bytes = fs::read(&source).unwrap();
+    assert_eq!(fs::read(&migrated_output).unwrap(), source_bytes);
+    assert!(
+        source.is_file(),
+        "declared static source must survive migration"
+    );
+    check_ok(&root, &output);
+
+    let before = snapshot_tree(&output.join(".github"));
+    let source_before = fs::read(&source).unwrap();
+    generate_ok(&root, &output, false);
+    assert_eq!(
+        snapshot_tree(&output.join(".github")),
+        before,
+        "repeat generation must leave generated outputs unchanged"
+    );
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+}
+
+#[test]
+fn v1_generated_static_source_is_retained_during_output_migration() {
+    generated_static_source_is_retained_during_output_migration(Pipeline::V1);
+}
+
+#[test]
+fn s2_generated_static_source_is_retained_during_output_migration() {
+    generated_static_source_is_retained_during_output_migration(Pipeline::S2);
+}
+
+fn separate_output_keeps_static_source_while_removing_stale_output(pipeline: Pipeline) {
+    let root = minimal_root(&format!("{}-separate-static-source", pipeline.name()));
+    write_config(pipeline, &root);
+    let output = output_for(&root);
+    let _ = fs::remove_dir_all(&output);
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let base = fs::read_to_string(&config).unwrap();
+
+    fs::write(
+        &config,
+        format!("{base}\n[cache.velnor]\nbudget_bytes = 53687091200\n"),
+    )
+    .unwrap();
+    generate_ok(&root, &output, false);
+    let generated_sidecar = output.join("config/fleet/velnor-host.env");
+    let source = root.join("config/fleet/velnor-host.env");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let source_bytes = fs::read(&generated_sidecar).unwrap();
+    fs::write(&source, &source_bytes).unwrap();
+    common::commit_fixture(&root);
+
+    fs::write(
+        &config,
+        format!(
+            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"config/fleet/velnor-host.env\"\n"
+        ),
+    )
+    .unwrap();
+    generate_ok(&root, &output, false);
+
+    assert_eq!(fs::read(&source).unwrap(), source_bytes);
+    assert_eq!(
+        fs::read(output.join(".github/migrated.env")).unwrap(),
+        source_bytes
+    );
+    assert!(
+        fs::symlink_metadata(&generated_sidecar).is_err(),
+        "the stale sidecar under the separate output root must be removed"
+    );
+    check_ok(&root, &output);
+}
+
+#[test]
+fn v1_separate_output_keeps_static_source_while_removing_stale_output() {
+    separate_output_keeps_static_source_while_removing_stale_output(Pipeline::V1);
+}
+
+#[test]
+fn s2_separate_output_keeps_static_source_while_removing_stale_output() {
+    separate_output_keeps_static_source_while_removing_stale_output(Pipeline::S2);
+}
+
+fn static_output_case_alias_transition_is_rejected(pipeline: Pipeline) {
+    let root = minimal_root(&format!("{}-static-output-case-alias", pipeline.name()));
+    write_config(pipeline, &root);
+    let output = output_for(&root);
+    let _ = fs::remove_dir_all(&output);
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let base = fs::read_to_string(&config).unwrap();
+    let source = root.join(".github-gen/sources/note.md");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, "static bytes\n").unwrap();
+    fs::write(
+        &config,
+        format!(
+            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \".github-gen/sources/note.md\"\n"
+        ),
+    )
+    .unwrap();
+    generate_ok(&root, &output, false);
+    let before = snapshot_tree(&output.join(".github"));
+
+    fs::write(
+        &config,
+        format!(
+            "{base}\n[[static_files]]\nfile = \".github/MIGRATED.env\"\nsource = \".github-gen/sources/note.md\"\n"
+        ),
+    )
+    .unwrap();
+    let rejected = run_generate(&root, &output, false);
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        !rejected.status.success(),
+        "case alias transition must fail: {stderr}"
+    );
+    assert!(
+        stderr.contains("aliases") || stderr.contains("overlap"),
+        "rejection must identify the output path collision: {stderr}"
+    );
+    assert_eq!(snapshot_tree(&output.join(".github")), before);
+}
+
+#[test]
+fn v1_static_output_case_alias_transition_is_rejected() {
+    static_output_case_alias_transition_is_rejected(Pipeline::V1);
+}
+
+#[test]
+fn s2_static_output_case_alias_transition_is_rejected() {
+    static_output_case_alias_transition_is_rejected(Pipeline::S2);
+}
+
+fn static_output_file_directory_transition_is_rejected(pipeline: Pipeline) {
+    let root = minimal_root(&format!(
+        "{}-static-output-shape-transition",
+        pipeline.name()
+    ));
+    write_config(pipeline, &root);
+    let output = output_for(&root);
+    let _ = fs::remove_dir_all(&output);
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let base = fs::read_to_string(&config).unwrap();
+    let source = root.join(".github-gen/sources/note.md");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, "static bytes\n").unwrap();
+    fs::write(
+        &config,
+        format!(
+            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \".github-gen/sources/note.md\"\n"
+        ),
+    )
+    .unwrap();
+    generate_ok(&root, &output, false);
+    let original = fs::read(output.join(".github/migrated.env")).unwrap();
+    let before = snapshot_tree(&output.join(".github"));
+
+    fs::write(
+        &config,
+        format!(
+            "{base}\n[[static_files]]\nfile = \".github/migrated.env/child\"\nsource = \".github-gen/sources/note.md\"\n"
+        ),
+    )
+    .unwrap();
+    let rejected = run_generate(&root, &output, false);
+    assert!(
+        !rejected.status.success(),
+        "file-to-directory transition must fail: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(
+        fs::read(output.join(".github/migrated.env")).unwrap(),
+        original,
+        "a failed transition must preserve the old output"
+    );
+    assert_eq!(snapshot_tree(&output.join(".github")), before);
+}
+
+#[test]
+fn v1_static_output_file_directory_transition_is_rejected() {
+    static_output_file_directory_transition_is_rejected(Pipeline::V1);
+}
+
+#[test]
+fn s2_static_output_file_directory_transition_is_rejected() {
+    static_output_file_directory_transition_is_rejected(Pipeline::S2);
+}
+
+fn static_source_rejects_active_fleet_cache_feedback(pipeline: Pipeline) {
+    let root = minimal_root(&format!("{}-static-source-cache-feedback", pipeline.name()));
+    write_config(pipeline, &root);
+    let output = root.clone();
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let base = fs::read_to_string(&config).unwrap();
+    let with_cache = format!("{base}\n[cache.velnor]\nbudget_bytes = 53687091200\n");
+    fs::write(&config, &with_cache).unwrap();
+    generate_ok(&root, &output, false);
+    let source = root.join("config/fleet/velnor-host.env");
+    let before = fs::read(&source).unwrap();
+
+    fs::write(
+        &config,
+        format!(
+            "{with_cache}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"config/fleet/velnor-host.env\"\n"
+        ),
+    )
+    .unwrap();
+    let rejected = run_generate(&root, &output, false);
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        !rejected.status.success(),
+        "self-referential output is rejected"
+    );
+    assert!(
+        stderr.contains("cannot source `config/fleet/velnor-host.env`"),
+        "the rejection names the generated source collision: {stderr}"
+    );
+    assert_eq!(fs::read(&source).unwrap(), before);
+    assert!(
+        fs::symlink_metadata(root.join(".github/migrated.env")).is_err(),
+        "a rejected config does not publish static output"
+    );
+}
+
+#[test]
+fn v1_static_source_rejects_active_fleet_cache_feedback() {
+    static_source_rejects_active_fleet_cache_feedback(Pipeline::V1);
+}
+
+#[test]
+fn s2_static_source_rejects_active_fleet_cache_feedback() {
+    static_source_rejects_active_fleet_cache_feedback(Pipeline::S2);
+}
+
 #[test]
 #[cfg(unix)]
 fn force_normalizes_executable_modes() {

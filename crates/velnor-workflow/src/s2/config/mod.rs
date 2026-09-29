@@ -17,6 +17,7 @@ pub(crate) mod canonical;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::de::{Deserializer, SeqAccess, Visitor};
@@ -2992,6 +2993,7 @@ fn validate_unit_references(
 /// stays inside the repository: anything else would turn configuration into an
 /// arbitrary filesystem write.
 fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorError> {
+    let mut declared_outputs: Vec<&str> = Vec::new();
     for row in rows {
         let file = row.file.as_deref().unwrap_or_default();
         let source = row.source.as_deref().unwrap_or_default();
@@ -3000,11 +3002,30 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] file must be a repository-relative path inside `.github/`, found `{file}`"
             )));
         }
-        if !crate::path_spelling_is_supported(file) {
+        if let Some(reserved) = crate::generator_owned_static_file_path(file) {
+            return Err(GeneratorError::usage(format!(
+                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
+            )));
+        }
+        if !crate::path_spelling_is_supported(file)
+            || file
+                .split('/')
+                .any(|component| component.is_empty() || component == ".")
+        {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] file uses an unsupported generated path spelling: {file}"
             )));
         }
+        if let Some(existing) = declared_outputs
+            .iter()
+            .copied()
+            .find(|existing| crate::path_spellings_alias(existing, file))
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[static_files]] paths `{existing}` and `{file}` alias the same output; declare one path"
+            )));
+        }
+        declared_outputs.push(file);
         if !is_contained_repository_path(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
@@ -3013,11 +3034,6 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
         if starts_with_generated_github_tree(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must stay outside `.github/`, found `{source}`"
-            )));
-        }
-        if let Some(reserved) = crate::generator_owned_static_file_path(file) {
-            return Err(GeneratorError::usage(format!(
-                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
             )));
         }
         let duplicate = rows
@@ -3041,7 +3057,7 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
 /// generated `.github/` state or outside the repository. Callers must read the
 /// returned canonical path, rather than the original spelling, so the
 /// validation and read operate on the same resolved object.
-pub(crate) fn validate_static_file_source(
+pub(crate) fn resolve_static_file_source(
     root: &Path,
     source: &str,
 ) -> Result<PathBuf, GeneratorError> {
@@ -3075,7 +3091,7 @@ pub(crate) fn validate_static_file_source(
             "[[static_file]] source resolves outside the repository: `{source}`"
         ))
     })?;
-    if let Some(directory) = scanner_pruned_directory(relative) {
+    if let Some(directory) = scanner_pruned_directory(&canonical_root, relative) {
         return Err(GeneratorError::usage(format!(
             "[[static_file]] source must stay inside the scanner input: `{source}` resolves under pruned directory `{directory}`"
         )));
@@ -3093,6 +3109,107 @@ pub(crate) fn validate_static_file_source(
             "[[static_file]] source must resolve to a regular file: `{source}`"
         )));
     }
+    Ok(resolved)
+}
+
+/// Validate static declarations and resolve every source before the first
+/// scanner pass. Scanner membership is checked against that pass's file list.
+pub(crate) fn preflight_static_files(
+    root: &Path,
+    generation: &RepoGenerationConfig,
+) -> Result<crate::StaticFilePreflight, GeneratorError> {
+    validate_static_files(generation.static_files())?;
+    if generation.static_files().is_empty() {
+        return Ok(crate::StaticFilePreflight::default());
+    }
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| GeneratorError::io("resolve repository root", root, &error))?;
+    let mut preflight = crate::StaticFilePreflight {
+        source_root: Some(canonical_root.clone()),
+        source_root_identity: Some(
+            crate::static_source_root_identity(&canonical_root)
+                .map_err(|error| GeneratorError::usage(error.to_string()))?,
+        ),
+        ..crate::StaticFilePreflight::default()
+    };
+    for row in generation.static_files() {
+        let file = row.file().ok_or_else(|| {
+            GeneratorError::usage("[[static_file]] row is missing `file`".to_owned())
+        })?;
+        let source = row.source().ok_or_else(|| {
+            GeneratorError::usage("[[static_file]] row is missing `source`".to_owned())
+        })?;
+        let resolved = resolve_static_file_source(root, source)?;
+        let relative = resolved.strip_prefix(&canonical_root).map_err(|_| {
+            GeneratorError::usage(format!(
+                "[[static_file]] source resolves outside the repository: `{source}`"
+            ))
+        })?;
+        let relative_text = crate::static_source_relative_path(relative)
+            .map_err(|error| GeneratorError::usage(error.to_string()))?;
+        let cache_output = canonical_root.join("config/fleet/velnor-host.env");
+        let cache_output_exists = match fs::symlink_metadata(&cache_output) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(GeneratorError::usage(format!(
+                    "inspect generated cache output `{}`: {error}",
+                    cache_output.display()
+                )));
+            }
+        };
+        let aliases_cache_output = cache_output_exists
+            && crate::static_source_paths_alias(&resolved, &cache_output)
+                .map_err(|error| GeneratorError::usage(error.to_string()))?;
+        if aliases_cache_output && generation.cache_velnor().has_overrides() {
+            return Err(GeneratorError::usage(
+                "[[static_files]] cannot source `config/fleet/velnor-host.env` while `[cache.velnor]` emits that generated file; remove the cache overrides before migrating it to a static source".to_owned(),
+            ));
+        }
+        preflight.output_paths.push(file.to_owned());
+        preflight.source_paths.push(relative_text.clone());
+        let content = fs::read_to_string(&resolved).map_err(|error| {
+            GeneratorError::io("read declared static file source", &resolved, &error)
+        })?;
+        if preflight
+            .resolved_sources
+            .get(source)
+            .is_some_and(|previous| previous != &resolved)
+            || preflight
+                .source_contents
+                .get(source)
+                .is_some_and(|previous| previous != &content)
+        {
+            return Err(GeneratorError::usage(format!(
+                "declared static source changed during preflight: `{source}`"
+            )));
+        }
+        preflight
+            .resolved_sources
+            .insert(source.to_owned(), resolved);
+        preflight.source_contents.insert(source.to_owned(), content);
+    }
+    preflight.output_paths.sort();
+    preflight.source_paths.sort();
+    preflight.source_paths.dedup();
+    Ok(preflight)
+}
+
+/// Compatibility validator for direct callers and tests. The production
+/// generation path validates membership against its existing scan snapshot.
+#[cfg(test)]
+pub(crate) fn validate_static_file_source(
+    root: &Path,
+    source: &str,
+) -> Result<PathBuf, GeneratorError> {
+    let resolved = resolve_static_file_source(root, source)?;
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| GeneratorError::io("resolve repository root", root, &error))?;
+    let relative = resolved.strip_prefix(&canonical_root).map_err(|_| {
+        GeneratorError::usage(format!(
+            "[[static_file]] source resolves outside the repository: `{source}`"
+        ))
+    })?;
     validate_static_source_in_scanner(root, relative)?;
     Ok(resolved)
 }
@@ -3100,38 +3217,35 @@ pub(crate) fn validate_static_file_source(
 /// The scanner never treats tool output, dependency trees, or VCS metadata as
 /// repository inputs. Keep static passthrough sources on that same boundary so
 /// an unreviewed build result cannot become generated workflow input.
-fn scanner_pruned_directory(path: &Path) -> Option<&'static str> {
-    let mut components = path.components();
-    let first = components.next();
-    let Component::Normal(first) = first? else {
-        return None;
-    };
-    let first = first.to_str()?;
-    for directory in [
-        ".git",
-        ".output",
-        "target",
-        "node_modules",
-        ".build",
-        ".gradle",
-        ".terraform",
-        "dist",
-        "coverage",
-    ] {
-        if crate::path_spellings_alias(first, directory) {
-            return Some(directory);
-        }
-    }
-    for component in components {
+fn scanner_pruned_directory(root: &Path, path: &Path) -> Option<&'static str> {
+    let mut parent = root.to_path_buf();
+    for (index, component) in path.components().enumerate() {
         let Component::Normal(component) = component else {
             continue;
         };
-        let component = component.to_str()?;
-        for directory in [".git", "node_modules"] {
-            if crate::path_spellings_alias(component, directory) {
+        let directories: &[&str] = if index == 0 {
+            &[
+                ".git",
+                ".output",
+                "target",
+                "node_modules",
+                ".build",
+                ".gradle",
+                ".terraform",
+                "dist",
+                "coverage",
+            ]
+        } else {
+            &[".git", "node_modules"]
+        };
+        let candidate = parent.join(component);
+        let candidate = fs::canonicalize(&candidate).ok()?;
+        for directory in directories {
+            if fs::canonicalize(parent.join(directory)).ok().as_ref() == Some(&candidate) {
                 return Some(directory);
             }
         }
+        parent.push(component);
     }
     None
 }
@@ -3139,13 +3253,13 @@ fn scanner_pruned_directory(path: &Path) -> Option<&'static str> {
 /// The scanner's file set is the single source of truth for repository input:
 /// it applies the Git index boundary, scanner-pruned roots, dependency
 /// filtering, generator-owned output filtering, and `[scan] exclude` rows.
+#[cfg(test)]
 fn validate_static_source_in_scanner(root: &Path, relative: &Path) -> Result<(), GeneratorError> {
     let generation = discover(root)?;
     let excludes = match generation.as_ref() {
         Some(generation) => generation.scan_exclude()?,
         None => &[],
     };
-    let files = crate::s2::scan::file_walk::repository_files(root, excludes)?;
     relative.to_str().ok_or_else(|| {
         GeneratorError::usage(format!(
             "[[static_file]] source path is not valid UTF-8: {}",
@@ -3153,7 +3267,17 @@ fn validate_static_source_in_scanner(root: &Path, relative: &Path) -> Result<(),
         ))
     })?;
     let relative = crate::s2::scan::file_walk::normalize_relative_path(relative)?;
-    if files.iter().any(|file| file == &relative) {
+    let files = crate::s2::scan::file_walk::repository_files_with_static_sources(
+        root,
+        excludes,
+        std::slice::from_ref(&relative),
+    )?;
+    let resolved = fs::canonicalize(root.join(&relative)).map_err(|error| {
+        GeneratorError::io("resolve static source for scanner membership", root, &error)
+    })?;
+    if crate::static_source_is_scanner_input(root, &resolved, &relative, &files)
+        .map_err(|error| GeneratorError::usage(error.to_string()))?
+    {
         return Ok(());
     }
     Err(GeneratorError::usage(format!(
@@ -7475,6 +7599,110 @@ mod tests {
         let env = super::render_velnor_host_env(config.cache_velnor());
         assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
         assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
+    }
+
+    #[test]
+    fn static_source_cannot_consume_cache_generated_fleet_bytes() {
+        let root = scanned_root("static-source-cache-coexistence");
+        let source = root.join("config/fleet/velnor-host.env");
+        must(
+            fs::create_dir_all(source.parent().unwrap_or(&root)),
+            "create fleet source directory",
+        );
+        must(fs::write(&source, "MANUAL=1\n"), "write fleet source");
+        let generation = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[static_files]]\nfile = \".github/notes/fleet.env\"\nsource = \"config/fleet/velnor-host.env\"\n\n\
+             [cache.velnor]\nbudget_bytes = 53687091200\n",
+        );
+        let error = must_fail(
+            preflight_static_files(&root, &generation),
+            "cache/static source coexistence must fail closed",
+        );
+        assert!(error.to_string().contains("cannot source"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_distinct_fleet_source_does_not_hide_generated_output() {
+        let root = scanned_root("static-source-fleet-case-distinct");
+        let generated = root.join("config/fleet/velnor-host.env");
+        let source = root.join("config/fleet/VELNOR-HOST.env");
+        must(
+            fs::create_dir_all(generated.parent().unwrap_or(&root)),
+            "create fleet case directory",
+        );
+        must(
+            fs::write(&generated, "GENERATED=1\n"),
+            "write generated fleet output",
+        );
+        must(
+            fs::write(&source, "STATIC=1\n"),
+            "write case-distinct source",
+        );
+        if fs::canonicalize(&generated).ok() == fs::canonicalize(&source).ok() {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        let generation = config_for(concat!(
+            "schema = 2\n\n",
+            "[generator]\nrepository = \"example/fixture\"\n\n",
+            "[[static_files]]\nfile = \".github/notes/fleet.env\"\n",
+            "source = \"config/fleet/VELNOR-HOST.env\"\n\n",
+            "[cache.velnor]\nbudget_bytes = 53687091200\n",
+        ));
+        must(
+            preflight_static_files(&root, &generation),
+            "case-distinct source must not alias generated fleet output",
+        );
+        let fixed = must(
+            crate::s2::generator_fixed_output_paths_with_static_files(
+                &root,
+                &["config/fleet/VELNOR-HOST.env".to_owned()],
+                &["config/fleet/velnor-host.env".to_owned()],
+            ),
+            "resolve fixed output paths",
+        );
+        assert!(fixed.contains(std::path::Path::new("config/fleet/velnor-host.env")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_source_hardlink_cannot_consume_cache_generated_fleet_bytes() {
+        let root = scanned_root("static-source-cache-hardlink");
+        let generated = root.join("config/fleet/velnor-host.env");
+        let source = root.join("config/static/fleet-alias.env");
+        must(
+            fs::create_dir_all(generated.parent().unwrap_or(&root)),
+            "create generated fleet directory",
+        );
+        must(
+            fs::create_dir_all(source.parent().unwrap_or(&root)),
+            "create static source directory",
+        );
+        must(
+            fs::write(&generated, "MANUAL=1\n"),
+            "write generated fleet file",
+        );
+        must(
+            fs::hard_link(&generated, &source),
+            "create static/cache hardlink",
+        );
+        let generation = config_for(concat!(
+            "schema = 2\n\n",
+            "[generator]\nrepository = \"example/fixture\"\n\n",
+            "[[static_files]]\nfile = \".github/notes/fleet.env\"\n",
+            "source = \"config/static/fleet-alias.env\"\n\n",
+            "[cache.velnor]\nbudget_bytes = 53687091200\n",
+        ));
+        let error = must_fail(
+            preflight_static_files(&root, &generation),
+            "cache/static hardlink coexistence must fail closed",
+        );
+        assert!(error.to_string().contains("cannot source"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

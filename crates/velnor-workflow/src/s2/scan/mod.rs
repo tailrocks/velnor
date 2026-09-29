@@ -19,7 +19,7 @@ mod signals;
 pub(crate) mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -59,7 +59,87 @@ pub(crate) fn scan_shape_with_precondition_phases(
     apple: &rust::AppleNativePolicy,
     precondition_phases_enabled: bool,
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    scan_shape_with_precondition_phases_and_static_sources(
+        root,
+        providers,
+        default_branch,
+        exclude,
+        apple,
+        precondition_phases_enabled,
+        &[],
+    )
+}
+
+pub(crate) fn scan_shape_with_precondition_phases_and_static_sources(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    apple: &rust::AppleNativePolicy,
+    precondition_phases_enabled: bool,
+    static_sources: &[String],
+) -> Result<RepositoryShape, GeneratorError> {
+    scan_shape_with_precondition_phases_and_static_files(
+        root,
+        providers,
+        default_branch,
+        exclude,
+        apple,
+        precondition_phases_enabled,
+        static_sources,
+        &[],
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scan call binds provider, platform, config, source, and output snapshots together"
+)]
+pub(crate) fn scan_shape_with_precondition_phases_and_static_files(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    apple: &rust::AppleNativePolicy,
+    precondition_phases_enabled: bool,
+    static_sources: &[String],
+    static_outputs: &[String],
+) -> Result<RepositoryShape, GeneratorError> {
+    scan_shape_with_precondition_phases_and_static_files_with_owned_paths(
+        root,
+        providers,
+        default_branch,
+        exclude,
+        apple,
+        precondition_phases_enabled,
+        static_sources,
+        static_outputs,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scan call binds provider, platform, config, source, output, and ownership snapshots together"
+)]
+pub(crate) fn scan_shape_with_precondition_phases_and_static_files_with_owned_paths(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    apple: &rust::AppleNativePolicy,
+    precondition_phases_enabled: bool,
+    static_sources: &[String],
+    static_outputs: &[String],
+    verified_owned_paths: Option<&BTreeSet<PathBuf>>,
+) -> Result<RepositoryShape, GeneratorError> {
+    let files = file_walk::repository_files_with_static_files_and_owned_paths(
+        root,
+        exclude,
+        static_sources,
+        static_outputs,
+        verified_owned_paths,
+    )?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
