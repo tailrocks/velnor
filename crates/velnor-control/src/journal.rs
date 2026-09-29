@@ -4642,7 +4642,7 @@ mod tests {
         // A pre-v9 binary's persist_state would rewrite every meta row it
         // knows and drop the drain key. The durable v9 fence rejects that
         // stale write before it can unlatch the fleet.
-        let old_writer = Connection::open(&dir.join("journal.db")).unwrap();
+        let old_writer = Connection::open(dir.join("journal.db")).unwrap();
         let error = old_writer.execute("DELETE FROM meta", []).unwrap_err();
         assert!(error.to_string().contains(JOURNAL_WRITE_FENCE_REASON));
         let state = journal.materialized_state().unwrap();
