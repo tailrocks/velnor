@@ -332,6 +332,15 @@ struct MetricsSnapshot {
     job_processes: usize,
     waiter_processes: usize,
     reconcile_duration_ms: u64,
+    jit_create_attempts: u64,
+    jit_create_successes: u64,
+    jit_create_failures: u64,
+    jit_create_latency_ms: u64,
+    journal_event_attempts: u64,
+    journal_durable_events: u64,
+    events_per_second: f64,
+    durable_events_per_second: f64,
+    reconcile_overlap_count: u64,
 }
 
 impl Default for MetricsSnapshot {
@@ -341,6 +350,17 @@ impl Default for MetricsSnapshot {
             job_processes: 0,
             waiter_processes: 0,
             reconcile_duration_ms: 1,
+            jit_create_attempts: 0,
+            jit_create_successes: 0,
+            jit_create_failures: 0,
+            jit_create_latency_ms: 0,
+            journal_event_attempts: 0,
+            journal_durable_events: 0,
+            events_per_second: 0.0,
+            durable_events_per_second: 0.0,
+            // The controller owns one reconcile loop and never re-enters it.
+            // Keep the explicit invariant in the published contract.
+            reconcile_overlap_count: 0,
         }
     }
 }
@@ -349,6 +369,9 @@ struct MetricsPublisherState {
     snapshot: MetricsSnapshot,
     sequence: u64,
     stopped: bool,
+    last_published_at: Option<Instant>,
+    last_published_event_attempts: u64,
+    last_published_durable_events: u64,
 }
 
 /// Publish telemetry independently of the local control cycle. The controller
@@ -367,6 +390,9 @@ impl MetricsPublisher {
             snapshot: MetricsSnapshot::default(),
             sequence: 0,
             stopped: false,
+            last_published_at: None,
+            last_published_event_attempts: 0,
+            last_published_durable_events: 0,
         }));
         let stop = Arc::new(tokio::sync::Notify::new());
         let task_state = Arc::clone(&state);
@@ -416,6 +442,37 @@ impl MetricsPublisher {
         state.snapshot.job_processes = job_processes;
         state.snapshot.waiter_processes = waiter_processes;
         state.snapshot.reconcile_duration_ms = reconcile_duration_ms.max(1);
+        if let Some(durable_events) = durable_journal_event_count(&self.state_dir) {
+            state.snapshot.journal_durable_events = durable_events;
+        }
+    }
+
+    fn record_journal_event(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.snapshot.journal_event_attempts =
+            state.snapshot.journal_event_attempts.saturating_add(1);
+    }
+
+    fn record_jit_create(&self, latency: Duration, success: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.snapshot.jit_create_attempts = state.snapshot.jit_create_attempts.saturating_add(1);
+        state.snapshot.jit_create_latency_ms = state
+            .snapshot
+            .jit_create_latency_ms
+            .saturating_add(u64::try_from(latency.as_millis()).unwrap_or(u64::MAX));
+        if success {
+            state.snapshot.jit_create_successes =
+                state.snapshot.jit_create_successes.saturating_add(1);
+        } else {
+            state.snapshot.jit_create_failures =
+                state.snapshot.jit_create_failures.saturating_add(1);
+        }
     }
 
     async fn stop_and_publish(&mut self) -> anyhow::Result<()> {
@@ -458,6 +515,27 @@ fn publish_metrics_snapshot(
     if state.stopped && !allow_stopped {
         return Ok(false);
     }
+    let now = Instant::now();
+    if let Some(previous) = state.last_published_at {
+        let elapsed = previous.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            state.snapshot.events_per_second = state
+                .snapshot
+                .journal_event_attempts
+                .saturating_sub(state.last_published_event_attempts)
+                as f64
+                / elapsed;
+            state.snapshot.durable_events_per_second = state
+                .snapshot
+                .journal_durable_events
+                .saturating_sub(state.last_published_durable_events)
+                as f64
+                / elapsed;
+        }
+    }
+    state.last_published_at = Some(now);
+    state.last_published_event_attempts = state.snapshot.journal_event_attempts;
+    state.last_published_durable_events = state.snapshot.journal_durable_events;
     state.sequence = state.sequence.saturating_add(1);
     let current = state.snapshot;
     publish_controller_metrics(
@@ -467,6 +545,7 @@ fn publish_metrics_snapshot(
         current.job_processes,
         current.waiter_processes,
         current.reconcile_duration_ms,
+        current,
     )?;
     Ok(true)
 }
@@ -489,7 +568,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
     let mut last_reconcile_duration_ms = 1;
-    publish_controller_metrics(&args.state_dir, 0, 0, 0, 0, 1)?;
+    publish_controller_metrics(&args.state_dir, 0, 0, 0, 0, 1, MetricsSnapshot::default())?;
     let mut metrics = MetricsPublisher::start(&args.state_dir);
     let lifecycle = args.lifecycle.as_ref().and_then(ActiveLifecycle::bind);
     loop {
@@ -548,6 +627,7 @@ fn publish_controller_metrics(
     job_processes: usize,
     waiter_processes: usize,
     reconcile_p95_ms: u64,
+    snapshot: MetricsSnapshot,
 ) -> anyhow::Result<()> {
     let wal_bytes = std::fs::metadata(state_dir.join("journal.db-wal"))
         .map(|metadata| metadata.len())
@@ -560,7 +640,21 @@ fn publish_controller_metrics(
         "job_processes": job_processes,
         "waiter_processes": waiter_processes,
         "reconcile_duration_ms": { "p95": reconcile_p95_ms },
-        "journal": { "transactions": sequence.saturating_add(1), "wal_bytes": wal_bytes },
+        "reconcile_overlap_count": snapshot.reconcile_overlap_count,
+        "events_per_second": snapshot.events_per_second,
+        "durable_events_per_second": snapshot.durable_events_per_second,
+        "jit": {
+            "create_attempts": snapshot.jit_create_attempts,
+            "create_successes": snapshot.jit_create_successes,
+            "create_failures": snapshot.jit_create_failures,
+            "create_latency_ms": snapshot.jit_create_latency_ms
+        },
+        "journal": {
+            "transactions": sequence.saturating_add(1),
+            "wal_bytes": wal_bytes,
+            "event_attempts": snapshot.journal_event_attempts,
+            "durable_events": snapshot.journal_durable_events
+        },
         "cpu": {
             "controller": { "user_us": user_us, "system_us": system_us },
             "phases": {
@@ -577,6 +671,56 @@ fn publish_controller_metrics(
     std::fs::write(&temporary, serde_json::to_vec(&metrics)?)?;
     std::fs::rename(temporary, destination)?;
     Ok(())
+}
+
+/// Read the authoritative durable event count without borrowing the journal's
+/// private SQLite connection. The controller owns the journal path; opening a
+/// short-lived read-only handle keeps the publisher independent of journal
+/// mutation and includes events committed by worker processes too.
+fn durable_journal_event_count(state_dir: &Path) -> Option<u64> {
+    let connection = rusqlite::Connection::open_with_flags(
+        state_dir.join("journal.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    connection.busy_timeout(Duration::from_millis(100)).ok()?;
+    connection
+        .query_row("SELECT COUNT(*) FROM events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .ok()
+        .and_then(|count| u64::try_from(count).ok())
+}
+
+/// Apply one event through the current journal path and count the controller's
+/// authoritative submission. Durable rows are sampled from SQLite by the
+/// publisher, because worker processes can commit events through their own
+/// journal handles.
+fn apply_journal_event(
+    journal: &mut Journal,
+    metrics: Option<&MetricsPublisher>,
+    event: Event,
+) -> anyhow::Result<velnor_control::journal::ReduceOutcome> {
+    let outcome = journal.apply(event)?;
+    if let Some(metrics) = metrics {
+        metrics.record_journal_event();
+    }
+    Ok(outcome)
+}
+
+fn apply_journal_events(
+    journal: &mut Journal,
+    metrics: Option<&MetricsPublisher>,
+    events: impl IntoIterator<Item = Event>,
+) -> anyhow::Result<Vec<velnor_control::journal::ReduceOutcome>> {
+    let events = events.into_iter().collect::<Vec<_>>();
+    let outcomes = journal.apply_many(events)?;
+    if let Some(metrics) = metrics {
+        for _ in &outcomes {
+            metrics.record_journal_event();
+        }
+    }
+    Ok(outcomes)
 }
 
 /// Return process CPU time for the explicit aggregate controller metric. The
@@ -960,7 +1104,7 @@ async fn reconcile_once(
     // Ingest a surviving slot's heartbeat before deciding whether its permit
     // needs repair. On controller restart the child handle is gone, so the
     // heartbeat is the only fresh local proof that prevents a double spawn.
-    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
+    ingest_slot_heartbeats(args, journal, total as usize, heartbeats, Some(metrics))?;
     reconcile_lifecycle_admission(journal, lifecycle)?;
     let state = journal.materialized_state()?;
     // The loop top exits on drain, so this closes the race where another
@@ -996,7 +1140,7 @@ async fn reconcile_once(
             && !fenced
             && stale_slot_deadline_reached(args, slot, &id, startup_deadlines, Instant::now())
         {
-            fence_stale_slot_actor(args, journal, slots, jobs, &id, generation).await?;
+            fence_stale_slot_actor(args, journal, slots, jobs, &id, generation, metrics).await?;
             startup_deadlines.remove(&id.0);
             continue;
         }
@@ -1022,12 +1166,15 @@ async fn reconcile_once(
             continue;
         }
         effects.extend(
-            journal
-                .apply(Event::PermitReserved {
+            apply_journal_event(
+                journal,
+                Some(metrics),
+                Event::PermitReserved {
                     slot_id: id,
                     generation,
-                })?
-                .commands,
+                },
+            )?
+            .commands,
         );
     }
     for command in effects {
@@ -1038,6 +1185,7 @@ async fn reconcile_once(
             startup_deadlines,
             &mut *pacing,
             remote_deadline,
+            metrics,
             command,
         )
         .await?;
@@ -1045,14 +1193,15 @@ async fn reconcile_once(
 
     metrics.update(slots, jobs, 1);
 
-    observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
+    observe_github_and_routing_with_metrics(args, journal, pacing, remote_deadline, Some(metrics))
+        .await?;
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL
         && pacing.rest_requests_allowed(tokio::time::Instant::now())
     {
         *last_registration_reconcile = Instant::now();
         let reconciliation = run_bounded_remote_reconciliation(
-            reconcile_remote_registrations(args, journal, jobs, pacing),
+            reconcile_remote_registrations_with_metrics(args, journal, jobs, pacing, Some(metrics)),
             remaining_remote_budget(remote_deadline),
         )
         .await;
@@ -1078,23 +1227,29 @@ async fn reconcile_once(
             .unwrap_or(Generation::INITIAL);
         if executor {
             proof_effects.extend(
-                journal
-                    .apply(Event::ExecutorProven {
+                apply_journal_event(
+                    journal,
+                    Some(metrics),
+                    Event::ExecutorProven {
                         slot_id: id.clone(),
                         generation,
-                    })?
-                    .commands,
+                    },
+                )?
+                .commands,
             );
         }
         if prove::slot_heartbeat_is_fresh(&args.state_dir, &id, generation, SLOT_HEARTBEAT_MAX_AGE)
         {
             proof_effects.extend(
-                journal
-                    .apply(Event::SessionLive {
+                apply_journal_event(
+                    journal,
+                    Some(metrics),
+                    Event::SessionLive {
                         slot_id: id.clone(),
                         generation,
-                    })?
-                    .commands,
+                    },
+                )?
+                .commands,
             );
         }
         let state = journal.materialized_state()?;
@@ -1104,12 +1259,15 @@ async fn reconcile_once(
             && pacing.registration_due(&id.0, now)
         {
             proof_effects.extend(
-                journal
-                    .apply(Event::RegistrationIntended {
+                apply_journal_event(
+                    journal,
+                    Some(metrics),
+                    Event::RegistrationIntended {
                         slot_id: id,
                         generation,
-                    })?
-                    .commands,
+                    },
+                )?
+                .commands,
             );
         }
     }
@@ -1128,23 +1286,33 @@ async fn reconcile_once(
                     startup_deadlines,
                     &mut *pacing,
                     remote_deadline,
+                    metrics,
                     command,
                 )
                 .await?
             }
         }
     }
-    register_runners(args, journal, pacing, registrations, remote_deadline).await?;
+    register_runners(
+        args,
+        journal,
+        pacing,
+        registrations,
+        remote_deadline,
+        metrics,
+    )
+    .await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
     reap(jobs);
     let outbox_reconcile_due = last_outbox_reconcile.elapsed() >= OUTBOX_RECONCILIATION_INTERVAL;
-    reclaim_orphaned_jobs(
+    reclaim_orphaned_jobs_with_metrics(
         args,
         journal,
         remote_deadline,
         outbox_reconcile_due,
         crate::docker::client::host_call,
+        Some(metrics),
     )
     .await?;
     if outbox_reconcile_due {
@@ -1221,6 +1389,7 @@ async fn execute_effect(
     startup_deadlines: &mut HashMap<String, Instant>,
     pacing: &mut GithubPacing,
     remote_deadline: tokio::time::Instant,
+    metrics: &MetricsPublisher,
     command: SideEffect,
 ) -> anyhow::Result<()> {
     match command {
@@ -1238,7 +1407,18 @@ async fn execute_effect(
         SideEffect::RegisterRunner {
             slot_id,
             generation,
-        } => register_runner(args, journal, pacing, slot_id, generation, remote_deadline).await,
+        } => {
+            register_runner(
+                args,
+                journal,
+                pacing,
+                slot_id,
+                generation,
+                remote_deadline,
+                metrics,
+            )
+            .await
+        }
         SideEffect::AdvertiseCapacity { permits } => {
             std::fs::write(
                 args.state_dir.join("advertised-capacity"),
@@ -1269,6 +1449,7 @@ async fn register_runner(
     slot_id: SlotId,
     generation: Generation,
     remote_deadline: tokio::time::Instant,
+    metrics: &MetricsPublisher,
 ) -> anyhow::Result<()> {
     register_runners(
         args,
@@ -1276,6 +1457,7 @@ async fn register_runner(
         pacing,
         vec![(slot_id, generation)],
         remote_deadline,
+        metrics,
     )
     .await
 }
@@ -1290,6 +1472,7 @@ async fn register_runners(
     pacing: &mut GithubPacing,
     registrations: Vec<(SlotId, Generation)>,
     remote_deadline: tokio::time::Instant,
+    metrics: &MetricsPublisher,
 ) -> anyhow::Result<()> {
     if registrations.is_empty() {
         return Ok(());
@@ -1316,6 +1499,7 @@ async fn register_runners(
             let config_base = config_base.clone();
             async move {
                 let index = slot_index_from_id(&slot_id);
+                let started = Instant::now();
                 let timeout = remaining_remote_budget(remote_deadline);
                 let jit_timeout = timeout.saturating_sub(JIT_ORPHAN_CLEANUP_BUDGET);
                 let result = if jit_timeout.is_zero() {
@@ -1364,15 +1548,16 @@ async fn register_runners(
                         }
                     }
                 };
-                (slot_id, generation, result)
+                (slot_id, generation, result, started.elapsed())
             }
         })
         .buffer_unordered(concurrency)
         .collect::<Vec<_>>()
         .await;
-    outcomes.sort_by_key(|(slot_id, _, _)| slot_id.0.clone());
+    outcomes.sort_by_key(|(slot_id, _, _, _)| slot_id.0.clone());
 
-    for (slot_id, generation, result) in outcomes {
+    for (slot_id, generation, result, latency) in outcomes {
+        metrics.record_jit_create(latency, result.is_ok());
         if let Err(error) = result {
             // Per-slot backoff always. Quota 403/429 also sets rest_hold_until
             // so other unregistered slots do not keep calling generate-jitconfig
@@ -1390,17 +1575,25 @@ async fn register_runners(
             continue;
         }
         pacing.record_registration_success(&slot_id.0);
-        let registered = journal.apply(Event::Registered {
-            slot_id: slot_id.clone(),
-            generation,
-        })?;
+        let registered = apply_journal_event(
+            journal,
+            Some(metrics),
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+        )?;
         if registered.rejected {
             continue;
         }
-        let ready = journal.apply(Event::ReadyAttempt {
-            slot_id,
-            generation,
-        })?;
+        let ready = apply_journal_event(
+            journal,
+            Some(metrics),
+            Event::ReadyAttempt {
+                slot_id,
+                generation,
+            },
+        )?;
         for nested in ready.commands {
             if let SideEffect::AdvertiseCapacity { permits } = nested {
                 std::fs::write(
@@ -1418,11 +1611,22 @@ async fn register_runners(
 /// intact (manual cleanup, expiry, or a crashed registration flow). Trusting
 /// only the local `registered` bit then permanently suppresses fresh JIT
 /// configuration and leaves every slot dead after restart.
+#[cfg(test)]
 async fn reconcile_remote_registrations(
     args: &ControllerArgs,
     journal: &mut Journal,
     jobs: &mut HashMap<String, Child>,
     pacing: &mut GithubPacing,
+) -> anyhow::Result<()> {
+    reconcile_remote_registrations_with_metrics(args, journal, jobs, pacing, None).await
+}
+
+async fn reconcile_remote_registrations_with_metrics(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    jobs: &mut HashMap<String, Child>,
+    pacing: &mut GithubPacing,
+    metrics: Option<&MetricsPublisher>,
 ) -> anyhow::Result<()> {
     // Reconciliation is the proof that permits and remote registration still
     // agree. Without executable config or a PAT that proof cannot be made for
@@ -1529,10 +1733,14 @@ async fn reconcile_remote_registrations(
 
     for (slot_id, generation) in lost {
         let state = journal.materialized_state()?;
-        let outcome = journal.apply(Event::RegistrationLost {
-            slot_id: slot_id.clone(),
-            generation,
-        })?;
+        let outcome = apply_journal_event(
+            journal,
+            metrics,
+            Event::RegistrationLost {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+        )?;
         if outcome.rejected {
             continue;
         }
@@ -1610,11 +1818,22 @@ fn job_child_keys_for_slot(
     keys
 }
 
+#[cfg(test)]
 async fn observe_github_and_routing(
     args: &ControllerArgs,
     journal: &mut Journal,
     pacing: &mut GithubPacing,
     remote_deadline: tokio::time::Instant,
+) -> anyhow::Result<()> {
+    observe_github_and_routing_with_metrics(args, journal, pacing, remote_deadline, None).await
+}
+
+async fn observe_github_and_routing_with_metrics(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    pacing: &mut GithubPacing,
+    remote_deadline: tokio::time::Instant,
+    metrics: Option<&MetricsPublisher>,
 ) -> anyhow::Result<()> {
     let mut reachable = false;
     let mut dependency_observed = false;
@@ -1737,16 +1956,24 @@ async fn observe_github_and_routing(
         }
     }
     if dependency_observed || !probe_configured(args) {
-        journal.apply(Event::Dependency {
-            github_reachable: reachable,
-        })?;
+        apply_journal_event(
+            journal,
+            metrics,
+            Event::Dependency {
+                github_reachable: reachable,
+            },
+        )?;
     }
     let _ = prove::reconcile_from_dir(&args.state_dir)?;
     let routing = prove::observe_routing(&args.state_dir);
-    journal.apply(Event::Routing {
-        valid: routing.valid,
-        group_valid: routing.group_valid,
-    })?;
+    apply_journal_event(
+        journal,
+        metrics,
+        Event::Routing {
+            valid: routing.valid,
+            group_valid: routing.group_valid,
+        },
+    )?;
     Ok(())
 }
 
@@ -1925,12 +2152,33 @@ fn teardown_orphaned_job_containers(
 /// Return slots occupied by job workers that died without a terminal
 /// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
 /// slot stays `Assigned` forever and advertised capacity never recovers.
+#[cfg(test)]
 async fn reclaim_orphaned_jobs(
     args: &ControllerArgs,
     journal: &mut Journal,
     remote_deadline: tokio::time::Instant,
     scan_persisted_markers: bool,
     mut docker: impl FnMut(&[String]) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    reclaim_orphaned_jobs_with_metrics(
+        args,
+        journal,
+        remote_deadline,
+        scan_persisted_markers,
+        &mut docker,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reclaim_orphaned_jobs_with_metrics(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    remote_deadline: tokio::time::Instant,
+    scan_persisted_markers: bool,
+    mut docker: impl FnMut(&[String]) -> anyhow::Result<String>,
+    metrics: Option<&MetricsPublisher>,
 ) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
     let orphan_jobs: Vec<_> = state
@@ -2010,6 +2258,7 @@ async fn reclaim_orphaned_jobs(
             &job,
             remote_deadline,
             &mut teardown,
+            metrics,
         )
         .await
         {
@@ -2121,6 +2370,7 @@ async fn recover_one_orphaned_job(
     job: &velnor_control::journal::JobRecord,
     remote_deadline: tokio::time::Instant,
     teardown: &mut impl FnMut(&str),
+    metrics: Option<&MetricsPublisher>,
 ) -> anyhow::Result<()> {
     let slot_dir = recovery_slot_config_dir(&args.state_dir, exec, state, &job.slot_id)?;
     let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
@@ -2275,10 +2525,14 @@ async fn recover_one_orphaned_job(
     // before the slot returns to Ready; after JobWorkerLost no path
     // would ever touch them again.
     teardown(&job.job_id.0);
-    let lost = journal.apply(Event::JobWorkerLost {
-        job_id: job.job_id.clone(),
-        generation: job.generation,
-    })?;
+    let lost = apply_journal_event(
+        journal,
+        metrics,
+        Event::JobWorkerLost {
+            job_id: job.job_id.clone(),
+            generation: job.generation,
+        },
+    )?;
     if !lost.rejected {
         eprintln!(
             "Warning: job {} worker lost on {}; slot restored to Ready",
@@ -2908,11 +3162,16 @@ async fn fence_stale_slot_actor(
     jobs: &mut HashMap<String, Child>,
     id: &SlotId,
     generation: Generation,
+    metrics: &MetricsPublisher,
 ) -> anyhow::Result<()> {
-    let outcome = journal.apply(Event::SlotStale {
-        slot_id: id.clone(),
-        generation,
-    })?;
+    let outcome = apply_journal_event(
+        journal,
+        Some(metrics),
+        Event::SlotStale {
+            slot_id: id.clone(),
+            generation,
+        },
+    )?;
     if outcome.rejected {
         return Ok(());
     }
@@ -2946,6 +3205,7 @@ fn ingest_slot_heartbeats(
     journal: &mut Journal,
     total: usize,
     seen: &mut HashMap<String, (u32, u64)>,
+    metrics: Option<&MetricsPublisher>,
 ) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
     let mut pending = Vec::new();
@@ -2976,12 +3236,15 @@ fn ingest_slot_heartbeats(
         }
         pending.push((id, heartbeat));
     }
-    let outcomes =
-        journal.apply_many(pending.iter().map(|(id, heartbeat)| Event::SlotHeartbeat {
+    let outcomes = apply_journal_events(
+        journal,
+        metrics,
+        pending.iter().map(|(id, heartbeat)| Event::SlotHeartbeat {
             slot_id: id.clone(),
             generation: Generation(heartbeat.generation),
             pid: heartbeat.pid,
-        }))?;
+        }),
+    )?;
     for ((id, heartbeat), outcome) in pending.into_iter().zip(outcomes) {
         if !outcome.rejected {
             seen.insert(id.0, (heartbeat.pid, heartbeat.sequence));
@@ -3451,7 +3714,16 @@ mod tests {
         assert_eq!((job_processes, waiter_processes), (2, 1));
 
         let dir = metrics_test_dir("active-jobs");
-        publish_controller_metrics(&dir, 1, 2, job_processes, waiter_processes, 7).unwrap();
+        publish_controller_metrics(
+            &dir,
+            1,
+            2,
+            job_processes,
+            waiter_processes,
+            7,
+            MetricsSnapshot::default(),
+        )
+        .unwrap();
 
         let metrics: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
@@ -3491,7 +3763,7 @@ mod tests {
             checksum = checksum.wrapping_add(value.rotate_left(7));
         }
         std::hint::black_box(checksum);
-        publish_controller_metrics(&dir, 1, 0, 0, 0, 1).unwrap();
+        publish_controller_metrics(&dir, 1, 0, 0, 0, 1, MetricsSnapshot::default()).unwrap();
         let metrics: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
                 .unwrap();
@@ -4005,6 +4277,36 @@ mod tests {
             metrics["sequence"].as_u64().unwrap(),
             publisher.state.lock().unwrap().sequence
         );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_publisher_reports_supported_jit_and_journal_labels() {
+        let dir = metrics_test_dir("telemetry-labels");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        journal.apply(Event::ControlLive).unwrap();
+
+        let mut publisher = MetricsPublisher::start(&dir);
+        publisher.record_jit_create(Duration::from_millis(3), true);
+        publisher.record_jit_create(Duration::from_millis(7), false);
+        publisher.record_journal_event();
+        publisher.record_journal_event();
+        publisher.update(&HashMap::new(), &HashMap::new(), 11);
+        publisher.stop_and_publish().await.unwrap();
+
+        let metrics: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
+                .unwrap();
+        assert_eq!(metrics["jit"]["create_attempts"], json!(2));
+        assert_eq!(metrics["jit"]["create_successes"], json!(1));
+        assert_eq!(metrics["jit"]["create_failures"], json!(1));
+        assert_eq!(metrics["jit"]["create_latency_ms"], json!(10));
+        assert_eq!(metrics["journal"]["event_attempts"], json!(2));
+        assert_eq!(metrics["journal"]["durable_events"], json!(1));
+        assert_eq!(metrics["reconcile_overlap_count"], json!(0));
+        assert!(metrics["events_per_second"].is_number());
+        assert!(metrics["durable_events_per_second"].is_number());
 
         std::fs::remove_dir_all(dir).unwrap();
     }
