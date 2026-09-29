@@ -68,7 +68,8 @@ pub enum DockerIsolationMode {
 /// Select the host isolation proof without assuming that the host kernel is
 /// the kernel running Docker. This selects the cgroup driver and version
 /// only — a mode, not a ceiling. Placement under the job cgroup is proven
-/// separately, and no CPU/RAM ceiling is ever required or applied.
+/// separately, and no CPU, memory, swap, or task ceiling is ever required or
+/// applied.
 pub fn validate_docker_isolation(
     platform: HostPlatform,
     driver: &str,
@@ -283,7 +284,8 @@ pub(crate) fn verify_docker_job_cgroup_boundary_with_image(
     }
 
     // The job slice is identity and cleanup ancestry, not a ceiling: it must
-    // be loaded, and its effective CPU/RAM properties must all read
+    // be loaded, and its effective CPU, memory, swap, and task properties must
+    // all read
     // `infinity`. Any finite value is a surviving quota — a stale package
     // drop-in or an operator override — and fails closed.
     let slice = crate::docker_lease::JOB_CGROUP_PARENT;
@@ -296,12 +298,14 @@ pub(crate) fn verify_docker_job_cgroup_boundary_with_image(
     }
     for (property, value) in [
         ("CPUQuotaPerSecUSec", state.cpu_quota.as_str()),
-        ("MemoryMax", state.memory_max.as_str()),
         ("MemoryHigh", state.memory_high.as_str()),
+        ("MemoryMax", state.memory_max.as_str()),
+        ("MemorySwapMax", state.memory_swap_max.as_str()),
+        ("TasksMax", state.tasks_max.as_str()),
     ] {
         if !value.eq_ignore_ascii_case("infinity") {
             return Err(ExecutionError::DockerPreflight(format!(
-                "Docker job cgroup boundary requires no CPU/RAM ceiling on {slice}; {property} is {value:?}"
+                "Docker job cgroup boundary requires no resource ceiling on {slice}; {property} is {value:?}"
             )));
         }
     }
@@ -397,12 +401,14 @@ fn verify_docker_vm_resource_controls(
     Ok(())
 }
 
-/// Effective load state and CPU/RAM ceiling properties of the job slice.
+/// Effective load state and resource ceiling properties of the job slice.
 struct SystemdSliceState {
     load_state: String,
     cpu_quota: String,
-    memory_max: String,
     memory_high: String,
+    memory_max: String,
+    memory_swap_max: String,
+    tasks_max: String,
 }
 
 fn systemd_slice_load_and_ceilings(
@@ -416,8 +422,10 @@ fn systemd_slice_load_and_ceilings(
                 "show".into(),
                 "--property=LoadState".into(),
                 "--property=CPUQuotaPerSecUSec".into(),
-                "--property=MemoryMax".into(),
                 "--property=MemoryHigh".into(),
+                "--property=MemoryMax".into(),
+                "--property=MemorySwapMax".into(),
+                "--property=TasksMax".into(),
                 slice.into(),
             ],
         )
@@ -433,12 +441,14 @@ fn systemd_slice_load_and_ceilings(
         )));
     }
 
-    // `systemctl --value` does not preserve the requested property order on
-    // every systemd version. Parse named fields so the probe is order-safe.
+    // systemctl does not guarantee the requested property order on every
+    // systemd version. Parse named fields so the probe is order-safe.
     let mut load_state = None;
     let mut cpu_quota = None;
-    let mut memory_max = None;
     let mut memory_high = None;
+    let mut memory_max = None;
+    let mut memory_swap_max = None;
+    let mut tasks_max = None;
     for line in result.stdout.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -446,13 +456,28 @@ fn systemd_slice_load_and_ceilings(
         match key {
             "LoadState" => load_state = Some(value.trim().to_string()),
             "CPUQuotaPerSecUSec" => cpu_quota = Some(value.trim().to_string()),
-            "MemoryMax" => memory_max = Some(value.trim().to_string()),
             "MemoryHigh" => memory_high = Some(value.trim().to_string()),
+            "MemoryMax" => memory_max = Some(value.trim().to_string()),
+            "MemorySwapMax" => memory_swap_max = Some(value.trim().to_string()),
+            "TasksMax" => tasks_max = Some(value.trim().to_string()),
             _ => {}
         }
     }
-    let (Some(load_state), Some(cpu_quota), Some(memory_max), Some(memory_high)) =
-        (load_state, cpu_quota, memory_max, memory_high)
+    let (
+        Some(load_state),
+        Some(cpu_quota),
+        Some(memory_high),
+        Some(memory_max),
+        Some(memory_swap_max),
+        Some(tasks_max),
+    ) = (
+        load_state,
+        cpu_quota,
+        memory_high,
+        memory_max,
+        memory_swap_max,
+        tasks_max,
+    )
     else {
         return Err(ExecutionError::DockerPreflight(format!(
             "systemd slice state probe for {slice} returned malformed output {:?}",
@@ -462,8 +487,10 @@ fn systemd_slice_load_and_ceilings(
     Ok(SystemdSliceState {
         load_state,
         cpu_quota,
-        memory_max,
         memory_high,
+        memory_max,
+        memory_swap_max,
+        tasks_max,
     })
 }
 

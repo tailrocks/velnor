@@ -370,15 +370,17 @@ fn docker_backend_accepts_an_unbounded_job_slice() {
 fn docker_backend_rejects_any_surviving_slice_ceiling() {
     for (property, value) in [
         ("CPUQuotaPerSecUSec", "950ms"),
-        ("MemoryMax", "17179869184"),
         ("MemoryHigh", "16106127360"),
+        ("MemoryMax", "17179869184"),
+        ("MemorySwapMax", "8589934592"),
+        ("TasksMax", "256"),
     ] {
         let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
         let mut fs = MemoryFs::default();
         let docker = socket_for(ExecutionBackendKind::Docker);
         fs.write(&docker, b"socket").unwrap();
         let mut state =
-            "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryMax=infinity\nMemoryHigh=infinity\n"
+            "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryHigh=infinity\nMemoryMax=infinity\nMemorySwapMax=infinity\nTasksMax=infinity\n"
                 .to_string();
         state = state.replace(
             &format!("{property}=infinity"),
@@ -400,7 +402,7 @@ fn docker_backend_rejects_any_surviving_slice_ceiling() {
         let error = preflight_selected(&file, &mut world).unwrap_err();
         let message = error.to_string();
         assert!(
-            message.contains("no CPU/RAM ceiling") && message.contains(property),
+            message.contains("no resource ceiling") && message.contains(property),
             "a surviving {property} ceiling must fail closed: {message}"
         );
     }
