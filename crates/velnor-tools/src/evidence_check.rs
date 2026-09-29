@@ -14,7 +14,7 @@ use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
-use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -991,6 +991,11 @@ fn reject_duplicate_json_keys(bytes: &[u8]) -> Result<(), String> {
     deserializer.end().map_err(|error| error.to_string())
 }
 
+pub(crate) fn parse_strict_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    reject_duplicate_json_keys(bytes)?;
+    serde_json::from_slice(bytes).map_err(|error| error.to_string())
+}
+
 struct DuplicateKeyGuard;
 
 impl<'de> Deserialize<'de> for DuplicateKeyGuard {
@@ -1932,6 +1937,14 @@ fn check_g0_inventory(
         &collector.raw_objects,
         findings,
     );
+    check_g0_local_raw_refs(
+        "evidence.g0_inventory.collector_snapshot.workload_artifact.raw_object_refs",
+        &collector.workload_artifact.raw_object_refs,
+        &raw_ids,
+        &collector.raw_objects,
+        &["workload.source", "workload.artifact"],
+        findings,
+    );
     if !g0_typed_raw_binding(
         &collector.workload_artifact.raw_object_refs,
         &collector.raw_objects,
@@ -2266,6 +2279,23 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
             );
         }
     }
+    let mut bound_local_raw_ids = BTreeSet::new();
+    bound_local_raw_ids.extend(collector.model_session.raw_object_refs.iter().cloned());
+    bound_local_raw_ids.extend(collector.workload_artifact.raw_object_refs.iter().cloned());
+    for raw in &collector.raw_objects {
+        if g0_local_raw_kind(&raw.object_kind) && !bound_local_raw_ids.contains(&raw.raw_id) {
+            finding(
+                findings,
+                "g0-local-raw-orphan",
+                "",
+                "evidence.g0_inventory.collector_snapshot.raw_objects",
+                format!(
+                    "local raw object {} must be referenced by model_session or workload_artifact",
+                    raw.raw_id
+                ),
+            );
+        }
+    }
     for request in &collector.requests {
         for raw_id in std::iter::once(&request.response_raw_ref).chain(request.error_raw_ref.iter())
         {
@@ -2413,7 +2443,7 @@ fn check_g0_paginated_response_streams(
             let body_valid = BASE64
                 .decode(&raw.bytes_base64)
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|bytes| parse_strict_json::<Value>(&bytes).ok())
                 .and_then(|value| {
                     let (total, members) = g0_page_members(&value, response_schema)?;
                     Some((total, members.to_vec()))
@@ -2521,8 +2551,46 @@ fn check_g0_raw_refs(
             "typed authoritative fields require at least one raw object reference",
         );
     }
+    let mut seen = BTreeSet::new();
     for raw_id in refs {
+        if !seen.insert(raw_id.clone()) {
+            finding(
+                findings,
+                "g0-raw-duplicate",
+                "",
+                field,
+                format!("raw object reference {raw_id} appears more than once"),
+            );
+        }
         check_g0_raw_ref(field, raw_id, raw_ids, findings);
+    }
+}
+
+fn check_g0_local_raw_refs(
+    field: &str,
+    refs: &[String],
+    raw_ids: &BTreeSet<String>,
+    raw_objects: &[G0RawObjectRef],
+    expected_kinds: &[&str],
+    findings: &mut Vec<Finding>,
+) {
+    check_g0_raw_refs(field, refs, raw_ids, findings);
+    for raw_id in refs {
+        let Some(raw) = raw_objects.iter().find(|raw| raw.raw_id == *raw_id) else {
+            continue;
+        };
+        if !expected_kinds.contains(&raw.object_kind.as_str()) {
+            finding(
+                findings,
+                "g0-local-raw-kind",
+                "",
+                field,
+                format!(
+                    "local raw object {raw_id} has kind {}, expected one of {:?}",
+                    raw.object_kind, expected_kinds
+                ),
+            );
+        }
     }
 }
 
@@ -2586,10 +2654,7 @@ fn g0_raw_object_matches_typed<T: Serialize>(
     let Ok(bytes) = BASE64.decode(&raw.bytes_base64) else {
         return false;
     };
-    if reject_duplicate_json_keys(&bytes).is_err() {
-        return false;
-    }
-    let Ok(actual) = serde_json::from_slice::<Value>(&bytes) else {
+    let Ok(actual) = parse_strict_json::<Value>(&bytes) else {
         return false;
     };
     serde_json::to_value(expected).is_ok_and(|expected| actual == expected)
@@ -2639,10 +2704,7 @@ fn g0_response_query_contract(
     };
     let response_schema = contract.response_schema;
     let endpoint_query_valid = g0_endpoint_inline_query_contract(request, contract);
-    if matches!(
-        response_schema,
-        G0RawResponseSchema::Singular | G0RawResponseSchema::Binary
-    ) {
+    if matches!(response_schema, G0RawResponseSchema::Singular) {
         let singular_page = payload_pairs.is_empty()
             || (payload_pairs.len() == 1
                 && payload_pairs[0].0 == "per_page"
@@ -2652,13 +2714,36 @@ fn g0_response_query_contract(
             && request.page.number == 1
             && !request.page.has_next_page;
     }
+    if matches!(response_schema, G0RawResponseSchema::Binary) {
+        return endpoint_query_valid
+            && payload_pairs.is_empty()
+            && request.page.number == 1
+            && request.page.per_page == 1
+            && !request.page.has_next_page;
+    }
 
     let keys = ordered
         .iter()
         .map(|(key, _)| key.as_str())
         .collect::<Vec<_>>();
     let expected_keys = g0_paginated_query_keys(contract.kind);
-    if keys != expected_keys {
+    let first_page_keys = expected_keys
+        .iter()
+        .copied()
+        .filter(|key| *key != "page")
+        .collect::<Vec<_>>();
+    // The collector constructors omit `page` on the first request; the REST
+    // acquisition layer may add `page=1` when recording that request. Accept
+    // both representations only for the affected provider streams.
+    let page_optional_on_first_page = matches!(
+        contract.kind,
+        G0EndpointKind::ArtifactsPage
+            | G0EndpointKind::CheckSuitesPage
+            | G0EndpointKind::CheckSuiteRunsPage
+    );
+    if keys != expected_keys
+        && !(page_optional_on_first_page && request.page.number == 1 && keys == first_page_keys)
+    {
         return false;
     }
     let value = |key: &str| {
@@ -2670,7 +2755,10 @@ fn g0_response_query_contract(
     let Some(per_page) = value("per_page").and_then(|value| value.parse::<u32>().ok()) else {
         return false;
     };
-    let Some(page) = value("page").and_then(|value| value.parse::<u32>().ok()) else {
+    let page = value("page")
+        .map(|value| value.parse::<u32>().ok())
+        .unwrap_or(Some(request.page.number));
+    let Some(page) = page else {
         return false;
     };
     endpoint_query_valid
@@ -2739,7 +2827,18 @@ fn g0_endpoint_inline_query_shape_from_query(
                 .iter()
                 .map(|(key, _)| key.as_str())
                 .collect::<Vec<_>>();
-            if keys != expected_keys {
+            let first_page_keys = expected_keys
+                .iter()
+                .copied()
+                .filter(|key| *key != "page")
+                .collect::<Vec<_>>();
+            let page_optional_on_first_page = matches!(
+                kind,
+                G0EndpointKind::ArtifactsPage
+                    | G0EndpointKind::CheckSuitesPage
+                    | G0EndpointKind::CheckSuiteRunsPage
+            );
+            if keys != expected_keys && !(page_optional_on_first_page && keys == first_page_keys) {
                 return false;
             }
             ordered.iter().all(|(key, value)| match key.as_str() {
@@ -3036,6 +3135,45 @@ fn g0_api_url(value: &str) -> Option<Url> {
     Some(url)
 }
 
+/// Return the exact path for typed metadata/archive provenance.  The
+/// ordinary endpoint parser above intentionally supports pagination queries;
+/// these two role endpoints must not carry a query, fragment, credentials,
+/// port, or alternate origin.
+fn g0_canonical_api_path(endpoint: &str) -> Option<String> {
+    if endpoint.starts_with('/') {
+        if endpoint.starts_with("//")
+            || endpoint.contains('?')
+            || endpoint.contains('#')
+            || endpoint.contains("://")
+            || endpoint.contains("..")
+            || endpoint.trim().is_empty()
+        {
+            return None;
+        }
+        return Some(endpoint.to_owned());
+    }
+    let url = Url::parse(endpoint).ok()?;
+    let has_userinfo = url
+        .as_str()
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .is_some_and(|authority| authority.contains('@'));
+    if url.scheme() != "https"
+        || url.host_str() != Some("api.github.com")
+        || has_userinfo
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path().is_empty()
+        || url.path().contains("..")
+    {
+        return None;
+    }
+    Some(url.path().to_owned())
+}
+
 fn g0_next_link_matches(current: &G0RequestRecord, next: &G0RequestRecord) -> bool {
     if let Some(link) = current.page.link_next.as_deref() {
         let Some(url) = g0_api_url(link) else {
@@ -3183,6 +3321,12 @@ fn check_g0_workflow_source(
         .iter()
         .map(|raw| raw.raw_id.clone())
         .collect::<BTreeSet<_>>();
+    check_g0_raw_refs(
+        &format!("{field}.raw_object_refs"),
+        &source.raw_object_refs,
+        &raw_ids,
+        findings,
+    );
     let decoded = BASE64.decode(&source.bytes_base64);
     let valid = !source.repository.trim().is_empty()
         && source.repository == repository
@@ -4026,16 +4170,29 @@ fn check_g0_artifact_observations(
     }
 
     let mut artifact_ids = BTreeSet::new();
-    let mut artifact_names = BTreeSet::new();
-    let mut known_run_bindings = BTreeMap::<u64, BTreeSet<(u32, String)>>::new();
-    for check in context.main_checks {
+    let mut artifact_run_names = BTreeSet::new();
+    // Raw workflow-run/job rows prove the run ID, attempt, and source head.
+    // They do not expose the runner's checkout state; that remains a typed
+    // provider field checked against the independent execution snapshot.
+    let mut verified_run_bindings = BTreeMap::<u64, BTreeSet<(u32, String)>>::new();
+    for check in context.main_checks.iter().chain(
+        context
+            .open_prs
+            .iter()
+            .flat_map(|pr| pr.required_check_producers.iter()),
+    ) {
+        // This binding deliberately uses only raw workflow-run/job rows.
+        // The typed checkout SHA is checked against the independent
+        // execution snapshot elsewhere; the GitHub API rows do not prove
+        // what the runner checked out.
         if let G0CheckProvider::GithubActions {
             workflow_run_id,
             run_attempt,
             ..
         } = &check.provider
+            && g0_check_raw_evidence_valid(repository, check, context.requests, context.raw_objects)
         {
-            known_run_bindings
+            verified_run_bindings
                 .entry(*workflow_run_id)
                 .or_default()
                 .insert((*run_attempt, check.source_sha.clone()));
@@ -4049,35 +4206,34 @@ fn check_g0_artifact_observations(
         if let Some(merge_group_sha) = &pr.merge_group_sha {
             known_source_shas.insert(merge_group_sha.clone());
         }
-        for check in &pr.required_check_producers {
-            if let G0CheckProvider::GithubActions {
-                workflow_run_id,
-                run_attempt,
-                ..
-            } = &check.provider
-            {
-                known_run_bindings
-                    .entry(*workflow_run_id)
-                    .or_default()
-                    .insert((*run_attempt, check.source_sha.clone()));
-            }
-        }
     }
 
     for artifact in artifacts {
+        let artifact_run_name = (artifact.run_id, artifact.name.clone());
+        let attempt_verified =
+            verified_run_bindings
+                .get(&artifact.run_id)
+                .is_some_and(|bindings| {
+                    bindings.contains(&(artifact.run_attempt, artifact.run_head_sha.clone()))
+                });
+        if !attempt_verified {
+            finding(
+                findings,
+                "g0-artifact-attempt",
+                repository,
+                "repositories.artifacts.run_attempt",
+                "artifact run_attempt acceptance is blocked without independently verified workflow run/job evidence",
+            );
+        }
         if artifact.artifact_id == 0
             || !artifact_ids.insert(artifact.artifact_id)
             || artifact.name.trim().is_empty()
-            || !artifact_names.insert(artifact.name.clone())
+            || !artifact_run_names.insert(artifact_run_name)
             || artifact.run_id == 0
             || artifact.run_attempt == 0
             || !valid_sha(&artifact.run_head_sha)
             || !known_source_shas.contains(&artifact.run_head_sha)
-            || !known_run_bindings
-                .get(&artifact.run_id)
-                .is_some_and(|bindings| {
-                    bindings.contains(&(artifact.run_attempt, artifact.run_head_sha.clone()))
-                })
+            || !attempt_verified
             || !valid_digest(&artifact.digest)
             || artifact.expired
             || !g0_artifact_source_url(repository, artifact.artifact_id, &artifact.source_url)
@@ -4096,73 +4252,137 @@ fn check_g0_artifact_observations(
             context.raw_ids,
             findings,
         );
-        let Some(raw) = artifact.raw_object_refs.iter().find_map(|raw_id| {
-            context
-                .raw_objects
+        let expected_metadata_endpoint = format!(
+            "/repos/{repository}/actions/runs/{}/artifacts",
+            artifact.run_id
+        );
+        let expected_archive_endpoint = format!(
+            "/repos/{repository}/actions/artifacts/{}/zip",
+            artifact.artifact_id
+        );
+        let mut seen_raw_ids = BTreeSet::new();
+        let mut metadata_raws = Vec::new();
+        let mut archive_raws = Vec::new();
+        for raw_id in &artifact.raw_object_refs {
+            if !seen_raw_ids.insert(raw_id.clone()) {
+                finding(
+                    findings,
+                    "g0-artifact-role",
+                    repository,
+                    "repositories.artifacts.raw_object_refs",
+                    "an artifact cannot bind the same raw object more than once",
+                );
+                continue;
+            }
+            let Some(raw) = context.raw_objects.iter().find(|raw| raw.raw_id == *raw_id) else {
+                continue;
+            };
+            if raw.object_kind != "workflow_artifacts" {
+                finding(
+                    findings,
+                    "g0-artifact-raw-kind",
+                    repository,
+                    "repositories.artifacts.raw_object_refs",
+                    "artifact provenance must reference a workflow_artifacts API object",
+                );
+                continue;
+            }
+            let Some(request) = context
+                .requests
                 .iter()
-                .find(|raw| raw.raw_id == *raw_id && raw.object_kind == "workflow_artifacts")
-        }) else {
+                .find(|request| request.request_id == raw.request_id)
+            else {
+                finding(
+                    findings,
+                    "g0-artifact-request",
+                    repository,
+                    "repositories.artifacts.raw_object_refs",
+                    "artifact raw object must bind to a captured artifact request",
+                );
+                continue;
+            };
+            let request_path = g0_canonical_api_path(&request.endpoint_or_operation);
+            if request.api != G0ApiKind::Rest
+                || request.response_raw_ref != *raw_id
+                || request.method != "GET"
+                || request.http_status != 200
+                || !request.complete
+                || !matches!(
+                    request.state,
+                    G0RequestState::Complete | G0RequestState::EmptyComplete
+                )
+            {
+                finding(
+                    findings,
+                    "g0-artifact-request",
+                    repository,
+                    "repositories.artifacts.raw_object_refs",
+                    "artifact raw object must bind to a complete successful response request",
+                );
+            }
+            if request_path.as_deref() == Some(expected_metadata_endpoint.as_str()) {
+                metadata_raws.push((raw, request));
+            } else if request_path.as_deref() == Some(expected_archive_endpoint.as_str()) {
+                archive_raws.push((raw, request));
+            } else {
+                finding(
+                    findings,
+                    "g0-artifact-role",
+                    repository,
+                    "repositories.artifacts.raw_object_refs",
+                    "artifact raw objects must be the exact metadata-list or archive response",
+                );
+            }
+        }
+        let metadata_role_valid = g0_artifact_metadata_stream_valid(&metadata_raws);
+        let archive_role_valid = archive_raws.len() == 1
+            && archive_raws
+                .first()
+                .is_some_and(|(_, request)| g0_artifact_archive_request_valid(request));
+        if !metadata_role_valid || !archive_role_valid {
             finding(
                 findings,
-                "g0-artifact-digest",
+                "g0-artifact-role",
                 repository,
-                "repositories.artifacts",
-                "artifact archive digest must be present and its row must bind to a workflow_artifacts API object",
+                "repositories.artifacts.raw_object_refs",
+                "each artifact requires the complete contiguous metadata response stream (per_page=100) and exactly one archive response (per_page=1)",
             );
-            continue;
-        };
-        if !g0_artifact_row_matches_raw(repository, artifact, raw) {
+        }
+        let mut metadata_row_counts = (0usize, 0usize, 0usize);
+        let mut metadata_rows_well_formed = true;
+        for (raw, _) in &metadata_raws {
+            let Some(counts) = g0_artifact_row_counts_raw(repository, artifact, raw) else {
+                metadata_rows_well_formed = false;
+                continue;
+            };
+            metadata_row_counts.0 += counts.0;
+            metadata_row_counts.1 += counts.1;
+            metadata_row_counts.2 += counts.2;
+        }
+        if !metadata_rows_well_formed || metadata_row_counts != (1, 1, 1) {
             finding(
                 findings,
                 "g0-artifact-row",
                 repository,
                 "repositories.artifacts",
-                "artifact identity must match one row in the independently captured artifact page",
+                "artifact identity must match exactly one non-conflicting row across the independently captured metadata pages",
             );
         }
-        let Some(request) = context
-            .requests
-            .iter()
-            .find(|request| request.request_id == raw.request_id)
-        else {
-            finding(
-                findings,
-                "g0-artifact-request",
-                repository,
-                "repositories.artifacts.raw_object_refs",
-                "artifact raw object must bind to a captured artifact request",
-            );
-            continue;
-        };
-        let expected_endpoint = format!(
-            "/repos/{repository}/actions/runs/{}/artifacts",
-            artifact.run_id
-        );
-        if request.endpoint_or_operation != expected_endpoint
-            || request.method != "GET"
-            || request.http_status != 200
-            || !request.complete
-            || !matches!(
-                request.state,
-                G0RequestState::Complete | G0RequestState::EmptyComplete
-            )
-        {
-            finding(
-                findings,
-                "g0-artifact-request",
-                repository,
-                "repositories.artifacts.raw_object_refs",
-                "artifact raw object must bind to the successful API request for its exact run",
-            );
-        }
-        if raw.object_kind != "workflow_artifacts" {
-            finding(
-                findings,
-                "g0-artifact-raw-kind",
-                repository,
-                "repositories.artifacts.raw_object_refs",
-                "artifact provenance must reference a workflow_artifacts API object",
-            );
+        if let Some((raw, _request)) = archive_raws.first() {
+            let archive_digest_matches = BASE64
+                .decode(&raw.bytes_base64)
+                .ok()
+                .is_some_and(|bytes| digest_bytes(&bytes) == artifact.digest)
+                && raw.sha256 == artifact.digest;
+            if !archive_role_valid || !archive_digest_matches {
+                finding(
+                    findings,
+                    "g0-artifact-digest",
+                    repository,
+                    "repositories.artifacts.raw_object_refs",
+                    "the exact archive response bytes must match the metadata digest",
+                );
+            }
         }
     }
 }
@@ -4321,42 +4541,160 @@ fn g0_artifact_source_url(repository: &str, artifact_id: u64, value: &str) -> bo
         && url.path() == format!("/repos/{repository}/actions/artifacts/{artifact_id}/zip")
 }
 
+fn g0_artifact_metadata_request_valid(request: &G0RequestRecord) -> bool {
+    if request.api != G0ApiKind::Rest
+        || request.method != "GET"
+        || request.http_status != 200
+        || !request.complete
+        || request.response_raw_ref.trim().is_empty()
+        || !matches!(
+            request.state,
+            G0RequestState::Complete | G0RequestState::EmptyComplete
+        )
+        || request.page.per_page != 100
+        || request.page.number == 0
+        || request.page.cursor_in.is_some()
+        || request.page.cursor_out.is_some()
+    {
+        return false;
+    }
+    let Ok(contract) = g0_endpoint_contract("workflow_artifacts", &request.endpoint_or_operation)
+    else {
+        return false;
+    };
+    let Ok(query) = BASE64.decode(&request.query_base64) else {
+        return false;
+    };
+    g0_response_query_contract(request, &query, contract)
+}
+
+fn g0_artifact_metadata_stream_valid(
+    metadata_raws: &[(&G0RawObjectRef, &G0RequestRecord)],
+) -> bool {
+    if metadata_raws.is_empty() {
+        return false;
+    }
+    let mut pages = BTreeMap::<u32, &G0RequestRecord>::new();
+    for (_, request) in metadata_raws {
+        if !g0_artifact_metadata_request_valid(request)
+            || pages.insert(request.page.number, *request).is_some()
+        {
+            return false;
+        }
+    }
+    let page_numbers = pages.keys().copied().collect::<Vec<_>>();
+    if page_numbers != (1..=pages.len() as u32).collect::<Vec<_>>() {
+        return false;
+    }
+    for page_number in 1..=pages.len() as u32 {
+        let Some(request) = pages.get(&page_number) else {
+            return false;
+        };
+        let has_next = page_number < pages.len() as u32;
+        if request.page.has_next_page != has_next
+            || (!has_next
+                && (request.page.link_next.is_some() || request.page.cursor_out.is_some()))
+        {
+            return false;
+        }
+        if has_next {
+            let Some(next) = pages.get(&(page_number + 1)) else {
+                return false;
+            };
+            if !g0_next_link_matches(request, next) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn g0_artifact_archive_request_valid(request: &G0RequestRecord) -> bool {
+    if request.api != G0ApiKind::Rest
+        || request.method != "GET"
+        || request.http_status != 200
+        || !request.complete
+        || request.response_raw_ref.trim().is_empty()
+        || !matches!(request.state, G0RequestState::Complete)
+        || request.page.per_page != 1
+        || request.page.number != 1
+        || request.page.has_next_page
+        || request.page.link_next.is_some()
+        || request.page.cursor_in.is_some()
+        || request.page.cursor_out.is_some()
+    {
+        return false;
+    }
+    let Ok(contract) = g0_endpoint_contract("workflow_artifacts", &request.endpoint_or_operation)
+    else {
+        return false;
+    };
+    let Ok(query) = BASE64.decode(&request.query_base64) else {
+        return false;
+    };
+    g0_response_query_contract(request, &query, contract)
+}
+
+#[cfg(test)]
 fn g0_artifact_row_matches_raw(
     repository: &str,
     artifact: &G0ArtifactObservation,
     raw: &G0RawObjectRef,
 ) -> bool {
+    g0_artifact_row_counts_raw(repository, artifact, raw).is_some_and(
+        |(matches, same_id, same_run_name)| matches == 1 && same_id == 1 && same_run_name == 1,
+    )
+}
+
+fn g0_artifact_row_counts_raw(
+    repository: &str,
+    artifact: &G0ArtifactObservation,
+    raw: &G0RawObjectRef,
+) -> Option<(usize, usize, usize)> {
     let expected_endpoint = format!(
         "/repos/{repository}/actions/runs/{}/artifacts",
         artifact.run_id
     );
     let Ok(contract) = g0_endpoint_contract("workflow_artifacts", &expected_endpoint) else {
-        return false;
+        return None;
     };
     let schema = contract.response_schema;
     let Ok(bytes) = BASE64.decode(&raw.bytes_base64) else {
-        return false;
+        return None;
     };
     if raw.byte_length != bytes.len() as u64 || digest_bytes(&bytes) != raw.sha256 {
-        return false;
+        return None;
     }
-    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-        return false;
+    let Ok(value) = parse_strict_json::<Value>(&bytes) else {
+        return None;
     };
-    let Some((_, members)) = g0_page_members(&value, schema) else {
-        return false;
-    };
-    members.iter().any(|member| {
-        g0_json_u64(member, &["id"]) == Some(artifact.artifact_id)
-            && g0_json_string(member, &["name"]) == Some(artifact.name.as_str())
-            && member.get("expired").and_then(Value::as_bool) == Some(artifact.expired)
-            && g0_json_string(member, &["digest"]) == Some(artifact.digest.as_str())
-            && g0_json_u64(member, &["workflow_run", "id"]) == Some(artifact.run_id)
-            && g0_json_string(member, &["workflow_run", "head_sha"])
-                == Some(artifact.run_head_sha.as_str())
-            && g0_json_string(member, &["archive_download_url"])
-                == Some(artifact.source_url.as_str())
-    })
+    let (_, members) = g0_page_members(&value, schema)?;
+    let matches = members
+        .iter()
+        .filter(|member| {
+            g0_json_u64(member, &["id"]) == Some(artifact.artifact_id)
+                && g0_json_string(member, &["name"]) == Some(artifact.name.as_str())
+                && member.get("expired").and_then(Value::as_bool) == Some(artifact.expired)
+                && g0_json_string(member, &["digest"]) == Some(artifact.digest.as_str())
+                && g0_json_u64(member, &["workflow_run", "id"]) == Some(artifact.run_id)
+                && g0_json_string(member, &["workflow_run", "head_sha"])
+                    == Some(artifact.run_head_sha.as_str())
+                && g0_json_string(member, &["archive_download_url"])
+                    == Some(artifact.source_url.as_str())
+        })
+        .count();
+    let same_id = members
+        .iter()
+        .filter(|member| g0_json_u64(member, &["id"]) == Some(artifact.artifact_id))
+        .count();
+    let same_run_name = members
+        .iter()
+        .filter(|member| {
+            g0_json_u64(member, &["workflow_run", "id"]) == Some(artifact.run_id)
+                && g0_json_string(member, &["name"]) == Some(artifact.name.as_str())
+        })
+        .count();
+    Some((matches, same_id, same_run_name))
 }
 
 struct G0CheckExpectation<'a> {
@@ -4414,6 +4752,13 @@ fn g0_check_provider_valid(check: &G0CheckProducer, repository: &str) -> bool {
 }
 
 fn g0_actions_checkout_sha(check: &G0CheckProducer) -> Option<&str> {
+    // `G0CheckoutObservationSupplement::proof_raw_object_refs` belongs to
+    // the deferred mapper contract and is not a field in the collector
+    // snapshot checked here. This checker therefore treats the typed
+    // `actual_checkout_sha` bound to the execution snapshot as its only
+    // checkout observation. API run/job rows prove run identity and source
+    // head, never runner checkout, and are not claimed as raw-proof
+    // equivalents.
     match &check.provider {
         G0CheckProvider::GithubActions {
             actual_checkout_sha,
@@ -4840,6 +5185,26 @@ fn g0_endpoint_path_query(endpoint: &str) -> Result<(String, Vec<(String, String
     Ok((path.to_owned(), query))
 }
 
+fn g0_endpoint_path_matches(actual: &str, expected: &str) -> bool {
+    let Some((actual_path, _)) = g0_endpoint_path_query(actual).ok() else {
+        return false;
+    };
+    let Some((expected_path, _)) = g0_endpoint_path_query(expected).ok() else {
+        return false;
+    };
+    actual_path == expected_path
+}
+
+fn g0_endpoint_without_query_matches(actual: &str, expected: &str) -> bool {
+    let Some((actual_path, actual_query)) = g0_endpoint_path_query(actual).ok() else {
+        return false;
+    };
+    let Some((expected_path, expected_query)) = g0_endpoint_path_query(expected).ok() else {
+        return false;
+    };
+    actual_path == expected_path && actual_query.is_empty() && expected_query.is_empty()
+}
+
 fn g0_is_contents_path(parts: &[&str]) -> bool {
     parts.len() >= 6
         && parts[3] == "contents"
@@ -4880,7 +5245,7 @@ fn g0_capture_raw_json(
         || !matches!(request.state, G0RequestState::Complete)
         || !endpoints
             .iter()
-            .any(|endpoint| endpoint == &request.endpoint_or_operation)
+            .any(|endpoint| g0_endpoint_path_matches(&request.endpoint_or_operation, endpoint))
     {
         return None;
     }
@@ -4898,7 +5263,7 @@ fn g0_capture_raw_json(
     {
         return None;
     }
-    let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let value = parse_strict_json::<Value>(&bytes).ok()?;
     g0_select_raw_member(value, response_schema, member_id, request)
 }
 
@@ -4976,6 +5341,10 @@ fn g0_check_raw_evidence_valid(
             check.source_sha
         ),
     ];
+    let check_suite_runs_endpoint = format!(
+        "/repos/{repository}/check-suites/{}/check-runs",
+        check.check_suite_id
+    );
     let suite_endpoints = [
         format!("/repos/{repository}/check-suites/{}", check.check_suite_id),
         format!(
@@ -4983,7 +5352,6 @@ fn g0_check_raw_evidence_valid(
             check.source_sha
         ),
     ];
-    let app_endpoint = format!("/apps/{}", check.app_slug);
     let app_id = check.app_id.parse::<u64>().ok();
     let check_run = g0_capture_raw_json(
         &check.raw_object_refs,
@@ -4993,6 +5361,16 @@ fn g0_check_raw_evidence_valid(
         requests,
         raw_objects,
     )
+    .or_else(|| {
+        g0_capture_raw_json(
+            &check.raw_object_refs,
+            "check_suite_runs",
+            check.check_run_id,
+            std::slice::from_ref(&check_suite_runs_endpoint),
+            requests,
+            raw_objects,
+        )
+    })
     .or_else(|| {
         g0_capture_raw_json(
             &check.raw_object_refs,
@@ -5021,14 +5399,10 @@ fn g0_check_raw_evidence_valid(
             raw_objects,
         )
     });
-    let app = g0_capture_raw_json(
-        &check.raw_object_refs,
-        "app",
-        app_id.unwrap_or_default(),
-        &[app_endpoint],
-        requests,
-        raw_objects,
-    );
+    // The live collector captures the app identity nested in the check-run
+    // and check-suite rows. It does not issue a separate /apps/{slug}
+    // request; requiring that un-emitted raw object would reject authentic
+    // collector output. The nested identities remain mandatory below.
     let common = app_id.is_some_and(|app_id| {
         check_run
             .as_ref()
@@ -5040,10 +5414,6 @@ fn g0_check_raw_evidence_valid(
                     && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
                     && g0_json_u64(value, &["app", "id"]) == Some(app_id)
                     && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
-            })
-            && app.as_ref().is_some_and(|value| {
-                g0_json_u64(value, &["id"]) == Some(app_id)
-                    && g0_json_string(value, &["slug"]) == Some(check.app_slug.as_str())
             })
     });
     if !common {
@@ -5095,6 +5465,7 @@ fn g0_check_raw_evidence_valid(
                 g0_json_u64(value, &["id"]) == Some(*workflow_run_id)
                     && g0_json_u64(value, &["run_attempt"]) == Some(u64::from(*run_attempt))
                     && g0_json_string(value, &["head_sha"]) == Some(job_source_sha.as_str())
+                    && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
                     && g0_json_string(value, &["event"]) == Some(check.event.as_str())
                     && g0_json_string(value, &["status"]) == Some(check.status.as_str())
                     && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
@@ -5103,6 +5474,7 @@ fn g0_check_raw_evidence_valid(
                     && g0_json_u64(value, &["run_id"]) == Some(*job_run_id)
                     && g0_json_u64(value, &["run_attempt"]) == Some(u64::from(*job_run_attempt))
                     && g0_json_string(value, &["head_sha"]) == Some(job_source_sha.as_str())
+                    && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
                     && g0_json_string(value, &["html_url"]) == Some(job_html_url.as_str())
                     && g0_api_path_is(
                         &value["check_run_url"],
@@ -5127,7 +5499,7 @@ fn check_g0_check_raw_evidence(
                 "g0-check-raw-evidence",
                 repository,
                 "check_producers.raw_object_refs",
-                "check producer must bind independently captured check-run, check-suite, App, source, status, conclusion, html_url, and provider-specific run/job objects",
+                "check producer must bind independently captured check-run, check-suite, nested provider identity, source, status, conclusion, html_url, and provider-specific run/job objects",
             );
         }
     }
@@ -6366,10 +6738,12 @@ fn check_g0_model_session(
             "effective runtime model session must record the required orchestrator and agent settings",
         );
     }
-    check_g0_raw_refs(
+    check_g0_local_raw_refs(
         "evidence.g0_inventory.collector_snapshot.model_session.raw_object_refs",
         &session.raw_object_refs,
         raw_ids,
+        raw_objects,
+        &["model.session"],
         findings,
     );
     if !g0_typed_raw_binding(
@@ -6402,13 +6776,15 @@ fn check_g0_model_session(
                 "every agent must record unique effective Luna/max runtime settings",
             );
         }
-        check_g0_raw_refs(
+        check_g0_local_raw_refs(
             "evidence.g0_inventory.collector_snapshot.agent_model.raw_object_refs",
             &agent.raw_object_refs,
             raw_ids,
+            raw_objects,
+            &["model.session"],
             findings,
         );
-        if !agent.raw_object_refs.iter().any(|raw_id| {
+        if !agent.raw_object_refs.iter().all(|raw_id| {
             session
                 .raw_object_refs
                 .iter()
@@ -6507,7 +6883,10 @@ fn g0_access_raw_binding(
                         && request.response_raw_ref == raw.raw_id
                         && request.api == G0ApiKind::Rest
                         && request.method == "GET"
-                        && request.endpoint_or_operation == endpoint
+                        && g0_endpoint_without_query_matches(
+                            &request.endpoint_or_operation,
+                            &endpoint,
+                        )
                         && request.http_status == 200
                         && request.complete
                         && request.state == G0RequestState::Complete
@@ -9695,7 +10074,10 @@ mod tests {
                 ),
             });
             let artifact_name = format!("scan-artifact-{repository_id}");
-            let artifact_archive_digest = digest('d');
+            let artifact_archive_raw_id = format!("raw-artifact-archive-{repository_id}");
+            let artifact_archive_request_id = format!("request-artifact-archive-{repository_id}");
+            let artifact_archive_bytes = format!("artifact-archive-{repository_id}").into_bytes();
+            let artifact_archive_digest = digest_bytes(&artifact_archive_bytes);
             let artifact_source_url = format!(
                 "https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}/zip"
             );
@@ -9724,6 +10106,30 @@ mod tests {
                 original_storage_ref: format!(
                     "sha256://{}",
                     artifact_page_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
+            });
+            raw_objects.push(G0RawObjectRef {
+                raw_id: artifact_archive_raw_id.clone(),
+                request_id: artifact_archive_request_id.clone(),
+                object_kind: "workflow_artifacts".to_owned(),
+                canonicalization: "binary".to_owned(),
+                sha256: artifact_archive_digest.clone(),
+                byte_length: artifact_archive_bytes.len() as u64,
+                bytes_base64: BASE64.encode(&artifact_archive_bytes),
+                media_type: "application/zip".to_owned(),
+                storage_ref: format!(
+                    "sha256://{}",
+                    artifact_archive_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
+                original_sha256: artifact_archive_digest.clone(),
+                original_byte_length: artifact_archive_bytes.len() as u64,
+                original_storage_ref: format!(
+                    "sha256://{}",
+                    artifact_archive_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
                 ),
@@ -9811,6 +10217,38 @@ mod tests {
                     items_returned: 1,
                 },
                 response_raw_ref: artifact_raw_id.clone(),
+                error_raw_ref: None,
+                state: G0RequestState::Complete,
+                complete: true,
+                truncation_reason: None,
+            });
+            requests.push(G0RequestRecord {
+                request_id: artifact_archive_request_id,
+                api: G0ApiKind::Rest,
+                method: "GET".to_owned(),
+                endpoint_or_operation: format!(
+                    "/repos/{repository}/actions/artifacts/{artifact_id}/zip"
+                ),
+                query_base64: BASE64.encode(b""),
+                variables_base64: BASE64.encode(b"{}"),
+                query_sha256: digest_bytes(b""),
+                variables_sha256: digest_bytes(b"{}"),
+                auth_identity_ref: "collector.auth".to_owned(),
+                started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+                http_status: 200,
+                api_request_id: format!("api-artifact-archive-request-{repository_id}"),
+                rate_limit_ref: "collector.rate_limit".to_owned(),
+                page: G0Page {
+                    number: 1,
+                    per_page: 1,
+                    link_next: None,
+                    cursor_in: None,
+                    cursor_out: None,
+                    has_next_page: false,
+                    items_returned: 0,
+                },
+                response_raw_ref: artifact_archive_raw_id.clone(),
                 error_raw_ref: None,
                 state: G0RequestState::Complete,
                 complete: true,
@@ -10203,7 +10641,7 @@ mod tests {
                     digest: artifact_archive_digest,
                     expired: false,
                     source_url: artifact_source_url,
-                    raw_object_refs: vec![artifact_raw_id],
+                    raw_object_refs: vec![artifact_raw_id, artifact_archive_raw_id],
                 }],
                 open_prs: vec![G0PullRequestInventory {
                     number: 1,
@@ -10715,6 +11153,41 @@ mod tests {
         );
         assert!(g0_codes(&findings).contains("g0-artifact-identity"));
 
+        let mut expired_artifact = inventory.clone();
+        expired_artifact.collector_snapshot.repositories[0].artifacts[0].expired = true;
+        refresh_typed_inventory_bytes(&mut expired_artifact);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&expired_artifact), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-identity"));
+
+        let mut unverified_artifact_attempt = inventory.clone();
+        let main_check_refs = unverified_artifact_attempt.collector_snapshot.repositories[0]
+            .main_checks[0]
+            .raw_object_refs
+            .clone();
+        let attempt_job_raw_ids = unverified_artifact_attempt
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .filter(|raw| {
+                main_check_refs.iter().any(|raw_id| raw_id == &raw.raw_id)
+                    && raw.object_kind == "workflow_attempt_jobs"
+            })
+            .map(|raw| raw.raw_id.clone())
+            .collect::<BTreeSet<_>>();
+        unverified_artifact_attempt.collector_snapshot.repositories[0].main_checks[0]
+            .raw_object_refs
+            .retain(|raw_id| !attempt_job_raw_ids.contains(raw_id));
+        refresh_typed_inventory_bytes(&mut unverified_artifact_attempt);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&unverified_artifact_attempt),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-attempt"));
+
         let mut wrong_artifact_request = inventory.clone();
         let artifact_raw_id = wrong_artifact_request.collector_snapshot.repositories[0].artifacts
             [0]
@@ -10933,6 +11406,851 @@ mod tests {
     }
 
     #[test]
+    fn g0_artifact_roles_require_metadata_and_archive_provenance() {
+        let (manifest, snapshot, inventory) = complete_g0_fixture();
+        let mut baseline_findings = Vec::new();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&inventory),
+            &mut baseline_findings,
+        );
+        assert!(
+            baseline_findings.is_empty(),
+            "unexpected findings: {baseline_findings:?}"
+        );
+        let mut findings = Vec::new();
+
+        let artifact = &inventory.collector_snapshot.repositories[0].artifacts[0];
+        let metadata_raw_id = artifact
+            .raw_object_refs
+            .first()
+            .cloned()
+            .expect("metadata raw binding");
+        let metadata_request_id = inventory
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == metadata_raw_id)
+            .expect("metadata raw object")
+            .request_id
+            .clone();
+        let metadata_request = inventory
+            .collector_snapshot
+            .requests
+            .iter()
+            .find(|request| request.request_id == metadata_request_id)
+            .expect("metadata request")
+            .clone();
+
+        let mut duplicate_metadata = inventory.clone();
+        let duplicate_metadata_raw_id = "raw-artifact-metadata-duplicate".to_owned();
+        let duplicate_metadata_request_id = "request-artifact-metadata-duplicate".to_owned();
+        let mut duplicate_metadata_raw = duplicate_metadata
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == metadata_raw_id)
+            .expect("metadata raw object")
+            .clone();
+        duplicate_metadata_raw.raw_id = duplicate_metadata_raw_id.clone();
+        duplicate_metadata_raw.request_id = duplicate_metadata_request_id.clone();
+        let mut duplicate_metadata_request = metadata_request.clone();
+        duplicate_metadata_request.request_id = duplicate_metadata_request_id;
+        duplicate_metadata_request.response_raw_ref = duplicate_metadata_raw_id.clone();
+        duplicate_metadata
+            .collector_snapshot
+            .raw_objects
+            .push(duplicate_metadata_raw);
+        duplicate_metadata
+            .collector_snapshot
+            .requests
+            .push(duplicate_metadata_request);
+        duplicate_metadata.collector_snapshot.repositories[0].artifacts[0]
+            .raw_object_refs
+            .insert(1, duplicate_metadata_raw_id);
+        refresh_typed_inventory_bytes(&mut duplicate_metadata);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&duplicate_metadata),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut wrong_metadata_page_size = inventory.clone();
+        wrong_metadata_page_size
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == metadata_request_id)
+            .expect("metadata request")
+            .page
+            .per_page = 50;
+        refresh_typed_inventory_bytes(&mut wrong_metadata_page_size);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&wrong_metadata_page_size),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut omitted_metadata_page = inventory.clone();
+        let metadata_query = canonical_rest_query("per_page=100");
+        let metadata_request = omitted_metadata_page
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == metadata_request_id)
+            .expect("metadata request");
+        metadata_request.query_base64 = BASE64.encode(&metadata_query);
+        metadata_request.query_sha256 = digest_bytes(&metadata_query);
+        refresh_typed_inventory_bytes(&mut omitted_metadata_page);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&omitted_metadata_page),
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "metadata page one may omit the page query: {findings:?}"
+        );
+
+        let mut page_two_inventory = inventory.clone();
+        let repository_name = page_two_inventory.collector_snapshot.repositories[0]
+            .repository
+            .clone();
+        let target_artifact =
+            page_two_inventory.collector_snapshot.repositories[0].artifacts[0].clone();
+        let metadata_endpoint = format!(
+            "/repos/{repository_name}/actions/runs/{}/artifacts",
+            target_artifact.run_id
+        );
+        let page_one_raw_id = "raw-artifact-metadata-page-one";
+        let page_one_request_id = "request-artifact-metadata-page-one";
+        let page_two_raw_id = "raw-artifact-metadata-page-two";
+        let page_two_request_id = "request-artifact-metadata-page-two";
+        let synthetic_id = target_artifact.artifact_id + 1_000;
+        let synthetic_url = format!(
+            "https://api.github.com/repos/{repository_name}/actions/artifacts/{synthetic_id}/zip"
+        );
+        let synthetic_row = json!({
+            "id": synthetic_id,
+            "name": "other-artifact",
+            "digest": digest('d'),
+            "expired": false,
+            "archive_download_url": synthetic_url,
+            "workflow_run": {
+                "id": target_artifact.run_id,
+                "head_sha": target_artifact.run_head_sha
+            }
+        });
+        let target_row = json!({
+            "id": target_artifact.artifact_id,
+            "name": target_artifact.name,
+            "digest": target_artifact.digest,
+            "expired": target_artifact.expired,
+            "archive_download_url": target_artifact.source_url,
+            "workflow_run": {
+                "id": target_artifact.run_id,
+                "head_sha": target_artifact.run_head_sha
+            }
+        });
+        let page_one_bytes = canonical_json(&json!({
+            "total_count": 2,
+            "artifacts": [synthetic_row]
+        }))
+        .into_bytes();
+        let page_two_bytes = canonical_json(&json!({
+            "total_count": 2,
+            "artifacts": [target_row]
+        }))
+        .into_bytes();
+        let original_metadata_index = page_two_inventory
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .position(|raw| raw.raw_id == metadata_raw_id)
+            .expect("original metadata raw");
+        page_two_inventory.collector_snapshot.raw_objects[original_metadata_index] =
+            captured_raw_reference(
+                page_one_raw_id,
+                page_one_request_id,
+                "workflow_artifacts",
+                &page_one_bytes,
+            );
+        let original_metadata_request = page_two_inventory
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == metadata_request_id)
+            .expect("original metadata request");
+        original_metadata_request.request_id = page_one_request_id.to_owned();
+        original_metadata_request.response_raw_ref = page_one_raw_id.to_owned();
+        original_metadata_request.page.items_returned = 1;
+        original_metadata_request.page.has_next_page = true;
+        original_metadata_request.page.link_next = Some(format!(
+            "https://api.github.com{metadata_endpoint}?page=2&per_page=100"
+        ));
+        original_metadata_request.query_base64 =
+            BASE64.encode(canonical_rest_query("per_page=100&page=1"));
+        original_metadata_request.query_sha256 =
+            digest_bytes(&canonical_rest_query("per_page=100&page=1"));
+        let mut page_two_request =
+            captured_page_request(&metadata_endpoint, "per_page=100&page=2", 1);
+        page_two_request.request_id = page_two_request_id.to_owned();
+        page_two_request.response_raw_ref = page_two_raw_id.to_owned();
+        page_two_request.page.number = 2;
+        page_two_inventory
+            .collector_snapshot
+            .raw_objects
+            .push(captured_raw_reference(
+                page_two_raw_id,
+                page_two_request_id,
+                "workflow_artifacts",
+                &page_two_bytes,
+            ));
+        page_two_inventory
+            .collector_snapshot
+            .requests
+            .push(page_two_request);
+        let artifact_refs =
+            &mut page_two_inventory.collector_snapshot.repositories[0].artifacts[0].raw_object_refs;
+        artifact_refs[0] = page_one_raw_id.to_owned();
+        artifact_refs.insert(1, page_two_raw_id.to_owned());
+        refresh_typed_inventory_bytes(&mut page_two_inventory);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&page_two_inventory),
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "artifact metadata row may be on contiguous page two: {findings:?}"
+        );
+
+        let mut missing_page_two = page_two_inventory.clone();
+        missing_page_two
+            .collector_snapshot
+            .raw_objects
+            .retain(|raw| raw.raw_id != page_two_raw_id);
+        missing_page_two
+            .collector_snapshot
+            .requests
+            .retain(|request| request.request_id != page_two_request_id);
+        missing_page_two.collector_snapshot.repositories[0].artifacts[0]
+            .raw_object_refs
+            .retain(|raw_id| raw_id != page_two_raw_id);
+        refresh_typed_inventory_bytes(&mut missing_page_two);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&missing_page_two), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut metadata_gap = page_two_inventory.clone();
+        let gap_request = metadata_gap
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == page_two_request_id)
+            .expect("page two request");
+        gap_request.page.number = 3;
+        gap_request.query_base64 = BASE64.encode(canonical_rest_query("per_page=100&page=3"));
+        gap_request.query_sha256 = digest_bytes(&canonical_rest_query("per_page=100&page=3"));
+        metadata_gap.collector_snapshot.repositories[0].artifacts[0]
+            .raw_object_refs
+            .retain(|raw_id| raw_id != page_one_raw_id);
+        refresh_typed_inventory_bytes(&mut metadata_gap);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&metadata_gap), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut foreign_page_two = page_two_inventory.clone();
+        foreign_page_two
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == page_two_request_id)
+            .expect("page two request")
+            .endpoint_or_operation = format!(
+            "/repos/other-owner/other-repository/actions/runs/{}/artifacts",
+            target_artifact.run_id
+        );
+        refresh_typed_inventory_bytes(&mut foreign_page_two);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&foreign_page_two), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let archive_raw_id = artifact
+            .raw_object_refs
+            .last()
+            .cloned()
+            .expect("archive raw binding");
+        let archive_request_id = inventory
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == archive_raw_id)
+            .expect("archive raw object")
+            .request_id
+            .clone();
+        let mut wrong_archive_page_size = inventory.clone();
+        wrong_archive_page_size
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == archive_request_id)
+            .expect("archive request")
+            .page
+            .per_page = 100;
+        refresh_typed_inventory_bytes(&mut wrong_archive_page_size);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&wrong_archive_page_size),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut archive_query_page = inventory.clone();
+        let archive_query = canonical_rest_query("per_page=1");
+        let archive_request = archive_query_page
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == archive_request_id)
+            .expect("archive request");
+        archive_request.query_base64 = BASE64.encode(&archive_query);
+        archive_request.query_sha256 = digest_bytes(&archive_query);
+        refresh_typed_inventory_bytes(&mut archive_query_page);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&archive_query_page),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut same_name_different_run = inventory.clone();
+        let mut same_name_snapshot = snapshot.clone();
+        let repository_name = same_name_different_run.collector_snapshot.repositories[0]
+            .repository
+            .clone();
+        let second_artifact_id = 90_002;
+        let second_run_id = 50_001;
+        let second_name = same_name_different_run.collector_snapshot.repositories[0].artifacts[0]
+            .name
+            .clone();
+        let second_archive_bytes = b"artifact-archive-second-run";
+        let second_archive_digest = digest_bytes(second_archive_bytes);
+        let second_source_url = format!(
+            "https://api.github.com/repos/{repository_name}/actions/artifacts/{second_artifact_id}/zip"
+        );
+        let second_metadata_bytes = serde_json::to_vec(&json!({
+            "total_count": 1,
+            "artifacts": [{
+                "id": second_artifact_id,
+                "name": second_name,
+                "digest": second_archive_digest,
+                "expired": false,
+                "archive_download_url": second_source_url,
+                "workflow_run": {
+                    "id": second_run_id,
+                    "head_sha": sha('b')
+                }
+            }]
+        }))
+        .expect("second artifact metadata JSON");
+        let second_metadata_raw_id = "raw-artifact-metadata-second-run";
+        let second_metadata_request_id = "request-artifact-metadata-second-run";
+        let second_metadata_raw = captured_raw_reference(
+            second_metadata_raw_id,
+            second_metadata_request_id,
+            "workflow_artifacts",
+            &second_metadata_bytes,
+        );
+        let mut second_metadata_request = captured_page_request(
+            &format!("/repos/{repository_name}/actions/runs/{second_run_id}/artifacts"),
+            "per_page=100&page=1",
+            1,
+        );
+        second_metadata_request.request_id = second_metadata_request_id.to_owned();
+        second_metadata_request.response_raw_ref = second_metadata_raw_id.to_owned();
+        let second_archive_raw_id = "raw-artifact-archive-second-run";
+        let second_archive_request_id = "request-artifact-archive-second-run";
+        let second_archive_raw = captured_raw_reference(
+            second_archive_raw_id,
+            second_archive_request_id,
+            "workflow_artifacts",
+            second_archive_bytes,
+        );
+        let mut second_archive_request = captured_page_request(
+            &format!("/repos/{repository_name}/actions/artifacts/{second_artifact_id}/zip"),
+            "",
+            0,
+        );
+        second_archive_request.page.per_page = 1;
+        second_archive_request.request_id = second_archive_request_id.to_owned();
+        second_archive_request.response_raw_ref = second_archive_raw_id.to_owned();
+        same_name_different_run
+            .collector_snapshot
+            .raw_objects
+            .extend([second_metadata_raw, second_archive_raw]);
+        same_name_different_run
+            .collector_snapshot
+            .requests
+            .extend([second_metadata_request, second_archive_request]);
+        let mut second_check = same_name_different_run.collector_snapshot.repositories[0].open_prs
+            [0]
+        .required_check_producers[0]
+            .clone();
+        second_check
+            .raw_object_refs
+            .retain(|raw_id| raw_id != "raw-app-dco-2");
+        second_check.app_slug = "github-actions".to_owned();
+        second_check.html_url =
+            format!("https://github.com/{repository_name}/actions/runs/{second_run_id}/job/70001");
+        second_check.provider = G0CheckProvider::GithubActions {
+            workflow_run_id: second_run_id,
+            run_attempt: 1,
+            job_id: 80_001,
+            job_run_id: second_run_id,
+            job_run_attempt: 1,
+            job_check_run_id: 70_001,
+            job_source_sha: sha('b'),
+            job_html_url: format!(
+                "https://github.com/{repository_name}/actions/runs/{second_run_id}/job/80001"
+            ),
+            actual_checkout_sha: sha('c'),
+        };
+        let check_run_raw_request_id = same_name_different_run
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == "raw-1-pr-check_run")
+            .expect("existing PR check raw object")
+            .request_id
+            .clone();
+        let check_run_bytes = canonical_json(&json!({
+            "id": second_check.check_run_id,
+            "name": second_check.context,
+            "head_sha": second_check.source_sha,
+            "status": second_check.status,
+            "conclusion": second_check.conclusion,
+            "html_url": second_check.html_url,
+            "check_suite": {"id": second_check.check_suite_id},
+            "app": {"id": 123, "slug": second_check.app_slug}
+        }))
+        .into_bytes();
+        *same_name_different_run
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == "raw-1-pr-check_run")
+            .expect("existing PR check raw object") = captured_raw_reference(
+            "raw-1-pr-check_run",
+            &check_run_raw_request_id,
+            "check_run",
+            &check_run_bytes,
+        );
+        let check_suite_raw_request_id = same_name_different_run
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == "raw-1-pr-check_suite")
+            .expect("existing PR suite raw object")
+            .request_id
+            .clone();
+        let check_suite_bytes = canonical_json(&json!({
+            "id": second_check.check_suite_id,
+            "head_sha": second_check.source_sha,
+            "status": second_check.status,
+            "conclusion": second_check.conclusion,
+            "app": {"id": 123, "slug": second_check.app_slug}
+        }))
+        .into_bytes();
+        *same_name_different_run
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == "raw-1-pr-check_suite")
+            .expect("existing PR suite raw object") = captured_raw_reference(
+            "raw-1-pr-check_suite",
+            &check_suite_raw_request_id,
+            "check_suite",
+            &check_suite_bytes,
+        );
+        let second_check_raw_refs = push_provider_raw_fixture(
+            &mut same_name_different_run.collector_snapshot.requests,
+            &mut same_name_different_run.collector_snapshot.raw_objects,
+            &repository_name,
+            "1-pr",
+            &second_check,
+        );
+        second_check.raw_object_refs.extend(second_check_raw_refs);
+        second_check.raw_object_refs.sort();
+        second_check.raw_object_refs.dedup();
+        same_name_snapshot.repositories[0].open_prs[0].executions[0].required_checks[0]
+            .source_url = second_check.html_url.clone();
+        same_name_different_run.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0] = second_check;
+        same_name_different_run.collector_snapshot.repositories[0]
+            .artifacts
+            .push(G0ArtifactObservation {
+                artifact_id: second_artifact_id,
+                run_id: second_run_id,
+                run_attempt: 1,
+                run_head_sha: sha('b'),
+                name: second_name,
+                digest: second_archive_digest,
+                expired: false,
+                source_url: second_source_url,
+                raw_object_refs: vec![
+                    second_metadata_raw_id.to_owned(),
+                    second_archive_raw_id.to_owned(),
+                ],
+            });
+        refresh_typed_inventory_bytes(&mut same_name_different_run);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &same_name_snapshot,
+            Some(&same_name_different_run),
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "same artifact name across distinct runs should pass: {findings:?}"
+        );
+
+        let mut duplicate_run_name = inventory.clone();
+        let first_artifact =
+            duplicate_run_name.collector_snapshot.repositories[0].artifacts[0].clone();
+        let duplicate_artifact_id = 90_002;
+        let duplicate_archive_bytes = b"artifact-archive-duplicate-run-name";
+        let duplicate_archive_digest = digest_bytes(duplicate_archive_bytes);
+        let duplicate_source_url = format!(
+            "https://api.github.com/repos/{}/actions/artifacts/{duplicate_artifact_id}/zip",
+            duplicate_run_name.collector_snapshot.repositories[0].repository
+        );
+        let metadata_raw_id = first_artifact
+            .raw_object_refs
+            .first()
+            .cloned()
+            .expect("metadata raw binding");
+        let metadata_raw_index = duplicate_run_name
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .position(|raw| raw.raw_id == metadata_raw_id)
+            .expect("metadata raw object");
+        let metadata_request_id = duplicate_run_name.collector_snapshot.raw_objects
+            [metadata_raw_index]
+            .request_id
+            .clone();
+        let mut metadata_value: Value = serde_json::from_slice(
+            &BASE64
+                .decode(
+                    &duplicate_run_name.collector_snapshot.raw_objects[metadata_raw_index]
+                        .bytes_base64,
+                )
+                .expect("metadata bytes"),
+        )
+        .expect("metadata JSON");
+        metadata_value["total_count"] = json!(2);
+        metadata_value["artifacts"]
+            .as_array_mut()
+            .expect("artifact metadata array")
+            .push(json!({
+                "id": duplicate_artifact_id,
+                "name": first_artifact.name.clone(),
+                "digest": duplicate_archive_digest.clone(),
+                "expired": false,
+                "archive_download_url": duplicate_source_url.clone(),
+                "workflow_run": {
+                    "id": first_artifact.run_id,
+                    "head_sha": first_artifact.run_head_sha.clone()
+                }
+            }));
+        let metadata_bytes = canonical_json(&metadata_value).into_bytes();
+        duplicate_run_name.collector_snapshot.raw_objects[metadata_raw_index] =
+            captured_raw_reference(
+                &metadata_raw_id,
+                &metadata_request_id,
+                "workflow_artifacts",
+                &metadata_bytes,
+            );
+        duplicate_run_name
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == metadata_request_id)
+            .expect("metadata request")
+            .page
+            .items_returned = 2;
+        let duplicate_archive_raw_id = "raw-artifact-archive-duplicate-run-name";
+        let duplicate_archive_request_id = "request-artifact-archive-duplicate-run-name";
+        duplicate_run_name
+            .collector_snapshot
+            .raw_objects
+            .push(captured_raw_reference(
+                duplicate_archive_raw_id,
+                duplicate_archive_request_id,
+                "workflow_artifacts",
+                duplicate_archive_bytes,
+            ));
+        let mut duplicate_archive_request = captured_page_request(&duplicate_source_url, "", 0);
+        duplicate_archive_request.endpoint_or_operation = format!(
+            "/repos/{}/actions/artifacts/{duplicate_artifact_id}/zip",
+            duplicate_run_name.collector_snapshot.repositories[0].repository
+        );
+        duplicate_archive_request.page.per_page = 1;
+        duplicate_archive_request.request_id = duplicate_archive_request_id.to_owned();
+        duplicate_archive_request.response_raw_ref = duplicate_archive_raw_id.to_owned();
+        duplicate_run_name
+            .collector_snapshot
+            .requests
+            .push(duplicate_archive_request);
+        duplicate_run_name.collector_snapshot.repositories[0]
+            .artifacts
+            .push(G0ArtifactObservation {
+                artifact_id: duplicate_artifact_id,
+                run_id: first_artifact.run_id,
+                run_attempt: first_artifact.run_attempt,
+                run_head_sha: first_artifact.run_head_sha,
+                name: first_artifact.name,
+                digest: duplicate_archive_digest,
+                expired: false,
+                source_url: duplicate_source_url,
+                raw_object_refs: vec![metadata_raw_id, duplicate_archive_raw_id.to_owned()],
+            });
+        refresh_typed_inventory_bytes(&mut duplicate_run_name);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&duplicate_run_name),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-identity"));
+        assert!(g0_codes(&findings).contains("g0-artifact-row"));
+
+        let mut missing_archive = inventory.clone();
+        missing_archive.collector_snapshot.repositories[0].artifacts[0]
+            .raw_object_refs
+            .pop();
+        refresh_typed_inventory_bytes(&mut missing_archive);
+        check_g0_inventory(&manifest, &snapshot, Some(&missing_archive), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut duplicate_archive = inventory.clone();
+        let archive_raw_id = duplicate_archive.collector_snapshot.repositories[0].artifacts[0]
+            .raw_object_refs
+            .last()
+            .cloned()
+            .expect("archive raw binding");
+        duplicate_archive.collector_snapshot.repositories[0].artifacts[0]
+            .raw_object_refs
+            .push(archive_raw_id);
+        refresh_typed_inventory_bytes(&mut duplicate_archive);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&duplicate_archive),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut wrong_archive_digest = inventory.clone();
+        wrong_archive_digest.collector_snapshot.repositories[0].artifacts[0].digest = digest('e');
+        refresh_typed_inventory_bytes(&mut wrong_archive_digest);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&wrong_archive_digest),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-digest"));
+
+        let mut wrong_archive_endpoint = inventory.clone();
+        let archive_request_id = wrong_archive_endpoint.collector_snapshot.repositories[0]
+            .artifacts[0]
+            .raw_object_refs
+            .last()
+            .and_then(|raw_id| {
+                wrong_archive_endpoint
+                    .collector_snapshot
+                    .raw_objects
+                    .iter()
+                    .find(|raw| raw.raw_id == *raw_id)
+            })
+            .map(|raw| raw.request_id.clone())
+            .expect("archive request binding");
+        wrong_archive_endpoint
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == archive_request_id)
+            .expect("archive request")
+            .endpoint_or_operation = "/repos/tailrocks/velnor/actions/artifacts/999/zip".to_owned();
+        refresh_typed_inventory_bytes(&mut wrong_archive_endpoint);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&wrong_archive_endpoint),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let artifact = &inventory.collector_snapshot.repositories[0].artifacts[0];
+        let metadata_path = format!(
+            "/repos/{repository}/actions/runs/{}/artifacts",
+            artifact.run_id,
+            repository = inventory.collector_snapshot.repositories[0].repository
+        );
+        let archive_path = format!(
+            "/repos/{repository}/actions/artifacts/{}/zip",
+            artifact.artifact_id,
+            repository = inventory.collector_snapshot.repositories[0].repository
+        );
+        let mut absolute_endpoints = inventory.clone();
+        for request in &mut absolute_endpoints.collector_snapshot.requests {
+            if request.endpoint_or_operation == metadata_path
+                || request.endpoint_or_operation == archive_path
+            {
+                request.endpoint_or_operation =
+                    format!("https://api.github.com{}", request.endpoint_or_operation);
+            }
+        }
+        refresh_typed_inventory_bytes(&mut absolute_endpoints);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&absolute_endpoints),
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "exact public API origin should be accepted for artifact roles: {findings:?}"
+        );
+
+        let mut query_endpoint = inventory.clone();
+        query_endpoint
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.endpoint_or_operation == metadata_path)
+            .expect("metadata request")
+            .endpoint_or_operation = format!("{metadata_path}?per_page=100");
+        refresh_typed_inventory_bytes(&mut query_endpoint);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&query_endpoint), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-role"));
+
+        let mut graphql_endpoint = inventory.clone();
+        graphql_endpoint
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.endpoint_or_operation == metadata_path)
+            .expect("metadata request")
+            .api = G0ApiKind::Graphql;
+        refresh_typed_inventory_bytes(&mut graphql_endpoint);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&graphql_endpoint), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-request"));
+
+        let mut post_endpoint = inventory.clone();
+        post_endpoint
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.endpoint_or_operation == archive_path)
+            .expect("archive request")
+            .method = "POST".to_owned();
+        refresh_typed_inventory_bytes(&mut post_endpoint);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&post_endpoint), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-request"));
+
+        let mut duplicate_repository_refs = inventory.clone();
+        let repository_raw_id =
+            duplicate_repository_refs.collector_snapshot.repositories[0].raw_object_refs[0].clone();
+        duplicate_repository_refs.collector_snapshot.repositories[0]
+            .raw_object_refs
+            .push(repository_raw_id);
+        refresh_typed_inventory_bytes(&mut duplicate_repository_refs);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&duplicate_repository_refs),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-raw-duplicate"));
+
+        let mut orphan_local = inventory.clone();
+        orphan_local
+            .collector_snapshot
+            .raw_objects
+            .push(captured_raw_reference(
+                "raw-orphan-local",
+                "local-orphan-local",
+                "workload.source",
+                b"orphan local source",
+            ));
+        refresh_typed_inventory_bytes(&mut orphan_local);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&orphan_local), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-local-raw-orphan"));
+
+        let mut absolute_api_endpoints = inventory.clone();
+        let main_check_refs = absolute_api_endpoints.collector_snapshot.repositories[0].main_checks
+            [0]
+        .raw_object_refs
+        .clone();
+        let absolute_request_ids = absolute_api_endpoints
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .filter(|raw| main_check_refs.iter().any(|raw_id| raw_id == &raw.raw_id))
+            .map(|raw| raw.request_id.clone())
+            .collect::<BTreeSet<_>>();
+        for request in &mut absolute_api_endpoints.collector_snapshot.requests {
+            if absolute_request_ids.contains(&request.request_id)
+                || request.endpoint_or_operation == "/repos/tailrocks/velnor"
+            {
+                request.endpoint_or_operation =
+                    format!("https://api.github.com{}", request.endpoint_or_operation);
+            }
+        }
+        refresh_typed_inventory_bytes(&mut absolute_api_endpoints);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&absolute_api_endpoints),
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "canonical absolute API endpoints should bind checks and access: {findings:?}"
+        );
+    }
+
+    #[test]
     fn g0_source_join_bindings_are_typed_and_repository_specific() {
         let (manifest, snapshot, inventory) = complete_g0_fixture();
         let mut baseline_findings = Vec::new();
@@ -10976,6 +12294,15 @@ mod tests {
             .expect("workload artifact raw object")
             .object_kind = "repository".to_owned();
         assert_rejected(wrong_artifact_kind, "g0-workload-artifact");
+
+        let mut nested_agent_wrong_kind = inventory.clone();
+        nested_agent_wrong_kind
+            .collector_snapshot
+            .model_session
+            .agents[0]
+            .raw_object_refs
+            .push("raw-repository-1".to_owned());
+        assert_rejected(nested_agent_wrong_kind, "g0-local-raw-kind");
 
         let mut cross_repository_access = inventory.clone();
         cross_repository_access.collector_snapshot.access[0].raw_object_refs =
@@ -12600,6 +13927,159 @@ mod tests {
     }
 
     #[test]
+    fn provider_raw_json_rejects_duplicate_keys_before_selection() {
+        let endpoint = "/repos/tailrocks/velnor/check-runs/1";
+        let body = br#"{"id":1,"id":1,"name":"ci"}"#;
+        let raw = captured_raw_reference("duplicate-raw", "duplicate-request", "check_run", body);
+        let mut request = captured_page_request(endpoint, "", 1);
+        request.request_id = "duplicate-request".to_owned();
+        request.response_raw_ref = "duplicate-raw".to_owned();
+        assert!(g0_capture_raw_json(
+            &["duplicate-raw".to_owned()],
+            "check_run",
+            1,
+            &[endpoint.to_owned()],
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&raw),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn check_suite_runs_raw_kind_binds_check_producer() {
+        let source_sha = sha('a');
+        let check = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "123".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 42,
+            check_run_id: 7,
+            source_sha: source_sha.clone(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/tailrocks/velnor/runs/7".to_owned(),
+            raw_object_refs: vec!["suite-runs-raw".to_owned(), "suite-raw".to_owned()],
+        };
+        let suite_endpoint = format!("/repos/tailrocks/velnor/commits/{source_sha}/check-suites");
+        let suite_request = {
+            let mut request = captured_page_request(&suite_endpoint, "per_page=100", 1);
+            request.request_id = "suite-request".to_owned();
+            request.response_raw_ref = "suite-raw".to_owned();
+            request
+        };
+        let suite_raw = captured_raw_reference(
+            "suite-raw",
+            "suite-request",
+            "check_suites",
+            serde_json::to_string(&json!({
+                "total_count": 1,
+                "check_suites": [{
+                    "id": 42,
+                    "head_sha": source_sha.clone(),
+                    "status": "completed",
+                    "conclusion": "success",
+                    "app": {"id": 123, "slug": "dco-2"}
+                }]
+            }))
+            .expect("suite JSON")
+            .as_bytes(),
+        );
+        let runs_endpoint = "/repos/tailrocks/velnor/check-suites/42/check-runs";
+        let runs_request = {
+            let mut request = captured_page_request(runs_endpoint, "filter=all&per_page=100", 1);
+            request.request_id = "suite-runs-request".to_owned();
+            request.response_raw_ref = "suite-runs-raw".to_owned();
+            request
+        };
+        let runs_body = serde_json::to_vec(&json!({
+            "total_count": 1,
+            "check_runs": [{
+                "id": 7,
+                "name": "DCO",
+                "head_sha": source_sha.clone(),
+                "status": "completed",
+                "conclusion": "success",
+                "html_url": "https://github.com/tailrocks/velnor/runs/7",
+                "check_suite": {"id": 42},
+                "app": {"id": 123, "slug": "dco-2"}
+            }]
+        }))
+        .expect("check suite runs JSON");
+        let runs_raw = captured_raw_reference(
+            "suite-runs-raw",
+            "suite-runs-request",
+            "check_suite_runs",
+            &runs_body,
+        );
+        assert!(g0_check_raw_evidence_valid(
+            "tailrocks/velnor",
+            &check,
+            &[suite_request, runs_request],
+            &[suite_raw, runs_raw],
+        ));
+    }
+
+    #[test]
+    fn actions_raw_heads_bind_directly_to_check_source_sha() {
+        let (_, _, inventory) = complete_g0_fixture();
+        let collector = &inventory.collector_snapshot;
+        let repository = &collector.repositories[0];
+        let check = repository
+            .main_checks
+            .first()
+            .expect("main Actions check fixture");
+        assert!(g0_check_raw_evidence_valid(
+            &repository.repository,
+            check,
+            &collector.requests,
+            &collector.raw_objects,
+        ));
+
+        let mut mismatched = check.clone();
+        assert!(matches!(
+            &mismatched.provider,
+            G0CheckProvider::GithubActions { .. }
+        ));
+        if let G0CheckProvider::GithubActions { job_source_sha, .. } = &mut mismatched.provider {
+            *job_source_sha = sha('b');
+        }
+        let mut raw_objects = collector.raw_objects.clone();
+        for raw_id in [
+            "raw-1-main-workflow_run",
+            "raw-1-main-workflow_attempt_jobs",
+        ] {
+            let index = raw_objects
+                .iter()
+                .position(|raw| raw.raw_id == raw_id)
+                .expect("Actions raw head fixture");
+            let raw = raw_objects[index].clone();
+            let bytes = BASE64
+                .decode(&raw.bytes_base64)
+                .expect("Actions raw JSON bytes");
+            let mut value = parse_strict_json::<Value>(&bytes).expect("Actions raw JSON");
+            if raw.object_kind == "workflow_run" {
+                value["head_sha"] = json!(sha('b'));
+            } else {
+                value["jobs"][0]["head_sha"] = json!(sha('b'));
+            }
+            let bytes = canonical_json(&value).into_bytes();
+            raw_objects[index] =
+                captured_raw_reference(&raw.raw_id, &raw.request_id, &raw.object_kind, &bytes);
+        }
+        // The raw run/job rows agree with the typed job_source_sha, but not
+        // with the check's source_sha. That source mismatch must fail closed.
+        assert!(!g0_check_raw_evidence_valid(
+            &repository.repository,
+            &mismatched,
+            &collector.requests,
+            &raw_objects,
+        ));
+    }
+
+    #[test]
     fn endpoint_contract_is_closed_and_coverage_specific() {
         let source = sha('a');
         let check_endpoint = format!("/repos/tailrocks/velnor/commits/{source}/check-runs");
@@ -12792,6 +14272,26 @@ mod tests {
             &all_request,
             &latest_query,
             check_contract,
+        ));
+
+        let suites_endpoint = format!("/repos/tailrocks/velnor/commits/{source}/check-suites");
+        let suites_contract =
+            g0_endpoint_contract("check_suites", &suites_endpoint).expect("check suites contract");
+        let suites_request = captured_page_request(&suites_endpoint, "per_page=100", 1);
+        let suites_query = canonical_rest_query("per_page=100");
+        assert!(g0_response_query_contract(
+            &suites_request,
+            &suites_query,
+            suites_contract,
+        ));
+        let suites_explicit_page_query = canonical_rest_query("page=1&per_page=100");
+        let mut suites_explicit_page = suites_request.clone();
+        suites_explicit_page.query_base64 = BASE64.encode(&suites_explicit_page_query);
+        suites_explicit_page.query_sha256 = digest_bytes(&suites_explicit_page_query);
+        assert!(g0_response_query_contract(
+            &suites_explicit_page,
+            &suites_explicit_page_query,
+            suites_contract,
         ));
 
         for (object_kind, endpoint) in [
@@ -13732,29 +15232,13 @@ mod tests {
             &raw_objects
         ));
 
-        let app_index = raw_objects
-            .iter()
-            .position(|raw| raw.raw_id == "real-app-dco")
-            .expect("DCO App capture");
-        let app_body = serde_json::from_slice::<Value>(
-            &BASE64
-                .decode(&raw_objects[app_index].bytes_base64)
-                .expect("DCO App bytes"),
-        )
-        .expect("DCO App JSON");
-        let mut wrong_app_body = app_body;
-        wrong_app_body["id"] = json!(12_526);
-        wrong_app_body["slug"] = json!("sonarqubecloud");
-        let wrong_app_bytes = canonical_json(&wrong_app_body).into_bytes();
-        raw_objects[app_index] = captured_raw_reference(
-            "real-app-dco",
-            "real-app-dco-request",
-            "app",
-            &wrong_app_bytes,
-        );
-        assert!(!g0_check_raw_evidence_valid(
+        let mut no_separate_app_capture = dco.clone();
+        no_separate_app_capture
+            .raw_object_refs
+            .retain(|raw_id| raw_id != "real-app-dco");
+        assert!(g0_check_raw_evidence_valid(
             "tailrocks/velnor",
-            &dco,
+            &no_separate_app_capture,
             &requests,
             &raw_objects
         ));

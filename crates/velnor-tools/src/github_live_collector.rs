@@ -12,11 +12,13 @@ use super::{
     collect_binary, collect_rest, github_check_suite_runs_request, github_check_suites_request,
     github_open_pull_requests_request, github_single_object_request,
     github_workflow_artifacts_request, github_workflow_attempt_jobs_request,
-    github_workflow_attempt_request, github_workflow_runs_request, AcquisitionError,
-    AcquisitionState, AuthIdentity, CollectionResult, IdentityReconciliation, RawObjectRef,
-    RawObjectStore, RequestRecord, RestCollectionRequest, RevisionIdentity,
+    github_workflow_attempt_request, github_workflow_runs_request, sha256_digest, AcquisitionError,
+    AcquisitionState, ApiKind, AuthIdentity, CollectionResult, HttpMethod, IdentityReconciliation,
+    RawObjectRef, RawObjectStore, RequestRecord, RestCollectionRequest, RevisionIdentity,
 };
-use crate::evidence_check::{ManifestDocument, ManifestRepository, CANONICAL_REPOSITORIES};
+use crate::evidence_check::{
+    parse_strict_json, ManifestDocument, ManifestRepository, CANONICAL_REPOSITORIES,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -1046,7 +1048,7 @@ where
     )
     .await?;
     merge_artifacts(&mut artifacts, main_artifacts)?;
-    let main_checks = collect_check_facts(
+    let mut main_checks = collect_check_facts(
         transport,
         store,
         auth,
@@ -1056,6 +1058,12 @@ where
         ledger,
     )
     .await?;
+    bind_actions_checks_to_executions(
+        &mut main_checks,
+        &main_executions,
+        ledger,
+        &manifest.repository,
+    )?;
     let mut access_gaps = access_gaps(&repository_value);
     access_gaps.extend(access_endpoint_gaps(
         &ledger.requests[request_start..],
@@ -1429,7 +1437,7 @@ where
         .tested_merge_sha
         .as_deref()
         .ok_or_else(|| anyhow!("PR #{} lacks tested merge SHA", identity.number))?;
-    let checks = collect_check_facts(
+    let mut checks = collect_check_facts(
         transport,
         store,
         auth,
@@ -1439,6 +1447,7 @@ where
         ledger,
     )
     .await?;
+    bind_actions_checks_to_executions(&mut checks, &executions, ledger, &manifest.repository)?;
     Ok((executions, checks, artifacts))
 }
 
@@ -1497,6 +1506,34 @@ where
             &run_source_sha,
             None,
         )?;
+        let (run_detail, run_detail_raw_ids) = collect_one(
+            transport,
+            store,
+            auth,
+            ledger,
+            github_single_object_request(
+                collection_id(
+                    &manifest.repository,
+                    &format!("{collection_prefix}-run-{run_id}-detail"),
+                ),
+                format!("/repos/{}/actions/runs/{run_id}", manifest.repository),
+                "workflow_run",
+            ),
+        )
+        .await?;
+        validate_workflow_run(
+            &run_detail,
+            &manifest.repository,
+            repository_id,
+            run_id,
+            &run_source_sha,
+            None,
+        )?;
+        if required_u32(&run_detail, &["run_attempt"])? != latest_attempt
+            || workflow_path_from_run(&run_detail)? != workflow_path_from_run(&run)?
+        {
+            bail!("workflow run {run_id} detail disagrees with list identity");
+        }
         let workflow_path = workflow_path_from_run(&run)?;
         let workflow_index = workflows
             .iter()
@@ -1559,6 +1596,12 @@ where
                     repository_id,
                     run_id,
                     &run_source_sha,
+                    Some(resolve_artifact_run_attempt(
+                        artifact,
+                        run_id,
+                        &run_source_sha,
+                        &attempts,
+                    )?),
                     artifact_raw_ids.clone(),
                 )
             })
@@ -1688,6 +1731,7 @@ where
                 .collect::<Result<Vec<_>>>()?;
             validate_unique_jobs(&live_jobs, run_id, attempt_number)?;
             let mut raw_ids = run_list_raw_ids.clone();
+            raw_ids.extend(run_detail_raw_ids.clone());
             raw_ids.extend(attempt_raw_ids);
             raw_ids.extend(jobs_raw_ids);
             raw_ids.extend(artifact_raw_ids.clone());
@@ -1891,6 +1935,288 @@ where
         }
     }
     Ok(checks)
+}
+
+/// Complete the Actions check identity only after the independently collected
+/// execution ledger contains the exact run detail and attempt-job page that
+/// produced the check.  Check-suite rows remain part of the binding; this
+/// adds the run/job evidence needed by the strict mapper without deriving an
+/// association from a shared source SHA alone.
+fn bind_actions_checks_to_executions(
+    checks: &mut [LiveCheck],
+    executions: &[LiveExecution],
+    ledger: &Ledger<'_>,
+    repository: &str,
+) -> Result<()> {
+    for check in checks
+        .iter_mut()
+        .filter(|check| check.app_slug == "github-actions")
+    {
+        let matches = executions
+            .iter()
+            .enumerate()
+            .flat_map(|(execution_index, execution)| {
+                execution.jobs.iter().map(move |job| (execution_index, job))
+            })
+            .filter(|(_, job)| job.check_run_id == check.check_run_id)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            bail!(
+                "Actions check {} must bind exactly one collected job, found {}",
+                check.check_run_id,
+                matches.len()
+            );
+        }
+        let (execution_index, job) = matches[0];
+        let execution = &executions[execution_index];
+        if execution.source_sha != check.source_sha
+            || job.run_id != execution.run_id
+            || job.run_attempt != execution.run_attempt
+            || job.source_sha.as_deref() != Some(check.source_sha.as_str())
+        {
+            bail!(
+                "Actions check {} has a mismatched run, attempt, job, or source SHA",
+                check.check_run_id
+            );
+        }
+        if check
+            .workflow_run_id
+            .is_some_and(|run_id| run_id != execution.run_id)
+            || check
+                .run_attempt
+                .is_some_and(|attempt| attempt != execution.run_attempt)
+            || check
+                .event
+                .as_deref()
+                .is_some_and(|event| event != execution.event)
+        {
+            bail!(
+                "Actions check {} suite association disagrees with collected execution",
+                check.check_run_id
+            );
+        }
+
+        let run_endpoint = format!("/repos/{repository}/actions/runs/{}", execution.run_id);
+        let run_refs = matching_raw_refs(
+            &execution.raw_object_refs,
+            ledger,
+            "workflow_run",
+            &run_endpoint,
+        )?;
+        if run_refs.len() != 1 {
+            bail!(
+                "Actions check {} requires exactly one workflow_run detail raw object",
+                check.check_run_id
+            );
+        }
+        let run_raw = ledger
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == run_refs[0])
+            .ok_or_else(|| anyhow!("workflow_run raw object disappeared from ledger"))?;
+        let run_value = raw_json_value(run_raw)?;
+        if required_u64(&run_value, &["id"])? != execution.run_id
+            || required_u32(&run_value, &["run_attempt"])? != execution.run_attempt
+            || required_sha(&run_value, &["head_sha"])? != check.source_sha
+            || required_string(&run_value, &["event"])? != execution.event
+            || required_string(&run_value, &["status"])? != check.status
+            || optional_string(&run_value, &["conclusion"]) != check.conclusion
+        {
+            bail!(
+                "workflow_run detail does not exactly bind Actions check {}",
+                check.check_run_id
+            );
+        }
+
+        let jobs_endpoint = format!(
+            "/repos/{repository}/actions/runs/{}/attempts/{}/jobs",
+            execution.run_id, execution.run_attempt
+        );
+        let job_refs = matching_job_page_refs(
+            &job.raw_object_refs,
+            ledger,
+            &jobs_endpoint,
+            job,
+            check.source_sha.as_str(),
+        )?;
+        if job_refs.len() != 1 {
+            bail!(
+                "Actions check {} requires exactly one matching workflow_attempt_jobs page",
+                check.check_run_id
+            );
+        }
+
+        check.workflow_run_id = Some(execution.run_id);
+        check.job_id = Some(job.job_id);
+        check.run_attempt = Some(execution.run_attempt);
+        check.raw_object_refs.extend(run_refs.clone());
+        check.raw_object_refs.extend(job_refs.clone());
+        check.checkout.api_raw_object_refs.extend(run_refs);
+        check.checkout.api_raw_object_refs.extend(job_refs);
+        check.raw_object_refs.sort();
+        check.raw_object_refs.dedup();
+        check.checkout.api_raw_object_refs.sort();
+        check.checkout.api_raw_object_refs.dedup();
+    }
+    Ok(())
+}
+
+fn matching_raw_refs(
+    owner_refs: &[String],
+    ledger: &Ledger<'_>,
+    object_kind: &str,
+    expected_path: &str,
+) -> Result<Vec<String>> {
+    let mut matches = Vec::new();
+    let mut seen = BTreeSet::new();
+    for raw_id in owner_refs {
+        if !seen.insert(raw_id) {
+            bail!("raw object reference {raw_id} is repeated");
+        }
+        let Some(raw) = ledger.raw_objects.iter().find(|raw| raw.raw_id == *raw_id) else {
+            continue;
+        };
+        let Some(request) = ledger
+            .requests
+            .iter()
+            .find(|request| request.request_id == raw.request_id)
+        else {
+            continue;
+        };
+        if raw.object_kind == object_kind
+            && request.api == ApiKind::Rest
+            && request.method == HttpMethod::Get
+            && request.http_status == Some(200)
+            && request.complete
+            && request.response_raw_ref.as_deref() == Some(raw.raw_id.as_str())
+            && exact_github_api_path(&request.endpoint_or_operation, expected_path)
+        {
+            matches.push(raw.raw_id.clone());
+        }
+    }
+    Ok(matches)
+}
+
+fn matching_job_page_refs(
+    owner_refs: &[String],
+    ledger: &Ledger<'_>,
+    expected_path: &str,
+    job: &LiveJob,
+    source_sha: &str,
+) -> Result<Vec<String>> {
+    let mut matches = Vec::new();
+    let mut seen = BTreeSet::new();
+    for raw_id in owner_refs {
+        if !seen.insert(raw_id) {
+            bail!("raw object reference {raw_id} is repeated");
+        }
+        let Some(raw) = ledger.raw_objects.iter().find(|raw| raw.raw_id == *raw_id) else {
+            continue;
+        };
+        if raw.object_kind != "workflow_attempt_jobs" {
+            continue;
+        }
+        let Some(request) = ledger
+            .requests
+            .iter()
+            .find(|request| request.request_id == raw.request_id)
+        else {
+            continue;
+        };
+        if request.api != ApiKind::Rest
+            || request.method != HttpMethod::Get
+            || request.http_status != Some(200)
+            || !request.complete
+            || request.response_raw_ref.as_deref() != Some(raw.raw_id.as_str())
+            || !exact_github_api_path(&request.endpoint_or_operation, expected_path)
+        {
+            continue;
+        }
+        let value = raw_json_value(raw)?;
+        let Some(jobs) = value.get("jobs").and_then(Value::as_array) else {
+            continue;
+        };
+        let matching = jobs
+            .iter()
+            .filter(|candidate| {
+                required_u64(candidate, &["id"]).ok() == Some(job.job_id)
+                    && required_u64(candidate, &["run_id"]).ok() == Some(job.run_id)
+                    && required_u32(candidate, &["run_attempt"]).ok() == Some(job.run_attempt)
+                    && required_sha(candidate, &["head_sha"]).ok() == Some(source_sha.to_owned())
+            })
+            .count();
+        if matching == 1 {
+            matches.push(raw.raw_id.clone());
+        } else if matching > 1 {
+            bail!(
+                "workflow_attempt_jobs page {} repeats job {}",
+                raw.raw_id,
+                job.job_id
+            );
+        }
+    }
+    Ok(matches)
+}
+
+fn exact_github_api_path(value: &str, expected_path: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("api.github.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == expected_path
+}
+
+fn raw_json_value(raw: &RawObjectRef) -> Result<Value> {
+    let bytes = BASE64
+        .decode(&raw.bytes_base64)
+        .context("decode collector raw JSON")?;
+    if raw.byte_length != bytes.len() as u64 || sha256_digest(&bytes) != raw.sha256 {
+        bail!("collector raw JSON digest does not match its immutable reference");
+    }
+    parse_strict_json(&bytes).map_err(|error| anyhow!("parse strict collector raw JSON: {error}"))
+}
+
+fn resolve_artifact_run_attempt(
+    value: &Value,
+    run_id: u64,
+    run_head_sha: &str,
+    attempts: &[(Value, Vec<String>, u32)],
+) -> Result<u32> {
+    let explicit_attempt = optional_u32(value, &["workflow_run", "run_attempt"])?;
+    let mut candidates = attempts
+        .iter()
+        .filter_map(|(attempt, _, attempt_number)| {
+            let matches = required_u64(attempt, &["id"]).ok() == Some(run_id)
+                && required_sha(attempt, &["head_sha"]).ok() == Some(run_head_sha.to_owned());
+            matches.then_some(*attempt_number)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.dedup();
+    if let Some(explicit_attempt) = explicit_attempt {
+        if !candidates.contains(&explicit_attempt) {
+            bail!(
+                "artifact run {} explicit attempt {} is not uniquely bound to authenticated attempts",
+                run_id,
+                explicit_attempt
+            );
+        }
+        return Ok(explicit_attempt);
+    }
+    if candidates.len() != 1 {
+        bail!(
+            "artifact run {} lacks explicit attempt and has {} authenticated candidates",
+            run_id,
+            candidates.len()
+        );
+    }
+    Ok(candidates[0])
 }
 
 fn validate_unique_jobs(jobs: &[LiveJob], run_id: u64, run_attempt: u32) -> Result<()> {
@@ -2123,6 +2449,7 @@ fn parse_artifact(
     repository_id: u64,
     run_id: u64,
     run_head_sha: &str,
+    run_attempt: Option<u32>,
     raw_object_refs: Vec<String>,
 ) -> Result<LiveArtifact> {
     let artifact_run_id = required_u64(value, &["workflow_run", "id"])?;
@@ -2154,7 +2481,7 @@ fn parse_artifact(
     Ok(LiveArtifact {
         artifact_id,
         run_id: artifact_run_id,
-        run_attempt: None,
+        run_attempt,
         run_head_sha: artifact_head_sha,
         name: required_string(value, &["name"])?,
         digest,
@@ -4156,6 +4483,7 @@ jobs:
             1,
             7,
             "cccccccccccccccccccccccccccccccccccccccc",
+            None,
             vec!["raw".to_owned()],
         )
         .expect("artifact");
@@ -4169,6 +4497,7 @@ jobs:
             1,
             7,
             "cccccccccccccccccccccccccccccccccccccccc",
+            None,
             vec![]
         )
         .is_err());
@@ -4183,6 +4512,7 @@ jobs:
             1,
             7,
             "cccccccccccccccccccccccccccccccccccccccc",
+            None,
             vec![]
         )
         .is_err());
@@ -4198,9 +4528,355 @@ jobs:
             1,
             7,
             "cccccccccccccccccccccccccccccccccccccccc",
+            None,
             vec![]
         )
         .is_err());
+    }
+
+    fn actions_binding_fixture() -> (
+        LiveCheck,
+        LiveExecution,
+        Vec<RequestRecord>,
+        Vec<RawObjectRef>,
+    ) {
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let repository = "tailrocks/velnor";
+        let run_id = 7;
+        let run_attempt = 2;
+        let job_id = 9;
+        let check_run_id = 11;
+        let run_endpoint =
+            format!("https://api.github.com/repos/{repository}/actions/runs/{run_id}");
+        let jobs_endpoint = format!(
+            "https://api.github.com/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs"
+        );
+        let run_value = serde_json::json!({
+            "id": run_id,
+            "run_attempt": run_attempt,
+            "head_sha": source_sha,
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success"
+        });
+        let job_value = serde_json::json!({
+            "id": job_id,
+            "run_id": run_id,
+            "run_attempt": run_attempt,
+            "head_sha": source_sha
+        });
+        let raw = |raw_id: &str, request_id: &str, kind: &str, value: &Value| {
+            let bytes = serde_json::to_vec(value).expect("raw fixture JSON");
+            let digest = sha256_digest(&bytes);
+            RawObjectRef {
+                raw_id: raw_id.to_owned(),
+                request_id: request_id.to_owned(),
+                object_kind: kind.to_owned(),
+                canonicalization: "raw-bytes-v1".to_owned(),
+                sha256: digest.clone(),
+                byte_length: bytes.len() as u64,
+                original_sha256: digest.clone(),
+                original_byte_length: bytes.len() as u64,
+                bytes_base64: BASE64.encode(bytes),
+                media_type: "application/json".to_owned(),
+                storage_ref: format!("sha256://{}", digest.strip_prefix("sha256:").unwrap()),
+                original_storage_ref: format!(
+                    "sha256://{}",
+                    digest.strip_prefix("sha256:").unwrap()
+                ),
+            }
+        };
+        let request = |request_id: &str, endpoint: String, raw_id: &str| RequestRecord {
+            request_id: request_id.to_owned(),
+            api: ApiKind::Rest,
+            method: HttpMethod::Get,
+            endpoint_or_operation: endpoint,
+            query_base64: String::new(),
+            variables_base64: String::new(),
+            query_sha256: None,
+            variables_sha256: None,
+            redacted_variables: None,
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+            http_status: Some(200),
+            api_request_id: Some(format!("api-{request_id}")),
+            rate_limit: None,
+            safe_scopes: None,
+            page: PageState {
+                number: 1,
+                per_page: Some(100),
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: Some(false),
+                items_returned: 1,
+            },
+            response_raw_ref: Some(raw_id.to_owned()),
+            error_raw_ref: None,
+            state: AcquisitionState::Complete,
+            complete: true,
+            truncation_reason: None,
+        };
+        let run_raw = raw("raw-run", "request-run", "workflow_run", &run_value);
+        let jobs_body = serde_json::json!({"total_count": 1, "jobs": [job_value]});
+        let jobs_raw = raw(
+            "raw-jobs",
+            "request-jobs",
+            "workflow_attempt_jobs",
+            &jobs_body,
+        );
+        let requests = vec![
+            request("request-run", run_endpoint, "raw-run"),
+            request("request-jobs", jobs_endpoint, "raw-jobs"),
+        ];
+        let job = LiveJob {
+            job_id,
+            check_run_id,
+            run_id,
+            run_attempt,
+            name: "scan".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            event: "push".to_owned(),
+            source_sha: Some(source_sha.to_owned()),
+            checkout: LiveCheckoutObservation::api_head_only(
+                source_sha.to_owned(),
+                vec!["raw-jobs".to_owned()],
+            ),
+            source_url: format!("https://github.com/{repository}/runs/{run_id}/jobs/{job_id}"),
+            raw_object_refs: vec!["raw-jobs".to_owned()],
+        };
+        let execution = LiveExecution {
+            run_id,
+            run_attempt,
+            workflow_path: ".github/workflows/ci.yml".to_owned(),
+            workflow_revision: source_sha.to_owned(),
+            event: "push".to_owned(),
+            source_sha: source_sha.to_owned(),
+            checkout: LiveCheckoutObservation::api_head_only(
+                source_sha.to_owned(),
+                vec!["raw-run".to_owned(), "raw-jobs".to_owned()],
+            ),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            source_url: format!(
+                "https://github.com/{repository}/actions/runs/{run_id}/attempts/{run_attempt}"
+            ),
+            jobs: vec![job],
+            raw_object_refs: vec!["raw-run".to_owned(), "raw-jobs".to_owned()],
+        };
+        let check = LiveCheck {
+            context: "ci".to_owned(),
+            app_id: Some("123".to_owned()),
+            app_slug: "github-actions".to_owned(),
+            check_suite_id: Some(5),
+            check_run_id,
+            workflow_run_id: Some(run_id),
+            job_id: None,
+            run_attempt: Some(run_attempt),
+            source_sha: source_sha.to_owned(),
+            checkout: LiveCheckoutObservation::api_head_only(
+                source_sha.to_owned(),
+                vec!["raw-suite".to_owned()],
+            ),
+            event: Some("push".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            source_url: format!(
+                "https://github.com/{repository}/actions/runs/{run_id}/job/{check_run_id}"
+            ),
+            raw_object_refs: vec!["raw-suite".to_owned()],
+        };
+        (check, execution, requests, vec![run_raw, jobs_raw])
+    }
+
+    #[test]
+    fn actions_checks_bind_exact_run_detail_and_attempt_jobs_page() {
+        let (mut check, execution, requests, raw_objects) = actions_binding_fixture();
+        let mut ledger = Ledger {
+            requests,
+            raw_objects,
+            ..Ledger::default()
+        };
+        bind_actions_checks_to_executions(
+            std::slice::from_mut(&mut check),
+            std::slice::from_ref(&execution),
+            &ledger,
+            "tailrocks/velnor",
+        )
+        .expect("exact Actions raw binding");
+        assert_eq!(check.workflow_run_id, Some(7));
+        assert_eq!(check.run_attempt, Some(2));
+        assert_eq!(check.job_id, Some(9));
+        assert!(check.raw_object_refs.contains(&"raw-suite".to_owned()));
+        assert!(check.raw_object_refs.contains(&"raw-run".to_owned()));
+        assert!(check.raw_object_refs.contains(&"raw-jobs".to_owned()));
+        assert!(check
+            .checkout
+            .api_raw_object_refs
+            .contains(&"raw-jobs".to_owned()));
+        // Keep the ledger alive through the assertions: the helper must only
+        // borrow captured objects and never synthesize a raw reference.
+        ledger
+            .requests
+            .sort_by(|left, right| left.request_id.cmp(&right.request_id));
+    }
+
+    #[test]
+    fn actions_checks_reject_missing_or_mismatched_run_attempt_job_and_sha_evidence() {
+        let cases = [
+            "missing-run",
+            "wrong-run-endpoint",
+            "wrong-run-attempt",
+            "missing-jobs",
+            "wrong-job-endpoint",
+            "wrong-job-id",
+            "wrong-job-attempt",
+            "wrong-job-sha",
+            "duplicate-job",
+            "duplicate-run-json",
+        ];
+        for case in cases {
+            let (mut check, mut execution, mut requests, mut raw_objects) =
+                actions_binding_fixture();
+            match case {
+                "missing-run" => execution
+                    .raw_object_refs
+                    .retain(|raw_id| raw_id != "raw-run"),
+                "wrong-run-endpoint" => {
+                    requests
+                        .iter_mut()
+                        .find(|request| request.request_id == "request-run")
+                        .expect("run request")
+                        .endpoint_or_operation =
+                        "https://api.github.com/repos/tailrocks/velnor/actions/runs/8".to_owned()
+                }
+                "wrong-run-attempt" => {
+                    let raw = raw_objects
+                        .iter_mut()
+                        .find(|raw| raw.raw_id == "raw-run")
+                        .expect("run raw");
+                    raw.bytes_base64 = BASE64.encode(
+                        serde_json::to_vec(&serde_json::json!({
+                            "id": 7,
+                            "run_attempt": 1,
+                            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "event": "push",
+                            "status": "completed",
+                            "conclusion": "success"
+                        }))
+                        .expect("run JSON"),
+                    );
+                }
+                "duplicate-run-json" => {
+                    let raw = raw_objects
+                        .iter_mut()
+                        .find(|raw| raw.raw_id == "raw-run")
+                        .expect("run raw");
+                    raw.bytes_base64 = BASE64.encode(
+                        br#"{"id":7,"id":7,"run_attempt":2,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":"push","status":"completed","conclusion":"success"}"#,
+                    );
+                }
+                "missing-jobs" => execution.jobs[0].raw_object_refs.clear(),
+                "wrong-job-endpoint" => {
+                    requests
+                        .iter_mut()
+                        .find(|request| request.request_id == "request-jobs")
+                        .expect("jobs request")
+                        .endpoint_or_operation =
+                        "https://api.github.com/repos/other/repo/actions/runs/7/attempts/2/jobs"
+                            .to_owned()
+                }
+                "wrong-job-id" | "wrong-job-attempt" | "wrong-job-sha" | "duplicate-job" => {
+                    let raw = raw_objects
+                        .iter_mut()
+                        .find(|raw| raw.raw_id == "raw-jobs")
+                        .expect("jobs raw");
+                    let job_id = if case == "wrong-job-id" { 10 } else { 9 };
+                    let attempt = if case == "wrong-job-attempt" { 1 } else { 2 };
+                    let head_sha = if case == "wrong-job-sha" {
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    } else {
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    };
+                    let mut jobs = vec![serde_json::json!({
+                        "id": job_id,
+                        "run_id": 7,
+                        "run_attempt": attempt,
+                        "head_sha": head_sha
+                    })];
+                    if case == "duplicate-job" {
+                        jobs.push(jobs[0].clone());
+                    }
+                    raw.bytes_base64 = BASE64.encode(
+                        serde_json::to_vec(&serde_json::json!({
+                            "total_count": jobs.len(),
+                            "jobs": jobs
+                        }))
+                        .expect("jobs JSON"),
+                    );
+                }
+                _ => continue,
+            }
+            let mut ledger = Ledger {
+                requests,
+                raw_objects,
+                ..Ledger::default()
+            };
+            assert!(
+                bind_actions_checks_to_executions(
+                    std::slice::from_mut(&mut check),
+                    std::slice::from_ref(&execution),
+                    &ledger,
+                    "tailrocks/velnor",
+                )
+                .is_err(),
+                "case {case} must fail closed"
+            );
+            ledger.raw_objects.clear();
+        }
+    }
+
+    #[test]
+    fn artifact_attempt_resolution_requires_authenticated_unique_attempt() {
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let attempts = vec![
+            (
+                serde_json::json!({"id": 7, "head_sha": source_sha}),
+                Vec::new(),
+                1,
+            ),
+            (
+                serde_json::json!({"id": 7, "head_sha": source_sha}),
+                Vec::new(),
+                2,
+            ),
+        ];
+        let without_attempt = serde_json::json!({"workflow_run": {"id": 7}});
+        assert!(resolve_artifact_run_attempt(&without_attempt, 7, source_sha, &attempts).is_err());
+        let explicit = serde_json::json!({"workflow_run": {"id": 7, "run_attempt": 2}});
+        assert_eq!(
+            resolve_artifact_run_attempt(&explicit, 7, source_sha, &attempts)
+                .expect("explicit authenticated attempt"),
+            2
+        );
+        let wrong_attempt = serde_json::json!({"workflow_run": {"id": 7, "run_attempt": 3}});
+        assert!(resolve_artifact_run_attempt(&wrong_attempt, 7, source_sha, &attempts).is_err());
+        let wrong_source = serde_json::json!({"workflow_run": {"id": 7, "run_attempt": 2}});
+        assert!(resolve_artifact_run_attempt(
+            &wrong_source,
+            7,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &attempts
+        )
+        .is_err());
+        let one_attempt = vec![(attempts[0].0.clone(), Vec::new(), 1)];
+        assert_eq!(
+            resolve_artifact_run_attempt(&without_attempt, 7, source_sha, &one_attempt)
+                .expect("unique authenticated attempt"),
+            1
+        );
     }
 
     #[test]
