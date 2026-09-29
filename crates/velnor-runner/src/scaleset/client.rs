@@ -495,11 +495,21 @@ impl ScaleSetClient {
         }
         let list: RunnerScaleSetList = response.decode("runner scale set list")?;
         match list.count {
-            1 => list.runner_scale_sets.into_iter().next().map_or_else(
-                || Err(response.failed(None, "runner scale set list count lies about its value")),
-                |set| Ok(Some(set)),
-            ),
-            0 => Ok(None),
+            1 => {
+                let mut values = list.runner_scale_sets.into_iter();
+                match (values.next(), values.next()) {
+                    (Some(set), None) => Ok(Some(set)),
+                    _ => Err(response.failed(
+                        None,
+                        "runner scale set list count is one but value does not contain exactly one item",
+                    )),
+                }
+            }
+            0 if list.runner_scale_sets.is_empty() => Ok(None),
+            0 => Err(response.failed(
+                None,
+                "runner scale set list count is zero but value is not empty",
+            )),
             _ => Err(response.failed(
                 None,
                 &format!("multiple runner scale sets found with name {name:?}"),
@@ -635,10 +645,16 @@ impl ScaleSetClient {
         }
         let list: RunnerGroupList = response.decode("runner group list")?;
         match list.count {
-            1 => list.runner_groups.into_iter().next().map_or_else(
-                || Err(response.failed(None, "runner group list count lies about its value")),
-                Ok,
-            ),
+            1 => {
+                let mut values = list.runner_groups.into_iter();
+                match (values.next(), values.next()) {
+                    (Some(group), None) => Ok(group),
+                    _ => Err(response.failed(
+                        None,
+                        "runner group list count is one but value does not contain exactly one item",
+                    )),
+                }
+            }
             0 => Err(response.failed(
                 None,
                 &format!("no runner group found with name {runner_group:?}"),
