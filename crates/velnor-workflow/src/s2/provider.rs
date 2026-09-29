@@ -696,6 +696,14 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
+        if run.platform_for(&identity.unit_id) != Some(identity.platform) {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "platform does not match the planned unit".to_owned(),
+            });
+            continue;
+        }
         if !expected.contains(&key) {
             // A record for a pair outside the expected set is either a claim
             // for another provider's work or an unselected unit: both fail.
@@ -783,6 +791,7 @@ pub(crate) struct RunIdentity {
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
     pub(crate) command_digests: BTreeMap<String, String>,
+    pub(crate) platforms: BTreeMap<String, Platform>,
 }
 
 impl RunIdentity {
@@ -795,6 +804,10 @@ impl RunIdentity {
             .get(unit_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn platform_for(&self, unit_id: &str) -> Option<Platform> {
+        self.platforms.get(unit_id).copied()
     }
 }
 
@@ -1018,5 +1031,22 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[test]
+    fn selection_plan_digest_keeps_the_legacy_sixteen_hex_shape() {
+        let units = vec![(
+            "rust-unit".to_owned(),
+            ProviderSet::from([ProviderId::GithubHosted]),
+            "command-digest".to_owned(),
+        )];
+        let exclusions = vec![(
+            "docs".to_owned(),
+            ProviderId::Velnor,
+            ExclusionReason::GenuinelyUnaffected,
+        )];
+        let digest = plan_digest(&units, &exclusions);
+        assert_eq!(digest.len(), 16);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }
