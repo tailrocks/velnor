@@ -26,11 +26,11 @@ use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
 use super::provider::ProviderSet;
 use super::{
-    apply_generated_write_plan, generated_files, plan_generated_write, scan_target, Checkout, Cli,
-    GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
-    WriteOutcome,
+    apply_generated_write_plan_with_static_sources, generated_files,
+    plan_generated_write_with_static_sources, scan_target, Checkout, Cli, GeneratedWritePlan,
+    GenerationInputs, GeneratorError, ProjectConfig, RepositorySource, WriteOutcome,
 };
-use crate::generated_symlinks;
+use crate::{generated_symlinks, StaticSourceSnapshot};
 
 const MIN_WIDTH: u16 = 52;
 const MIN_HEIGHT: u16 = 16;
@@ -51,6 +51,7 @@ struct PreparedProject {
     checkout: Checkout,
     config: ProjectConfig,
     inputs: GenerationInputs,
+    static_sources: StaticSourceSnapshot,
     output_root: std::path::PathBuf,
 }
 
@@ -88,6 +89,7 @@ struct App {
     checkout: Option<Checkout>,
     config: Option<ProjectConfig>,
     inputs: Option<GenerationInputs>,
+    static_sources: StaticSourceSnapshot,
     output_root: Option<std::path::PathBuf>,
     selector: Option<ListState<String>>,
     scroll: ScrollAreaState,
@@ -112,6 +114,7 @@ impl App {
             checkout: None,
             config: None,
             inputs: None,
+            static_sources: StaticSourceSnapshot::default(),
             output_root: None,
             selector: None,
             scroll: ScrollAreaState::new().axes(true, false),
@@ -212,6 +215,7 @@ impl App {
         self.output_root = Some(prepared.output_root);
         self.config = Some(prepared.config);
         self.inputs = Some(prepared.inputs);
+        self.static_sources = prepared.static_sources;
         self.selector = Some(selector);
         self.phase = if self
             .config
@@ -547,7 +551,13 @@ impl App {
             return;
         };
         let symlinks = generated_symlinks();
-        let plan = match plan_generated_write(output_root, &files, &symlinks, &inputs) {
+        let plan = match plan_generated_write_with_static_sources(
+            output_root,
+            &files,
+            &symlinks,
+            &inputs,
+            &self.static_sources,
+        ) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());
@@ -598,13 +608,15 @@ impl App {
             );
             return;
         };
+        let static_sources = self.static_sources.clone();
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let result = complete_generation(
+            let result = complete_generation_with_static_sources(
                 &output_root,
                 &files_for_worker,
                 &symlinks_for_worker,
                 &inputs,
+                &static_sources,
                 dry_run,
                 check,
                 force,
@@ -672,6 +684,7 @@ impl App {
     clippy::too_many_arguments,
     reason = "the review worker replays the exact write contract the plan was built with"
 )]
+#[cfg(test)]
 fn complete_generation(
     output_root: &std::path::Path,
     files: &std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -682,18 +695,53 @@ fn complete_generation(
     force: bool,
     reviewed_plan: &GeneratedWritePlan,
 ) -> Result<GenerationCompletion, GeneratorError> {
-    let plan = plan_generated_write(output_root, files, symlinks, inputs)?;
+    complete_generation_with_static_sources(
+        output_root,
+        files,
+        symlinks,
+        inputs,
+        &StaticSourceSnapshot::default(),
+        dry_run,
+        check,
+        force,
+        reviewed_plan,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the review worker replays the exact write contract the plan was built with"
+)]
+fn complete_generation_with_static_sources(
+    output_root: &std::path::Path,
+    files: &std::collections::BTreeMap<std::path::PathBuf, String>,
+    symlinks: &std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf>,
+    inputs: &GenerationInputs,
+    static_sources: &StaticSourceSnapshot,
+    dry_run: bool,
+    check: bool,
+    force: bool,
+    reviewed_plan: &GeneratedWritePlan,
+) -> Result<GenerationCompletion, GeneratorError> {
+    let plan = plan_generated_write_with_static_sources(
+        output_root,
+        files,
+        symlinks,
+        inputs,
+        static_sources,
+    )?;
     if &plan != reviewed_plan {
         return Ok(GenerationCompletion::PlanChanged(plan));
     }
     if check && plan.has_drift() {
         return Ok(GenerationCompletion::CheckDrift(plan));
     }
-    let outcome = apply_generated_write_plan(
+    let outcome = apply_generated_write_plan_with_static_sources(
         output_root,
         files,
         symlinks,
         inputs,
+        static_sources,
         dry_run,
         check,
         force,
@@ -850,6 +898,7 @@ fn spawn_scan(
                 checkout,
                 config: scanned.config,
                 inputs: scanned.inputs,
+                static_sources: scanned.static_sources,
                 output_root,
             })
         })()
