@@ -950,6 +950,7 @@ impl ConsumerFixture {
         run_id: &str,
         head_candidate: &str,
         extra: &[(&str, &str)],
+        preseeded_github_env: Option<&str>,
     ) -> (Output, PathBuf) {
         let tail = candidate_verify_tail(&self.revision);
         let runner_temp = self.root.join("runner-temp");
@@ -959,6 +960,12 @@ impl ConsumerFixture {
             .root
             .join(format!("github-env-{}", crate::unique_suffix()));
         let env_str = must_some(env_file.to_str(), "env file is UTF-8");
+        if let Some(line) = preseeded_github_env {
+            must(
+                fs::write(&env_file, format!("{line}\n")),
+                "preseed github env",
+            );
+        }
         let mut env: Vec<(&str, &str)> = vec![
             ("RUNNER_TEMP", runner_temp_str),
             ("GITHUB_ENV", env_str),
@@ -1541,7 +1548,7 @@ fn candidate_acquire_recomputes_the_digest() {
     let prefix = &fixture.candidate_closure[..16];
     let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
     let candidate = fixture.candidate_closure.clone();
-    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
+    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[], None);
     assert!(!output.status.success(), "a wrong candidate digest rejects");
     let stderr = stderr_of(&output);
     assert!(
@@ -1558,7 +1565,7 @@ fn candidate_checksum_alone_confers_no_trust() {
     let prefix = &fixture.candidate_closure[..16];
     let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
     let candidate = fixture.candidate_closure.clone();
-    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
+    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[], None);
     assert!(
         !output.status.success(),
         "a foreign closure rejects despite a matching checksum"
@@ -1581,24 +1588,60 @@ fn candidate_acquire_exports_bound_product() {
     serve_candidate(&fixture, &candidate, &candidate);
     let prefix = &candidate[..16];
     let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
-    let (output, env_file) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
+    let (output, env_file) = fixture.run_candidate_tail(
+        &name,
+        "12345678",
+        &candidate,
+        &[("VELNOR_WORKFLOW_PINNED_BINARY", "/trusted/velnor-workflow")],
+        Some("VELNOR_WORKFLOW_PINNED_BINARY=/trusted/velnor-workflow"),
+    );
     assert!(
         output.status.success(),
         "a bound candidate acquires: {}",
         stderr_of(&output)
     );
     let env = must(fs::read_to_string(&env_file), "read github env");
-    assert!(
-        env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
-        "the candidate binary exports in its own slot: {env}"
+    let candidate_binary = fixture
+        .root
+        .join("runner-temp/velnor-workflow-candidate/velnor-workflow");
+    let expected_pinned = "VELNOR_WORKFLOW_PINNED_BINARY=/trusted/velnor-workflow";
+    let expected_candidate = format!(
+        "VELNOR_WORKFLOW_CANDIDATE_BINARY={}",
+        candidate_binary.display()
     );
-    assert!(
-        !env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "candidate acquisition preserves the pinned runtime slot: {env}"
+    let candidate_manifest = fixture
+        .root
+        .join("runner-temp/velnor-workflow-candidate/candidate-manifest.json");
+    let expected_manifest = format!(
+        "VELNOR_WORKFLOW_CANDIDATE_MANIFEST={}",
+        candidate_manifest.display()
     );
-    assert!(
-        env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),
-        "the manifest exports for the validator binding: {env}"
+    let pinned_lines: Vec<_> = env
+        .lines()
+        .filter(|line| line.starts_with("VELNOR_WORKFLOW_PINNED_BINARY="))
+        .collect();
+    assert_eq!(
+        pinned_lines,
+        vec![expected_pinned],
+        "candidate acquisition preserves exactly one preseeded pinned runtime slot: {env}"
+    );
+    let candidate_lines: Vec<_> = env
+        .lines()
+        .filter(|line| line.starts_with("VELNOR_WORKFLOW_CANDIDATE_BINARY="))
+        .collect();
+    assert_eq!(
+        candidate_lines,
+        vec![expected_candidate.as_str()],
+        "the exact candidate binary path exports in its own slot: {env}"
+    );
+    let manifest_lines: Vec<_> = env
+        .lines()
+        .filter(|line| line.starts_with("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="))
+        .collect();
+    assert_eq!(
+        manifest_lines,
+        vec![expected_manifest.as_str()],
+        "the exact candidate manifest path exports for the validator binding: {env}"
     );
     assert!(
         fixture.gh_log_text().contains("run-download"),
