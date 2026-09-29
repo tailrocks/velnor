@@ -3446,37 +3446,63 @@ pub(crate) fn scanner_path_matches_owned_path(
     candidate: &str,
     owned: &str,
 ) -> Result<bool, GeneratorError> {
+    fn safe_relative_path(value: &str) -> bool {
+        let mut saw_normal = false;
+        for component in Path::new(value).components() {
+            match component {
+                Component::Normal(_) => saw_normal = true,
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+            }
+        }
+        saw_normal
+    }
+
+    if !safe_relative_path(candidate) || !safe_relative_path(owned) {
+        return Ok(false);
+    }
     if candidate == owned {
         return Ok(true);
     }
     if Path::new(candidate).components().count() != Path::new(owned).components().count() {
         return Ok(false);
     }
-    let owned_path = root.join(owned);
-    let owned_path = match fs::canonicalize(&owned_path) {
+
+    let canonical_root = match fs::canonicalize(root) {
         Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {
             return Err(GeneratorError::io(
-                "resolve owned scanner path",
-                &owned_path,
+                "resolve scanner repository root",
+                root,
                 &error,
             ));
         }
     };
-    let candidate_path = root.join(candidate);
-    let candidate_path = match fs::canonicalize(&candidate_path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(GeneratorError::io(
-                "resolve scanner candidate path",
-                &candidate_path,
-                &error,
-            ));
-        }
-    };
-    Ok(candidate_path == owned_path)
+    let canonicalize_relative =
+        |relative: &str, action: &str| -> Result<Option<PathBuf>, GeneratorError> {
+            let joined = root.join(relative);
+            let canonical = match fs::canonicalize(&joined) {
+                Ok(path) => path,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(GeneratorError::io(action, &joined, &error));
+                }
+            };
+            if !canonical.starts_with(&canonical_root) {
+                return Ok(None);
+            }
+            Ok(Some(canonical))
+        };
+
+    // Resolve both spellings before comparing them. Lexical aliases such as
+    // case-only, Unicode-normalized, parent-directory, and Windows 8.3 names
+    // are only aliases when this filesystem resolves them to one in-root path.
+    let owned_path = canonicalize_relative(owned, "resolve owned scanner path")?;
+    let candidate_path = canonicalize_relative(candidate, "resolve scanner candidate path")?;
+    match (owned_path, candidate_path) {
+        (Some(owned_path), Some(candidate_path)) => Ok(candidate_path == owned_path),
+        _ => Ok(false),
+    }
 }
 
 pub(crate) fn scanner_path_matches_any_owned_path(
@@ -9934,7 +9960,7 @@ fn write_generated_with_static_sources_with_options(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(feature = "tui", test))]
 fn plan_generated_write(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -9944,7 +9970,7 @@ fn plan_generated_write(
     plan_generated_write_with_options(root, files, symlinks, inputs, false)
 }
 
-#[cfg(test)]
+#[cfg(any(feature = "tui", test))]
 fn plan_generated_write_with_options(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -10055,7 +10081,7 @@ fn plan_generated_write_with_static_sources_and_options(
         symlinks,
         ownership.map(|state| &state.outputs),
         static_sources,
-    );
+    )?;
     let stale = stale_files
         .iter()
         .map(|file| file.path.clone())
@@ -10303,7 +10329,7 @@ pub(crate) fn is_full_revision(value: &str) -> bool {
     clippy::too_many_arguments,
     reason = "the render passes files, links, and inputs as one explicit write contract"
 )]
-#[cfg(test)]
+#[cfg(any(feature = "tui", test))]
 fn apply_generated_write_plan(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -11600,16 +11626,77 @@ fn is_known_legacy_workflows_agents_md(relative: &Path, current: &[u8]) -> bool 
 }
 
 fn stale_owned_files(
-    _root: &Path,
-    _files: &BTreeMap<PathBuf, String>,
-    _symlinks: &BTreeMap<PathBuf, PathBuf>,
-    _ownership: Option<&BTreeMap<PathBuf, u64>>,
-    _static_sources: &StaticSourceSnapshot,
-) -> Vec<PlannedFile> {
-    // Missing current-renderer proof is a migration case, not permission to
-    // delete. Old dynamic outputs stay ordinary inputs until a renderer emits
-    // them again and proves ownership in the same run.
-    Vec::new()
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    ownership: Option<&BTreeMap<PathBuf, u64>>,
+    static_sources: &StaticSourceSnapshot,
+) -> Result<Vec<PlannedFile>, GeneratorError> {
+    let Some(ownership) = ownership else {
+        return Ok(Vec::new());
+    };
+    let mut stale = Vec::new();
+    for (relative, expected) in ownership {
+        if files.contains_key(relative) || symlinks.contains_key(relative) {
+            continue;
+        }
+        let path = root.join(relative);
+        if static_source_aliases_path(root, relative, static_sources)? {
+            continue;
+        }
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(GeneratorError::usage(format!(
+                "refusing to remove symlinked stale generated file: {}",
+                path.display()
+            )));
+        }
+        let preimage = capture_file_preimage(&path, relative)?;
+        let Some(current) = preimage.bytes() else {
+            continue;
+        };
+        if content_digest_bytes(current) != *expected {
+            return Err(GeneratorError::usage(format!(
+                "stale generated file was manually modified: {}",
+                relative.display()
+            )));
+        }
+        if preimage.is_executable() {
+            return Err(GeneratorError::usage(format!(
+                "stale generated file has executable mode: {}",
+                relative.display()
+            )));
+        }
+        stale.push(PlannedFile {
+            path: relative.clone(),
+            action: PlannedAction::Delete,
+            preimage,
+        });
+    }
+    Ok(stale)
+}
+
+/// A static source may retain the file object previously recorded as a
+/// generated output. Compare file identity rather than path spelling so a
+/// hard-link or symlink alias cannot be deleted out from under the source.
+fn static_source_aliases_path(
+    root: &Path,
+    relative: &Path,
+    static_sources: &StaticSourceSnapshot,
+) -> Result<bool, GeneratorError> {
+    let path = root.join(relative);
+    if fs::symlink_metadata(&path).is_err() {
+        return Ok(false);
+    }
+    let Some(source_root) = static_sources.source_root.as_ref() else {
+        return Ok(false);
+    };
+    for source in static_sources.files.keys() {
+        let source_path = source_root.join(source);
+        if static_source_paths_share_file_identity(&path, &source_path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The generation inputs a recorded state file pins: the repo-owned config
@@ -11876,10 +11963,9 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
         .join(", ")
 }
 
-/// Every path the unknown walk excuses: the render, the ownership
-/// state, and recorded outputs. Recorded-but-unrendered entries are retained
-/// as migration inputs until a current renderer proves them, so they must not
-/// classify as unknown or become force-gated deletions.
+/// Every path the unknown walk excuses: the render, the ownership state, and
+/// recorded outputs. The stale-output pass separately proves recorded bytes
+/// before deleting entries omitted by the current renderer.
 fn expected_tree_paths(
     files: &BTreeMap<PathBuf, String>,
     symlinks: &BTreeMap<PathBuf, PathBuf>,
@@ -13121,6 +13207,76 @@ mod tests {
             std::fs::remove_dir_all(root),
             "remove owned-output unicode root",
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanner_owned_output_canonicalizes_same_depth_parent_alias() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-owned-output-parent-alias-{}",
+            unique_suffix()
+        ));
+        let workflows = root.join(".github/workflows");
+        must(
+            std::fs::create_dir_all(&workflows),
+            "create owned-output parent",
+        );
+        let owned = workflows.join("generated.yml");
+        must(
+            std::fs::write(&owned, "name: generated\n"),
+            "write owned-output parent alias target",
+        );
+        must(
+            symlink("workflows", root.join(".github/WORKFLOWS")),
+            "create same-depth parent alias",
+        );
+
+        assert!(must(
+            scanner_path_matches_owned_path(
+                &root,
+                ".github/WORKFLOWS/generated.yml",
+                ".github/workflows/generated.yml",
+            ),
+            "same-depth parent alias",
+        ));
+        must(
+            std::fs::remove_dir_all(root),
+            "remove owned-output parent alias root",
+        );
+    }
+
+    #[test]
+    fn scanner_owned_output_rejects_paths_outside_repository_root() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-owned-output-root-boundary-{}",
+            unique_suffix()
+        ));
+        assert!(!must(
+            scanner_path_matches_owned_path(&root, "../generated.yml", "../generated.yml"),
+            "reject parent traversal in scanner ownership",
+        ));
+        assert!(!must(
+            scanner_path_matches_owned_path(&root, "/generated.yml", "/generated.yml"),
+            "reject absolute scanner ownership path",
+        ));
+    }
+
+    #[test]
+    fn path_spellings_alias_preserves_component_boundaries() {
+        assert!(path_spellings_alias(
+            ".github/workflows/CI-POL~1.YML",
+            ".github/workflows/ci-policy.yml",
+        ));
+        assert!(!path_spellings_alias(
+            ".github/workflows/ci-policy.yml",
+            ".github/workflows/ci-policy.yml/child",
+        ));
+        assert!(!path_spellings_alias(
+            ".github/workflows/ci",
+            ".github/workflows/ci-policy.yml",
+        ));
     }
 
     #[cfg(unix)]
@@ -24968,7 +25124,7 @@ channel = "stable"
         let _ = fs::remove_dir_all(root);
     }
     #[test]
-    fn historical_workflows_are_preserved_without_renderer_proof() {
+    fn stale_generated_workflows_are_removed_after_digest_verification() {
         let root = temporary_repository("stale-generated-workflow");
         must(
             fs::write(
@@ -24983,9 +25139,10 @@ channel = "stable"
         );
         let current = must(generated_files(&config), "generate");
         let mut previous = current.clone();
+        let stale = PathBuf::from(".github/workflows/ci.yml");
         previous.insert(
-            PathBuf::from(".github/workflows/ci.yml"),
-            "name: handwritten historical workflow\n".to_owned(),
+            stale.clone(),
+            format!("{GENERATED_HEADER}name: superseded\n"),
         );
         must(
             write_generated(&root, &previous, false, false, false),
@@ -24996,15 +25153,8 @@ channel = "stable"
             "remove exact stale generated workflow",
         );
         assert!(
-            root.join(".github/workflows/ci.yml").is_file(),
-            "old dynamic workflow must remain a scanner input"
-        );
-        assert_eq!(
-            must(
-                fs::read_to_string(root.join(".github/workflows/ci.yml")),
-                "read preserved historical workflow"
-            ),
-            "name: handwritten historical workflow\n"
+            !root.join(&stale).exists(),
+            "verified stale output must be removed"
         );
 
         let stale = root.join(".github/workflows/ci-pr.yml");
@@ -25021,8 +25171,79 @@ channel = "stable"
             .contains("manually modified generated file"));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[cfg(unix)]
     #[test]
-    fn forged_sidecar_claim_cannot_authorize_arbitrary_stale_deletion() {
+    fn declared_static_source_hardlink_preserves_stale_output() {
+        let root = temporary_repository("static-source-stale-output");
+        let source = PathBuf::from(".github-gen/sources/static.yml");
+        let stale = PathBuf::from("config/fleet/velnor-host.env");
+        must(
+            fs::create_dir_all(root.join(".github-gen/sources")),
+            "create static source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create stale output directory",
+        );
+        must(
+            fs::write(root.join(&stale), "static source\n"),
+            "write stale output",
+        );
+        must(
+            fs::hard_link(root.join(&stale), root.join(&source)),
+            "link static source to stale output",
+        );
+        let current = BTreeMap::from([(
+            PathBuf::from(".github/workflows/ci-pr.yml"),
+            format!("{GENERATED_HEADER}name: current\n"),
+        )]);
+        let mut previous = current.clone();
+        previous.insert(stale.clone(), "static source\n".to_owned());
+        must(
+            write_generated(&root, &previous, false, false, false),
+            "write previous generated layout",
+        );
+        let canonical_root = must(fs::canonicalize(&root), "canonicalize static source root");
+        let static_sources = StaticSourceSnapshot {
+            source_root: Some(canonical_root.clone()),
+            source_root_identity: Some(must(
+                static_source_root_identity(&canonical_root),
+                "capture static source root identity",
+            )),
+            files: BTreeMap::from([(source, "static source\n".to_owned())]),
+        };
+        must(
+            write_generated_with_static_sources_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                &static_sources,
+                false,
+                false,
+                false,
+                false,
+            ),
+            "migrate generated output to static source",
+        );
+        assert!(
+            root.join(&stale).is_file(),
+            "static source file object must survive stale cleanup"
+        );
+        let state = must(
+            fs::read_to_string(root.join(OWNERSHIP_STATE)),
+            "read migrated ownership state",
+        );
+        assert!(
+            !state.contains("config/fleet/velnor-host.env"),
+            "migrated static source must leave stale output ownership"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changed_sidecar_claim_cannot_authorize_stale_deletion() {
         let root = temporary_repository("forged-sidecar-stale-deletion");
         let current = BTreeMap::from([(
             PathBuf::from(".github/workflows/ci-pr.yml"),
@@ -25036,12 +25257,59 @@ channel = "stable"
             "write forged sidecar fixture",
         );
         must(
-            write_generated(&root, &current, false, false, false),
-            "ignore arbitrary sidecar stale claim",
+            fs::write(&root.join(&forged), "# local input\n"),
+            "modify forged sidecar path",
         );
+        let error = must_some(
+            write_generated(&root, &current, false, false, false).err(),
+            "changed stale claim must fail closed",
+        );
+        assert!(error.to_string().contains("manually modified"));
         assert!(
             root.join(&forged).is_file(),
-            "forged claim must not delete input"
+            "changed stale claim must not delete input"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_stale_output_is_not_removed_even_when_digest_matches() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = temporary_repository("executable-stale-output");
+        let current = BTreeMap::from([(
+            PathBuf::from(".github/workflows/ci-pr.yml"),
+            format!("{GENERATED_HEADER}name: current\n"),
+        )]);
+        let stale = PathBuf::from(".github/workflows/stale-executable.yml");
+        let stale_content = format!("{GENERATED_HEADER}name: stale\n");
+        let mut previous = current.clone();
+        previous.insert(stale.clone(), stale_content);
+        must(
+            write_generated(&root, &previous, false, false, false),
+            "write executable stale fixture",
+        );
+        let stale_path = root.join(&stale);
+        let mut permissions = must(fs::metadata(&stale_path), "stat stale output").permissions();
+        permissions.set_mode(0o755);
+        must(
+            fs::set_permissions(&stale_path, permissions),
+            "mark stale output executable",
+        );
+
+        let error = must_some(
+            write_generated(&root, &current, false, false, false).err(),
+            "reject executable stale output",
+        );
+        assert!(error.to_string().contains("executable mode"));
+        assert!(stale_path.is_file(), "executable stale output must survive");
+        assert_ne!(
+            must(fs::metadata(&stale_path), "restat stale output")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -25070,11 +25338,14 @@ channel = "stable"
             ),
             "plan current generated layout",
         );
-        assert!(!plan.files.iter().any(|file| file.path == stale));
+        assert!(plan
+            .files
+            .iter()
+            .any(|file| { file.path == stale && file.action == PlannedAction::Delete }));
         assert!(plan.files.iter().any(|file| {
             file.path == Path::new(OWNERSHIP_STATE) && file.action == PlannedAction::Update
         }));
-        assert!(root.join(&stale).is_file());
+        assert!(root.join(&stale).is_file(), "planning must not write");
         let _ = fs::remove_dir_all(root);
     }
     #[test]
@@ -25361,7 +25632,7 @@ channel = "stable"
         let _ = fs::remove_dir_all(root);
     }
     #[test]
-    fn unrendered_legacy_guide_is_preserved() {
+    fn unrendered_legacy_guide_is_removed_after_digest_verification() {
         let root = temporary_repository("stale-generated-guide");
         must(
             fs::write(
@@ -25386,9 +25657,9 @@ channel = "stable"
         );
         must(
             write_generated(&root, &current, false, false, false),
-            "preserve unrendered legacy guide",
+            "remove verified unrendered legacy guide",
         );
-        assert!(root.join(".github/UNIFIED-ACTIONS.md").is_file());
+        assert!(!root.join(".github/UNIFIED-ACTIONS.md").exists());
         let state = must(
             fs::read_to_string(root.join(OWNERSHIP_STATE)),
             "read refreshed ownership state",
