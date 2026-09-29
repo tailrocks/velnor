@@ -66,10 +66,20 @@ fn postinst_removes_the_stale_quota_dropin_and_never_writes_one() {
     assert!(postinst.contains("rm -f \"$JOBS_SLICE_DROPIN\""));
     assert!(postinst.contains("systemctl daemon-reload"));
     // After reload, every effective ceiling property must read infinity.
-    assert!(postinst.contains("CPUQuotaPerSecUSec"));
-    assert!(postinst.contains("MemoryMax"));
-    assert!(postinst.contains("MemoryHigh"));
+    for property in [
+        "CPUQuotaPerSecUSec",
+        "MemoryHigh",
+        "MemoryMax",
+        "MemorySwapMax",
+        "TasksMax",
+    ] {
+        assert!(
+            postinst.contains(&format!("--property={property}")),
+            "postinst must prove the effective {property} ceiling is absent"
+        );
+    }
     assert!(postinst.contains("infinity"));
+    assert!(postinst.contains("-eq 5"));
 
     // No quota is ever derived or written.
     assert!(!postinst.contains("write_host_scaled_jobs_cpu_quota"));
@@ -78,6 +88,78 @@ fn postinst_removes_the_stale_quota_dropin_and_never_writes_one() {
     assert!(!postinst.contains("getconf _NPROCESSORS_ONLN"));
     assert!(!postinst.contains("busctl get-property"));
     assert!(!postinst.contains("expected_cpu_quota_usec"));
+}
+
+#[test]
+fn postinst_verifies_five_unbounded_resource_properties_fail_closed() {
+    use std::process::Command;
+
+    let postinst = include_str!("../debian/postinst");
+    let function_start = postinst
+        .find("verify_jobs_slice_has_no_resource_ceilings()")
+        .unwrap();
+    let function_end = postinst[function_start..]
+        .find("\nrequire_package_transaction_lock()")
+        .map(|offset| function_start + offset)
+        .unwrap();
+    let function = &postinst[function_start..function_end];
+    let cases = [
+        (
+            "five-infinity-values",
+            "infinity\ninfinity\ninfinity\ninfinity\ninfinity\n",
+            false,
+            true,
+        ),
+        (
+            "finite-value",
+            "infinity\ninfinity\n512M\ninfinity\ninfinity\n",
+            false,
+            false,
+        ),
+        (
+            "missing-value",
+            "infinity\ninfinity\ninfinity\ninfinity\n",
+            false,
+            false,
+        ),
+        (
+            "malformed-value",
+            "infinity\ninfinity\ninfinity\nnot-a-limit\ninfinity\n",
+            false,
+            false,
+        ),
+        ("systemctl-failure", "", true, false),
+    ];
+
+    for (label, output, systemctl_failure, expected_success) in cases {
+        let script = format!(
+            "set -eu\n\
+             fail() {{ echo \"$1\" >&2; exit 1; }}\n\
+             systemctl() {{\n\
+               [ \"$*\" = 'show --property=CPUQuotaPerSecUSec --property=MemoryHigh --property=MemoryMax --property=MemorySwapMax --property=TasksMax --value velnor-jobs.slice' ] || return 99\n\
+               if [ \"${{TEST_SYSTEMCTL_FAILURE:-0}}\" = 1 ]; then return 1; fi\n\
+               printf '%s' \"$TEST_SYSTEMCTL_OUTPUT\"\n\
+             }}\n\
+             {function}\n\
+             verify_jobs_slice_has_no_resource_ceilings\n",
+        );
+        let command = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_SYSTEMCTL_OUTPUT", output)
+            .env(
+                "TEST_SYSTEMCTL_FAILURE",
+                if systemctl_failure { "1" } else { "0" },
+            )
+            .output()
+            .unwrap();
+        assert_eq!(
+            command.status.success(),
+            expected_success,
+            "fixture {label} unexpected result; stderr: {}",
+            String::from_utf8_lossy(&command.stderr)
+        );
+    }
 }
 
 #[test]
