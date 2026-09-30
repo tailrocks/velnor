@@ -3778,6 +3778,11 @@ fn validate_check_profile_result(
         }
     }
     if row.artifacts_required == Some(true) {
+        if row.status.as_deref() == Some("advisory") {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} cannot combine artifacts_required = true with status = advisory; required artifacts need status = required or no status"
+            )));
+        }
         let Some(artifacts) = row.artifacts.as_deref() else {
             return Err(GeneratorError::usage(format!(
                 "[[check_profile]] {id} sets `artifacts_required = true` but declares no `artifacts`; name every required file"
@@ -6680,6 +6685,23 @@ mod tests {
             );
             assert!(error.to_string().contains("required artifact"), "{error}");
         }
+    }
+
+    #[test]
+    fn check_profile_rejects_advisory_required_artifacts() {
+        let error = must_fail(
+            config_for(&check_profile_config(
+                "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n\
+                 artifacts_required = true\nartifacts = [\"target/evidence.json\"]\n\
+                 status = \"advisory\"\n",
+            ))
+            .validate(&[], &[], &BTreeSet::new()),
+            "advisory required artifacts must fail",
+        );
+        assert_eq!(
+            error.to_string(),
+            "[[check_profile]] strict cannot combine artifacts_required = true with status = advisory; required artifacts need status = required or no status"
+        );
     }
 
     #[test]
