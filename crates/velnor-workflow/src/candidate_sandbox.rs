@@ -1686,16 +1686,15 @@ fn parse_gnu_metadata(payload: &[u8]) -> Result<Vec<u8>, String> {
             ARCHIVE_PATH_LIMIT + 1
         ));
     }
-    let end = payload
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(payload.len());
-    if payload[end + usize::from(end < payload.len())..]
-        .iter()
-        .any(|byte| *byte != 0)
-    {
-        return Err("candidate archive GNU metadata has trailing bytes".to_owned());
-    }
+    let end = match payload.iter().position(|byte| *byte == 0) {
+        None => payload.len(),
+        Some(end) if end + 1 == payload.len() => end,
+        Some(_) => {
+            return Err(
+                "candidate archive GNU metadata has repeated or interior NUL bytes".to_owned(),
+            );
+        }
+    };
     let value = payload[..end].to_vec();
     validate_archive_path_bytes(&value, "GNU metadata")?;
     Ok(value)
@@ -2198,7 +2197,24 @@ mod tests {
         finish_archive(&mut trailing);
         assert!(preflight_archive(&trailing, OUTPUT_CONTENT_LIMIT)
             .expect_err("GNU trailing data")
-            .contains("trailing"));
+            .contains("NUL"));
+
+        let mut repeated_nul = Vec::new();
+        append_entry(
+            &mut repeated_nul,
+            header("@LongLink", EntryType::GNULongName, 6),
+            b"name\0\0",
+        );
+        finish_archive(&mut repeated_nul);
+        assert!(preflight_archive(&repeated_nul, OUTPUT_CONTENT_LIMIT)
+            .expect_err("repeated GNU terminator")
+            .contains("repeated"));
+
+        assert_eq!(
+            parse_gnu_metadata(b"unterminated").unwrap(),
+            b"unterminated"
+        );
+        assert_eq!(parse_gnu_metadata(b"terminated\0").unwrap(), b"terminated");
     }
 
     #[test]
