@@ -8885,13 +8885,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             };
             let identity =
                 crate::s2::platform::ProductIdentity::for_product(producer_unit, product);
-            let marker = crate::s2::platform::transport_marker(&producer, &product.name);
             let Some(block) = super::product_transport::render_native_product_cache_restore_block(
                 self.pins.cache_restore,
                 &producer,
                 product,
                 identity.as_ref(),
-                &marker,
             ) else {
                 continue;
             };
