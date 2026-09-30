@@ -2357,10 +2357,14 @@ mod scope_event_tests {
 #[cfg(test)]
 mod runner_lane_tests {
     use super::{
-        collect_manifests, command_digest_for, expand_affected_units, plan_providers_for_value,
-        watched_units, CiUnit, Scope, HEX_DIGITS,
+        collect_manifests, command_digest_for_revision, expand_affected_units,
+        expected_work_plan_digest, plan_providers_for_value, push_framed_strings,
+        tests::selection_config, watched_units, CiUnit, PlannedUnit, Scope, ValidationPhase,
+        COMMAND_DIGEST_DOMAIN, HEX_DIGITS,
     };
+    use crate::s2::provider::ProviderId;
     use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     #[test]
@@ -6347,7 +6351,7 @@ pub(crate) mod tests {
         assert_eq!(record.key, "example-docker-seed-Linux-X64");
     }
 
-    fn selection_config() -> CiConfig {
+    pub(super) fn selection_config() -> CiConfig {
         let unit = |id: &str, watch: &[&str], depends_on: &[&str]| CiUnit {
             id: id.to_owned(),
             label: id.to_owned(),
@@ -10618,7 +10622,7 @@ trust = "untrusted-ok"
             Some(0),
         );
         let dir = s4_dir("no-work");
-        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"results": []}"#);
+        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"results":[]}"#);
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(exit.is_ok(), "no-work must pass the aggregate: {exit:?}");
         assert_eq!(
@@ -11612,8 +11616,22 @@ trust = "untrusted-ok"
         );
         // The bound file scores against the same SHAs: proven no-work plus
         // zero results passes with the machine-readable reason.
-        let verdict =
-            crate::s2::reuse::aggregate_files(&expected, r#"{"results": []}"#, &base, &head)?;
+        let run = crate::s2::provider::RunIdentity {
+            repository_id: "example/s4-plan".to_owned(),
+            source_sha: head.clone(),
+            run_id: "test-run".to_owned(),
+            run_attempt: "1".to_owned(),
+            plan_digest: canonical.clone(),
+            command_digests: BTreeMap::new(),
+            platforms: BTreeMap::new(),
+        };
+        let verdict = crate::s2::reuse::aggregate_files_with_identity(
+            &expected,
+            r#"{"schema":2,"results":[]}"#,
+            &base,
+            &head,
+            &run,
+        )?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert_eq!(
             explicit_no_work_line(&expected, &verdict).as_deref(),
