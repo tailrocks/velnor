@@ -686,7 +686,7 @@ fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
     if profile.artifacts_required {
         let _ = writeln!(
             output,
-            "      - name: Verify {} artifacts\n        if: success()\n        shell: bash\n        run: |\n          set -euo pipefail",
+            "      - name: Verify {} artifacts\n        if: success()\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail",
             profile.id
         );
         for artifact in &profile.artifacts {
@@ -1002,6 +1002,36 @@ mod tests {
         assert!(workflow.contains("- name: Upload strict artifacts\n        if: success()"));
         assert!(workflow.contains("if-no-files-found: error"), "{workflow}");
         assert!(!workflow.contains("if: always()"), "{workflow}");
+    }
+
+    #[test]
+    fn required_artifacts_preflight_sets_bash_env_on_verifier_step() {
+        let mut strict = profile("strict");
+        strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
+        strict.artifacts_required = true;
+        let config = profile_config(vec![strict]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select the strict profile",
+        );
+        let workflow = render(&config, None, &selected);
+        let verify = must_some(
+            workflow.find("- name: Verify strict artifacts"),
+            "strict preflight is rendered",
+        );
+        let upload = must_some(
+            workflow.find("- name: Upload strict artifacts"),
+            "strict upload is rendered",
+        );
+        let verifier = &workflow[verify..upload];
+        assert!(
+            verifier.contains(
+                "- name: Verify strict artifacts\n        if: success()\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n"
+            ),
+            "BASH_ENV must be step-level on the verifier: {verifier}"
+        );
+        assert_eq!(verifier.matches("BASH_ENV: /dev/null").count(), 1);
     }
 
     #[cfg(unix)]
