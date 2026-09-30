@@ -461,7 +461,12 @@ fn render_checks_file(
         output.push_str("  cancel-in-progress: true\n\njobs:\n");
     }
     for profile in profiles {
-        render_profile_job(&mut output, config, profile)?;
+        render_profile_job_with_selected_profiles(&mut output, config, profile, profiles)?;
+    }
+    for profile in profiles {
+        if profile.artifacts_required {
+            render_artifact_verifier_job(&mut output, config, profile)?;
+        }
     }
     Ok(output)
 }
@@ -481,15 +486,50 @@ fn render_scheduled_checks(
 /// One profile job: the runner it runs on, the timeout it holds, the threshold
 /// environment its tasks read, and the steps that check out, provision tools,
 /// run the named tasks, and upload the declared artifacts.
+#[cfg(test)]
 fn render_profile_job(
     output: &mut String,
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
 ) -> Result<(), GeneratorError> {
+    render_profile_job_with_selected_profiles(output, config, profile, &[])
+}
+
+fn artifact_verifier_job_id(profile_id: &str) -> String {
+    format!("verify-{profile_id}-artifacts")
+}
+
+fn render_profile_job_with_selected_profiles(
+    output: &mut String,
+    config: &ProjectConfig,
+    profile: &CheckProfileSpec,
+    selected_profiles: &[&CheckProfileSpec],
+) -> Result<(), GeneratorError> {
     let _ = writeln!(output, "  {}:", profile.id);
     let _ = writeln!(output, "    name: {}", yaml_scalar(&profile.name));
     if !profile.needs.is_empty() {
-        let _ = writeln!(output, "    needs: [{}]", profile.needs.join(", "));
+        let needs = profile
+            .needs
+            .iter()
+            .map(|dependency| {
+                selected_profiles
+                    .iter()
+                    .find(|candidate| candidate.id == *dependency)
+                    .filter(|candidate| candidate.artifacts_required)
+                    .map_or_else(
+                        || dependency.clone(),
+                        |candidate| artifact_verifier_job_id(&candidate.id),
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(output, "    needs: [{needs}]");
+    }
+    if profile.artifacts_required {
+        let _ = writeln!(
+            output,
+            "    outputs:\n      artifact_id: ${{{{ steps.upload_artifact.outputs.artifact-id }}}}",
+        );
     }
     // A Velnor profile mounts the checkout and runs named tasks, so it
     // skips fork and bot pull requests exactly like any other local job.
@@ -534,6 +574,76 @@ fn render_profile_job(
     }
     if !profile.artifacts.is_empty() {
         render_artifact_step(output, profile);
+    }
+    Ok(())
+}
+
+fn render_artifact_verifier_job(
+    output: &mut String,
+    config: &ProjectConfig,
+    profile: &CheckProfileSpec,
+) -> Result<(), GeneratorError> {
+    let job_id = artifact_verifier_job_id(&profile.id);
+    let _ = writeln!(output, "  {job_id}:");
+    let _ = writeln!(
+        output,
+        "    name: Verify {} artifacts",
+        yaml_scalar(&profile.id)
+    );
+    let _ = writeln!(output, "    needs: [{}]", profile.id);
+    let _ = writeln!(
+        output,
+        "    if: ${{{{ needs.{}.result == 'success' }}}}",
+        profile.id
+    );
+    let _ = writeln!(output, "    runs-on: {}", profile_runs_on(config, profile)?);
+    let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
+    let _ = writeln!(
+        output,
+        "    outputs:\n      artifact_id: ${{{{ needs.{}.outputs.artifact_id }}}}",
+        profile.id
+    );
+    // The verifier only reads the current run's immutable artifact service.
+    // It never checks out or executes repository-controlled code.
+    output.push_str("    permissions:\n      actions: read\n    steps:\n");
+    let root = format!(
+        "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{}",
+        profile.id
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Clear verifier workspace\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail\n          root=\"$RUNNER_TEMP/velnor-required-artifacts-$GITHUB_RUN_ID-{}\"\n          rm -rf \"$root\"\n          mkdir -p \"$root\"",
+        profile.id
+    );
+    let download = ActionPin::DownloadArtifact.reference();
+    let _ = writeln!(
+        output,
+        "      - name: Download immutable {} artifact\n        uses: {download}\n        with:\n          artifact-ids: ${{{{ needs.{}.outputs.artifact_id }}}}\n          path: {root}",
+        yaml_scalar(&profile.id),
+        profile.id
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Verify downloaded {} artifacts\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail\n          root=\"$RUNNER_TEMP/velnor-required-artifacts-$GITHUB_RUN_ID-{}\"",
+        yaml_scalar(&profile.id),
+        profile.id
+    );
+    for artifact in &profile.artifacts {
+        let prefixes = artifact
+            .split('/')
+            .scan(String::new(), |prefix, component| {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(component);
+                Some(format!("\"$root/{prefix}\""))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            output,
+            "          path=\"$root/{artifact}\"\n          for prefix in {prefixes}; do\n            if [[ -L \"$prefix\" ]]; then\n              echo \"downloaded required artifact path is a symlink: $prefix\" >&2\n              exit 1\n            fi\n          done\n          if [[ -f \"$path\" && -s \"$path\" ]]; then\n            :\n          else\n            echo \"downloaded required artifact is missing or empty: $path\" >&2\n            exit 1\n          fi"
+        );
     }
     Ok(())
 }
@@ -692,15 +802,44 @@ fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
                 "          path='{artifact}'\n          for prefix in {prefixes}; do\n            if [[ -L \"$prefix\" ]]; then\n              echo \"required artifact path uses a symlink: $prefix\" >&2\n              exit 1\n            fi\n          done\n          if [[ -f \"$path\" && -s \"$path\" ]]; then\n            :\n          else\n            echo \"required artifact is missing or empty: $path\" >&2\n            exit 1\n          fi"
             );
         }
+        let _ = writeln!(
+            output,
+            "      - name: Stage {} artifacts\n        if: success()\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-required-artifacts-$GITHUB_RUN_ID-{}\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"",
+            profile.id,
+            profile.id
+        );
+        for artifact in &profile.artifacts {
+            let _ = writeln!(
+                output,
+                "          destination=\"$stage/{artifact}\"\n          mkdir -p \"${{destination%/*}}\"\n          cp \"{artifact}\" \"$destination\"\n          if [[ -L \"$destination\" || ! -f \"$destination\" || ! -s \"$destination\" ]]; then\n            echo \"staged required artifact is missing, empty, or not regular: {artifact}\" >&2\n            exit 1\n          fi"
+            );
+        }
     }
+    let upload_id = if profile.artifacts_required {
+        "        id: upload_artifact\n"
+    } else {
+        ""
+    };
+    let path = if profile.artifacts_required {
+        format!(
+            "${{ runner.temp }}/velnor-required-artifacts-${{ github.run_id }}-{}",
+            profile.id
+        )
+    } else {
+        "|".to_owned()
+    };
     let _ = writeln!(
         output,
-        "      - name: Upload {} artifacts\n        if: {gate}\n        uses: {upload}\n        with:\n          name: {}\n          path: |",
+        "      - name: Upload {} artifacts\n        if: {gate}\n{upload_id}        uses: {upload}\n        with:\n          name: {}\n          path: {path}",
         profile.id,
-        yaml_scalar(&profile.id)
+        yaml_scalar(&profile.id),
+        upload_id = upload_id,
+        path = path
     );
-    for artifact in &profile.artifacts {
-        let _ = writeln!(output, "            {artifact}");
+    if !profile.artifacts_required {
+        for artifact in &profile.artifacts {
+            let _ = writeln!(output, "            {artifact}");
+        }
     }
     let if_no_files_found = if profile.artifacts_required {
         "error"
@@ -1109,6 +1248,80 @@ mod tests {
     }
 
     #[test]
+    fn required_artifacts_verify_the_uploaded_id_before_consumers() {
+        let mut strict = profile("strict");
+        strict.artifacts = vec![
+            "target/ci-evidence/rollup.json".to_owned(),
+            "target/ci-evidence/rollup.md".to_owned(),
+        ];
+        strict.artifacts_required = true;
+        let mut consumer = profile("consumer");
+        consumer.needs = vec!["strict".to_owned()];
+        let config = profile_config(vec![strict, consumer]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select producer and consumer",
+        );
+        let workflow = render(&config, None, &selected);
+        assert!(
+            workflow.contains(
+                "outputs:\n      artifact_id: ${{ steps.upload_artifact.outputs.artifact-id }}"
+            ),
+            "the producer exports the immutable artifact id: {workflow}"
+        );
+        assert!(
+            workflow.contains("id: upload_artifact\n        uses: actions/upload-artifact@"),
+            "the upload step has an output id: {workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "path: ${{ runner.temp }}/velnor-required-artifacts-${{ github.run_id }}-strict"
+            ),
+            "the producer uploads a staged relative tree: {workflow}"
+        );
+        assert!(
+            workflow.contains("destination=\"$stage/target/ci-evidence/rollup.json\""),
+            "the staging tree preserves the declared path: {workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n"
+            ),
+            "the verifier is a separate dependent job: {workflow}"
+        );
+        assert!(
+            workflow.contains("artifact-ids: ${{ needs.strict.outputs.artifact_id }}"),
+            "the verifier downloads the exact producer artifact id: {workflow}"
+        );
+        assert!(
+            workflow
+                .contains("outputs:\n      artifact_id: ${{ needs.strict.outputs.artifact_id }}"),
+            "the verifier forwards the immutable artifact id to consumers: {workflow}"
+        );
+        assert!(
+            workflow.contains("permissions:\n      actions: read\n    steps:"),
+            "the verifier has read-only permissions: {workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "  consumer:\n    name: \"consumer check\"\n    needs: [verify-strict-artifacts]"
+            ),
+            "consumers wait for verification: {workflow}"
+        );
+        let verifier_start = must_some(
+            workflow.find("  verify-strict-artifacts:"),
+            "find verifier job",
+        );
+        let verifier = &workflow[verifier_start..];
+        assert!(!verifier.contains("Checkout repository"), "{verifier}");
+        assert!(
+            verifier.contains("path=\"$root/target/ci-evidence/rollup.json\""),
+            "the verifier checks the preserved relative path: {verifier}"
+        );
+    }
+
+    #[test]
     fn required_artifacts_preflight_sets_bash_env_on_verifier_step() {
         let mut strict = profile("strict");
         strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
@@ -1135,7 +1348,7 @@ mod tests {
             ),
             "BASH_ENV must be step-level on the verifier: {verifier}"
         );
-        assert_eq!(verifier.matches("BASH_ENV: /dev/null").count(), 1);
+        assert_eq!(verifier.matches("BASH_ENV: /dev/null").count(), 2);
     }
 
     #[cfg(unix)]
@@ -1150,8 +1363,10 @@ mod tests {
             "strict preflight has a shell script",
         ) + "        run: |\n".len();
         let script_end = must_some(
-            rendered.find("      - name: Upload"),
-            "strict upload follows the preflight",
+            rendered
+                .find("      - name: Stage")
+                .or_else(|| rendered.find("      - name: Upload")),
+            "strict staging follows the preflight",
         );
         let script = rendered[script_start..script_end]
             .lines()

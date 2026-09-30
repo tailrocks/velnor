@@ -258,8 +258,16 @@ artifacts = [
 
 Strict artifacts must be non-empty, relative literal file paths whose visible
 slash-separated components start with an ASCII letter or digit and continue
-with ASCII letters, digits, `_`, `-`, or `.`. The generated job rejects
-symlinked path components, requires every file to be non-empty, and uploads
-with `success()` plus `if-no-files-found: error`. Globs, directories,
-traversal, absolute paths, whitespace, hidden names, and shell syntax are
-rejected during config validation.
+with ASCII letters, digits, `_`, `-`, or `.`. The producer rejects symlinked
+path components, requires every file to be non-empty, stages the exact
+relative tree, and uploads it with `success()` plus
+`if-no-files-found: error`. Globs, directories, traversal, absolute paths,
+whitespace, hidden names, and shell syntax are rejected during config
+validation.
+
+The producer exports the upload action's immutable artifact ID. A separate
+fresh verifier job downloads that exact ID and checks every declared path in
+the uploaded tree for a regular, non-empty file. A profile that depends on a
+strict profile waits for its verifier job and can read the same ID through
+`needs.verify-<profile>-artifacts.outputs.artifact_id`. The verifier has only
+`actions: read` permission and does not check out or run repository tasks.

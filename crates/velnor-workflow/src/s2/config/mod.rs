@@ -3709,6 +3709,19 @@ fn valid_check_profile_artifact_path(path: &str) -> bool {
     saw_component
 }
 
+/// Whether two strict required-artifact paths would address the same staged
+/// file or one path's parent directory. Staging a file and a descendant under
+/// that file cannot produce a deterministic tree, so reject both forms.
+fn check_profile_artifact_paths_collide(left: &str, right: &str) -> bool {
+    left == right
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 /// Whether `key` is a valid environment threshold name: a shell identifier the
 /// rendered job exports for the named task to read.
 fn valid_check_profile_env_key(key: &str) -> bool {
@@ -4118,6 +4131,17 @@ impl RepoGenerationConfig {
             }
         }
         for row in &self.check_profile {
+            if row.artifacts_required == Some(true) {
+                let id = row.id.as_deref().unwrap_or_default();
+                let verifier_id = format!("verify-{id}-artifacts");
+                if ids.contains(verifier_id.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[check_profile]] {id} requires generated verifier job `{verifier_id}`, but that id is already a check profile; rename one profile"
+                    )));
+                }
+            }
+        }
+        for row in &self.check_profile {
             let id = row.id.as_deref().unwrap_or_default();
             validate_check_profile_row(self, row, id, &ids, mise_lock_keys)?;
         }
@@ -4255,12 +4279,22 @@ fn validate_check_profile_result(
                 "[[check_profile]] {id} sets `artifacts_required = true` with an empty `artifacts`; name every required file"
             )));
         }
+        let mut declared: BTreeSet<String> = BTreeSet::new();
         for artifact in artifacts {
             if !valid_check_profile_artifact_path(artifact) {
                 return Err(GeneratorError::usage(format!(
                     "[[check_profile]] {id} required artifact `{artifact}` must be one non-empty relative literal file path without traversal, globs, or shell syntax"
                 )));
             }
+            if declared
+                .iter()
+                .any(|other| check_profile_artifact_paths_collide(other, artifact))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} required artifact `{artifact}` collides with another declared path; paths must name distinct files without file/descendant prefixes"
+                )));
+            }
+            declared.insert(artifact.clone());
         }
     }
     for (key, value) in &row.env {
@@ -7866,6 +7900,20 @@ mod tests {
         );
         assert!(valid.check_profiles()[0].artifacts_required());
 
+        let collision = must_fail(
+            config_for(&check_profile_config(
+                "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n\
+                 artifacts_required = true\nartifacts = [\"target/evidence.json\"]\n\n\
+                 [[check_profile]]\nid = \"verify-strict-artifacts\"\ntasks = [\"check-verifier\"]\n",
+            ))
+            .validate(&[], &[], &BTreeSet::new()),
+            "generated verifier job ids must not collide with profile jobs",
+        );
+        assert!(
+            collision.to_string().contains("generated verifier job"),
+            "{collision}"
+        );
+
         for (declaration, expected) in [
             ("artifacts_required = true\n", "declares no `artifacts`"),
             (
@@ -7881,6 +7929,20 @@ mod tests {
                 "required artifact declarations must be complete",
             );
             assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        for artifacts in [
+            "target/evidence.json\", \"target/evidence.json",
+            "target/evidence\", \"target/evidence/rollup.json",
+        ] {
+            let error = must_fail(
+                config_for(&check_profile_config(&format!(
+                    "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\nartifacts_required = true\nartifacts = [\"{artifacts}\"]\n"
+                )))
+                .validate(&[], &[], &BTreeSet::new()),
+                "required artifact paths must not collide",
+            );
+            assert!(error.to_string().contains("collides"), "{error}");
         }
 
         for artifact in [
