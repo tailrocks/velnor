@@ -43,6 +43,11 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::provider::{
+    ObservedOutcome, ObservedResult, Platform, ProviderId, ResultIdentity, RunIdentity,
+    VerdictFailure,
+};
+use super::results::identity_failures;
 use super::GeneratorError;
 
 /// Slice-C model version. Bump when the fingerprint canonical form, the reuse
@@ -1819,6 +1824,10 @@ pub(crate) struct ExpectedUnit {
     pub(crate) matrix: BTreeSet<String>,
     pub(crate) required: bool,
     pub(crate) planned_skip: Option<String>,
+    /// Strict schema-2 result identity facts. Legacy fixtures leave these
+    /// absent; generated live plans carry both fields.
+    pub(crate) platform: Option<String>,
+    pub(crate) command_digest: Option<String>,
 }
 
 /// The planner's expected work: every unit the run must account for, plus the
@@ -2213,17 +2222,36 @@ fn transitive_prerequisites(
     prerequisites: &BTreeMap<String, Vec<String>>,
 ) -> Result<BTreeSet<String>, String> {
     let mut transitive = BTreeSet::new();
-    let mut visiting = BTreeSet::from([unit.to_owned()]);
-    let mut stack: Vec<String> = prerequisites.get(unit).cloned().unwrap_or_default();
-    while let Some(id) = stack.pop() {
-        if !transitive.insert(id.clone()) {
+    let mut active = BTreeSet::new();
+    let mut completed = BTreeSet::new();
+    let mut stack = vec![(unit.to_owned(), false)];
+    while let Some((id, exiting)) = stack.pop() {
+        if exiting {
+            active.remove(&id);
+            completed.insert(id.clone());
+            if id != unit {
+                transitive.insert(id);
+            }
             continue;
         }
-        if !visiting.insert(id.clone()) {
+        if completed.contains(&id) {
+            continue;
+        }
+        if !active.insert(id.clone()) {
             return Err(format!("prerequisite graph contains a cycle at `{id}`"));
         }
+        stack.push((id.clone(), true));
         if let Some(deps) = prerequisites.get(&id) {
-            stack.extend(deps.iter().cloned());
+            for dependency in deps.iter().rev() {
+                if active.contains(dependency) {
+                    return Err(format!(
+                        "prerequisite graph contains a cycle at `{dependency}`"
+                    ));
+                }
+                if !completed.contains(dependency) {
+                    stack.push((dependency.clone(), false));
+                }
+            }
         }
     }
     Ok(transitive)
@@ -2286,6 +2314,10 @@ pub(crate) fn render_report(verdict: &AggregateVerdict) -> String {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExpectedWorkFile {
+    /// Legacy artifacts omit this marker. Identity-bearing artifacts must
+    /// declare the strict schema explicitly.
+    #[serde(default)]
+    pub(crate) schema: Option<u8>,
     #[serde(default)]
     pub(crate) planned_no_work: bool,
     #[serde(default)]
@@ -2298,6 +2330,12 @@ pub(crate) struct ExpectedWorkFile {
     /// The head SHA the plan selected for, exactly as the planner saw it.
     #[serde(default)]
     pub(crate) head_sha: Option<String>,
+    /// The canonical aggregate plan digest. It is separate from every unit
+    /// command digest and binds the run-level identity to the frozen plan;
+    /// strict aggregation recomputes it from the complete expected plan
+    /// instead of trusting this downloaded field.
+    #[serde(default)]
+    pub(crate) plan_digest: Option<String>,
 }
 
 /// One expected unit in the planner's file.
@@ -2313,6 +2351,10 @@ pub(crate) struct ExpectedUnitFile {
     pub(crate) required: bool,
     #[serde(default)]
     pub(crate) planned_skip: Option<String>,
+    #[serde(default)]
+    pub(crate) platform: Option<String>,
+    #[serde(default)]
+    pub(crate) command_digest: Option<String>,
 }
 
 fn default_required() -> bool {
@@ -2326,6 +2368,10 @@ fn default_required() -> bool {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResultsFile {
+    /// Legacy result collections omit this marker. Strict live collections
+    /// must carry schema 2.
+    #[serde(default)]
+    pub(crate) schema: Option<u8>,
     #[serde(default)]
     pub(crate) results: Vec<ReportedResultFile>,
 }
@@ -2343,6 +2389,103 @@ pub(crate) struct ReportedResultFile {
     pub(crate) reason: Option<String>,
     #[serde(default)]
     pub(crate) reused_from: Option<String>,
+    /// Live schema-2 identity. Optional at the wire type so legacy fixtures
+    /// keep parsing; strict generated results require every field.
+    #[serde(default)]
+    pub(crate) repository: Option<String>,
+    #[serde(default)]
+    pub(crate) base_sha: Option<String>,
+    #[serde(default)]
+    pub(crate) head_sha: Option<String>,
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
+    #[serde(default)]
+    pub(crate) run_attempt: Option<String>,
+    #[serde(default)]
+    pub(crate) plan_digest: Option<String>,
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) platform: Option<String>,
+    #[serde(default)]
+    pub(crate) command_digest: Option<String>,
+}
+
+/// Schema marker required by identity-bearing expected-work and result files.
+pub(crate) const S2_WORK_RESULTS_SCHEMA: u8 = 2;
+
+fn require_schema2(kind: &str, schema: Option<u8>) -> Result<(), String> {
+    if schema != Some(S2_WORK_RESULTS_SCHEMA) {
+        return Err(format!(
+            "the {kind} document is missing schema {S2_WORK_RESULTS_SCHEMA}"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the expected-work artifact opts into strict live-result identity.
+/// Presence of any strict identity key selects that schema, including a null
+/// or empty value: malformed strict artifacts must fail closed instead of
+/// silently falling back to legacy aggregation.
+fn expected_work_has_identity_fields(expected_json: &str) -> Result<bool, String> {
+    let document: serde_json::Value = serde_json::from_str(expected_json)
+        .map_err(|error| format!("the expected-work file is not valid JSON: {error}"))?;
+    let Some(object) = document.as_object() else {
+        return Ok(false);
+    };
+    if object.contains_key("schema") {
+        return Ok(true);
+    }
+    if object.contains_key("plan_digest") {
+        return Ok(true);
+    }
+    Ok(object
+        .get("units")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|units| {
+            units.iter().any(|unit| {
+                unit.as_object().is_some_and(|unit| {
+                    unit.contains_key("platform") || unit.contains_key("command_digest")
+                })
+            })
+        }))
+}
+
+/// Whether the reported-results artifact opts into strict live-result
+/// identity. Presence of any identity key selects that schema, including a
+/// null or empty value: a malformed strict artifact must fail closed instead
+/// of silently falling back to legacy aggregation.
+fn results_have_identity_fields(results_json: &str) -> Result<bool, String> {
+    let document: serde_json::Value = serde_json::from_str(results_json)
+        .map_err(|error| format!("the results file is not valid JSON: {error}"))?;
+    let Some(object) = document.as_object() else {
+        return Ok(false);
+    };
+    if object.contains_key("schema") || object.contains_key("plan_digest") {
+        return Ok(true);
+    }
+    Ok(object
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|results| {
+            results.iter().any(|result| {
+                result.as_object().is_some_and(|result| {
+                    [
+                        "repository",
+                        "base_sha",
+                        "head_sha",
+                        "run_id",
+                        "run_attempt",
+                        "plan_digest",
+                        "provider",
+                        "platform",
+                        "command_digest",
+                    ]
+                    .into_iter()
+                    .any(|key| result.contains_key(key))
+                })
+            })
+        }))
 }
 
 /// Parse an expected-work file and a results file, then [`aggregate`] them.
@@ -2363,14 +2506,81 @@ pub(crate) fn aggregate_files(
     base_sha: &str,
     head_sha: &str,
 ) -> Result<AggregateVerdict, String> {
+    aggregate_files_inner(expected_json, results_json, base_sha, head_sha, None)
+}
+
+/// Return the canonical identity for a generated expected-work document.
+///
+/// The planner's ordinary selection digest is not sufficient to authenticate
+/// this artifact: it does not carry the expected platform or prerequisite
+/// graph.  A strict aggregate therefore compares its run output against this
+/// digest, which is recomputed from the artifact's semantic plan fields.  The
+/// plan writer must publish this value as `plan_digest` and the workflow must
+/// pass the same value to the aggregate through `VELNOR_RESULT_PLAN_DIGEST`.
+///
+/// This parser is public within the crate so the plan writer can calculate the
+/// same value before it serializes the artifact.  It intentionally ignores an
+/// existing `plan_digest` field; trusting that field would make the check
+/// circular.
+#[allow(
+    dead_code,
+    reason = "the plan writer wires this helper when strict schema-2 output is emitted"
+)]
+pub(crate) fn canonical_expected_plan_digest_from_json(
+    expected_json: &str,
+) -> Result<String, String> {
+    let expected_file: ExpectedWorkFile = serde_json::from_str(expected_json)
+        .map_err(|error| format!("the expected-work file is not valid JSON: {error}"))?;
+    require_schema2("expected-work", expected_file.schema)?;
+    let units = parse_expected_units(&expected_file.units, true)?;
+    let base_sha = expected_file.base_sha.as_deref().ok_or_else(|| {
+        "the expected-work file is missing base_sha: refusing an unbound plan".to_owned()
+    })?;
+    let head_sha = expected_file
+        .head_sha
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "the expected-work file is missing a nonempty head_sha: refusing an unbound plan"
+                .to_owned()
+        })?;
+    canonical_expected_plan_digest(
+        expected_file.planned_no_work,
+        base_sha,
+        head_sha,
+        &units,
+        &expected_file.prerequisites,
+    )
+}
+
+/// Schema-2 aggregate entry point with an explicit strict run identity.
+/// Deterministic tests use this to avoid process-global GitHub environment.
+#[cfg(test)]
+pub(crate) fn aggregate_files_with_identity(
+    expected_json: &str,
+    results_json: &str,
+    base_sha: &str,
+    head_sha: &str,
+    run: &RunIdentity,
+) -> Result<AggregateVerdict, String> {
+    aggregate_files_inner(expected_json, results_json, base_sha, head_sha, Some(run))
+}
+
+fn aggregate_files_inner(
+    expected_json: &str,
+    results_json: &str,
+    base_sha: &str,
+    head_sha: &str,
+    explicit_run: Option<&RunIdentity>,
+) -> Result<AggregateVerdict, String> {
     let expected_file: ExpectedWorkFile = serde_json::from_str(expected_json)
         .map_err(|error| format!("the expected-work file is not valid JSON: {error}"))?;
     let results_file: ResultsFile = serde_json::from_str(results_json)
         .map_err(|error| format!("the results file is not valid JSON: {error}"))?;
-    let file_base = expected_file.base_sha.as_deref().ok_or_else(|| {
+    let file_base = expected_file.base_sha.clone().ok_or_else(|| {
         "the expected-work file is missing base_sha: refusing an unbound plan".to_owned()
     })?;
-    let file_head = expected_file.head_sha.as_deref().ok_or_else(|| {
+    let file_head = expected_file.head_sha.clone().ok_or_else(|| {
         "the expected-work file is missing head_sha: refusing an unbound plan".to_owned()
     })?;
     if file_head != head_sha || (!base_sha.is_empty() && file_base != base_sha) {
@@ -2378,38 +2588,100 @@ pub(crate) fn aggregate_files(
             "the expected-work file does not match this aggregate checkout: plan base SHA `{file_base}` vs aggregate base SHA `{base_sha}`; plan head SHA `{file_head}` vs aggregate head SHA `{head_sha}`"
         ));
     }
-    let mut units = BTreeMap::new();
-    for unit in expected_file.units {
-        if unit.id.is_empty() {
-            return Err("the expected-work file names a unit with an empty id".to_owned());
-        }
-        if unit.lanes.is_empty() {
-            return Err(format!("expected unit `{}` names no lanes", unit.id));
-        }
-        if units
-            .insert(
-                unit.id.clone(),
-                ExpectedUnit {
-                    lanes: unit.lanes.into_iter().collect(),
-                    matrix: unit.matrix.into_iter().collect(),
-                    required: unit.required,
-                    planned_skip: unit.planned_skip,
-                },
-            )
-            .is_some()
-        {
-            return Err(format!("duplicate expected unit `{}`", unit.id));
-        }
+    let identity_required = explicit_run.is_some()
+        || expected_work_has_identity_fields(expected_json)?
+        || results_have_identity_fields(results_json)?;
+    if identity_required {
+        require_schema2("expected-work", expected_file.schema)?;
+        require_schema2("results", results_file.schema)?;
     }
+    let units = parse_expected_units(&expected_file.units, identity_required)?;
+    let canonical_plan_digest = if identity_required {
+        let digest = canonical_expected_plan_digest(
+            expected_file.planned_no_work,
+            &file_base,
+            &file_head,
+            &units,
+            &expected_file.prerequisites,
+        )?;
+        let artifact_digest = expected_file
+            .plan_digest
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "the expected-work file is missing plan_digest: refusing an unbound live result"
+                    .to_owned()
+            })?;
+        if artifact_digest != digest {
+            return Err(format!(
+                "the expected-work file plan_digest `{artifact_digest}` does not match its canonical expected-plan digest `{digest}`"
+            ));
+        }
+        Some(digest)
+    } else {
+        None
+    };
+    let run = if identity_required {
+        let run = explicit_run
+            .cloned()
+            .map_or_else(|| live_run_identity(&file_head, &units), Ok)?;
+        validate_run_identity(&run, &file_head, &units, canonical_plan_digest.as_deref())?;
+        Some(run)
+    } else {
+        None
+    };
+    let expected_pairs = if run.is_some() {
+        let mut pairs = BTreeSet::new();
+        for (unit_id, unit) in &units {
+            for lane in &unit.lanes {
+                let provider = ProviderId::parse(lane).map_err(|error| {
+                    format!(
+                        "expected unit `{unit_id}` has non-canonical provider lane `{lane}`: {error}"
+                    )
+                })?;
+                pairs.insert((unit_id.clone(), provider));
+            }
+        }
+        Some(pairs)
+    } else {
+        None
+    };
     let mut results = Vec::with_capacity(results_file.results.len());
-    for result in results_file.results {
+    let mut observed = Vec::with_capacity(results_file.results.len());
+    for result in &results_file.results {
+        if run.is_some() && result.reused_from.is_some() {
+            return Err(format!(
+                "strict live result `{}` carries reused_from; live results must be executed",
+                result.unit
+            ));
+        }
+        let outcome = parse_outcome(&result.outcome, result.reason.as_deref())?;
+        if let Some(run) = &run {
+            observed.push(parse_live_observed_result(
+                result,
+                &file_base,
+                run,
+                units.get(&result.unit),
+            )?);
+        }
         results.push(ReportedResult {
-            unit_id: result.unit,
-            lane: result.lane,
-            matrix_entry: result.matrix,
-            outcome: parse_outcome(&result.outcome, result.reason.as_deref())?,
-            reused_from: result.reused_from,
+            unit_id: result.unit.clone(),
+            lane: result.lane.clone(),
+            matrix_entry: result.matrix.clone(),
+            outcome,
+            reused_from: result.reused_from.clone(),
         });
+    }
+    if let (Some(run), Some(expected_pairs)) = (&run, expected_pairs) {
+        let failures = identity_failures(&expected_pairs, &observed, run);
+        if !failures.is_empty() {
+            let classes = failures
+                .iter()
+                .map(VerdictFailure::class)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("live result identity rejected: {classes}"));
+        }
     }
     Ok(aggregate(
         &ExpectedWork {
@@ -2419,6 +2691,508 @@ pub(crate) fn aggregate_files(
         &results,
         &expected_file.prerequisites,
     ))
+}
+
+/// Parse the expected unit rows, retaining the legacy shape when strict live
+/// identity is disabled and enforcing the typed schema when it is enabled.
+fn parse_expected_units(
+    rows: &[ExpectedUnitFile],
+    strict: bool,
+) -> Result<BTreeMap<String, ExpectedUnit>, String> {
+    let mut units = BTreeMap::new();
+    for row in rows {
+        if row.id.is_empty() {
+            return Err("the expected-work file names a unit with an empty id".to_owned());
+        }
+        if row.lanes.is_empty() {
+            return Err(format!("expected unit `{}` names no lanes", row.id));
+        }
+        let mut parsed_lanes = Vec::with_capacity(row.lanes.len());
+        if strict {
+            for lane in &row.lanes {
+                let provider = ProviderId::parse(lane).map_err(|error| {
+                    format!(
+                        "expected unit `{}` has non-canonical provider lane `{lane}`: {error}",
+                        row.id
+                    )
+                })?;
+                if parsed_lanes
+                    .last()
+                    .is_some_and(|previous| *previous >= provider)
+                {
+                    return Err(format!(
+                        "expected unit `{}` provider lanes are not in canonical order",
+                        row.id
+                    ));
+                }
+                parsed_lanes.push(provider);
+            }
+            if parsed_lanes.windows(2).any(|lanes| lanes[0] == lanes[1]) {
+                return Err(format!(
+                    "expected unit `{}` repeats a provider lane",
+                    row.id
+                ));
+            }
+            if row
+                .matrix
+                .windows(2)
+                .any(|entries| entries[0] == entries[1])
+            {
+                return Err(format!("expected unit `{}` repeats a matrix entry", row.id));
+            }
+            let platform = row
+                .platform
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "expected unit `{}` is missing platform: refusing an unbound live result",
+                        row.id
+                    )
+                })?;
+            Platform::parse(platform).map_err(|error| {
+                format!("expected unit `{}` has invalid platform: {error}", row.id)
+            })?;
+            if row.command_digest.as_deref().is_none_or(str::is_empty) {
+                return Err(format!(
+                    "expected unit `{}` is missing command_digest: refusing an unbound live result",
+                    row.id
+                ));
+            }
+            if row.planned_skip.as_deref().is_some_and(str::is_empty) {
+                return Err(format!(
+                    "expected unit `{}` has an empty planned_skip reason",
+                    row.id
+                ));
+            }
+        }
+        if units
+            .insert(
+                row.id.clone(),
+                ExpectedUnit {
+                    lanes: row.lanes.iter().cloned().collect(),
+                    matrix: row.matrix.iter().cloned().collect(),
+                    required: row.required,
+                    planned_skip: row.planned_skip.clone(),
+                    platform: row.platform.clone(),
+                    command_digest: row.command_digest.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate expected unit `{}`", row.id));
+        }
+    }
+    Ok(units)
+}
+
+/// Verify and hash the semantic expected-work plan.  The digest uses framed
+/// fields so values cannot collide through delimiters or line breaks, and all
+/// maps/sets are emitted in canonical order.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the strict plan binding keeps canonical validation and hashing together"
+)]
+fn canonical_expected_plan_digest(
+    planned_no_work: bool,
+    base_sha: &str,
+    head_sha: &str,
+    units: &BTreeMap<String, ExpectedUnit>,
+    prerequisites: &BTreeMap<String, Vec<String>>,
+) -> Result<String, String> {
+    if head_sha.trim().is_empty() {
+        return Err(
+            "the expected-work plan is missing a nonempty head_sha: refusing an unbound plan"
+                .to_owned(),
+        );
+    }
+    if planned_no_work && !units.is_empty() {
+        return Err(
+            "the expected-work plan marks no-work while listing units: refusing a contradictory plan"
+                .to_owned(),
+        );
+    }
+    if !planned_no_work && units.is_empty() {
+        return Err(
+            "the expected-work plan lists no units without the explicit no-work marker".to_owned(),
+        );
+    }
+    let expected_ids = units.keys().cloned().collect::<BTreeSet<_>>();
+    let prerequisite_ids = prerequisites.keys().cloned().collect::<BTreeSet<_>>();
+    if expected_ids != prerequisite_ids {
+        let missing = expected_ids
+            .difference(&prerequisite_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        let extra = prerequisite_ids
+            .difference(&expected_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "expected-work prerequisite keys do not match units (missing: {missing:?}; extra: {extra:?})"
+        ));
+    }
+    for (unit_id, dependencies) in prerequisites {
+        let mut seen = BTreeSet::new();
+        for dependency in dependencies {
+            if dependency.is_empty() {
+                return Err(format!(
+                    "expected unit `{unit_id}` has an empty prerequisite"
+                ));
+            }
+            if dependency == unit_id {
+                return Err(format!("expected unit `{unit_id}` depends on itself"));
+            }
+            if !seen.insert(dependency) {
+                return Err(format!(
+                    "expected unit `{unit_id}` repeats prerequisite `{dependency}`"
+                ));
+            }
+        }
+    }
+    // The aggregate has the same cycle rule, but strict plan authentication
+    // must reject a changed graph before any result can score against it.
+    for unit_id in prerequisites.keys() {
+        transitive_prerequisites(unit_id, prerequisites)?;
+    }
+
+    let mut bytes = Vec::new();
+    push_plan_field(&mut bytes, "schema", "expected-work-v1");
+    push_plan_field(&mut bytes, "planned-no-work", bool_text(planned_no_work));
+    push_plan_field(&mut bytes, "base-sha", base_sha);
+    push_plan_field(&mut bytes, "head-sha", head_sha);
+    for (unit_id, unit) in units {
+        push_plan_field(&mut bytes, "unit", unit_id);
+        push_plan_field(&mut bytes, "required", bool_text(unit.required));
+        if let Some(reason) = &unit.planned_skip {
+            push_plan_field(&mut bytes, "planned-skip", reason);
+        }
+        for lane in &unit.lanes {
+            let provider = ProviderId::parse(lane).map_err(|error| {
+                format!(
+                    "expected unit `{unit_id}` has non-canonical provider lane `{lane}`: {error}"
+                )
+            })?;
+            push_plan_field(&mut bytes, "lane", provider.as_str());
+        }
+        let platform = unit.platform.as_deref().ok_or_else(|| {
+            format!(
+                "expected unit `{unit_id}` is missing platform: refusing an unbound live result"
+            )
+        })?;
+        let platform = Platform::parse(platform)
+            .map_err(|error| format!("expected unit `{unit_id}` has invalid platform: {error}"))?;
+        push_plan_field(&mut bytes, "platform", platform.as_str());
+        let command_digest = unit.command_digest.as_deref().filter(|value| !value.is_empty()).ok_or_else(|| {
+            format!(
+                "expected unit `{unit_id}` is missing command_digest: refusing an unbound live result"
+            )
+        })?;
+        push_plan_field(&mut bytes, "command", command_digest);
+        for matrix in &unit.matrix {
+            push_plan_field(&mut bytes, "matrix", matrix);
+        }
+    }
+    // Repeat identity-bearing maps under explicit names. This keeps the
+    // canonical contract obvious and makes a future unit-field refactor fail
+    // closed unless these bindings are intentionally updated together.
+    for (unit_id, unit) in units {
+        push_plan_field(&mut bytes, "lane-map-unit", unit_id);
+        for lane in &unit.lanes {
+            let provider = ProviderId::parse(lane).map_err(|error| {
+                format!(
+                    "expected unit `{unit_id}` has non-canonical provider lane `{lane}`: {error}"
+                )
+            })?;
+            push_plan_field(&mut bytes, "lane-map-provider", provider.as_str());
+        }
+        push_plan_field(&mut bytes, "platform-map-unit", unit_id);
+        let platform = unit.platform.as_deref().ok_or_else(|| {
+            format!(
+                "expected unit `{unit_id}` is missing platform: refusing an unbound live result"
+            )
+        })?;
+        let platform = Platform::parse(platform)
+            .map_err(|error| format!("expected unit `{unit_id}` has invalid platform: {error}"))?;
+        push_plan_field(&mut bytes, "platform-map-value", platform.as_str());
+        push_plan_field(&mut bytes, "command-map-unit", unit_id);
+        push_plan_field(
+            &mut bytes,
+            "command-map-value",
+            unit.command_digest.as_deref().ok_or_else(|| {
+                format!(
+                    "expected unit `{unit_id}` is missing command_digest: refusing an unbound live result"
+                )
+            })?,
+        );
+    }
+    for (unit_id, dependencies) in prerequisites {
+        push_plan_field(&mut bytes, "prerequisite-unit", unit_id);
+        let mut dependencies = dependencies.clone();
+        dependencies.sort();
+        for dependency in dependencies {
+            push_plan_field(&mut bytes, "prerequisite", &dependency);
+        }
+    }
+    Ok(hex_sha256(&bytes))
+}
+
+fn bool_text(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn push_plan_field(bytes: &mut Vec<u8>, name: &str, value: &str) {
+    bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(name.as_bytes());
+    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn live_env(
+    name: &str,
+    fallback_env: Option<&str>,
+    fallback_value: Option<&str>,
+) -> Result<String, String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            fallback_env.and_then(|fallback| {
+                std::env::var(fallback)
+                    .ok()
+                    .filter(|value| !value.is_empty())
+            })
+        })
+        .or_else(|| {
+            fallback_value
+                .map(str::to_owned)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| format!("live result identity is missing environment variable {name}"))
+}
+
+fn live_run_identity(
+    source_sha: &str,
+    expected: &BTreeMap<String, ExpectedUnit>,
+) -> Result<RunIdentity, String> {
+    // The plan digest is an authenticated planner output. Never derive it
+    // from, or fall back to, the downloaded expected-work artifact: doing so
+    // lets a forged artifact choose the run identity it is meant to prove.
+    let plan_digest = live_env("VELNOR_RESULT_PLAN_DIGEST", None, None)?;
+    let command_digests = expected
+        .iter()
+        .map(|(unit_id, unit)| {
+            let command_digest = unit
+                .command_digest
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "expected unit `{unit_id}` is missing command_digest: refusing an unbound live result"
+                    )
+                })?;
+            Ok((unit_id.clone(), command_digest.to_owned()))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let platforms = expected
+        .iter()
+        .map(|(unit_id, unit)| {
+            let platform = unit
+                .platform
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "expected unit {unit_id} is missing platform: refusing an unbound live result"
+                    )
+                })?;
+            let platform = Platform::parse(platform)
+                .map_err(|error| format!("expected unit {unit_id} has invalid platform: {error}"))?;
+            Ok((unit_id.clone(), platform))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    Ok(RunIdentity {
+        repository_id: live_env("VELNOR_RESULT_REPOSITORY", Some("GITHUB_REPOSITORY"), None)?,
+        source_sha: live_env(
+            "VELNOR_RESULT_SOURCE_SHA",
+            Some("GITHUB_SHA"),
+            Some(source_sha),
+        )?,
+        run_id: live_env("VELNOR_RESULT_RUN_ID", Some("GITHUB_RUN_ID"), None)?,
+        run_attempt: live_env(
+            "VELNOR_RESULT_RUN_ATTEMPT",
+            Some("GITHUB_RUN_ATTEMPT"),
+            None,
+        )?,
+        plan_digest,
+        command_digests,
+        platforms,
+    })
+}
+
+fn validate_run_identity(
+    run: &RunIdentity,
+    source_sha: &str,
+    expected: &BTreeMap<String, ExpectedUnit>,
+    expected_plan_digest: Option<&str>,
+) -> Result<(), String> {
+    if run.source_sha != source_sha {
+        return Err(format!(
+            "live run identity source SHA `{}` does not match expected head SHA `{source_sha}`",
+            run.source_sha
+        ));
+    }
+    let expected_plan_digest = expected_plan_digest
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "the canonical expected-plan digest is unavailable: refusing an unbound live result"
+                .to_owned()
+        })?;
+    if run.plan_digest != expected_plan_digest {
+        return Err(format!(
+            "live run identity plan digest `{}` does not match expected plan digest `{expected_plan_digest}`",
+            run.plan_digest
+        ));
+    }
+    for (unit_id, unit) in expected {
+        let expected_platform = unit
+            .platform
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "expected unit `{unit_id}` is missing platform: refusing an unbound live result"
+                )
+            })?;
+        let expected_platform = Platform::parse(expected_platform)
+            .map_err(|error| format!("expected unit `{unit_id}` has invalid platform: {error}"))?;
+        if run.platforms.get(unit_id).copied() != Some(expected_platform) {
+            return Err(format!(
+                "live run identity platform for unit `{unit_id}` does not match the expected unit"
+            ));
+        }
+        let expected_command_digest = unit
+            .command_digest
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "expected unit `{unit_id}` is missing command_digest: refusing an unbound live result"
+                )
+            })?;
+        if run.command_digests.get(unit_id).map(String::as_str) != Some(expected_command_digest) {
+            return Err(format!(
+                "live run identity command digest for unit `{unit_id}` does not match the expected unit"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn required_live_field<'a>(
+    value: &'a Option<String>,
+    name: &str,
+    unit: &str,
+) -> Result<&'a str, String> {
+    value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("live result `{unit}` is missing identity field {name}"))
+}
+
+fn parse_live_observed_result(
+    result: &ReportedResultFile,
+    expected_base_sha: &str,
+    run: &RunIdentity,
+    expected_unit: Option<&ExpectedUnit>,
+) -> Result<ObservedResult, String> {
+    if result.unit.is_empty() || result.lane.is_empty() {
+        return Err("live result identity has an empty unit or lane".to_owned());
+    }
+    let repository = required_live_field(&result.repository, "repository", &result.unit)?;
+    let base_sha = required_live_field(&result.base_sha, "base_sha", &result.unit)?;
+    let head_sha = required_live_field(&result.head_sha, "head_sha", &result.unit)?;
+    let run_id = required_live_field(&result.run_id, "run_id", &result.unit)?;
+    let run_attempt = required_live_field(&result.run_attempt, "run_attempt", &result.unit)?;
+    let plan_digest = required_live_field(&result.plan_digest, "plan_digest", &result.unit)?;
+    let provider_name = required_live_field(&result.provider, "provider", &result.unit)?;
+    let platform_name = required_live_field(&result.platform, "platform", &result.unit)?;
+    let command_digest =
+        required_live_field(&result.command_digest, "command_digest", &result.unit)?;
+    if base_sha != expected_base_sha {
+        return Err(format!(
+            "live result `{}` has base SHA `{base_sha}`, expected `{expected_base_sha}`",
+            result.unit
+        ));
+    }
+    if head_sha != run.source_sha {
+        return Err(format!(
+            "live result `{}` has head SHA `{head_sha}`, expected `{}`",
+            result.unit, run.source_sha
+        ));
+    }
+    let provider = ProviderId::parse(provider_name).map_err(|error| {
+        format!(
+            "live result `{}` has invalid provider: {error}",
+            result.unit
+        )
+    })?;
+    if result.lane != provider.as_str() {
+        return Err(format!(
+            "live result `{}` lane `{}` does not match provider `{}`",
+            result.unit, result.lane, provider
+        ));
+    }
+    let platform = Platform::parse(platform_name).map_err(|error| {
+        format!(
+            "live result `{}` has invalid platform: {error}",
+            result.unit
+        )
+    })?;
+    if let Some(expected_unit) = expected_unit {
+        let expected_platform = expected_unit
+            .platform
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "expected unit `{}` is missing platform: refusing an unbound live result",
+                    result.unit
+                )
+            })?;
+        let expected_platform = Platform::parse(expected_platform).map_err(|error| {
+            format!(
+                "expected unit `{}` has invalid platform: {error}",
+                result.unit
+            )
+        })?;
+        if platform != expected_platform {
+            return Err(format!(
+                "live result `{}` platform `{platform}` does not match expected platform `{expected_platform}`",
+                result.unit
+            ));
+        }
+    }
+    Ok(ObservedResult {
+        identity: ResultIdentity {
+            repository_id: repository.to_owned(),
+            source_sha: head_sha.to_owned(),
+            run_id: run_id.to_owned(),
+            run_attempt: run_attempt.to_owned(),
+            plan_digest: plan_digest.to_owned(),
+            unit_id: result.unit.clone(),
+            provider,
+            platform,
+            command_digest: command_digest.to_owned(),
+        },
+        // Identity validation is deliberately independent of outcome policy;
+        // aggregate() remains authoritative for success/failure/skip rules.
+        outcome: ObservedOutcome::Success,
+    })
 }
 
 /// Parse one file outcome. `skipped` needs its reported reason; anything else
@@ -2601,6 +3375,8 @@ mod tests {
             matrix: matrix.iter().map(ToString::to_string).collect(),
             required,
             planned_skip: planned_skip.map(str::to_owned),
+            platform: None,
+            command_digest: None,
         }
     }
 
@@ -4854,6 +5630,339 @@ mod tests {
             "units": [{"id": "rust-alpha", "lanes": ["github"], "bogus": true}]
         }"#;
         assert!(aggregate_files(unknown_field, results, "base-sha", "head-sha").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_expected_plan_digest_requires_schema_and_identity() -> Result<(), String> {
+        let valid = r#"{"schema":2,"planned_no_work":true,"units":[],"prerequisites":{},"base_sha":"base-sha","head_sha":"head-sha"}"#;
+        canonical_expected_plan_digest_from_json(valid)?;
+
+        for malformed in [
+            valid.replacen("\"schema\":2,", "", 1),
+            valid.replace("\"schema\":2", "\"schema\":1"),
+            valid.replace("\"base_sha\":\"base-sha\",", ""),
+            valid.replace(",\"head_sha\":\"head-sha\"", ""),
+            valid.replace("\"head_sha\":\"head-sha\"", "\"head_sha\":\"\""),
+        ] {
+            let error = canonical_expected_plan_digest_from_json(&malformed)
+                .expect_err("unbound or wrong-schema plan must fail closed");
+            assert!(
+                error.contains("schema 2")
+                    || error.contains("base_sha")
+                    || error.contains("head_sha"),
+                "unexpected error: {error}"
+            );
+        }
+
+        let dispatch = valid.replace("\"base_sha\":\"base-sha\"", "\"base_sha\":\"\"");
+        canonical_expected_plan_digest_from_json(&dispatch)
+            .expect("workflow_dispatch may carry an explicitly empty base SHA");
+        Ok(())
+    }
+
+    #[test]
+    fn schema_two_alone_selects_strict_aggregate_validation() {
+        let expected = r#"{
+            "schema": 2,
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
+            "units": [{"id": "rust-alpha", "lanes": ["github-hosted"]}],
+            "prerequisites": {"rust-alpha": []}
+        }"#;
+        let results = r#"{"schema": 2, "results": []}"#;
+        let error = aggregate_files(expected, results, "base-sha", "head-sha")
+            .expect_err("schema 2 must not fall back to legacy aggregation");
+        assert!(
+            error.contains("platform") || error.contains("command_digest"),
+            "schema-2 strict validation was not selected: {error}"
+        );
+    }
+
+    #[test]
+    fn aggregate_schema_selection_requires_a_strict_pair() -> Result<(), String> {
+        let legacy_expected = r#"{
+            "planned_no_work": true,
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
+            "units": [],
+            "prerequisites": {}
+        }"#;
+        let legacy_results = r#"{"results": []}"#;
+        let legacy = aggregate_files(legacy_expected, legacy_results, "base-sha", "head-sha")?;
+        assert!(legacy.passed, "legacy pair must retain legacy aggregation");
+
+        let mixed_error = aggregate_files(
+            legacy_expected,
+            r#"{"schema":2,"results":[]}"#,
+            "base-sha",
+            "head-sha",
+        )
+        .expect_err("schema-2 results must not pair with legacy expected work");
+        assert!(
+            mixed_error.contains("expected-work") && mixed_error.contains("schema 2"),
+            "mixed-schema error must identify the missing strict expected schema: {mixed_error}"
+        );
+
+        let row_identity_error = aggregate_files(
+            legacy_expected,
+            r#"{"results":[{"unit":"rust-alpha","lane":"github","outcome":"success","plan_digest":"stale"}]}"#,
+            "base-sha",
+            "head-sha",
+        )
+        .expect_err("row-level plan identity must not pair with legacy expected work");
+        assert!(
+            row_identity_error.contains("expected-work") && row_identity_error.contains("schema 2"),
+            "row identity must select strict mode: {row_identity_error}"
+        );
+
+        let strict_template = r#"{
+            "schema": 2,
+            "planned_no_work": true,
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
+            "plan_digest": "placeholder",
+            "units": [],
+            "prerequisites": {}
+        }"#;
+        let canonical = canonical_expected_plan_digest_from_json(strict_template)?;
+        let strict_expected = strict_template.replace(
+            "\"plan_digest\": \"placeholder\"",
+            &format!("\"plan_digest\": \"{canonical}\""),
+        );
+        let run = RunIdentity {
+            repository_id: "example/repository".to_owned(),
+            source_sha: "head-sha".to_owned(),
+            run_id: "run-1".to_owned(),
+            run_attempt: "1".to_owned(),
+            plan_digest: canonical,
+            command_digests: BTreeMap::new(),
+            platforms: BTreeMap::new(),
+        };
+        let strict = aggregate_files_with_identity(
+            &strict_expected,
+            r#"{"schema":2,"results":[]}"#,
+            "base-sha",
+            "head-sha",
+            &run,
+        )?;
+        assert!(
+            strict.passed,
+            "schema-2 pair must retain strict aggregation"
+        );
+
+        let reverse_error =
+            aggregate_files(&strict_expected, legacy_results, "base-sha", "head-sha")
+                .expect_err("schema-2 expected work must not pair with legacy results");
+        assert!(
+            reverse_error.contains("results") && reverse_error.contains("schema 2"),
+            "reverse mixed-schema error must identify results: {reverse_error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_root_prerequisite_cycle_is_rejected() {
+        let prerequisites = BTreeMap::from([
+            ("A".to_owned(), vec!["B".to_owned()]),
+            ("B".to_owned(), vec!["C".to_owned()]),
+            ("C".to_owned(), vec!["B".to_owned()]),
+        ]);
+        let error = transitive_prerequisites("A", &prerequisites)
+            .expect_err("a cycle below the root must fail closed");
+        assert!(error.contains("`B`"), "unexpected cycle error: {error}");
+    }
+
+    #[test]
+    fn diamond_prerequisites_are_closed_without_recursion() {
+        let prerequisites = BTreeMap::from([
+            ("A".to_owned(), vec!["B".to_owned(), "C".to_owned()]),
+            ("B".to_owned(), vec!["D".to_owned()]),
+            ("C".to_owned(), vec!["D".to_owned()]),
+            ("D".to_owned(), Vec::new()),
+        ]);
+        let closure = transitive_prerequisites("A", &prerequisites)
+            .expect("a shared diamond prerequisite is not a cycle");
+        assert_eq!(
+            closure,
+            BTreeSet::from(["B".to_owned(), "C".to_owned(), "D".to_owned()])
+        );
+    }
+
+    #[test]
+    fn schema2_results_bind_every_run_and_unit_identity() -> Result<(), String> {
+        let expected = r#"{
+            "schema": 2,
+            "base_sha": "base-sha",
+            "head_sha": "head-sha",
+            "plan_digest": "plan-7",
+            "prerequisites": {"swift-app": []},
+            "units": [{
+                "id": "swift-app",
+                "lanes": ["github-hosted"],
+                "planned_skip": "lane cannot run kind",
+                "platform": "macos-arm64",
+                "command_digest": "command-7"
+            }]
+        }"#;
+        let result = r#"{
+            "schema": 2,
+            "results": [{
+                "repository": "example/repository",
+                "base_sha": "base-sha",
+                "head_sha": "head-sha",
+                "run_id": "run-7",
+                "run_attempt": "2",
+                "plan_digest": "plan-7",
+                "unit": "swift-app",
+                "lane": "github-hosted",
+                "provider": "github-hosted",
+                "platform": "macos-arm64",
+                "command_digest": "command-7",
+                "outcome": "skipped",
+                "reason": "lane gate closed"
+            }]
+        }"#;
+        let canonical = canonical_expected_plan_digest_from_json(expected)?;
+        let expected = expected.replace(
+            "\"plan_digest\": \"plan-7\"",
+            &format!("\"plan_digest\": \"{canonical}\""),
+        );
+        let result = result.replace(
+            "\"plan_digest\": \"plan-7\"",
+            &format!("\"plan_digest\": \"{canonical}\""),
+        );
+        let run = RunIdentity {
+            repository_id: "example/repository".to_owned(),
+            source_sha: "head-sha".to_owned(),
+            run_id: "run-7".to_owned(),
+            run_attempt: "2".to_owned(),
+            plan_digest: canonical.clone(),
+            command_digests: BTreeMap::from([("swift-app".to_owned(), "command-7".to_owned())]),
+            platforms: BTreeMap::from([("swift-app".to_owned(), Platform::MacosArm64)]),
+        };
+        let verdict =
+            aggregate_files_with_identity(&expected, &result, "base-sha", "head-sha", &run)?;
+        assert!(
+            verdict.passed,
+            "planned skip should satisfy identity and aggregate: {verdict:?}"
+        );
+
+        let cancelled = result.replace("\"outcome\": \"skipped\"", "\"outcome\": \"cancelled\"");
+        let verdict =
+            aggregate_files_with_identity(&expected, &cancelled, "base-sha", "head-sha", &run)?;
+        assert!(!verdict.passed, "cancelled work must fail the aggregate");
+
+        let stale_attempt = result.replace("\"run_attempt\": \"2\"", "\"run_attempt\": \"1\"");
+        let error =
+            aggregate_files_with_identity(&expected, &stale_attempt, "base-sha", "head-sha", &run)
+                .expect_err("stale attempts must fail closed");
+        assert!(error.contains("stale-attempt"), "unexpected error: {error}");
+
+        let forged_digest = result.replace(
+            "\"command_digest\": \"command-7\"",
+            "\"command_digest\": \"plan-7\"",
+        );
+        let error =
+            aggregate_files_with_identity(&expected, &forged_digest, "base-sha", "head-sha", &run)
+                .expect_err("forged command digests must fail closed");
+        assert!(
+            error.contains("identity-mismatch"),
+            "unexpected error: {error}"
+        );
+
+        let wrong_platform = result.replace(
+            "\"platform\": \"macos-arm64\"",
+            "\"platform\": \"linux-x64\"",
+        );
+        let error =
+            aggregate_files_with_identity(&expected, &wrong_platform, "base-sha", "head-sha", &run)
+                .expect_err("wrong platforms must fail closed");
+        assert!(error.contains("platform"), "unexpected error: {error}");
+
+        let missing_identity = result.replace("\"run_id\": \"run-7\",\n                ", "");
+        let error = aggregate_files_with_identity(
+            &expected,
+            &missing_identity,
+            "base-sha",
+            "head-sha",
+            &run,
+        )
+        .expect_err("missing identity must fail closed");
+        assert!(error.contains("run_id"), "unexpected error: {error}");
+
+        let wrong_source =
+            result.replace("\"head_sha\": \"head-sha\"", "\"head_sha\": \"other-head\"");
+        let error =
+            aggregate_files_with_identity(&expected, &wrong_source, "base-sha", "head-sha", &run)
+                .expect_err("source SHA mismatches must fail closed");
+        assert!(error.contains("head SHA"), "unexpected error: {error}");
+
+        let missing_plan = expected.replace(&format!("\"plan_digest\": \"{canonical}\",\n"), "");
+        let error =
+            aggregate_files_with_identity(&missing_plan, &result, "base-sha", "head-sha", &run)
+                .expect_err("missing expected plan identity must fail closed");
+        assert!(error.contains("plan_digest"), "unexpected error: {error}");
+
+        let forged_plan = expected.replace(
+            "\"command_digest\": \"command-7\"",
+            "\"command_digest\": \"forged-command\"",
+        );
+        let error =
+            aggregate_files_with_identity(&forged_plan, &result, "base-sha", "head-sha", &run)
+                .expect_err("forged expected-plan fields must fail canonical binding");
+        assert!(
+            error.contains("canonical expected-plan digest"),
+            "unexpected error: {error}"
+        );
+
+        let forged_artifact_digest = expected.replace(&canonical, "forged-plan");
+        let error = aggregate_files_with_identity(
+            &forged_artifact_digest,
+            &result,
+            "base-sha",
+            "head-sha",
+            &run,
+        )
+        .expect_err("forged artifact plan digest must fail canonical binding");
+        assert!(
+            error.contains("canonical expected-plan digest"),
+            "unexpected error: {error}"
+        );
+
+        let reused = result.replace(
+            "\"outcome\": \"skipped\",",
+            "\"outcome\": \"success\",\n                \"reused_from\": \"producer-7\",",
+        );
+        let error = aggregate_files_with_identity(&expected, &reused, "base-sha", "head-sha", &run)
+            .expect_err("strict live aggregation must reject reused_from");
+        assert!(error.contains("reused_from"), "unexpected error: {error}");
+
+        let wrong_provider = result.replace(
+            "\"provider\": \"github-hosted\"",
+            "\"provider\": \"velnor\"",
+        );
+        let error =
+            aggregate_files_with_identity(&expected, &wrong_provider, "base-sha", "head-sha", &run)
+                .expect_err("lane/provider mismatch must fail closed");
+        assert!(error.contains("provider"), "unexpected error: {error}");
+
+        let missing_schema = expected.replace("\"schema\": 2,\n", "");
+        let error =
+            aggregate_files_with_identity(&missing_schema, &result, "base-sha", "head-sha", &run)
+                .expect_err("strict expected work must declare schema 2");
+        assert!(error.contains("schema 2"), "unexpected error: {error}");
+
+        let missing_expected_platform = expected.replace("\"platform\": \"macos-arm64\",\n", "");
+        let error = aggregate_files_with_identity(
+            &missing_expected_platform,
+            &result,
+            "base-sha",
+            "head-sha",
+            &run,
+        )
+        .expect_err("missing expected platform must fail closed");
+        assert!(error.contains("platform"), "unexpected error: {error}");
         Ok(())
     }
 
