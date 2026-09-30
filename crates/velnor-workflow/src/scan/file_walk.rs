@@ -37,6 +37,7 @@ pub(crate) fn repository_files_with_static_files(
         exclude,
         static_sources,
         static_outputs,
+        &[],
         None,
     )
 }
@@ -46,6 +47,7 @@ pub(crate) fn repository_files_with_static_files_and_owned_paths(
     exclude: &[String],
     static_sources: &[String],
     static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
     verified_owned_paths: Option<&BTreeSet<PathBuf>>,
 ) -> Result<Vec<String>, GeneratorError> {
     validate_scan_root(root)?;
@@ -55,6 +57,7 @@ pub(crate) fn repository_files_with_static_files_and_owned_paths(
                 root,
                 static_sources,
                 static_outputs,
+                generated_aliases,
             )
             .map_err(|error| GeneratorError::usage(error.to_string()))?;
             paths.extend(verified_owned_paths.iter().cloned());
@@ -62,11 +65,13 @@ pub(crate) fn repository_files_with_static_files_and_owned_paths(
         }
         // A sidecar is not scanner authority until its claims have been
         // checked against this renderer.  The first pass keeps only fixed
-        // generator paths and declared static outputs.
+        // generator paths, trusted generated aliases, and declared static
+        // outputs.
         None => crate::s2::generator_fixed_output_paths_with_static_files(
             root,
             static_sources,
             static_outputs,
+            generated_aliases,
         )
         .map_err(|error| GeneratorError::usage(error.to_string()))?,
     };
@@ -864,6 +869,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                &[],
                 Some(&verified),
             ),
             "scan with renderer-bound ownership",
@@ -879,6 +885,22 @@ mod tests {
             files.contains(&".github/workflows/Generated.yml".to_owned()),
             !recorded_path_is_alias,
             "a distinct case path stays an input on case-sensitive filesystems"
+        );
+
+        let files = must(
+            super::repository_files_with_static_files_and_owned_paths(
+                &root,
+                &[],
+                &[],
+                &[],
+                &[crate::s2::GeneratedAliasPath::FleetHostEnv],
+                Some(&verified),
+            ),
+            "scan with a renderer-bound generated alias",
+        );
+        assert!(
+            !files.contains(&"config/fleet/velnor-host.env".to_owned()),
+            "a trusted generated alias is excluded from scanner inputs"
         );
 
         must(
@@ -903,6 +925,22 @@ mod tests {
             "scan declared fleet config source",
         );
         assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+
+        let files = must(
+            super::repository_files_with_static_files_and_owned_paths(
+                &root,
+                &[],
+                &declared_source,
+                &[],
+                &[crate::s2::GeneratedAliasPath::FleetHostEnv],
+                Some(&verified),
+            ),
+            "scan declared fleet source with generated alias channel",
+        );
+        assert!(
+            files.contains(&"config/fleet/velnor-host.env".to_owned()),
+            "a declared fleet source remains a scanner input"
+        );
 
         let unrelated_source = vec!["config/fleet/other.env".to_owned()];
         let files = must(

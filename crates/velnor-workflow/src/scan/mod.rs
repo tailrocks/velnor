@@ -66,10 +66,15 @@ pub(crate) fn scan_shape_with_static_files(
         exclude,
         static_sources,
         static_outputs,
+        &[],
         None,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scan call binds config, source, output, alias, and ownership snapshots together"
+)]
 pub(crate) fn scan_shape_with_static_files_and_owned_paths(
     root: &Path,
     runners: RunnerMode,
@@ -77,6 +82,7 @@ pub(crate) fn scan_shape_with_static_files_and_owned_paths(
     exclude: &[String],
     static_sources: &[String],
     static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
     verified_owned_paths: Option<&BTreeSet<PathBuf>>,
 ) -> Result<RepositoryShape, GeneratorError> {
     let files = file_walk::repository_files_with_static_files_and_owned_paths(
@@ -84,6 +90,7 @@ pub(crate) fn scan_shape_with_static_files_and_owned_paths(
         exclude,
         static_sources,
         static_outputs,
+        generated_aliases,
         verified_owned_paths,
     )?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();

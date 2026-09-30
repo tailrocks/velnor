@@ -276,6 +276,7 @@ pub(crate) fn repository_files_with_static_files(
         exclude,
         static_sources,
         static_outputs,
+        &[],
         None,
     )
 }
@@ -285,6 +286,7 @@ pub(crate) fn repository_files_with_static_files_and_owned_paths(
     exclude: &[String],
     static_sources: &[String],
     static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
     verified_owned_paths: Option<&BTreeSet<PathBuf>>,
 ) -> Result<Vec<String>, GeneratorError> {
     validate_repository_tree(root)?;
@@ -300,17 +302,20 @@ pub(crate) fn repository_files_with_static_files_and_owned_paths(
                 root,
                 static_sources,
                 static_outputs,
+                generated_aliases,
             )?;
             paths.extend(verified_owned_paths.iter().cloned());
             paths
         }
         // A sidecar is evidence only after the current renderer has proved
         // each recorded path.  The first scan has no such proof, so it may
-        // exclude only fixed generator paths and declared static outputs.
+        // exclude only fixed generator paths, trusted generated aliases, and
+        // declared static outputs.
         None => crate::s2::generator_fixed_output_paths_with_static_files(
             root,
             static_sources,
             static_outputs,
+            generated_aliases,
         )?,
     };
     let owned_paths = generator_owned
@@ -831,6 +836,7 @@ mod tests {
         let files = must(
             super::repository_files_with_static_files_and_owned_paths(
                 &root,
+                &[],
                 &[],
                 &[],
                 &[],

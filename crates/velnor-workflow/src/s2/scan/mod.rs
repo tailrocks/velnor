@@ -88,6 +88,7 @@ pub(crate) fn scan_shape_with_precondition_phases_and_static_sources(
         precondition_phases_enabled,
         static_sources,
         &[],
+        &[],
     )
 }
 
@@ -104,6 +105,7 @@ pub(crate) fn scan_shape_with_precondition_phases_and_static_files(
     precondition_phases_enabled: bool,
     static_sources: &[String],
     static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
 ) -> Result<RepositoryShape, GeneratorError> {
     scan_shape_with_precondition_phases_and_static_files_with_owned_paths(
         root,
@@ -114,6 +116,7 @@ pub(crate) fn scan_shape_with_precondition_phases_and_static_files(
         precondition_phases_enabled,
         static_sources,
         static_outputs,
+        generated_aliases,
         None,
     )
 }
@@ -131,6 +134,7 @@ pub(crate) fn scan_shape_with_precondition_phases_and_static_files_with_owned_pa
     precondition_phases_enabled: bool,
     static_sources: &[String],
     static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
     verified_owned_paths: Option<&BTreeSet<PathBuf>>,
 ) -> Result<RepositoryShape, GeneratorError> {
     let files = file_walk::repository_files_with_static_files_and_owned_paths(
@@ -138,6 +142,7 @@ pub(crate) fn scan_shape_with_precondition_phases_and_static_files_with_owned_pa
         exclude,
         static_sources,
         static_outputs,
+        generated_aliases,
         verified_owned_paths,
     )?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();

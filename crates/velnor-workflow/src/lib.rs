@@ -3844,13 +3844,15 @@ fn scan_target_once(
         .transpose()?
         .unwrap_or_default();
     validate_static_source_root_identity(root, &scan_root_identity, "after static-file preflight")?;
-    let mut static_output_paths = static_files.output_paths.clone();
-    if generation
+    let static_output_paths = static_files.output_paths.clone();
+    let generated_aliases = if generation
         .as_ref()
         .is_some_and(|generation| generation.cache_velnor().has_overrides())
     {
-        static_output_paths.push("config/fleet/velnor-host.env".to_owned());
-    }
+        vec![crate::s2::GeneratedAliasPath::FleetHostEnv]
+    } else {
+        Vec::new()
+    };
     let shape = scan::scan_shape_with_static_files_and_owned_paths(
         root,
         scan_runners,
@@ -3858,6 +3860,7 @@ fn scan_target_once(
         exclude,
         &static_files.source_paths,
         &static_output_paths,
+        &generated_aliases,
         Some(verified_owned_paths),
     )?;
     let static_sources = capture_static_source_snapshot(root, &static_files, shape.files())?;

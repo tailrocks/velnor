@@ -7660,7 +7660,8 @@ mod tests {
             crate::s2::generator_fixed_output_paths_with_static_files(
                 &root,
                 &["config/fleet/VELNOR-HOST.env".to_owned()],
-                &["config/fleet/velnor-host.env".to_owned()],
+                &[],
+                &[crate::s2::GeneratedAliasPath::FleetHostEnv],
             ),
             "resolve fixed output paths",
         );
