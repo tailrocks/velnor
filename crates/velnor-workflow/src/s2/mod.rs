@@ -1258,6 +1258,8 @@ pub(crate) struct CheckProfileSpec {
     pub(crate) needs: Vec<String>,
     pub(crate) timeout_minutes: u32,
     pub(crate) artifacts: Vec<String>,
+    /// Whether artifact paths are exact required files. Generation-time only.
+    pub(crate) artifacts_required: bool,
     /// An advisory profile reports without gating: the rendered job carries
     /// `continue-on-error`.
     pub(crate) advisory: bool,
@@ -2999,6 +3001,7 @@ fn apply_check_profiles(
                 .and_then(|timeout| u32::try_from(timeout).ok())
                 .unwrap_or(primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES),
             artifacts: row.artifacts().unwrap_or_default().to_vec(),
+            artifacts_required: row.artifacts_required(),
             advisory: row.status().is_some_and(|status| status == "advisory"),
             env: row.env().clone(),
             permissions: row.permissions().clone(),

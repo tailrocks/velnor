@@ -664,16 +664,50 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
 
 fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
     let upload = ActionPin::UploadArtifact.reference();
+    let gate = if profile.artifacts_required {
+        "success()"
+    } else {
+        "always()"
+    };
+    if profile.artifacts_required {
+        let _ = writeln!(
+            output,
+            "      - name: Verify {} artifacts\n        if: success()\n        shell: bash\n        run: |\n          set -euo pipefail",
+            profile.id
+        );
+        for artifact in &profile.artifacts {
+            let prefixes = artifact
+                .split('/')
+                .scan(String::new(), |prefix, component| {
+                    if !prefix.is_empty() {
+                        prefix.push('/');
+                    }
+                    prefix.push_str(component);
+                    Some(format!("'{prefix}'"))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(
+                output,
+                "          path='{artifact}'\n          for prefix in {prefixes}; do\n            if [[ -L \"$prefix\" ]]; then\n              echo \"required artifact path uses a symlink: $prefix\" >&2\n              exit 1\n            fi\n          done\n          if [[ -f \"$path\" && -s \"$path\" ]]; then\n            :\n          else\n            echo \"required artifact is missing or empty: $path\" >&2\n            exit 1\n          fi"
+            );
+        }
+    }
     let _ = writeln!(
         output,
-        "      - name: Upload {} artifacts\n        if: always()\n        uses: {upload}\n        with:\n          name: {}\n          path: |",
+        "      - name: Upload {} artifacts\n        if: {gate}\n        uses: {upload}\n        with:\n          name: {}\n          path: |",
         profile.id,
         yaml_scalar(&profile.id)
     );
     for artifact in &profile.artifacts {
         let _ = writeln!(output, "            {artifact}");
     }
-    output.push_str("          if-no-files-found: warn\n");
+    let if_no_files_found = if profile.artifacts_required {
+        "error"
+    } else {
+        "warn"
+    };
+    let _ = writeln!(output, "          if-no-files-found: {if_no_files_found}");
 }
 
 #[cfg(test)]
@@ -684,6 +718,10 @@ mod tests {
     )]
 
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::process::Command;
 
     use super::*;
     use crate::s2::config;
@@ -713,6 +751,7 @@ mod tests {
             needs: Vec::new(),
             timeout_minutes: DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES,
             artifacts: Vec::new(),
+            artifacts_required: false,
             advisory: false,
             env: BTreeMap::new(),
             permissions: BTreeMap::new(),
@@ -1011,6 +1050,126 @@ mod tests {
             workflow.contains(crate::s2::ActionPin::UploadArtifact.reference()),
             "{workflow}"
         );
+        assert!(!workflow.contains("Verify load artifacts"), "{workflow}");
+        assert!(workflow.contains("if: always()"), "{workflow}");
+        assert!(workflow.contains("if-no-files-found: warn"), "{workflow}");
+    }
+
+    #[test]
+    fn required_artifacts_preflight_every_exact_file_before_strict_upload() {
+        let mut strict = profile("strict");
+        strict.artifacts = vec![
+            "target/ci-evidence/rollup.json".to_owned(),
+            "target/ci-evidence/rollup.md".to_owned(),
+        ];
+        strict.artifacts_required = true;
+        let config = profile_config(vec![strict]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select the strict profile",
+        );
+        let workflow = render(&config, None, &selected);
+        let verify = workflow
+            .find("- name: Verify strict artifacts")
+            .expect("strict preflight is rendered");
+        let upload = workflow
+            .find("- name: Upload strict artifacts")
+            .expect("strict upload is rendered");
+        assert!(verify < upload, "preflight must precede upload: {workflow}");
+        let preflight = &workflow[verify..upload];
+        assert_eq!(
+            preflight
+                .matches("[[ -f \"$path\" && -s \"$path\" ]]")
+                .count(),
+            2,
+            "{preflight}"
+        );
+        assert!(preflight.contains(
+            "for prefix in 'target' 'target/ci-evidence' 'target/ci-evidence/rollup.json'; do"
+        ));
+        assert!(preflight.contains(
+            "for prefix in 'target' 'target/ci-evidence' 'target/ci-evidence/rollup.md'; do"
+        ));
+        assert!(preflight.contains("[[ -L \"$prefix\" ]]"), "{preflight}");
+        assert!(!preflight.contains("test -f --"), "{preflight}");
+        assert!(workflow.contains("- name: Verify strict artifacts\n        if: success()"));
+        assert!(workflow.contains("- name: Upload strict artifacts\n        if: success()"));
+        assert!(workflow.contains("if-no-files-found: error"), "{workflow}");
+        assert!(!workflow.contains("if: always()"), "{workflow}");
+    }
+
+    #[cfg(unix)]
+    fn run_artifact_preflight(root: &std::path::Path, artifact: &str) -> bool {
+        let mut profile = profile("strict");
+        profile.artifacts = vec![artifact.to_owned()];
+        profile.artifacts_required = true;
+        let mut rendered = String::new();
+        render_artifact_step(&mut rendered, &profile);
+        let script_start = rendered
+            .find("        run: |\n")
+            .expect("strict preflight has a shell script")
+            + "        run: |\n".len();
+        let script_end = rendered
+            .find("      - name: Upload")
+            .expect("strict upload follows the preflight");
+        let script = rendered[script_start..script_end]
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Command::new("bash")
+            .args(["-euo", "pipefail", "-c"])
+            .arg(script)
+            .current_dir(root)
+            .status()
+            .expect("run generated artifact preflight")
+            .success()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_artifact_preflight_checks_nonempty_files_and_rejects_symlinks() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-required-artifact-schema2-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("target/evidence")).expect("create artifact directory");
+        let artifact = root.join("target/evidence/rollup.json");
+        fs::write(&artifact, b"{}\n").expect("write nonempty artifact");
+        assert!(
+            run_artifact_preflight(&root, "target/evidence/rollup.json"),
+            "a nonempty regular file passes"
+        );
+
+        fs::write(&artifact, b"").expect("empty artifact");
+        assert!(
+            !run_artifact_preflight(&root, "target/evidence/rollup.json"),
+            "an empty artifact fails"
+        );
+
+        let outside = root.join("outside.json");
+        fs::write(&outside, b"outside\n").expect("write symlink target");
+        fs::remove_file(&artifact).expect("remove regular artifact");
+        std::os::unix::fs::symlink(&outside, &artifact).expect("create final symlink");
+        assert!(
+            !run_artifact_preflight(&root, "target/evidence/rollup.json"),
+            "a final symlink fails"
+        );
+
+        fs::remove_file(&artifact).expect("remove final symlink");
+        fs::remove_dir_all(root.join("target/evidence")).expect("remove real artifact parent");
+        fs::create_dir_all(root.join("real-evidence")).expect("create symlink target parent");
+        fs::write(root.join("real-evidence/rollup.json"), b"{}\n")
+            .expect("write nested symlink target");
+        std::os::unix::fs::symlink(root.join("real-evidence"), root.join("target/evidence"))
+            .expect("create parent symlink");
+        assert!(
+            !run_artifact_preflight(&root, "target/evidence/rollup.json"),
+            "a symlinked parent fails"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
