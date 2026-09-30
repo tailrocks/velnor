@@ -747,6 +747,13 @@ mod tests {
         }
     }
 
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}: expected a value"),
+        }
+    }
+
     fn must_fail<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> E {
         match result {
             Ok(_) => panic!("{context}: expected a usage error"),
@@ -966,12 +973,14 @@ mod tests {
             "select the strict profile",
         );
         let workflow = render(&config, None, &selected);
-        let verify = workflow
-            .find("- name: Verify strict artifacts")
-            .expect("strict preflight is rendered");
-        let upload = workflow
-            .find("- name: Upload strict artifacts")
-            .expect("strict upload is rendered");
+        let verify = must_some(
+            workflow.find("- name: Verify strict artifacts"),
+            "strict preflight is rendered",
+        );
+        let upload = must_some(
+            workflow.find("- name: Upload strict artifacts"),
+            "strict upload is rendered",
+        );
         assert!(verify < upload, "preflight must precede upload: {workflow}");
         let preflight = &workflow[verify..upload];
         assert_eq!(
@@ -1002,25 +1011,28 @@ mod tests {
         profile.artifacts_required = true;
         let mut rendered = String::new();
         render_artifact_step(&mut rendered, &profile);
-        let script_start = rendered
-            .find("        run: |\n")
-            .expect("strict preflight has a shell script")
-            + "        run: |\n".len();
-        let script_end = rendered
-            .find("      - name: Upload")
-            .expect("strict upload follows the preflight");
+        let script_start = must_some(
+            rendered.find("        run: |\n"),
+            "strict preflight has a shell script",
+        ) + "        run: |\n".len();
+        let script_end = must_some(
+            rendered.find("      - name: Upload"),
+            "strict upload follows the preflight",
+        );
         let script = rendered[script_start..script_end]
             .lines()
             .map(|line| line.strip_prefix("          ").unwrap_or(line))
             .collect::<Vec<_>>()
             .join("\n");
-        Command::new("bash")
-            .args(["-euo", "pipefail", "-c"])
-            .arg(script)
-            .current_dir(root)
-            .status()
-            .expect("run generated artifact preflight")
-            .success()
+        must(
+            Command::new("bash")
+                .args(["-euo", "pipefail", "-c"])
+                .arg(script)
+                .current_dir(root)
+                .status(),
+            "run generated artifact preflight",
+        )
+        .success()
     }
 
     #[cfg(unix)]
@@ -1031,36 +1043,52 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("target/evidence")).expect("create artifact directory");
+        must(
+            fs::create_dir_all(root.join("target/evidence")),
+            "create artifact directory",
+        );
         let artifact = root.join("target/evidence/rollup.json");
-        fs::write(&artifact, b"{}\n").expect("write nonempty artifact");
+        must(fs::write(&artifact, b"{}\n"), "write nonempty artifact");
         assert!(
             run_artifact_preflight(&root, "target/evidence/rollup.json"),
             "a nonempty regular file passes"
         );
 
-        fs::write(&artifact, b"").expect("empty artifact");
+        must(fs::write(&artifact, b""), "empty artifact");
         assert!(
             !run_artifact_preflight(&root, "target/evidence/rollup.json"),
             "an empty artifact fails"
         );
 
         let outside = root.join("outside.json");
-        fs::write(&outside, b"outside\n").expect("write symlink target");
-        fs::remove_file(&artifact).expect("remove regular artifact");
-        std::os::unix::fs::symlink(&outside, &artifact).expect("create final symlink");
+        must(fs::write(&outside, b"outside\n"), "write symlink target");
+        must(fs::remove_file(&artifact), "remove regular artifact");
+        must(
+            std::os::unix::fs::symlink(&outside, &artifact),
+            "create final symlink",
+        );
         assert!(
             !run_artifact_preflight(&root, "target/evidence/rollup.json"),
             "a final symlink fails"
         );
 
-        fs::remove_file(&artifact).expect("remove final symlink");
-        fs::remove_dir_all(root.join("target/evidence")).expect("remove real artifact parent");
-        fs::create_dir_all(root.join("real-evidence")).expect("create symlink target parent");
-        fs::write(root.join("real-evidence/rollup.json"), b"{}\n")
-            .expect("write nested symlink target");
-        std::os::unix::fs::symlink(root.join("real-evidence"), root.join("target/evidence"))
-            .expect("create parent symlink");
+        must(fs::remove_file(&artifact), "remove final symlink");
+        must(
+            fs::remove_dir_all(root.join("target/evidence")),
+            "remove real artifact parent",
+        );
+        must(
+            fs::create_dir_all(root.join("real-evidence")),
+            "create symlink target parent",
+        );
+        must(
+            fs::write(root.join("real-evidence/rollup.json"), b"{}\n"),
+            "write nested symlink target",
+        );
+        must(
+            std::os::unix::fs::symlink(root.join("real-evidence"), root.join("target/evidence")),
+            "create parent symlink",
+        );
         assert!(
             !run_artifact_preflight(&root, "target/evidence/rollup.json"),
             "a symlinked parent fails"
