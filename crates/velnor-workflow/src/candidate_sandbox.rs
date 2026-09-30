@@ -19,6 +19,8 @@ use tar::{EntryType, Header as TarHeader};
 #[cfg(unix)]
 use std::env;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::{
     FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
 };
@@ -39,8 +41,10 @@ const LOG_TMPFS_SIZE: &str = "4m";
 const CAPTURE_ARCHIVE_LIMIT: usize = 256 * 1024 * 1024;
 const ARCHIVE_BLOCK_SIZE: usize = 512;
 const ARCHIVE_MEMBER_LIMIT: usize = 16_384;
-const ARCHIVE_METADATA_LIMIT: usize = 64 * 1024;
+const ARCHIVE_METADATA_EXTENSION_LIMIT: usize = 64 * 1024;
+const ARCHIVE_METADATA_TOTAL_LIMIT: usize = 64 * 1024 * 1024;
 const ARCHIVE_PATH_LIMIT: usize = 4 * 1024;
+const ARCHIVE_PATH_COMPONENT_LIMIT: usize = 128;
 const OUTPUT_CONTENT_LIMIT: usize = 128 * 1024 * 1024;
 const CANDIDATE_WRAPPER: &str = "ulimit -f 262144 || exit 125; /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- /candidate \"$@\" > /tmp/velnor-candidate.stdout 2> /tmp/velnor-candidate.stderr; exit $?";
 
@@ -1304,11 +1308,30 @@ impl Drop for ContainerCleanup {
 
 #[cfg(unix)]
 fn safe_archive_path(path: &Path) -> Result<Option<PathBuf>, String> {
+    if path.as_os_str().as_bytes().len() > ARCHIVE_PATH_LIMIT {
+        return Err(format!(
+            "candidate archive path exceeds {ARCHIVE_PATH_LIMIT} bytes"
+        ));
+    }
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err("candidate archive path contains a NUL byte".to_owned());
+    }
     let mut safe = PathBuf::new();
+    let mut depth = 0usize;
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::Normal(part) => safe.push(part),
+            Component::Normal(part) => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| "candidate archive path depth overflow".to_owned())?;
+                if depth > ARCHIVE_PATH_COMPONENT_LIMIT {
+                    return Err(format!(
+                        "candidate archive path exceeds {ARCHIVE_PATH_COMPONENT_LIMIT} components"
+                    ));
+                }
+                safe.push(part);
+            }
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(format!(
                     "Docker returned an unsafe archive path {}",
@@ -1325,14 +1348,84 @@ fn safe_archive_path(path: &Path) -> Result<Option<PathBuf>, String> {
 }
 
 #[cfg(unix)]
+fn validate_symlink_target(path: &Path, target: &Path) -> Result<(), String> {
+    if target.as_os_str().is_empty() {
+        return Err(format!(
+            "candidate output symlink {} has an empty target",
+            path.display()
+        ));
+    }
+    if target.as_os_str().as_bytes().len() > ARCHIVE_PATH_LIMIT {
+        return Err(format!(
+            "candidate output symlink {} target exceeds {ARCHIVE_PATH_LIMIT} bytes",
+            path.display()
+        ));
+    }
+    if target.as_os_str().as_bytes().contains(&0) {
+        return Err(format!(
+            "candidate output symlink {} target contains a NUL byte",
+            path.display()
+        ));
+    }
+    let mut depth = 0usize;
+    if let Some(parent) = path.parent() {
+        for component in parent.components() {
+            if let Component::Normal(_) = component {
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    format!(
+                        "candidate output symlink {} path depth overflow",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+    }
+    for component in target.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(_) => {
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    format!(
+                        "candidate output symlink {} target depth overflow",
+                        path.display()
+                    )
+                })?;
+            }
+            Component::ParentDir => {
+                if depth == 0 {
+                    return Err(format!(
+                        "candidate output symlink {} escapes its output root",
+                        path.display()
+                    ));
+                }
+                depth -= 1;
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "candidate output symlink {} has an absolute target",
+                    path.display()
+                ));
+            }
+        }
+        if depth > ARCHIVE_PATH_COMPONENT_LIMIT {
+            return Err(format!(
+                "candidate output symlink {} exceeds {ARCHIVE_PATH_COMPONENT_LIMIT} components",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 struct PendingArchiveMetadata {
     path: Option<Vec<u8>>,
     linkpath: Option<Vec<u8>>,
     size: Option<u64>,
+    gnu_path: Option<Vec<u8>>,
+    gnu_linkpath: Option<Vec<u8>>,
     pax: bool,
-    gnu_longname: bool,
-    gnu_longlink: bool,
 }
 
 #[cfg(unix)]
@@ -1370,7 +1463,7 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
             if bytes[second_end..].iter().any(|b| *b != 0) {
                 return Err("candidate archive contains data after its terminator".to_owned());
             }
-            if pending.pax || pending.gnu_longname || pending.gnu_longlink {
+            if pending.pax || pending.gnu_path.is_some() || pending.gnu_linkpath.is_some() {
                 return Err("candidate archive metadata has no following entry".to_owned());
             }
             return Ok(());
@@ -1393,6 +1486,7 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
             .map_err(|error| format!("candidate archive has invalid entry size: {error}"))?;
         let entry_type = header.entry_type();
         let raw_data_start = header_end;
+        let recognized_extension = header.as_gnu().is_some() || header.as_ustar().is_some();
 
         if entry_type == EntryType::XGlobalHeader {
             return Err("candidate archive contains unsupported global PAX metadata".to_owned());
@@ -1403,6 +1497,11 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
 
         match entry_type {
             EntryType::XHeader => {
+                if !recognized_extension {
+                    return Err(
+                        "candidate archive has an unrecognized PAX header encoding".to_owned()
+                    );
+                }
                 let raw_data_end = archive_data_end(raw_data_start, raw_size, bytes.len())?;
                 let raw_payload_end = raw_data_start
                     .checked_add(usize::try_from(raw_size).map_err(|_| {
@@ -1412,14 +1511,7 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
                 let payload = bytes
                     .get(raw_data_start..raw_payload_end)
                     .ok_or_else(|| "candidate archive PAX payload is truncated".to_owned())?;
-                metadata_bytes = metadata_bytes
-                    .checked_add(payload.len())
-                    .ok_or_else(|| "candidate archive metadata size overflow".to_owned())?;
-                if metadata_bytes > ARCHIVE_METADATA_LIMIT {
-                    return Err(format!(
-                        "candidate archive metadata exceeds {ARCHIVE_METADATA_LIMIT} bytes"
-                    ));
-                }
+                account_archive_metadata(&mut metadata_bytes, payload.len())?;
                 if pending.pax {
                     return Err("candidate archive repeats a local PAX header".to_owned());
                 }
@@ -1429,6 +1521,11 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
                 continue;
             }
             EntryType::GNULongName | EntryType::GNULongLink => {
+                if !recognized_extension {
+                    return Err(
+                        "candidate archive has an unrecognized GNU header encoding".to_owned()
+                    );
+                }
                 let raw_data_end = archive_data_end(raw_data_start, raw_size, bytes.len())?;
                 let raw_payload_end = raw_data_start
                     .checked_add(usize::try_from(raw_size).map_err(|_| {
@@ -1438,33 +1535,18 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
                 let payload = bytes
                     .get(raw_data_start..raw_payload_end)
                     .ok_or_else(|| "candidate archive GNU metadata is truncated".to_owned())?;
-                metadata_bytes = metadata_bytes
-                    .checked_add(payload.len())
-                    .ok_or_else(|| "candidate archive metadata size overflow".to_owned())?;
-                if metadata_bytes > ARCHIVE_METADATA_LIMIT {
-                    return Err(format!(
-                        "candidate archive metadata exceeds {ARCHIVE_METADATA_LIMIT} bytes"
-                    ));
-                }
+                account_archive_metadata(&mut metadata_bytes, payload.len())?;
                 let value = parse_gnu_metadata(payload)?;
                 if entry_type == EntryType::GNULongName {
-                    if pending.gnu_longname || pending.path.is_some() {
-                        return Err(
-                            "candidate archive repeats or conflicts with a path metadata header"
-                                .to_owned(),
-                        );
+                    if pending.gnu_path.is_some() {
+                        return Err("candidate archive repeats a GNU long-name header".to_owned());
                     }
-                    pending.gnu_longname = true;
-                    pending.path = Some(value);
+                    pending.gnu_path = Some(value);
                 } else {
-                    if pending.gnu_longlink || pending.linkpath.is_some() {
-                        return Err(
-                            "candidate archive repeats or conflicts with a link metadata header"
-                                .to_owned(),
-                        );
+                    if pending.gnu_linkpath.is_some() {
+                        return Err("candidate archive repeats a GNU long-link header".to_owned());
                     }
-                    pending.gnu_longlink = true;
-                    pending.linkpath = Some(value);
+                    pending.gnu_linkpath = Some(value);
                 }
                 offset = raw_data_end;
                 continue;
@@ -1479,13 +1561,18 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
         }
 
         let header_path = header.path_bytes();
-        let path = pending.path.as_deref().unwrap_or(header_path.as_ref());
+        let path = pending
+            .gnu_path
+            .as_deref()
+            .or(pending.path.as_deref())
+            .unwrap_or(header_path.as_ref());
         validate_archive_path_bytes(path, "path")?;
         if entry_type == EntryType::Symlink {
             let header_linkpath = header.link_name_bytes();
             let linkpath = pending
-                .linkpath
+                .gnu_linkpath
                 .as_deref()
+                .or(pending.linkpath.as_deref())
                 .or_else(|| header_linkpath.as_deref())
                 .ok_or_else(|| "candidate archive symlink has no target".to_owned())?;
             validate_archive_path_bytes(linkpath, "link target")?;
@@ -1498,21 +1585,47 @@ fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
             ));
         }
         let effective_end = archive_data_end(raw_data_start, effective_size, bytes.len())?;
-        content_bytes = content_bytes
-            .checked_add(usize::try_from(effective_size).map_err(|_| {
-                "candidate archive cumulative content exceeds platform capacity".to_owned()
-            })?)
-            .ok_or_else(|| "candidate archive cumulative content overflow".to_owned())?;
-        if content_bytes > content_limit {
-            return Err(format!(
-                "candidate archive cumulative content exceeds {content_limit} bytes"
-            ));
+        if entry_type == EntryType::Regular {
+            account_archive_content(&mut content_bytes, effective_size, content_limit)?;
         }
         pending = PendingArchiveMetadata::default();
         offset = effective_end;
     }
 
     Err("candidate archive is missing its terminator".to_owned())
+}
+
+#[cfg(unix)]
+fn account_archive_metadata(total: &mut usize, extension_size: usize) -> Result<(), String> {
+    if extension_size > ARCHIVE_METADATA_EXTENSION_LIMIT {
+        return Err(format!(
+            "candidate archive extension metadata exceeds {ARCHIVE_METADATA_EXTENSION_LIMIT} bytes"
+        ));
+    }
+    *total = total
+        .checked_add(extension_size)
+        .ok_or_else(|| "candidate archive metadata size overflow".to_owned())?;
+    if *total > ARCHIVE_METADATA_TOTAL_LIMIT {
+        return Err(format!(
+            "candidate archive metadata exceeds {ARCHIVE_METADATA_TOTAL_LIMIT} bytes"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn account_archive_content(total: &mut usize, size: u64, limit: usize) -> Result<usize, String> {
+    let size = usize::try_from(size)
+        .map_err(|_| "candidate archive content exceeds platform capacity".to_owned())?;
+    *total = total
+        .checked_add(size)
+        .ok_or_else(|| "candidate archive cumulative content overflow".to_owned())?;
+    if *total > limit {
+        return Err(format!(
+            "candidate archive cumulative content exceeds {limit} bytes"
+        ));
+    }
+    Ok(size)
 }
 
 #[cfg(unix)]
@@ -1615,8 +1728,18 @@ fn parse_pax_metadata(payload: &[u8], pending: &mut PendingArchiveMetadata) -> R
             .ok_or_else(|| "candidate archive PAX record has no key".to_owned())?;
         let key = &body[..equals];
         let value = &body[equals + 1..];
-        if key.is_empty() || key.contains(&0) || value.contains(&0) {
-            return Err("candidate archive PAX record contains an invalid NUL".to_owned());
+        if key.is_empty()
+            || key.contains(&0)
+            || value.contains(&0)
+            || key.contains(&b'\n')
+            || value.contains(&b'\n')
+        {
+            return Err(
+                "candidate archive PAX record contains an interior newline or NUL".to_owned(),
+            );
+        }
+        if std::str::from_utf8(key).is_err() || std::str::from_utf8(value).is_err() {
+            return Err("candidate archive PAX record is not UTF-8".to_owned());
         }
         if key.starts_with(b"GNU.sparse.") {
             return Err("candidate archive contains unsupported PAX sparse metadata".to_owned());
@@ -1693,6 +1816,12 @@ fn single_file_archive(bytes: &[u8], expected: &str, limit: usize) -> Result<Vec
             .map_err(|_| format!("candidate log size {size} exceeds platform capacity"))?;
         let mut content = Vec::with_capacity(capacity);
         entry
+            .take(
+                u64::try_from(capacity)
+                    .map_err(|_| format!("candidate log size {size} exceeds platform capacity"))?
+                    .checked_add(1)
+                    .ok_or_else(|| format!("candidate log size {size} overflows"))?,
+            )
             .read_to_end(&mut content)
             .map_err(|error| format!("read candidate log content: {error}"))?;
         if content.len() != capacity {
@@ -1725,6 +1854,7 @@ fn parse_render_archive(bytes: &[u8]) -> Result<BTreeMap<PathBuf, RenderEntry>, 
     preflight_archive(bytes, OUTPUT_CONTENT_LIMIT)?;
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let mut entries = BTreeMap::new();
+    let mut content_bytes = 0usize;
     let parsed = archive
         .entries()
         .map_err(|error| format!("read candidate render archive: {error}"))?;
@@ -1737,6 +1867,7 @@ fn parse_render_archive(bytes: &[u8]) -> Result<BTreeMap<PathBuf, RenderEntry>, 
         let Some(path) = safe_archive_path(&raw_path)? else {
             continue;
         };
+        let _ = safe_archive_path(&path)?;
         let kind = entry.header().entry_type();
         let record = if kind.is_dir() {
             RenderEntry::Directory
@@ -1752,14 +1883,23 @@ fn parse_render_archive(bytes: &[u8]) -> Result<BTreeMap<PathBuf, RenderEntry>, 
                     path.display()
                 ));
             }
-            let capacity = usize::try_from(size).map_err(|_| {
-                format!(
-                    "candidate file {} exceeds platform capacity",
-                    path.display()
-                )
-            })?;
+            let capacity = account_archive_content(&mut content_bytes, size, OUTPUT_CONTENT_LIMIT)
+                .map_err(|error| format!("candidate file {}: {error}", path.display()))?;
             let mut contents = Vec::with_capacity(capacity);
             entry
+                .take(
+                    u64::try_from(capacity)
+                        .map_err(|_| {
+                            format!(
+                                "candidate file {} exceeds platform capacity",
+                                path.display()
+                            )
+                        })?
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            format!("candidate file {} size overflows", path.display())
+                        })?,
+                )
                 .read_to_end(&mut contents)
                 .map_err(|error| format!("read candidate file {}: {error}", path.display()))?;
             if contents.len() != capacity {
@@ -1779,6 +1919,7 @@ fn parse_render_archive(bytes: &[u8]) -> Result<BTreeMap<PathBuf, RenderEntry>, 
                 .map_err(|error| format!("read candidate symlink target: {error}"))?
                 .ok_or_else(|| "candidate output has a symlink without a target".to_owned())?
                 .into_owned();
+            validate_symlink_target(&path, &target)?;
             RenderEntry::Symlink { target }
         } else {
             return Err(format!(
@@ -1799,6 +1940,7 @@ fn parse_render_archive(bytes: &[u8]) -> Result<BTreeMap<PathBuf, RenderEntry>, 
 #[cfg(unix)]
 fn validate_render_entries(entries: &BTreeMap<PathBuf, RenderEntry>) -> Result<(), String> {
     for path in entries.keys() {
+        let _ = safe_archive_path(path)?;
         let mut parent = path.parent();
         while let Some(directory) = parent {
             if directory.as_os_str().is_empty() {
@@ -1814,6 +1956,9 @@ fn validate_render_entries(entries: &BTreeMap<PathBuf, RenderEntry>) -> Result<(
                 ));
             }
             parent = directory.parent();
+        }
+        if let Some(RenderEntry::Symlink { target }) = entries.get(path) {
+            validate_symlink_target(path, target)?;
         }
     }
     Ok(())
@@ -1901,6 +2046,23 @@ mod tests {
         *header.as_bytes()
     }
 
+    fn header_with_link(
+        name: &str,
+        kind: EntryType,
+        size: u64,
+        link: &str,
+    ) -> [u8; ARCHIVE_BLOCK_SIZE] {
+        let mut tar_header = TarHeader::new_old();
+        tar_header
+            .as_mut_bytes()
+            .copy_from_slice(&header(name, kind, size));
+        tar_header
+            .set_link_name(link)
+            .unwrap_or_else(|error| panic!("set test archive link {link}: {error}"));
+        tar_header.set_cksum();
+        *tar_header.as_bytes()
+    }
+
     fn append_entry(archive: &mut Vec<u8>, header: [u8; ARCHIVE_BLOCK_SIZE], payload: &[u8]) {
         archive.extend_from_slice(&header);
         archive.extend_from_slice(payload);
@@ -1971,6 +2133,182 @@ mod tests {
     }
 
     #[test]
+    fn archive_preflight_hides_headers_inside_pax_effective_payload() {
+        let mut hidden = vec![0; ARCHIVE_BLOCK_SIZE * 2];
+        let hidden_header = header_with_link("hidden", EntryType::Symlink, 0, "/outside");
+        hidden[ARCHIVE_BLOCK_SIZE..ARCHIVE_BLOCK_SIZE * 2].copy_from_slice(&hidden_header);
+
+        let mut archive = Vec::new();
+        append_pax(&mut archive, &[("size", "1024")]);
+        append_entry(
+            &mut archive,
+            header("visible", EntryType::Regular, 1),
+            &hidden,
+        );
+        finish_archive(&mut archive);
+
+        let entries = parse_render_archive(&archive).expect("hidden header remains payload");
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains_key(Path::new("visible")));
+    }
+
+    #[test]
+    fn archive_preflight_rejects_truncation_and_strict_pax_records() {
+        let mut truncated = Vec::new();
+        append_entry(
+            &mut truncated,
+            header(
+                "truncated",
+                EntryType::Regular,
+                ARCHIVE_BLOCK_SIZE as u64 * 2,
+            ),
+            &[b'x'; ARCHIVE_BLOCK_SIZE],
+        );
+        finish_archive(&mut truncated);
+        assert!(preflight_archive(&truncated, OUTPUT_CONTENT_LIMIT)
+            .expect_err("truncated payload")
+            .contains("terminator"));
+
+        let mut interior_newline = Vec::new();
+        append_pax(&mut interior_newline, &[("path", "has\nnewline")]);
+        append_entry(
+            &mut interior_newline,
+            header("entry", EntryType::Regular, 0),
+            &[],
+        );
+        finish_archive(&mut interior_newline);
+        assert!(preflight_archive(&interior_newline, OUTPUT_CONTENT_LIMIT)
+            .expect_err("interior newline")
+            .contains("newline"));
+
+        let mut duplicate = Vec::new();
+        append_pax(&mut duplicate, &[("size", "1"), ("size", "1")]);
+        append_entry(&mut duplicate, header("entry", EntryType::Regular, 1), b"x");
+        finish_archive(&mut duplicate);
+        assert!(preflight_archive(&duplicate, OUTPUT_CONTENT_LIMIT)
+            .expect_err("duplicate PAX size")
+            .contains("repeats"));
+
+        let mut trailing = Vec::new();
+        append_entry(
+            &mut trailing,
+            header("@LongLink", EntryType::GNULongName, 8),
+            b"name\0tail",
+        );
+        finish_archive(&mut trailing);
+        assert!(preflight_archive(&trailing, OUTPUT_CONTENT_LIMIT)
+            .expect_err("GNU trailing data")
+            .contains("trailing"));
+    }
+
+    #[test]
+    fn archive_metadata_budgets_have_per_extension_and_total_caps() {
+        let mut total = 0;
+        account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT)
+            .expect("per-extension boundary");
+        assert!(
+            account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT + 1)
+                .expect_err("per-extension cap")
+                .contains("extension metadata")
+        );
+
+        let mut total = 0;
+        for _ in 0..(ARCHIVE_METADATA_TOTAL_LIMIT / ARCHIVE_METADATA_EXTENSION_LIMIT) {
+            account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT)
+                .expect("aggregate boundary");
+        }
+        assert_eq!(total, ARCHIVE_METADATA_TOTAL_LIMIT);
+        assert!(account_archive_metadata(&mut total, 1)
+            .expect_err("aggregate cap")
+            .contains("metadata exceeds"));
+    }
+
+    #[test]
+    fn archive_preflight_aligns_gnu_names_over_pax_names() {
+        let long_name = "gnu-name.txt";
+        let long_link = "gnu-target.txt";
+        let mut archive = Vec::new();
+        append_pax(
+            &mut archive,
+            &[("path", "pax-name.txt"), ("linkpath", "pax-target.txt")],
+        );
+        let mut gnu_name = long_name.as_bytes().to_vec();
+        gnu_name.push(0);
+        append_entry(
+            &mut archive,
+            header("@LongLink", EntryType::GNULongName, gnu_name.len() as u64),
+            &gnu_name,
+        );
+        let mut gnu_link = long_link.as_bytes().to_vec();
+        gnu_link.push(0);
+        append_entry(
+            &mut archive,
+            header("@LongLink", EntryType::GNULongLink, gnu_link.len() as u64),
+            &gnu_link,
+        );
+        append_entry(
+            &mut archive,
+            header_with_link("short", EntryType::Symlink, 0, "short-target"),
+            &[],
+        );
+        finish_archive(&mut archive);
+
+        let entries = parse_render_archive(&archive).expect("GNU metadata combination");
+        let Some(RenderEntry::Symlink { target }) = entries.get(Path::new(long_name)) else {
+            panic!("expected GNU long-name symlink")
+        };
+        assert_eq!(target, Path::new(long_link));
+    }
+
+    #[test]
+    fn render_validation_rejects_symlink_escape_children_and_deep_paths() {
+        let mut escape = BTreeMap::new();
+        escape.insert(
+            PathBuf::from("link"),
+            RenderEntry::Symlink {
+                target: PathBuf::from("../outside"),
+            },
+        );
+        assert!(validate_render_entries(&escape)
+            .expect_err("symlink escape")
+            .contains("escapes"));
+
+        let mut child = BTreeMap::new();
+        child.insert(
+            PathBuf::from("link"),
+            RenderEntry::Symlink {
+                target: PathBuf::from("inside"),
+            },
+        );
+        child.insert(
+            PathBuf::from("link/file"),
+            RenderEntry::File {
+                executable: false,
+                bytes: Vec::new(),
+            },
+        );
+        assert!(validate_render_entries(&child)
+            .expect_err("child through symlink")
+            .contains("non-directory"));
+
+        let deep = (0..=ARCHIVE_PATH_COMPONENT_LIMIT)
+            .map(|index| format!("component-{index}"))
+            .collect::<PathBuf>();
+        assert!(safe_archive_path(&deep)
+            .expect_err("deep archive path")
+            .contains("components"));
+
+        let mut safe = BTreeMap::new();
+        safe.insert(
+            PathBuf::from("dir/link"),
+            RenderEntry::Symlink {
+                target: PathBuf::from("../target"),
+            },
+        );
+        assert!(validate_render_entries(&safe).is_ok());
+    }
+
+    #[test]
     fn archive_preflight_rejects_pax_size_over_limit() {
         let mut archive = Vec::new();
         append_pax(
@@ -1985,7 +2323,7 @@ mod tests {
 
     #[test]
     fn archive_preflight_rejects_oversized_metadata_and_paths() {
-        let oversized = "x".repeat(ARCHIVE_METADATA_LIMIT + 1);
+        let oversized = "x".repeat(ARCHIVE_METADATA_EXTENSION_LIMIT + 1);
         let mut metadata_archive = Vec::new();
         append_entry(
             &mut metadata_archive,
