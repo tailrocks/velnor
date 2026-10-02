@@ -7557,10 +7557,10 @@ fn generated_files_with_surface(
     for (path, content) in builtin_generated_actions() {
         files.entry(path).or_insert(content);
     }
-    if config.host_cache.has_overrides() {
-        if let Some((path, content)) = config::render_cache_artifact(&config.host_cache) {
-            files.insert(path, content);
-        }
+    if config.host_cache.has_overrides()
+        && let Some((path, content)) = config::render_cache_artifact(&config.host_cache)
+    {
+        files.insert(path, content);
     }
     // The agent-instruction file is unconditional: every render owns these
     // exact bytes, even for minimal repositories. A `static_files` row for a
@@ -8380,7 +8380,7 @@ pub(crate) fn write_generated_with_static_sources_with_options(
     )
 }
 
-#[cfg(any(feature = "tui", test))]
+#[cfg(test)]
 fn plan_generated_write(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -8390,7 +8390,7 @@ fn plan_generated_write(
     plan_generated_write_with_options(root, files, symlinks, inputs, false)
 }
 
-#[cfg(any(feature = "tui", test))]
+#[cfg(test)]
 fn plan_generated_write_with_options(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -8750,7 +8750,7 @@ pub(crate) fn is_full_revision(value: &str) -> bool {
     clippy::too_many_arguments,
     reason = "the render passes files, links, and inputs as one explicit write contract"
 )]
-#[cfg(any(feature = "tui", test))]
+#[cfg(test)]
 fn apply_generated_write_plan(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
