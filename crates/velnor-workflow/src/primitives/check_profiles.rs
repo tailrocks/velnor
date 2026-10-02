@@ -29,7 +29,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{lanes_dispatch_inputs, lanes_runs_on, Args, Primitive, RenderCtx, Rendered};
+use super::{
+    lanes_dispatch_inputs, lanes_runs_on, Args, LaneAdmission, Primitive, RenderCtx, Rendered,
+    WorkflowIr,
+};
 use crate::{
     velnor_runner, velnor_runner_group, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError,
     ProjectConfig, RunnerMode, GENERATED_HEADER,
@@ -578,6 +581,14 @@ fn artifact_verifier_job_id(profile_id: &str) -> String {
     format!("verify-{profile_id}-artifacts")
 }
 
+fn profile_admission_expression(
+    config: &ProjectConfig,
+    profile: &CheckProfileSpec,
+) -> Option<String> {
+    (profile.runner == "velnor")
+        .then(|| WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor))
+}
+
 fn render_profile_job_with_selected_profiles(
     output: &mut String,
     config: &ProjectConfig,
@@ -604,6 +615,9 @@ fn render_profile_job_with_selected_profiles(
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(output, "    needs: [{needs}]");
+    }
+    if let Some(admission) = profile_admission_expression(config, profile) {
+        let _ = writeln!(output, "    if: ${{{{ ({admission}) }}}}");
     }
     if profile.artifacts_required {
         let _ = writeln!(
@@ -670,11 +684,12 @@ fn render_artifact_verifier_job(
         yaml_scalar(&profile.id)
     );
     let _ = writeln!(output, "    needs: [{}]", profile.id);
-    let _ = writeln!(
-        output,
-        "    if: ${{{{ needs.{}.result == 'success' }}}}",
-        profile.id
+    let result_condition = format!("needs.{}.result == 'success'", profile.id);
+    let condition = profile_admission_expression(config, profile).map_or_else(
+        || result_condition.clone(),
+        |admission| format!("({result_condition}) && ({admission})"),
     );
+    let _ = writeln!(output, "    if: ${{{{ {condition} }}}}");
     let runs_on = match (dispatch_runs_on, profile.runner.as_str()) {
         (Some(conditional), "github" | "velnor") => conditional.to_owned(),
         _ => profile_runs_on(config, profile)?,
@@ -1158,6 +1173,7 @@ mod tests {
     #[test]
     fn required_artifacts_verify_the_uploaded_id_before_consumers() {
         let mut strict = profile("strict");
+        strict.runner = "velnor".to_owned();
         strict.artifacts = vec![
             "target/ci-evidence/rollup.json".to_owned(),
             "target/ci-evidence/rollup.md".to_owned(),
@@ -1166,12 +1182,18 @@ mod tests {
         let mut consumer = profile("consumer");
         consumer.needs = vec!["strict".to_owned()];
         let config = profile_config(vec![strict, consumer]);
+        let admission =
+            WorkflowIr::from_config(&config).lane_admission_expression(LaneAdmission::Velnor);
         let map = args_for("");
         let selected = must(
             select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
             "select producer and consumer",
         );
         let workflow = render(&config, None, &selected);
+        assert!(
+            workflow.contains(&format!("if: ${{{{ ({admission}) }}}}")),
+            "the local artifact producer uses canonical lane admission: {workflow}"
+        );
         assert!(
             workflow.contains(
                 "outputs:\n      artifact_id: ${{ steps.upload_artifact.outputs.artifact-id }}"
@@ -1197,6 +1219,12 @@ mod tests {
                 "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n"
             ),
             "the verifier is a separate dependent job: {workflow}"
+        );
+        assert!(
+            workflow.contains(&format!(
+                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && ({admission}) }}}}\n"
+            )),
+            "the local verifier combines producer success with canonical lane admission: {workflow}"
         );
         assert!(
             workflow.contains("artifact-ids: ${{ needs.strict.outputs.artifact_id }}"),

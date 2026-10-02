@@ -3320,15 +3320,19 @@ fn valid_check_profile_artifact_path(path: &str) -> bool {
 }
 
 /// Whether two strict required-artifact paths would address the same staged
-/// file or one path's parent directory. Staging a file and a descendant under
-/// that file cannot produce a deterministic tree, so reject both forms.
+/// file or one path's parent directory. Compare ASCII case-insensitively so
+/// declarations cannot alias on case-insensitive filesystems. Staging a file
+/// and a descendant under that file cannot produce a deterministic tree, so
+/// reject both forms.
 fn check_profile_artifact_paths_collide(left: &str, right: &str) -> bool {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
     left == right
         || right
-            .strip_prefix(left)
+            .strip_prefix(&left)
             .is_some_and(|suffix| suffix.starts_with('/'))
         || left
-            .strip_prefix(right)
+            .strip_prefix(&right)
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
@@ -6711,6 +6715,8 @@ mod tests {
         for artifacts in [
             "target/evidence.json\", \"target/evidence.json",
             "target/evidence\", \"target/evidence/rollup.json",
+            "target/Evidence.json\", \"target/evidence.json",
+            "target/evidence\", \"TARGET/EVIDENCE/rollup.json",
         ] {
             let error = must_fail(
                 config_for(&check_profile_config(&format!(
