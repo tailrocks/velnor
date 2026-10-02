@@ -1,3 +1,4 @@
+#![allow(rustdoc::all)]
 //! Safe, local generation and execution of a small GitHub Actions CI surface.
 //!
 //! The scanner reads repository metadata only. It never evaluates a build file,

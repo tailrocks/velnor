@@ -1,4 +1,5 @@
 #![allow(async_fn_in_trait)]
+#![allow(rustdoc::all)]
 //! Velnor self-hosted GitHub Actions runner.
 //!
 //! This crate is the runtime library behind the `velnorctl` command center:
