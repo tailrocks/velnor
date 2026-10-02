@@ -1841,6 +1841,8 @@ fn parse_previous_attempt_url(url: &str, repository: &str, run_id: u64) -> Resul
     let parsed = Url::parse(url).context("parse previous workflow attempt URL")?;
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("api.github.com")
+        || has_explicit_port(url)
+        || parsed.port().is_some()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
         || parsed.username() != ""
@@ -2019,8 +2021,8 @@ fn bind_actions_checks_to_executions(
             || required_u32(&run_value, &["run_attempt"])? != execution.run_attempt
             || required_sha(&run_value, &["head_sha"])? != check.source_sha
             || required_string(&run_value, &["event"])? != execution.event
-            || required_string(&run_value, &["status"])? != check.status
-            || optional_string(&run_value, &["conclusion"]) != check.conclusion
+            || required_string(&run_value, &["status"])? != execution.status
+            || optional_string(&run_value, &["conclusion"]) != execution.conclusion
         {
             bail!(
                 "workflow_run detail does not exactly bind Actions check {}",
@@ -2164,6 +2166,7 @@ fn exact_github_api_path(value: &str, expected_path: &str) -> bool {
     };
     url.scheme() == "https"
         && url.host_str() == Some("api.github.com")
+        && !has_explicit_port(value)
         && url.port().is_none()
         && url.username().is_empty()
         && url.password().is_none()
@@ -2739,6 +2742,8 @@ fn validate_workflow_content(
         && query.next().is_none();
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("api.github.com")
+        || has_explicit_port(&content_url)
+        || parsed.port().is_some()
         || parsed.username() != ""
         || parsed.password().is_some()
         || parsed.fragment().is_some()
@@ -2803,6 +2808,8 @@ fn parse_safe_url(value: &str, host: &str) -> Result<Url> {
     let parsed = Url::parse(value).context("parse GitHub URL")?;
     if parsed.scheme() != "https"
         || parsed.host_str() != Some(host)
+        || has_explicit_port(value)
+        || parsed.port().is_some()
         || parsed.username() != ""
         || parsed.password().is_some()
         || parsed.query().is_some()
@@ -2811,6 +2818,21 @@ fn parse_safe_url(value: &str, host: &str) -> Result<Url> {
         bail!("GitHub URL has an unsafe origin or components");
     }
     Ok(parsed)
+}
+
+fn has_explicit_port(value: &str) -> bool {
+    let Some(authority) = value
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+    else {
+        return false;
+    };
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+    host_port
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn validate_check_run_url(value: &str, repository: &str, check_run_id: u64) -> Result<()> {
@@ -4211,6 +4233,13 @@ jobs:
             1,
         )
         .is_err());
+        assert!(validate_workflow_attempt_url(
+            "https://github.com:443/tailrocks/velnor/actions/runs/7/attempts/1",
+            "tailrocks/velnor",
+            7,
+            1,
+        )
+        .is_err());
         assert!(validate_job_url(
             "https://github.com/other/repo/runs/9",
             "tailrocks/velnor",
@@ -4243,6 +4272,16 @@ jobs:
             7,
         )
         .is_err());
+        assert!(parse_previous_attempt_url(
+            "https://api.github.com:443/repos/tailrocks/velnor/actions/runs/7/attempts/1",
+            "tailrocks/velnor",
+            7,
+        )
+        .is_err());
+        assert!(!exact_github_api_path(
+            "https://api.github.com:443/repos/tailrocks/velnor/actions/runs/7",
+            "/repos/tailrocks/velnor/actions/runs/7",
+        ));
         let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut content = serde_json::json!({
             "path": ".github/workflows/ci.yml",
@@ -4256,6 +4295,16 @@ jobs:
             source_sha
         )
         .is_ok());
+        content["url"] = serde_json::json!(
+            "https://api.github.com:443/repos/tailrocks/velnor/contents/.github/workflows/ci.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(validate_workflow_content(
+            &content,
+            "tailrocks/velnor",
+            ".github/workflows/ci.yml",
+            source_sha
+        )
+        .is_err());
         content["url"] = serde_json::json!(
             "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&token=secret"
         );
@@ -4721,6 +4770,47 @@ jobs:
         ledger
             .requests
             .sort_by(|left, right| left.request_id.cmp(&right.request_id));
+    }
+
+    #[test]
+    fn actions_checks_bind_aggregate_run_status_to_execution() {
+        let (mut check, mut execution, requests, mut raw_objects) = actions_binding_fixture();
+        execution.conclusion = Some("failure".to_owned());
+        let raw = raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == "raw-run")
+            .expect("run raw");
+        let mut value = raw_json_value(raw).expect("run JSON");
+        value["status"] = serde_json::json!("completed");
+        value["conclusion"] = serde_json::json!("failure");
+        let bytes = serde_json::to_vec(&value).expect("run JSON bytes");
+        let digest = sha256_digest(&bytes);
+        raw.bytes_base64 = BASE64.encode(&bytes);
+        raw.sha256 = digest.clone();
+        raw.byte_length = bytes.len() as u64;
+        raw.original_sha256 = digest.clone();
+        raw.original_byte_length = bytes.len() as u64;
+        let storage_ref = format!(
+            "sha256://{}",
+            digest.strip_prefix("sha256:").expect("digest prefix")
+        );
+        raw.storage_ref = storage_ref.clone();
+        raw.original_storage_ref = storage_ref;
+        let ledger = Ledger {
+            requests,
+            raw_objects,
+            ..Ledger::default()
+        };
+
+        // The workflow run is aggregate evidence. Its conclusion may differ
+        // from the successful individual check while identity remains bound.
+        bind_actions_checks_to_executions(
+            std::slice::from_mut(&mut check),
+            std::slice::from_ref(&execution),
+            &ledger,
+            "tailrocks/velnor",
+        )
+        .expect("aggregate run must bind to execution");
     }
 
     #[test]

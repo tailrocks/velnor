@@ -5267,6 +5267,104 @@ fn g0_capture_raw_json(
     g0_select_raw_member(value, response_schema, member_id, request)
 }
 
+/// Select one check-run from every captured page of a check-suite runs
+/// response.  A suite can span multiple pages; binding against one page would
+/// either reject a valid check or let an incomplete stream stand in for the
+/// suite's complete evidence.
+fn g0_capture_paginated_raw_json(
+    raw_refs: &[String],
+    object_kind: &str,
+    member_id: u64,
+    endpoints: &[String],
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+) -> Option<Value> {
+    let candidates = raw_objects
+        .iter()
+        .filter(|raw| {
+            raw.object_kind == object_kind && raw_refs.iter().any(|raw_id| raw_id == &raw.raw_id)
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut pages = Vec::with_capacity(candidates.len());
+    for raw in candidates {
+        let request = requests.iter().find(|request| {
+            request.request_id == raw.request_id && request.response_raw_ref == raw.raw_id
+        })?;
+        if request.api != G0ApiKind::Rest
+            || request.method != "GET"
+            || request.http_status != 200
+            || !request.complete
+            || !matches!(request.state, G0RequestState::Complete)
+            || !endpoints
+                .iter()
+                .any(|endpoint| g0_endpoint_path_matches(&request.endpoint_or_operation, endpoint))
+        {
+            return None;
+        }
+        let response_contract =
+            g0_endpoint_contract(object_kind, &request.endpoint_or_operation).ok()?;
+        if response_contract.response_schema != G0RawResponseSchema::CheckSuiteRunsPage {
+            return None;
+        }
+        let query = BASE64.decode(&request.query_base64).ok()?;
+        if !g0_response_query_contract(request, &query, response_contract) {
+            return None;
+        }
+        let bytes = BASE64.decode(&raw.bytes_base64).ok()?;
+        if raw.byte_length != bytes.len() as u64
+            || digest_bytes(&bytes) != raw.sha256
+            || !g0_storage_ref(&raw.storage_ref, &raw.sha256)
+        {
+            return None;
+        }
+        let value = parse_strict_json::<Value>(&bytes).ok()?;
+        let (total_count, members) = g0_page_members(&value, response_contract.response_schema)?;
+        if members.len() as u32 != request.page.items_returned {
+            return None;
+        }
+        pages.push((
+            request.page.number,
+            request.page.has_next_page,
+            total_count,
+            members.to_vec(),
+        ));
+    }
+
+    pages.sort_by_key(|(page_number, _, _, _)| *page_number);
+    let expected_total = pages.first().map(|(_, _, total, _)| *total)?;
+    let mut observed_items = 0u64;
+    let mut member_ids = BTreeSet::new();
+    let mut selected = None;
+    let mut selected_count = 0u32;
+    for (index, (page_number, has_next_page, total_count, members)) in pages.iter().enumerate() {
+        if *page_number != u32::try_from(index + 1).ok()?
+            || *total_count != expected_total
+            || (*has_next_page != (index + 1 < pages.len()))
+        {
+            return None;
+        }
+        observed_items = observed_items.saturating_add(members.len() as u64);
+        for member in members {
+            let id = g0_json_u64(member, &["id"])?;
+            if !member_ids.insert(id) {
+                return None;
+            }
+            if id == member_id {
+                selected_count = selected_count.saturating_add(1);
+                selected = Some(member.clone());
+            }
+        }
+    }
+    if observed_items != expected_total || selected_count != 1 {
+        return None;
+    }
+    selected
+}
+
 /// Select one object from the exact GitHub page envelope retained by the
 /// collector.  Check-runs and jobs are paginated envelopes in the REST API;
 /// treating the envelope itself as a singular object silently loses every
@@ -5362,7 +5460,7 @@ fn g0_check_raw_evidence_valid(
         raw_objects,
     )
     .or_else(|| {
-        g0_capture_raw_json(
+        g0_capture_paginated_raw_json(
             &check.raw_object_refs,
             "check_suite_runs",
             check.check_run_id,
@@ -5410,8 +5508,6 @@ fn g0_check_raw_evidence_valid(
             && check_suite.as_ref().is_some_and(|value| {
                 g0_json_u64(value, &["id"]) == Some(check.check_suite_id)
                     && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
-                    && g0_json_string(value, &["status"]) == Some(check.status.as_str())
-                    && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
                     && g0_json_u64(value, &["app", "id"]) == Some(app_id)
                     && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
             })
@@ -5467,8 +5563,6 @@ fn g0_check_raw_evidence_valid(
                     && g0_json_string(value, &["head_sha"]) == Some(job_source_sha.as_str())
                     && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
                     && g0_json_string(value, &["event"]) == Some(check.event.as_str())
-                    && g0_json_string(value, &["status"]) == Some(check.status.as_str())
-                    && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
             }) && job.as_ref().is_some_and(|value| {
                 g0_json_u64(value, &["id"]) == Some(*job_id)
                     && g0_json_u64(value, &["run_id"]) == Some(*job_run_id)
@@ -13961,7 +14055,11 @@ mod tests {
             status: "completed".to_owned(),
             conclusion: "success".to_owned(),
             html_url: "https://github.com/tailrocks/velnor/runs/7".to_owned(),
-            raw_object_refs: vec!["suite-runs-raw".to_owned(), "suite-raw".to_owned()],
+            raw_object_refs: vec![
+                "suite-runs-page-1-raw".to_owned(),
+                "suite-runs-page-2-raw".to_owned(),
+                "suite-raw".to_owned(),
+            ],
         };
         let suite_endpoint = format!("/repos/tailrocks/velnor/commits/{source_sha}/check-suites");
         let suite_request = {
@@ -13980,7 +14078,7 @@ mod tests {
                     "id": 42,
                     "head_sha": source_sha.clone(),
                     "status": "completed",
-                    "conclusion": "success",
+                    "conclusion": "failure",
                     "app": {"id": 123, "slug": "dco-2"}
                 }]
             }))
@@ -13989,13 +14087,43 @@ mod tests {
         );
         let runs_endpoint = "/repos/tailrocks/velnor/check-suites/42/check-runs";
         let runs_request = {
-            let mut request = captured_page_request(runs_endpoint, "filter=all&per_page=100", 1);
+            let mut request =
+                captured_page_request(runs_endpoint, "filter=all&per_page=100&page=1", 1);
             request.request_id = "suite-runs-request".to_owned();
-            request.response_raw_ref = "suite-runs-raw".to_owned();
+            request.response_raw_ref = "suite-runs-page-1-raw".to_owned();
+            request.page.has_next_page = true;
             request
         };
         let runs_body = serde_json::to_vec(&json!({
-            "total_count": 1,
+            "total_count": 2,
+            "check_runs": [{
+                "id": 6,
+                "name": "DCO",
+                "head_sha": source_sha.clone(),
+                "status": "completed",
+                "conclusion": "success",
+                "html_url": "https://github.com/tailrocks/velnor/runs/6",
+                "check_suite": {"id": 42},
+                "app": {"id": 123, "slug": "dco-2"}
+            }]
+        }))
+        .expect("check suite runs JSON");
+        let runs_raw = captured_raw_reference(
+            "suite-runs-page-1-raw",
+            "suite-runs-request",
+            "check_suite_runs",
+            &runs_body,
+        );
+        let runs_page_2_request = {
+            let mut request =
+                captured_page_request(runs_endpoint, "filter=all&per_page=100&page=2", 1);
+            request.request_id = "suite-runs-page-2-request".to_owned();
+            request.response_raw_ref = "suite-runs-page-2-raw".to_owned();
+            request.page.number = 2;
+            request
+        };
+        let runs_page_2_body = serde_json::to_vec(&json!({
+            "total_count": 2,
             "check_runs": [{
                 "id": 7,
                 "name": "DCO",
@@ -14007,18 +14135,18 @@ mod tests {
                 "app": {"id": 123, "slug": "dco-2"}
             }]
         }))
-        .expect("check suite runs JSON");
-        let runs_raw = captured_raw_reference(
-            "suite-runs-raw",
-            "suite-runs-request",
+        .expect("check suite runs page 2 JSON");
+        let runs_page_2_raw = captured_raw_reference(
+            "suite-runs-page-2-raw",
+            "suite-runs-page-2-request",
             "check_suite_runs",
-            &runs_body,
+            &runs_page_2_body,
         );
         assert!(g0_check_raw_evidence_valid(
             "tailrocks/velnor",
             &check,
-            &[suite_request, runs_request],
-            &[suite_raw, runs_raw],
+            &[suite_request, runs_request, runs_page_2_request],
+            &[suite_raw, runs_raw, runs_page_2_raw],
         ));
     }
 
@@ -14074,6 +14202,41 @@ mod tests {
         assert!(!g0_check_raw_evidence_valid(
             &repository.repository,
             &mismatched,
+            &collector.requests,
+            &raw_objects,
+        ));
+    }
+
+    #[test]
+    fn actions_raw_workflow_run_conclusion_is_aggregate_not_job_conclusion() {
+        let (_, _, inventory) = complete_g0_fixture();
+        let collector = &inventory.collector_snapshot;
+        let repository = &collector.repositories[0];
+        let check = repository
+            .main_checks
+            .first()
+            .expect("main Actions check fixture");
+        let mut raw_objects = collector.raw_objects.clone();
+        let index = raw_objects
+            .iter()
+            .position(|raw| raw.object_kind == "workflow_run")
+            .expect("Actions workflow_run fixture");
+        let raw = raw_objects[index].clone();
+        let bytes = BASE64
+            .decode(&raw.bytes_base64)
+            .expect("Actions workflow_run JSON bytes");
+        let mut value = parse_strict_json::<Value>(&bytes).expect("Actions workflow_run JSON");
+        value["status"] = json!("completed");
+        value["conclusion"] = json!("failure");
+        let bytes = canonical_json(&value).into_bytes();
+        raw_objects[index] =
+            captured_raw_reference(&raw.raw_id, &raw.request_id, &raw.object_kind, &bytes);
+
+        // The aggregate workflow run may fail while an individual job/check
+        // remains successful. Its identity and source binding still hold.
+        assert!(g0_check_raw_evidence_valid(
+            &repository.repository,
+            check,
             &collector.requests,
             &raw_objects,
         ));
