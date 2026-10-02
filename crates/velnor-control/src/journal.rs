@@ -4292,9 +4292,7 @@ fn decode_checked_event(
         .with_remediation("event generation is negative")
     })?;
     let expected_generation = event_generation(&event).0;
-    if kind != event_kind(&event)
-        || (expected_generation != 0 && stored_generation != expected_generation)
-    {
+    if kind != event_kind(&event) || stored_generation != expected_generation {
         return Err(StoreError::new(
             velnor_model::ExitClass::Conflict,
             "journal.event.metadata.mismatch",
@@ -5824,7 +5822,7 @@ mod tests {
         let fixture_payload = r#"{"type":"control_live"}"#;
         seed.execute(
             "INSERT INTO events (generation, kind, payload, checksum)
-             VALUES (1, 'control_live', ?1, ?2)",
+             VALUES (0, 'control_live', ?1, ?2)",
             params![fixture_payload, sha256_hex(fixture_payload.as_bytes())],
         )
         .unwrap();
@@ -7951,6 +7949,33 @@ mod tests {
         drop_replay_baseline_fence(&conn);
         conn.execute("UPDATE events SET kind = 'dependency' WHERE id = 1", [])
             .unwrap();
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_zero_generation_metadata_tamper() {
+        let (dir, mut journal) = open_tmp("replay-zero-generation-metadata");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("UPDATE events SET generation = 1 WHERE id = 1", [])
+            .unwrap();
+        // The payload and its checksum are unchanged. Only the denormalized
+        // database generation was tampered with.
+        let (payload, checksum): (String, String) = conn
+            .query_row(
+                "SELECT payload, checksum FROM events WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(sha256_hex(payload.as_bytes()), checksum);
         drop(conn);
 
         let error = Journal::open(dir.join("journal.db")).unwrap_err();
