@@ -320,6 +320,7 @@ fn prepare_live_set(
     if runner_policy_updated {
         set.runner_setting = pinned_runner_setting();
     }
+    bind_expected_group_identity(&mut set, expected_group_id, expected_group_name);
 
     Ok((set, labels_updated, labels_updated || runner_policy_updated))
 }
@@ -341,7 +342,7 @@ async fn reconcile_live_set(
         expected.set_id,
         expected.set_name,
     )?;
-    let set = if needs_update {
+    let mut set = if needs_update {
         client
             .update_runner_scale_set(prepared.id, &prepared)
             .await
@@ -358,7 +359,20 @@ async fn reconcile_live_set(
         expected.set_name,
     )
     .with_context(|| format!("{operation}: server returned an invalid scale-set identity"))?;
+    bind_expected_group_identity(&mut set, expected.group_id, expected.group_name);
     Ok((set, labels_updated))
+}
+
+/// Keep request-resolved identity when Actions omits the optional response
+/// echoes. Clearing the name for an ID-pinned plan prevents a stale response
+/// echo from becoming an unintended rename request.
+fn bind_expected_group_identity(
+    set: &mut RunnerScaleSet,
+    expected_group_id: i32,
+    expected_group_name: &str,
+) {
+    set.runner_group_id = expected_group_id;
+    set.runner_group_name = expected_group_name.to_owned();
 }
 
 fn validate_live_identity(
@@ -386,7 +400,7 @@ fn validate_live_identity(
     if set.name.is_empty() {
         anyhow::bail!("scale-set registration returned an empty set name");
     }
-    if set.runner_group_id != expected_group_id {
+    if set.runner_group_id != 0 && set.runner_group_id != expected_group_id {
         anyhow::bail!(
             "scale set {} lives in runner group {} ({:?}), not the configured group {} ({:?}): refusing to move it",
             set.id,
@@ -396,10 +410,13 @@ fn validate_live_identity(
             expected_group_name,
         );
     }
-    // A pinned group ID remains authoritative when this response omits the
-    // optional group name. Name-based resolution still binds the returned
-    // set to the exact non-empty name below.
-    if !expected_group_name.is_empty() && set.runner_group_name != expected_group_name {
+    // Both group fields are omitempty in actions/scaleset. An omitted field
+    // decodes to its zero value, so validate identity only when the response
+    // actually echoes it. The request-side group binding remains authoritative.
+    if !set.runner_group_name.is_empty()
+        && !expected_group_name.is_empty()
+        && set.runner_group_name != expected_group_name
+    {
         anyhow::bail!(
             "scale set {} lives in runner group name {:?}, not the configured group name {:?}: refusing to move it",
             set.id,
