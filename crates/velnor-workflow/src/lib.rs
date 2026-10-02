@@ -17312,12 +17312,12 @@ channel = "stable"
 
     #[test]
     fn generated_report_action_matches_authoritative_template() {
-        let template = report_velnor_ci_outcomes_action_template();
         let generated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github/actions/report-velnor-ci-outcomes/action.yml");
         if !generated_path.exists() {
             return;
         }
+        let template = report_velnor_ci_outcomes_action_template();
         let generated = must(
             fs::read_to_string(&generated_path),
             &format!("read {}", generated_path.display()),
