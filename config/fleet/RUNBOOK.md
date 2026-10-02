@@ -51,10 +51,29 @@ available disk < 5 GiB.
 
 ## BuildKit GC (trusted docker hosts)
 
-Copy `config/fleet/buildkitd.gc.toml` to the host BuildKit config path, or
-reference it from `buildkitd-config-inline` on trusted `velnor-host-docker`
-jobs. Keeps builder disk under ~40 GiB used with 10 GiB reserved and 5 GiB
-min free.
+Copy `config/fleet/buildkitd.gc.toml` to the host BuildKit config path. The
+managed `buildkitd-config-inline` input is limited to Velnor's reviewed
+mirror-only stanza; it cannot carry host GC policy or arbitrary worker,
+registry, or security settings. Keeps builder disk under ~40 GiB used with
+10 GiB reserved and 5 GiB min free.
+
+## BuildKit retention
+
+Managed `docker/setup-buildx-action` steps use `cleanup: false`; generated
+platform-build steps also set `keep-state: true`. Admission accepts only those
+values when either input is present. Upstream v4.4.1 skips its own post cleanup
+when `cleanup` is false, so `keep-state` alone has no effect there. Velnor's
+native post adapter still runs: it releases that job's builder claim and leaves
+the daemon running when the last claim is released. Velnor retains the builder
+and `_state` volume by policy; `keep-state` does not control that behavior.
+
+Buildx setup triggers a best-effort BuildKit horizon pass when its six-hour
+interval is due; startup and doctor checks also run a pass. For
+current-generation managed builders, it stops an unclaimed running daemon and
+deletes a stopped daemon and its state volume after seven idle days. A missing
+daemon registration or a retired legacy builder may be reconciled sooner when
+safe. Disk-pressure reclamation can prune an unclaimed builder's cache and stop
+its daemon sooner; it does not delete the builder or state volume.
 
 ## Trust-scope `pr` seed (D18)
 
