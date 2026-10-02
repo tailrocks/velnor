@@ -935,32 +935,56 @@ impl JobContainerSpec {
     }
 
     pub fn remove_container_args(&self) -> Vec<String> {
+        self.remove_container_args_for(&self.name)
+    }
+
+    pub fn remove_container_args_for(&self, target: &str) -> Vec<String> {
         let mut args = DockerArgv::new(["rm"]);
         args.flag("--force");
-        args.operands().operand(self.name.clone()).into_argv()
+        args.operands().operand(target).into_argv()
     }
 
     pub fn remove_network_args(&self) -> Vec<String> {
+        self.remove_network_args_for(&self.network)
+    }
+
+    pub fn remove_network_args_for(&self, target: &str) -> Vec<String> {
         DockerArgv::new(["network", "rm"])
             .operands()
-            .operand(self.network.clone())
+            .operand(target)
             .into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
+        self.disconnect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn disconnect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         let mut args = DockerArgv::new(["network", "disconnect"]);
         args.flag("--force");
         args.operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
+        self.connect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn connect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         DockerArgv::new(["network", "connect"])
             .operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 
@@ -1556,26 +1580,46 @@ impl ServiceContainerSpec {
     }
 
     pub fn remove_args(&self) -> Vec<String> {
+        self.remove_args_for(&self.name)
+    }
+
+    pub fn remove_args_for(&self, target: &str) -> Vec<String> {
         let mut args = DockerArgv::new(["rm"]);
         args.flag("--force");
-        args.operands().operand(self.name.clone()).into_argv()
+        args.operands().operand(target).into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
+        self.disconnect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn disconnect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         let mut args = DockerArgv::new(["network", "disconnect"]);
         args.flag("--force");
         args.operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
+        self.connect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn connect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         let mut args = DockerArgv::new(["network", "connect"]);
         args.pair("--alias", self.network_alias.clone());
         args.operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 }
@@ -4273,6 +4317,77 @@ mod tests {
         assert_eq!(
             service.remove_args(),
             vec!["rm", "--force", "--", "velnor-service-postgres"]
+        );
+    }
+
+    #[test]
+    fn lifecycle_builders_use_supplied_immutable_targets() {
+        let job = spec();
+        assert_eq!(
+            job.remove_container_args_for("immutable-container-id"),
+            vec!["rm", "--force", "--", "immutable-container-id"]
+        );
+        assert_eq!(
+            job.remove_network_args_for("immutable-network-id"),
+            vec!["network", "rm", "--", "immutable-network-id"]
+        );
+        assert_eq!(
+            job.disconnect_network_args_for("immutable-network-id", "immutable-container-id"),
+            vec![
+                "network",
+                "disconnect",
+                "--force",
+                "--",
+                "immutable-network-id",
+                "immutable-container-id"
+            ]
+        );
+        assert_eq!(
+            job.connect_network_args_for("immutable-network-id", "immutable-container-id"),
+            vec![
+                "network",
+                "connect",
+                "--",
+                "immutable-network-id",
+                "immutable-container-id"
+            ]
+        );
+
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-1".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        };
+        assert_eq!(
+            service.remove_args_for("immutable-service-id"),
+            vec!["rm", "--force", "--", "immutable-service-id"]
+        );
+        assert_eq!(
+            service.disconnect_network_args_for("immutable-network-id", "immutable-service-id"),
+            vec![
+                "network",
+                "disconnect",
+                "--force",
+                "--",
+                "immutable-network-id",
+                "immutable-service-id"
+            ]
+        );
+        assert_eq!(
+            service.connect_network_args_for("immutable-network-id", "immutable-service-id"),
+            vec![
+                "network",
+                "connect",
+                "--alias",
+                "postgres",
+                "--",
+                "immutable-network-id",
+                "immutable-service-id"
+            ]
         );
     }
 

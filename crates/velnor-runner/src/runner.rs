@@ -17183,6 +17183,7 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
+    use crate::args::HostMode;
     use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
@@ -20122,6 +20123,7 @@ jobs:
             routing_policy_file: None,
             dry_run_registration: false,
             slots,
+            mode: HostMode::NativeOnly,
             once: false,
             idle_timeout_seconds: None,
             complete_noop: false,
@@ -27593,6 +27595,7 @@ runs:
                         "daemon".into(),
                     )?),
                     job_network: None,
+                    docker_objects: crate::docker_lease::DockerObjectIds::default(),
                 })
             },
         );
@@ -27649,6 +27652,7 @@ runs:
                         "daemon".into(),
                     )?),
                     job_network: None,
+                    docker_objects: crate::docker_lease::DockerObjectIds::default(),
                 })
             });
             // Dropped without claim: Drop runs cleanup with a real docker CLI
