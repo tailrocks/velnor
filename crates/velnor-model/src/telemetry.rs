@@ -1,6 +1,6 @@
 //! Versioned, secret-safe performance telemetry at the model boundary.
 //!
-//! Telemetry is deliberately separate from control-plane [`Event`] values:
+//! Telemetry is deliberately separate from control-plane `Event` values:
 //! control events describe durable state transitions, while this envelope
 //! describes observations that may be streamed, sampled, or retained in a
 //! bounded ring.
