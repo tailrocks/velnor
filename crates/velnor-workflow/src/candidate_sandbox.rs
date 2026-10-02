@@ -819,7 +819,16 @@ fn execute_candidate(
         OsString::from("umask 000; : > /tmp/velnor-candidate.stdout; : > /tmp/velnor-candidate.stderr; chmod 0666 /tmp/velnor-candidate.stdout /tmp/velnor-candidate.stderr"),
     ];
     let setup = docker_exec_until(
-        docker, name, "0:0", None, "/bin/sh", &log_setup, deadline, LOG_LIMIT,
+        docker,
+        DockerExecOptions {
+            name,
+            user: "0:0",
+            workdir: None,
+            executable: "/bin/sh",
+            args: &log_setup,
+            deadline,
+            stdout_limit: LOG_LIMIT,
+        },
     )?;
     if !setup.status.success() {
         return Err(format!(
@@ -835,13 +844,15 @@ fn execute_candidate(
     candidate_args.extend_from_slice(args);
     let candidate = docker_exec_until(
         docker,
-        name,
-        "0:0",
-        has_source.then_some("/workspace"),
-        "/bin/sh",
-        &candidate_args,
-        deadline,
-        LOG_LIMIT,
+        DockerExecOptions {
+            name,
+            user: "0:0",
+            workdir: has_source.then_some("/workspace"),
+            executable: "/bin/sh",
+            args: &candidate_args,
+            deadline,
+            stdout_limit: LOG_LIMIT,
+        },
     )?;
     // A finite process scan is not a quiescence proof: a descendant can fork
     // after the last scan and mutate the output while the archive is being
@@ -1054,25 +1065,31 @@ fn read_capture_archive(path: &Path, limit: usize, label: &str) -> Result<Vec<u8
 }
 
 #[cfg(unix)]
-fn docker_exec_until(
-    docker: &DockerEnvironment,
-    name: &str,
-    user: &str,
-    workdir: Option<&str>,
-    executable: &str,
-    args: &[OsString],
+#[derive(Clone, Copy)]
+struct DockerExecOptions<'a> {
+    name: &'a str,
+    user: &'a str,
+    workdir: Option<&'a str>,
+    executable: &'a str,
+    args: &'a [OsString],
     deadline: Instant,
     stdout_limit: usize,
+}
+
+#[cfg(unix)]
+fn docker_exec_until(
+    docker: &DockerEnvironment,
+    options: DockerExecOptions<'_>,
 ) -> Result<std::process::Output, String> {
     let mut command = docker.command();
-    command.args(["exec", "--user", user]);
-    if let Some(workdir) = workdir {
+    command.args(["exec", "--user", options.user]);
+    if let Some(workdir) = options.workdir {
         command.args(["--workdir", workdir]);
     }
     let mut child = command
-        .arg(name)
-        .arg(executable)
-        .args(args)
+        .arg(options.name)
+        .arg(options.executable)
+        .args(options.args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1081,10 +1098,10 @@ fn docker_exec_until(
         .map_err(|error| format!("start candidate sandbox command: {error}"))?;
     bounded_child_output(
         &mut child,
-        deadline,
-        stdout_limit,
+        options.deadline,
+        options.stdout_limit,
         DOCKER_STDERR_LIMIT,
-        Some((docker, name)),
+        Some((docker, options.name)),
     )
 }
 
@@ -1429,170 +1446,223 @@ struct PendingArchiveMetadata {
 }
 
 #[cfg(unix)]
+#[derive(Default)]
+struct ArchivePreflightState {
+    members: usize,
+    metadata_bytes: usize,
+    content_bytes: usize,
+    pending: PendingArchiveMetadata,
+}
+
+#[cfg(unix)]
 fn preflight_archive(bytes: &[u8], content_limit: usize) -> Result<(), String> {
     if bytes.len() > OUTPUT_ARCHIVE_LIMIT {
         return Err(format!(
             "candidate archive exceeds {OUTPUT_ARCHIVE_LIMIT} bytes"
         ));
     }
-    if bytes.len() % ARCHIVE_BLOCK_SIZE != 0 {
+    if !bytes.len().is_multiple_of(ARCHIVE_BLOCK_SIZE) {
         return Err("candidate archive is not block aligned".to_owned());
     }
 
     let mut offset = 0usize;
-    let mut members = 0usize;
-    let mut metadata_bytes = 0usize;
-    let mut content_bytes = 0usize;
-    let mut pending = PendingArchiveMetadata::default();
+    let mut state = ArchivePreflightState::default();
 
     while offset < bytes.len() {
-        let header_end = offset
-            .checked_add(ARCHIVE_BLOCK_SIZE)
-            .ok_or_else(|| "candidate archive header offset overflow".to_owned())?;
-        if header_end > bytes.len() {
-            return Err("candidate archive ends in a partial header".to_owned());
-        }
+        let header_end = archive_header_end(offset, bytes.len())?;
         let block = &bytes[offset..header_end];
         if block.iter().all(|byte| *byte == 0) {
-            let second_end = header_end
-                .checked_add(ARCHIVE_BLOCK_SIZE)
-                .ok_or_else(|| "candidate archive terminator offset overflow".to_owned())?;
-            if second_end > bytes.len() || bytes[header_end..second_end].iter().any(|b| *b != 0) {
-                return Err("candidate archive has an incomplete terminator".to_owned());
-            }
-            if bytes[second_end..].iter().any(|b| *b != 0) {
-                return Err("candidate archive contains data after its terminator".to_owned());
-            }
-            if pending.pax || pending.gnu_path.is_some() || pending.gnu_linkpath.is_some() {
-                return Err("candidate archive metadata has no following entry".to_owned());
-            }
+            validate_archive_terminator(bytes, header_end, &state.pending)?;
             return Ok(());
         }
 
-        members = members
-            .checked_add(1)
-            .ok_or_else(|| "candidate archive member count overflow".to_owned())?;
-        if members > ARCHIVE_MEMBER_LIMIT {
-            return Err(format!(
-                "candidate archive exceeds {ARCHIVE_MEMBER_LIMIT} members"
-            ));
-        }
-
-        validate_archive_header(block, offset)?;
-        let mut header = TarHeader::new_old();
-        header.as_mut_bytes().copy_from_slice(block);
-        let raw_size = header
-            .entry_size()
-            .map_err(|error| format!("candidate archive has invalid entry size: {error}"))?;
-        let entry_type = header.entry_type();
-        let raw_data_start = header_end;
-        let recognized_extension = header.as_gnu().is_some() || header.as_ustar().is_some();
-
-        if entry_type == EntryType::XGlobalHeader {
-            return Err("candidate archive contains unsupported global PAX metadata".to_owned());
-        }
-        if entry_type == EntryType::GNUSparse {
-            return Err("candidate archive contains unsupported sparse data".to_owned());
-        }
-
-        match entry_type {
-            EntryType::XHeader => {
-                if !recognized_extension {
-                    return Err(
-                        "candidate archive has an unrecognized PAX header encoding".to_owned()
-                    );
-                }
-                let raw_data_end = archive_data_end(raw_data_start, raw_size, bytes.len())?;
-                let raw_payload_end = raw_data_start
-                    .checked_add(usize::try_from(raw_size).map_err(|_| {
-                        "candidate archive PAX payload exceeds platform capacity".to_owned()
-                    })?)
-                    .ok_or_else(|| "candidate archive payload offset overflow".to_owned())?;
-                let payload = bytes
-                    .get(raw_data_start..raw_payload_end)
-                    .ok_or_else(|| "candidate archive PAX payload is truncated".to_owned())?;
-                account_archive_metadata(&mut metadata_bytes, payload.len())?;
-                if pending.pax {
-                    return Err("candidate archive repeats a local PAX header".to_owned());
-                }
-                pending.pax = true;
-                parse_pax_metadata(payload, &mut pending)?;
-                offset = raw_data_end;
-                continue;
-            }
-            EntryType::GNULongName | EntryType::GNULongLink => {
-                if !recognized_extension {
-                    return Err(
-                        "candidate archive has an unrecognized GNU header encoding".to_owned()
-                    );
-                }
-                let raw_data_end = archive_data_end(raw_data_start, raw_size, bytes.len())?;
-                let raw_payload_end = raw_data_start
-                    .checked_add(usize::try_from(raw_size).map_err(|_| {
-                        "candidate archive GNU metadata exceeds platform capacity".to_owned()
-                    })?)
-                    .ok_or_else(|| "candidate archive payload offset overflow".to_owned())?;
-                let payload = bytes
-                    .get(raw_data_start..raw_payload_end)
-                    .ok_or_else(|| "candidate archive GNU metadata is truncated".to_owned())?;
-                account_archive_metadata(&mut metadata_bytes, payload.len())?;
-                let value = parse_gnu_metadata(payload)?;
-                if entry_type == EntryType::GNULongName {
-                    if pending.gnu_path.is_some() {
-                        return Err("candidate archive repeats a GNU long-name header".to_owned());
-                    }
-                    pending.gnu_path = Some(value);
-                } else {
-                    if pending.gnu_linkpath.is_some() {
-                        return Err("candidate archive repeats a GNU long-link header".to_owned());
-                    }
-                    pending.gnu_linkpath = Some(value);
-                }
-                offset = raw_data_end;
-                continue;
-            }
-            EntryType::Regular | EntryType::Directory | EntryType::Symlink => {}
-            _ => {
-                return Err(format!(
-                    "candidate archive contains unsupported entry type {:?}",
-                    entry_type
-                ));
-            }
-        }
-
-        let header_path = header.path_bytes();
-        let path = pending
-            .gnu_path
-            .as_deref()
-            .or(pending.path.as_deref())
-            .unwrap_or(header_path.as_ref());
-        validate_archive_path_bytes(path, "path")?;
-        if entry_type == EntryType::Symlink {
-            let header_linkpath = header.link_name_bytes();
-            let linkpath = pending
-                .gnu_linkpath
-                .as_deref()
-                .or(pending.linkpath.as_deref())
-                .or_else(|| header_linkpath.as_deref())
-                .ok_or_else(|| "candidate archive symlink has no target".to_owned())?;
-            validate_archive_path_bytes(linkpath, "link target")?;
-        }
-
-        let effective_size = pending.size.take().unwrap_or(raw_size);
-        if effective_size > content_limit as u64 {
-            return Err(format!(
-                "candidate archive entry exceeds {content_limit} bytes"
-            ));
-        }
-        let effective_end = archive_data_end(raw_data_start, effective_size, bytes.len())?;
-        if entry_type == EntryType::Regular {
-            account_archive_content(&mut content_bytes, effective_size, content_limit)?;
-        }
-        pending = PendingArchiveMetadata::default();
-        offset = effective_end;
+        offset = preflight_archive_entry(bytes, offset, header_end, content_limit, &mut state)?;
     }
 
     Err("candidate archive is missing its terminator".to_owned())
+}
+
+#[cfg(unix)]
+fn archive_header_end(offset: usize, archive_len: usize) -> Result<usize, String> {
+    let header_end = offset
+        .checked_add(ARCHIVE_BLOCK_SIZE)
+        .ok_or_else(|| "candidate archive header offset overflow".to_owned())?;
+    if header_end > archive_len {
+        return Err("candidate archive ends in a partial header".to_owned());
+    }
+    Ok(header_end)
+}
+
+#[cfg(unix)]
+fn validate_archive_terminator(
+    bytes: &[u8],
+    header_end: usize,
+    pending: &PendingArchiveMetadata,
+) -> Result<(), String> {
+    let second_end = header_end
+        .checked_add(ARCHIVE_BLOCK_SIZE)
+        .ok_or_else(|| "candidate archive terminator offset overflow".to_owned())?;
+    if second_end > bytes.len() || bytes[header_end..second_end].iter().any(|byte| *byte != 0) {
+        return Err("candidate archive has an incomplete terminator".to_owned());
+    }
+    if bytes[second_end..].iter().any(|byte| *byte != 0) {
+        return Err("candidate archive contains data after its terminator".to_owned());
+    }
+    if pending.pax || pending.gnu_path.is_some() || pending.gnu_linkpath.is_some() {
+        return Err("candidate archive metadata has no following entry".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn preflight_archive_entry(
+    bytes: &[u8],
+    offset: usize,
+    header_end: usize,
+    content_limit: usize,
+    state: &mut ArchivePreflightState,
+) -> Result<usize, String> {
+    state.members = state
+        .members
+        .checked_add(1)
+        .ok_or_else(|| "candidate archive member count overflow".to_owned())?;
+    if state.members > ARCHIVE_MEMBER_LIMIT {
+        return Err(format!(
+            "candidate archive exceeds {ARCHIVE_MEMBER_LIMIT} members"
+        ));
+    }
+
+    let block = &bytes[offset..header_end];
+    validate_archive_header(block, offset)?;
+    let mut header = TarHeader::new_old();
+    header.as_mut_bytes().copy_from_slice(block);
+    let raw_size = header
+        .entry_size()
+        .map_err(|error| format!("candidate archive has invalid entry size: {error}"))?;
+    let entry_type = header.entry_type();
+    let raw_data_start = header_end;
+    let recognized_extension = header.as_gnu().is_some() || header.as_ustar().is_some();
+
+    if entry_type == EntryType::XGlobalHeader {
+        return Err("candidate archive contains unsupported global PAX metadata".to_owned());
+    }
+    if entry_type == EntryType::GNUSparse {
+        return Err("candidate archive contains unsupported sparse data".to_owned());
+    }
+
+    match entry_type {
+        EntryType::XHeader => {
+            if !recognized_extension {
+                return Err("candidate archive has an unrecognized PAX header encoding".to_owned());
+            }
+            return preflight_pax_header(bytes, raw_data_start, raw_size, state);
+        }
+        EntryType::GNULongName | EntryType::GNULongLink => {
+            if !recognized_extension {
+                return Err("candidate archive has an unrecognized GNU header encoding".to_owned());
+            }
+            return preflight_gnu_header(bytes, raw_data_start, raw_size, entry_type, state);
+        }
+        EntryType::Regular | EntryType::Directory | EntryType::Symlink => {}
+        _ => {
+            return Err(format!(
+                "candidate archive contains unsupported entry type {entry_type:?}"
+            ));
+        }
+    }
+
+    let header_path = header.path_bytes();
+    let path = state
+        .pending
+        .gnu_path
+        .as_deref()
+        .or(state.pending.path.as_deref())
+        .unwrap_or(header_path.as_ref());
+    validate_archive_path_bytes(path, "path")?;
+    if entry_type == EntryType::Symlink {
+        let header_linkpath = header.link_name_bytes();
+        let linkpath = state
+            .pending
+            .gnu_linkpath
+            .as_deref()
+            .or(state.pending.linkpath.as_deref())
+            .or(header_linkpath.as_deref())
+            .ok_or_else(|| "candidate archive symlink has no target".to_owned())?;
+        validate_archive_path_bytes(linkpath, "link target")?;
+    }
+
+    let effective_size = state.pending.size.take().unwrap_or(raw_size);
+    if effective_size > content_limit as u64 {
+        return Err(format!(
+            "candidate archive entry exceeds {content_limit} bytes"
+        ));
+    }
+    let effective_end = archive_data_end(raw_data_start, effective_size, bytes.len())?;
+    if entry_type == EntryType::Regular {
+        account_archive_content(&mut state.content_bytes, effective_size, content_limit)?;
+    }
+    state.pending = PendingArchiveMetadata::default();
+    Ok(effective_end)
+}
+
+#[cfg(unix)]
+fn preflight_pax_header(
+    bytes: &[u8],
+    raw_data_start: usize,
+    raw_size: u64,
+    state: &mut ArchivePreflightState,
+) -> Result<usize, String> {
+    let raw_data_end = archive_data_end(raw_data_start, raw_size, bytes.len())?;
+    let raw_payload_end =
+        raw_data_start
+            .checked_add(usize::try_from(raw_size).map_err(|_| {
+                "candidate archive PAX payload exceeds platform capacity".to_owned()
+            })?)
+            .ok_or_else(|| "candidate archive payload offset overflow".to_owned())?;
+    let payload = bytes
+        .get(raw_data_start..raw_payload_end)
+        .ok_or_else(|| "candidate archive PAX payload is truncated".to_owned())?;
+    account_archive_metadata(&mut state.metadata_bytes, payload.len())?;
+    if state.pending.pax {
+        return Err("candidate archive repeats a local PAX header".to_owned());
+    }
+    state.pending.pax = true;
+    parse_pax_metadata(payload, &mut state.pending)?;
+    Ok(raw_data_end)
+}
+
+#[cfg(unix)]
+fn preflight_gnu_header(
+    bytes: &[u8],
+    raw_data_start: usize,
+    raw_size: u64,
+    entry_type: EntryType,
+    state: &mut ArchivePreflightState,
+) -> Result<usize, String> {
+    let raw_data_end = archive_data_end(raw_data_start, raw_size, bytes.len())?;
+    let raw_payload_end =
+        raw_data_start
+            .checked_add(usize::try_from(raw_size).map_err(|_| {
+                "candidate archive GNU metadata exceeds platform capacity".to_owned()
+            })?)
+            .ok_or_else(|| "candidate archive payload offset overflow".to_owned())?;
+    let payload = bytes
+        .get(raw_data_start..raw_payload_end)
+        .ok_or_else(|| "candidate archive GNU metadata is truncated".to_owned())?;
+    account_archive_metadata(&mut state.metadata_bytes, payload.len())?;
+    let value = parse_gnu_metadata(payload)?;
+    if entry_type == EntryType::GNULongName {
+        if state.pending.gnu_path.is_some() {
+            return Err("candidate archive repeats a GNU long-name header".to_owned());
+        }
+        state.pending.gnu_path = Some(value);
+    } else {
+        if state.pending.gnu_linkpath.is_some() {
+            return Err("candidate archive repeats a GNU long-link header".to_owned());
+        }
+        state.pending.gnu_linkpath = Some(value);
+    }
+    Ok(raw_data_end)
 }
 
 #[cfg(unix)]
@@ -1795,7 +1865,7 @@ fn single_file_archive(bytes: &[u8], expected: &str, limit: usize) -> Result<Vec
         .entries()
         .map_err(|error| format!("read candidate log archive: {error}"))?;
     for entry in entries {
-        let mut entry = entry.map_err(|error| format!("read candidate log entry: {error}"))?;
+        let entry = entry.map_err(|error| format!("read candidate log entry: {error}"))?;
         let path = entry
             .path()
             .map_err(|error| format!("read candidate log path: {error}"))?
@@ -1858,7 +1928,7 @@ fn parse_render_archive(bytes: &[u8]) -> Result<BTreeMap<PathBuf, RenderEntry>, 
         .entries()
         .map_err(|error| format!("read candidate render archive: {error}"))?;
     for entry in parsed {
-        let mut entry = entry.map_err(|error| format!("read candidate render entry: {error}"))?;
+        let entry = entry.map_err(|error| format!("read candidate render entry: {error}"))?;
         let raw_path = entry
             .path()
             .map_err(|error| format!("read candidate render path: {error}"))?
