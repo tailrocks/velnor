@@ -238,3 +238,28 @@ share a file with a `pull_request` trigger, because its task code would run
 with repository Actions-history access on contributor-controlled input. The
 maintenance workflow keeps cache mutation permissions job-scoped as well:
 only its cache-deletion jobs receive `actions: write`.
+
+## Required scheduled-check artifacts
+
+Scheduled-check artifacts remain best effort by default: the generated upload
+runs with `always()` and `if-no-files-found: warn`. A profile that produces
+evidence required by a downstream verifier can opt into the strict contract:
+
+```toml
+[[check_profile]]
+id = "ci-evidence"
+tasks = ["ci-evidence"]
+artifacts_required = true
+artifacts = [
+  "target/ci-evidence/rollup.json",
+  "target/ci-evidence/rollup.md",
+]
+```
+
+Strict artifacts must be non-empty, relative literal file paths whose visible
+slash-separated components start with an ASCII letter or digit and continue
+with ASCII letters, digits, `_`, `-`, or `.`. The generated job rejects
+symlinked path components, requires every file to be non-empty, and uploads
+with `success()` plus `if-no-files-found: error`. Globs, directories,
+traversal, absolute paths, whitespace, hidden names, and shell syntax are
+rejected during config validation.

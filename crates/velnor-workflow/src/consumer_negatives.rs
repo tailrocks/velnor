@@ -385,6 +385,12 @@ fn init_unrelated_checkout(root: &Path, name: &str) -> PathBuf {
 fn setup_action_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
+    let path = if path.exists() {
+        path
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/actions/setup-velnor-workflow/action.yml")
+    };
     let source = must(fs::read_to_string(&path), "read setup action");
     crate::closure_inputs::render_setup_action(&source)
 }

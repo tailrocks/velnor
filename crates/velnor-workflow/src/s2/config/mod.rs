@@ -388,6 +388,11 @@ pub(crate) struct CheckProfileSection {
     timeout_minutes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifacts: Option<Vec<String>>,
+    /// When true, `artifacts` names exact required files. The renderer adds
+    /// per-file preflight checks and makes the upload fail on missing files.
+    /// Absent/false preserves the historical best-effort upload contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifacts_required: Option<bool>,
     status: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
@@ -1269,6 +1274,10 @@ impl CheckProfileSection {
 
     pub(crate) fn artifacts(&self) -> Option<&[String]> {
         self.artifacts.as_deref()
+    }
+
+    pub(crate) fn artifacts_required(&self) -> bool {
+        self.artifacts_required == Some(true)
     }
 
     pub(crate) fn status(&self) -> Option<&str> {
@@ -3801,6 +3810,29 @@ pub(crate) fn valid_check_profile_task(task: &str) -> bool {
     })
 }
 
+/// Whether a required artifact is one safe, exact file path. Required
+/// artifacts are rendered into a shell preflight and then uploaded as a
+/// literal, so every slash-separated visible component must start with an
+/// ASCII letter or digit and continue with ASCII letters, digits, `_`, `-`,
+/// or `.`. Legacy best-effort artifacts retain their broader path contract.
+fn valid_check_profile_artifact_path(path: &str) -> bool {
+    let mut saw_component = false;
+    for component in path.split('/') {
+        let mut bytes = component.bytes();
+        if !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            return false;
+        }
+        if !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')) {
+            return false;
+        }
+        saw_component = true;
+    }
+    saw_component
+}
+
 /// Whether `key` is a valid environment threshold name: a shell identifier the
 /// rendered job exports for the named task to read.
 fn valid_check_profile_env_key(key: &str) -> bool {
@@ -4327,6 +4359,30 @@ fn validate_check_profile_result(
             if artifact.is_empty() || artifact.contains(['\n', '\r']) {
                 return Err(GeneratorError::usage(format!(
                     "[[check_profile]] {id} declares an artifact path that is empty or multi-line; name the paths the job uploads"
+                )));
+            }
+        }
+    }
+    if row.artifacts_required == Some(true) {
+        if row.status.as_deref() == Some("advisory") {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} cannot combine artifacts_required = true with status = advisory; required artifacts need status = required or no status"
+            )));
+        }
+        let Some(artifacts) = row.artifacts.as_deref() else {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} sets `artifacts_required = true` but declares no `artifacts`; name every required file"
+            )));
+        };
+        if artifacts.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} sets `artifacts_required = true` with an empty `artifacts`; name every required file"
+            )));
+        }
+        for artifact in artifacts {
+            if !valid_check_profile_artifact_path(artifact) {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} required artifact `{artifact}` must be one non-empty relative literal file path without traversal, globs, or shell syntax"
                 )));
             }
         }
@@ -8024,6 +8080,79 @@ mod tests {
         must(
             config.validate(&[], &[], &BTreeSet::new()),
             "two coherent profiles validate",
+        );
+    }
+
+    #[test]
+    fn check_profile_required_artifacts_are_complete_and_literal() {
+        let valid = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n\
+             artifacts_required = true\nartifacts = [\"target/evidence.json\", \"target/evidence.md\"]\n",
+        ));
+        must(
+            valid.validate(&[], &[], &BTreeSet::new()),
+            "exact required artifacts validate",
+        );
+        assert!(valid.check_profiles()[0].artifacts_required());
+
+        for (declaration, expected) in [
+            ("artifacts_required = true\n", "declares no `artifacts`"),
+            (
+                "artifacts_required = true\nartifacts = []\n",
+                "empty `artifacts`",
+            ),
+        ] {
+            let error = must_fail(
+                config_for(&check_profile_config(&format!(
+                    "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n{declaration}"
+                )))
+                .validate(&[], &[], &BTreeSet::new()),
+                "required artifact declarations must be complete",
+            );
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        for artifact in [
+            "target/*.json",
+            "../outside.json",
+            "/tmp/out.json",
+            "target/evidence/",
+            "target/evidence;rm",
+            ".hidden.json",
+            "target/.hidden.json",
+            "target/evidence file.json",
+            "target/#evidence.json",
+            "~/.config",
+            "target//evidence.json",
+            "target/evidence\\\\file.json",
+            "target/evidence:file.json",
+            "target/évidence.json",
+        ] {
+            let error = must_fail(
+                config_for(&check_profile_config(&format!(
+                    "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\nartifacts_required = true\nartifacts = [\"{artifact}\"]\n"
+                )))
+                .validate(&[], &[], &BTreeSet::new()),
+                "required artifact paths must be exact safe files",
+            );
+            assert!(error.to_string().contains("required artifact"), "{error}");
+        }
+    }
+
+    #[test]
+    fn check_profile_rejects_advisory_required_artifacts() {
+        let error = must_fail(
+            config_for(&check_profile_config(
+                "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n\
+                 artifacts_required = true\nartifacts = [\"target/evidence.json\"]\n\
+                 status = \"advisory\"\n",
+            ))
+            .validate(&[], &[], &BTreeSet::new()),
+            "advisory required artifacts must fail",
+        );
+        assert_eq!(
+            error.to_string(),
+            "[[check_profile]] strict cannot combine artifacts_required = true with status = advisory; required artifacts need status = required or no status"
         );
     }
 
