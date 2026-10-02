@@ -1818,7 +1818,7 @@ fn job_child_keys_for_slot(
     keys
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 async fn observe_github_and_routing(
     args: &ControllerArgs,
     journal: &mut Journal,

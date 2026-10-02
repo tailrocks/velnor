@@ -77,6 +77,14 @@ pub struct ReconciledSet {
     pub labels_updated: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LiveSetExpectation<'a> {
+    group_id: i32,
+    group_name: &'a str,
+    set_id: Option<i32>,
+    set_name: Option<&'a str>,
+}
+
 /// Ensure the registered group + set exist and match the plan.
 ///
 /// Order: group resolution → set adopt-or-create → label reconciliation.
@@ -146,10 +154,12 @@ async fn adopt_by_id(
         client,
         plan,
         live,
-        group_id,
-        group_name,
-        Some(set_id),
-        Some(expected_set_name.as_str()),
+        LiveSetExpectation {
+            group_id,
+            group_name,
+            set_id: Some(set_id),
+            set_name: Some(expected_set_name.as_str()),
+        },
         &format!("reconcile scale-set {set_id}"),
     )
     .await?;
@@ -180,10 +190,12 @@ async fn get_or_create_by_name(
                 client,
                 plan,
                 live,
-                group_id,
-                group_name,
-                Some(expected_set_id),
-                Some(name),
+                LiveSetExpectation {
+                    group_id,
+                    group_name,
+                    set_id: Some(expected_set_id),
+                    set_name: Some(name),
+                },
                 &format!("reconcile scale-set {name:?}"),
             )
             .await?;
@@ -214,10 +226,12 @@ async fn get_or_create_by_name(
                         client,
                         plan,
                         set,
-                        group_id,
-                        group_name,
-                        Some(expected_set_id),
-                        Some(name),
+                        LiveSetExpectation {
+                            group_id,
+                            group_name,
+                            set_id: Some(expected_set_id),
+                            set_name: Some(name),
+                        },
                         &format!("verify created scale-set {name:?}"),
                     )
                     .await?;
@@ -245,10 +259,12 @@ async fn get_or_create_by_name(
                         client,
                         plan,
                         live,
-                        group_id,
-                        group_name,
-                        Some(expected_set_id),
-                        Some(name),
+                        LiveSetExpectation {
+                            group_id,
+                            group_name,
+                            set_id: Some(expected_set_id),
+                            set_name: Some(name),
+                        },
                         &format!("reconcile raced scale-set {name:?}"),
                     )
                     .await?;
@@ -314,19 +330,16 @@ async fn reconcile_live_set(
     client: &ScaleSetClient,
     plan: &RegistrationPlan,
     live: RunnerScaleSet,
-    expected_group_id: i32,
-    expected_group_name: &str,
-    expected_set_id: Option<i32>,
-    expected_set_name: Option<&str>,
+    expected: LiveSetExpectation<'_>,
     operation: &str,
 ) -> Result<(RunnerScaleSet, bool)> {
     let (prepared, labels_updated, needs_update) = prepare_live_set(
         live,
         plan,
-        expected_group_id,
-        expected_group_name,
-        expected_set_id,
-        expected_set_name,
+        expected.group_id,
+        expected.group_name,
+        expected.set_id,
+        expected.set_name,
     )?;
     let set = if needs_update {
         client
@@ -339,10 +352,10 @@ async fn reconcile_live_set(
     validate_reconciled_set(
         &set,
         plan,
-        expected_group_id,
-        expected_group_name,
-        expected_set_id,
-        expected_set_name,
+        expected.group_id,
+        expected.group_name,
+        expected.set_id,
+        expected.set_name,
     )
     .with_context(|| format!("{operation}: server returned an invalid scale-set identity"))?;
     Ok((set, labels_updated))

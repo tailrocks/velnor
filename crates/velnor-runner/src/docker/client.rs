@@ -978,6 +978,7 @@ pub(crate) fn owned_container_ids_excluding_buildkit_rows(rows: &[OwnedContainer
 /// carry the creating job's label by design, and matching it here would
 /// destroy a daemon other jobs share. They outlive teardown; the claim
 /// release stops them, and the reclaim paths own them.
+#[cfg(test)]
 pub(crate) fn job_buildkit_ids_for_job(formatted: &str, job_id: &str, scope: &str) -> Vec<String> {
     let needle = format!(
         "{}{scope}",

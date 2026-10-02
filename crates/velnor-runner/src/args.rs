@@ -239,9 +239,10 @@ pub struct RunArgs {
 
 /// Explicit host execution topology. The daemon never enables one engine
 /// merely because configuration for the other engine happens to be present.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HostMode {
+    #[default]
     NativeOnly,
     ScaleSetOnly,
     Both,
@@ -265,12 +266,6 @@ impl HostMode {
             Self::ScaleSetOnly => "scale-set-only",
             Self::Both => "both",
         }
-    }
-}
-
-impl Default for HostMode {
-    fn default() -> Self {
-        Self::NativeOnly
     }
 }
 
