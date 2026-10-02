@@ -496,8 +496,8 @@ fn required_result_value(name: &str, value: Option<String>) -> Result<String, Ge
     }
 }
 
-fn result_outcome(value: String) -> String {
-    match value.as_str() {
+fn result_outcome(value: &str) -> String {
+    match value {
         "success" => "success".to_owned(),
         "cancelled" => "cancelled".to_owned(),
         _ => "failure".to_owned(),
@@ -545,7 +545,7 @@ fn result_record_from_env() -> Result<ResultRecord, GeneratorError> {
             env::var("VELNOR_RESULT_COMMAND_DIGEST").ok(),
         )?,
         outcome: result_outcome(
-            env::var("VELNOR_RESULT_OUTCOME").map_err(|_| {
+            &env::var("VELNOR_RESULT_OUTCOME").map_err(|_| {
                 GeneratorError::usage("record-result requires VELNOR_RESULT_OUTCOME")
             })?,
         ),
@@ -585,46 +585,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         return Ok(false);
     };
     match command {
-        "plan" => {
-            let options = parse_options(&arguments[1..], &["config"])?;
-            plan(&resolve_config_path(options.get("config")))?;
-            Ok(true)
-        }
-        "run" => {
-            let options = parse_options(&arguments[1..], &["config", "scope", "unit", "phase"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-            let config = resolve_config_path(options.get("config"));
-            let scope = options
-                .get("scope")
-                .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
-            let phase = options
-                .get("phase")
-                .map(|value| {
-                    ValidationPhase::parse(value).ok_or_else(|| {
-                        GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use precondition, fmt, clippy, test, doctest, swift-format, swift-lint, xcodegen-generate, swift-build, swift-run, swift-test, or check"
-                        ))
-                    })
-                })
-                .transpose()?;
-            run_units(
-                &root,
-                &config,
-                scope,
-                options.get("unit").map(String::as_str),
-                phase,
-            )?;
-            Ok(true)
-        }
+        "plan" => try_run_plan(&arguments[1..]),
+        "run" => try_run_units(&arguments[1..]),
         "verify-action" => verify_action_command(&arguments[1..]),
-        "test-crates" => {
-            let options = parse_options(&arguments[1..], &["config"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-            test_crates(&root, &resolve_config_path(options.get("config")), None)?;
-            Ok(true)
-        }
+        "test-crates" => try_run_test_crates(&arguments[1..]),
         "policy" => {
             crate::s2::policy::run_cli(&arguments[1..])?;
             Ok(true)
@@ -661,30 +625,74 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             crate::s2::primitives::product_transport::verify_product_cli(&root, &arguments[1..])?;
             Ok(true)
         }
-        "cache-plan" => {
-            let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
-            let mode = options.get("mode").map_or("plan", String::as_str);
-            if !matches!(mode, "plan" | "budget") {
-                return Err(GeneratorError::usage(format!(
-                    "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
-                )));
-            }
-            if mode == "budget" {
-                if let Some(entries_path) = options.get("entries") {
-                    cache_budget_report(entries_path)?;
-                } else {
-                    println!("{}", retention_policy_for_plan()?.total_bytes);
-                }
-                return Ok(true);
-            }
-            cache_plan(
-                options.get("entries").map(String::as_str),
-                options.get("now").map(String::as_str),
-            )?;
-            Ok(true)
-        }
+        "cache-plan" => try_run_cache_plan(&arguments[1..]),
         _ => try_run_reuse(command, arguments),
     }
+}
+
+fn try_run_plan(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["config"])?;
+    plan(&resolve_config_path(options.get("config")))?;
+    Ok(true)
+}
+
+fn try_run_units(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["config", "scope", "unit", "phase"])?;
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let config = resolve_config_path(options.get("config"));
+    let scope = options
+        .get("scope")
+        .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
+    let phase = options
+        .get("phase")
+        .map(|value| {
+            ValidationPhase::parse(value).ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "unsupported --phase: {value}; use precondition, fmt, clippy, test, doctest, swift-format, swift-lint, xcodegen-generate, swift-build, swift-run, swift-test, or check"
+                ))
+            })
+        })
+        .transpose()?;
+    run_units(
+        &root,
+        &config,
+        scope,
+        options.get("unit").map(String::as_str),
+        phase,
+    )?;
+    Ok(true)
+}
+
+fn try_run_test_crates(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["config"])?;
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    test_crates(&root, &resolve_config_path(options.get("config")), None)?;
+    Ok(true)
+}
+
+fn try_run_cache_plan(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["entries", "now", "mode"])?;
+    let mode = options.get("mode").map_or("plan", String::as_str);
+    if !matches!(mode, "plan" | "budget") {
+        return Err(GeneratorError::usage(format!(
+            "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
+        )));
+    }
+    if mode == "budget" {
+        if let Some(entries_path) = options.get("entries") {
+            cache_budget_report(entries_path)?;
+        } else {
+            println!("{}", retention_policy_for_plan()?.total_bytes);
+        }
+        return Ok(true);
+    }
+    cache_plan(
+        options.get("entries").map(String::as_str),
+        options.get("now").map(String::as_str),
+    )?;
+    Ok(true)
 }
 
 fn verify_action_command(arguments: &[OsString]) -> Result<bool, GeneratorError> {
@@ -10203,10 +10211,10 @@ workspace_check = true
 
     #[test]
     fn record_result_outcome_maps_non_green_statuses() {
-        assert_eq!(result_outcome("success".to_owned()), "success");
-        assert_eq!(result_outcome("cancelled".to_owned()), "cancelled");
-        assert_eq!(result_outcome("failure".to_owned()), "failure");
-        assert_eq!(result_outcome("skipped".to_owned()), "failure");
+        assert_eq!(result_outcome("success"), "success");
+        assert_eq!(result_outcome("cancelled"), "cancelled");
+        assert_eq!(result_outcome("failure"), "failure");
+        assert_eq!(result_outcome("skipped"), "failure");
     }
 
     // S4 aggregate wiring cut: the planner's expected work binds the
