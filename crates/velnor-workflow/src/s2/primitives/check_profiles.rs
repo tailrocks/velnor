@@ -544,7 +544,7 @@ fn render_profile_job_with_selected_profiles(
     // A Velnor profile mounts the checkout and runs named tasks, so it
     // skips fork and bot pull requests exactly like any other local job.
     if let Some(admission) = profile_admission_expression(config, profile) {
-        let _ = writeln!(output, "    if: ${{{{ ({admission}) }}}}");
+        let _ = writeln!(output, "    if: ${{{{ {admission} }}}}");
     }
     let runs_on = profile_runs_on(config, profile)?;
     let _ = writeln!(output, "    runs-on: {runs_on}");
@@ -602,7 +602,7 @@ fn render_artifact_verifier_job(
     let result_condition = format!("needs.{}.result == 'success'", profile.id);
     let condition = profile_admission_expression(config, profile).map_or_else(
         || result_condition.clone(),
-        |admission| format!("({result_condition}) && ({admission})"),
+        |admission| format!("({result_condition}) && {admission}"),
     );
     let _ = writeln!(output, "    if: ${{{{ {condition} }}}}");
     let _ = writeln!(output, "    runs-on: {}", profile_runs_on(config, profile)?);
@@ -1277,7 +1277,7 @@ mod tests {
         );
         let workflow = render(&config, None, &selected);
         assert!(
-            workflow.contains(&format!("if: ${{{{ ({admission}) }}}}")),
+            workflow.contains(&format!("if: ${{{{ {admission} }}}}")),
             "the Velnor artifact producer uses canonical provider admission: {workflow}"
         );
         assert!(
@@ -1308,7 +1308,7 @@ mod tests {
         );
         assert!(
             workflow.contains(&format!(
-                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && ({admission}) }}}}\n"
+                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && {admission} }}}}\n"
             )),
             "the Velnor verifier combines producer success with canonical provider admission: {workflow}"
         );
@@ -1629,7 +1629,7 @@ mod tests {
             "render the Velnor profile job",
         );
         assert!(
-            job.contains(&format!("    if: ${{{{ ({admission}) }}}}\n")),
+            job.contains(&format!("    if: ${{{{ {admission} }}}}\n")),
             "the profile job uses the canonical provider admission: {job}"
         );
 
