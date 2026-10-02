@@ -492,7 +492,11 @@ fn normalized_socket_host(path: &Path, source: &str) -> Result<String, String> {
 }
 
 #[cfg(unix)]
-fn default_socket_candidates(home: Option<&Path>, _runtime_dir: Option<&Path>) -> Vec<PathBuf> {
+fn default_socket_candidates(
+    home: Option<&Path>,
+    #[cfg(not(target_os = "macos"))] runtime_dir: Option<&Path>,
+    #[cfg(target_os = "macos")] _runtime_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     #[cfg(target_os = "macos")]
     {
@@ -507,7 +511,7 @@ fn default_socket_candidates(home: Option<&Path>, _runtime_dir: Option<&Path>) -
     {
         candidates.push(PathBuf::from("/var/run/docker.sock"));
         candidates.push(PathBuf::from("/run/docker.sock"));
-        if let Some(runtime_dir) = _runtime_dir {
+        if let Some(runtime_dir) = runtime_dir {
             candidates.push(runtime_dir.join("docker.sock"));
         }
         if let Some(home) = home {
