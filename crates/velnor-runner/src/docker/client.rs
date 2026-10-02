@@ -246,26 +246,6 @@ impl std::fmt::Display for NotRunning {
 
 impl std::error::Error for NotRunning {}
 
-/// Buildx reports a missing client-side builder differently from the Engine's
-/// `No such ...` vocabulary. Keep that distinction typed at the Docker
-/// boundary so BuildKit maintenance never has to re-match formatted errors.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BuildkitBuilderNotFound {
-    pub builder: String,
-}
-
-impl std::fmt::Display for BuildkitBuilderNotFound {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "BuildKit builder '{}' does not exist",
-            self.builder
-        )
-    }
-}
-
-impl std::error::Error for BuildkitBuilderNotFound {}
-
 /// True when `error` is a daemon positive-missing answer surfaced through this
 /// client — the only signal any caller may treat as proof of absence.
 pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
@@ -279,13 +259,6 @@ pub(crate) fn is_not_running(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<NotRunning>().is_some())
-}
-
-/// True when Buildx positively reported the requested builder as absent.
-pub(crate) fn is_buildkit_builder_not_found(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<BuildkitBuilderNotFound>().is_some())
 }
 
 /// The daemon's missing-object vocabulary, both generations: modern Engines
@@ -541,15 +514,6 @@ pub(crate) fn exit_info_args(name: &str) -> Vec<String> {
     ]
 }
 
-pub(crate) fn buildx_disk_usage_args(builder: &str) -> Vec<String> {
-    vec![
-        "buildx".to_string(),
-        "du".to_string(),
-        "--builder".to_string(),
-        builder.to_string(),
-    ]
-}
-
 pub(crate) fn daemon_cgroup_args() -> Vec<String> {
     vec![
         "info".to_string(),
@@ -732,80 +696,6 @@ fn parse_finished_at(value: &str) -> Option<std::time::SystemTime> {
     }
     let nanos = u64::try_from(nanos).ok()?;
     std::time::UNIX_EPOCH.checked_add(Duration::from_nanos(nanos))
-}
-
-/// Parse `buildx du` into the builder's total cache bytes, from the `Total:`
-/// footer. Sizes are 1000-based (`4.096kB` is 4096 bytes, proven live) and
-/// display-rounded to four significant figures, so callers treat the answer
-/// as approximate — exact enough to order builders largest-first and to
-/// account reclaimed bytes within a percent.
-pub(crate) fn parse_buildx_disk_usage(output: &str) -> Result<u64> {
-    for line in output.lines() {
-        let Some(total) = line.trim().strip_prefix("Total:") else {
-            continue;
-        };
-        return parse_human_size(total.trim())
-            .with_context(|| format!("parse buildx du total {total:?}"));
-    }
-    anyhow::bail!("buildx du reported no Total line: {output:?}")
-}
-
-fn parse_human_size(value: &str) -> Option<u64> {
-    let (number, multiplier) = [
-        ("B", 1_u128),
-        ("kB", 1_000),
-        ("MB", 1_000_000),
-        ("GB", 1_000_000_000),
-        ("TB", 1_000_000_000_000),
-        ("PB", 1_000_000_000_000_000),
-    ]
-    .iter()
-    .find_map(|(unit, multiplier)| {
-        value.strip_suffix(unit).and_then(|number| {
-            // `kB` ends in `B`: only accept the bare-`B` split when nothing
-            // longer matched, i.e. the number itself carries no unit letter.
-            if *unit == "B" && number.ends_with(|ch: char| ch.is_ascii_alphabetic()) {
-                None
-            } else {
-                Some((number, *multiplier))
-            }
-        })
-    })?;
-    let number = number.trim().parse::<f64>().ok()?;
-    if !number.is_finite() || number < 0.0 {
-        return None;
-    }
-    let bytes = (number * multiplier as f64).round();
-    if bytes > u64::MAX as f64 {
-        return None;
-    }
-    Some(bytes as u64)
-}
-
-/// Names of the buildx builders Velnor owns, from `docker buildx ls` output.
-///
-/// The builder name always carries a scope suffix; ownership is the
-/// `velnor-builder` prefix, so enumerate and match the prefix instead of
-/// guessing one name.
-pub(crate) fn owned_builder_names(buildx_ls_stdout: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in buildx_ls_stdout.lines() {
-        let Some(first) = line.split_whitespace().next() else {
-            continue;
-        };
-        // `docker buildx ls` marks the selected builder with a trailing `*` and
-        // indents each builder's nodes; nodes are not builders.
-        if line.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let name = first.trim_end_matches('*');
-        if name.starts_with(crate::cache::OWNED_BUILDER_PREFIX)
-            && !names.iter().any(|seen| seen == name)
-        {
-            names.push(name.to_string());
-        }
-    }
-    names
 }
 
 // ---------------------------------------------------------------------------
@@ -1500,11 +1390,6 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
                 object: args.join(" "),
             }));
         }
-        if let Some(builder) =
-            buildkit_builder_from_args(args).filter(|_| detail.contains("no builder"))
-        {
-            return Err(anyhow::Error::new(BuildkitBuilderNotFound { builder }));
-        }
         if is_not_running_command(args, &detail) {
             return Err(anyhow::Error::new(NotRunning {
                 object: args.join(" "),
@@ -1531,22 +1416,8 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn buildkit_builder_from_args(args: &[String]) -> Option<String> {
-    if !args.first().is_some_and(|arg| arg == "buildx")
-        || !args.get(1).is_some_and(|arg| arg == "du" || arg == "prune")
-    {
-        return None;
-    }
-    args.windows(2)
-        .find(|pair| pair[0] == "--builder")
-        .map(|pair| pair[1].clone())
-}
-
 fn is_not_running_command(args: &[String], lower_stderr: &str) -> bool {
-    lower_stderr.contains("is not running")
-        && (args.first().is_some_and(|arg| arg == "kill")
-            || (args.first().is_some_and(|arg| arg == "buildx")
-                && args.get(1).is_some_and(|arg| arg == "du")))
+    lower_stderr.contains("is not running") && args.first().is_some_and(|arg| arg == "kill")
 }
 
 // ---------------------------------------------------------------------------
@@ -2010,12 +1881,6 @@ impl<'r> Docker<'r> {
         parse_cgroup_projection(&self.call(&args, "daemon cgroup")?)
     }
 
-    /// Names of the buildx builders Velnor owns.
-    pub(crate) fn buildx_builders(&mut self) -> Result<Vec<String>> {
-        let args = vec!["buildx".to_string(), "ls".to_string()];
-        Ok(owned_builder_names(&self.call(&args, "buildx builders")?))
-    }
-
     /// Lifecycle word and last stop time of one container.
     pub(crate) fn inspect_exit(&mut self, name: &str) -> Result<ExitInfo> {
         if let Some(exit) = self.engine_or_cli(&exit_info_args(name), |engine, budget| async move {
@@ -2029,12 +1894,6 @@ impl<'r> Docker<'r> {
         }
         let args = exit_info_args(name);
         parse_exit_info(&self.call(&args, name)?)
-    }
-
-    /// Total cache bytes one builder holds, from `buildx du`.
-    pub(crate) fn buildx_disk_usage(&mut self, builder: &str) -> Result<u64> {
-        let args = buildx_disk_usage_args(builder);
-        parse_buildx_disk_usage(&self.call(&args, builder)?)
     }
 
     /// Containers carrying `velnor.job-id=<job_id>`: short ids plus names.
@@ -2490,8 +2349,6 @@ mod tests {
             mapped_ports_args("velnor-service-postgres"),
             image_id_args("velnor/job-ubuntu:26.04"),
             exit_info_args("buildx_buildkit_velnor-builder-shared-trusted-owner_repo0"),
-            buildx_disk_usage_args("velnor-builder-shared-trusted-owner_repo"),
-            vec!["buildx".to_string(), "ls".to_string()],
         ];
         // The listing builders the reclaim decisions consume through this
         // module's parsers must hold the same guarantee.
@@ -2681,28 +2538,6 @@ mod tests {
         assert_eq!(broken.finished, None);
 
         assert!(parse_exit_info("exited\n").is_err());
-    }
-
-    #[test]
-    fn buildx_disk_usage_reads_the_total_footer_in_decimal_units() {
-        // `docker buildx du`, live: per-record rows plus the footer.
-        let output = "\
-ID                           RECLAIMABLE   SIZE      LAST ACCESSED
-qoyzm9h3t5d8kc4avc1jzrft8*   true          0B        Less than a second ago
-ut03rtsmqbdemi4moqok6mtc2    true          6.054MB   Less than a second ago
-Reclaimable:\t6.054MB
-Total:\t\t6.054MB
-";
-        assert_eq!(parse_buildx_disk_usage(output).expect("total"), 6_054_000);
-        assert_eq!(parse_buildx_disk_usage("Total:\t\t0B\n").expect("zero"), 0);
-        // 4096 bytes display as 4.096kB: units are 1000-based, proven live.
-        assert_eq!(parse_human_size("4.096kB"), Some(4096));
-        assert_eq!(parse_human_size("27.03MB"), Some(27_030_000));
-        assert_eq!(parse_human_size("1.5GB"), Some(1_500_000_000));
-        assert_eq!(parse_human_size("2TB"), Some(2_000_000_000_000));
-        assert_eq!(parse_human_size("bogus"), None);
-        assert_eq!(parse_human_size("-1MB"), None);
-        assert!(parse_buildx_disk_usage("no footer here\n").is_err());
     }
 
     #[test]
@@ -3269,35 +3104,6 @@ Total:\t\t6.054MB
             owned_container_ids_excluding_buildkit_rows(&parse_owned_container_rows(text)),
             owned_container_ids_excluding_buildkit_rows(&project_owned_rows(&summaries)),
         );
-    }
-
-    #[test]
-    fn buildx_queries_stay_on_cli_without_api_attempts() {
-        let mock = routed_mock(0);
-        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
-        let _scope = begin_job("seq-buildx-cli");
-        let mut runner = ScriptRunner::scripted_host(vec![
-            ok("velnor-builder-shared-trusted-o_r0\n"),
-            ok("Total:\t\t6.054MB\n"),
-        ]);
-        let (builders, usage) = {
-            let mut docker = Docker::job(&mut runner);
-            (
-                docker.buildx_builders().expect("builders list"),
-                docker
-                    .buildx_disk_usage("velnor-builder-shared-trusted-o_r0")
-                    .expect("disk usage"),
-            )
-        };
-        assert_eq!(
-            builders,
-            vec!["velnor-builder-shared-trusted-o_r0".to_string()]
-        );
-        assert_eq!(usage, 6_054_000);
-        assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
-        let counts = snapshot();
-        assert_eq!(counts.api_calls, 0);
-        assert_eq!(counts.api_fallbacks, 0);
     }
 
     // ------------------------------------------------------------------

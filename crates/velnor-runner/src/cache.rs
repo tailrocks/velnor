@@ -21,10 +21,6 @@ const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// reclaimer may delete it.
 pub(crate) const EMERGENCY_MIN_IDLE: Duration = Duration::from_secs(15 * 60);
 
-/// Builder-name prefix for every BuildKit builder Velnor owns. The concrete
-/// builder always carries a `-<scope>` suffix, which is why inspecting the bare
-/// prefix never matched and the disk-pressure BuildKit reclaim was dead code.
-pub(crate) const OWNED_BUILDER_PREFIX: &str = "velnor-builder";
 const PERSISTENT_TARGET_MAX_NODES: usize = 1_000_000;
 const PERSISTENT_TARGET_MAX_DIRECTORIES: usize = 100_000;
 const PERSISTENT_TARGET_MAX_DEPTH: usize = 256;
@@ -1086,10 +1082,17 @@ fn reclaim_work_root_with_layout(
     // containers are repaired first. Only when the file stores cannot satisfy
     // the target does emergency reclaim stop and prune unclaimed builders,
     // largest first — bounded, measured, and cold-only. This is what makes
-    // the old dead reclaim (enumerate, then deliberately do nothing) live.
+    // the claim-aware emergency BuildKit reclaim live.
     if emergency && report.freed_bytes < target_bytes {
         let remaining = target_bytes.saturating_sub(report.freed_bytes);
-        let pruned = crate::buildkit::pressure_prune_builders(run_root, remaining);
+        let pruned = match crate::buildkit::PersistentBuildKitDomain::try_resolve() {
+            Ok(Some(domain)) => crate::buildkit::pressure_prune_builders(&domain, remaining),
+            Ok(None) => crate::buildkit::PressurePruneReport::default(),
+            Err(error) => crate::buildkit::PressurePruneReport {
+                failures: vec![format!("skip BuildKit pressure prune: {error:#}")],
+                ..crate::buildkit::PressurePruneReport::default()
+            },
+        };
         report.freed_bytes = report.freed_bytes.saturating_add(pruned.freed_bytes);
         for builder in pruned.pruned {
             tracing::info!(builder = %builder, "emergency reclaim pruned unclaimed BuildKit builder");
@@ -2659,35 +2662,6 @@ mod tests {
             "the cold store must still be reclaimed: {report:?}"
         );
         fs::remove_dir_all(root).ok();
-    }
-
-    /// The disk-pressure BuildKit reclaim inspected the literal name
-    /// `velnor-builder`, but every real builder carries a `-<scope>` suffix, so
-    /// the inspect never matched and the prune never ran.
-    #[test]
-    fn owned_builders_are_matched_by_prefix_not_by_a_bare_name() {
-        let listing = "\
-NAME/NODE                     DRIVER/ENDPOINT   STATUS    BUILDKIT   PLATFORMS
-default *                     docker
-  default                     default           running   v0.12.0    linux/arm64
-velnor-builder-trusted        docker-container
-  velnor-builder-trusted0     unix:///var/run/docker.sock running v0.12.0 linux/arm64
-velnor-builder-untrusted      docker-container
-  velnor-builder-untrusted0   unix:///var/run/docker.sock running v0.12.0 linux/arm64
-someone-elses-builder         docker-container
-";
-        assert_eq!(
-            crate::docker::client::owned_builder_names(listing),
-            vec![
-                "velnor-builder-trusted".to_string(),
-                "velnor-builder-untrusted".to_string()
-            ],
-            "the bare name never exists; ownership is the prefix"
-        );
-        assert!(crate::docker::client::owned_builder_names(listing)
-            .iter()
-            .all(|name| name.starts_with(OWNED_BUILDER_PREFIX)));
-        assert!(crate::docker::client::owned_builder_names("NAME/NODE\ndefault *\n").is_empty());
     }
 
     /// Every store the emergency reclaimer may delete must declare a lease
