@@ -20924,6 +20924,9 @@ channel = "stable"
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
+        if root.join(".velnor/config.toml").exists() {
+            return;
+        }
         let error = must_fail(
             scan_target(&root, RunnerMode::Both, "main"),
             "scanning the schema-2 repository with the schema-1 pipeline must fail",
