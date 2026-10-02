@@ -4626,10 +4626,10 @@ where
                     &action_state,
                     action,
                     "keep-state",
-                    "false",
+                    "true",
                 )?);
                 let cleanup =
-                    input_truthy(&native_input_or(&action_state, action, "cleanup", "true")?);
+                    input_truthy(&native_input_or(&action_state, action, "cleanup", "false")?);
                 // The post never destroys the builder: destroying it here is
                 // what kept every job's builds cold. It releases this job's
                 // hold and stops the daemon only when no holder remains; a
@@ -5277,28 +5277,38 @@ where
             tier,
             container.repository.as_deref(),
         );
+        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         // Builder claims live in the storage-backed claim store: without a
         // runner temp dir or without configured Velnor storage (unit tests
         // run hermetically, without VELNOR_STORAGE_ROOT) there is nothing to
         // claim in, so setup proceeds unclaimed and the builder stays
         // unmanaged — the same degraded path every other storage-gated
         // caller takes. The inspect/create below always runs.
-        let lifecycle: Option<(&Path, PathBuf)> = match (
-            state.temp_host.as_deref(),
-            crate::buildkit::claims_run_root(),
-        ) {
-            (Some(temp), Some(run_root)) => {
-                crate::buildkit::record_job_builder(temp, &name)?;
-                Some((temp, run_root))
+        let lifecycle: Option<(&Path, PathBuf)> = if driver.eq_ignore_ascii_case("docker-container")
+        {
+            match (
+                state.temp_host.as_deref(),
+                crate::buildkit::claims_run_root(),
+            ) {
+                (Some(temp), Some(run_root)) => {
+                    crate::buildkit::record_job_builder(temp, &name)?;
+                    Some((temp, run_root))
+                }
+                _ => None,
             }
-            _ => None,
+        } else {
+            None
         };
-        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
         let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
             None
         } else {
+            if !crate::docker_lease::is_approved_persistent_buildkit_config(
+                &buildkitd_config_inline,
+            ) {
+                bail!("setup-buildx permits only the reviewed mirror-only BuildKit configuration");
+            }
             let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&name));
             let config_host = state
                 .temp_host
@@ -5309,7 +5319,7 @@ where
                 .with_context(|| format!("write BuildKit config {}", config_host.display()))?;
             Some(format!("/__t/{config_name}"))
         };
-        let result = {
+        let result = (|| -> Result<CommandResult> {
             // Setup claims and creates/reuses under the same filesystem-wide
             // lifecycle gate the reaper takes exclusively. A job may be
             // admitted while cleanup runs, but cannot claim or use a builder
@@ -5330,33 +5340,99 @@ where
                 }
                 None => None,
             };
+            if driver.eq_ignore_ascii_case("docker-container") {
+                if self.docker_lease.is_some() {
+                    // Bind the lease to the host-approved immutable image and
+                    // state volume as one setup transaction. A failed setup
+                    // must not leave a builder capability behind when a
+                    // workflow continues after this step's error.
+                    self.docker_lease
+                        .as_ref()
+                        .context("Docker lease disappeared before BuildKit setup")?
+                        .begin_persistent_builder_setup(&name)?;
+                    let setup = (|| -> Result<()> {
+                        self.ensure_persistent_buildkit_image(&name)?;
+                        self.ensure_persistent_buildkit_volume(container, &name)
+                    })();
+                    if let Err(error) = setup {
+                        self.docker_lease
+                            .as_ref()
+                            .context("Docker lease disappeared while revoking BuildKit setup")?
+                            .revoke_persistent_builder(&name)?;
+                        return Err(error);
+                    }
+                    self.docker_lease
+                        .as_ref()
+                        .context("Docker lease disappeared after BuildKit setup")?
+                        .complete_persistent_builder_setup(&name)?;
+                }
+                if self.docker_lease.is_none() {
+                    self.ensure_persistent_buildkit_volume(container, &name)?;
+                }
+            }
             let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
             let inspect_result =
                 self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
             if inspect_result.code == 0 {
                 let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
-                self.container_docker(container, &action_state, &use_args, None, timeout)?
-            } else {
-                // No `--driver-opt` resource sizing: the builder daemon runs
-                // unbounded like every other workload container.
+                Ok(self.container_docker(container, &action_state, &use_args, None, timeout)?)
+            } else if buildx_inspect_reports_missing_builder(&inspect_result, &name) {
+                // Keep the builder daemon unbounded. The one permitted driver
+                // option disables Buildx's raw GitHub event archive; that
+                // event can contain cross-job workflow data and must not land
+                // in the shared state volume.
                 let mut args = vec![
                     "buildx".to_string(),
                     "create".to_string(),
                     "--name".to_string(),
                     name.clone(),
                     "--driver".to_string(),
-                    driver,
+                    driver.clone(),
                     "--use".to_string(),
                 ];
+                args.extend([
+                    "--driver-opt".to_string(),
+                    "provenance-add-gha=false".to_string(),
+                ]);
                 if let Some(config) = buildkitd_config_container {
                     args.extend(["--config".to_string(), config]);
                 }
                 if input_truthy(&native_input_or(&action_state, action, "install", "false")?) {
                     args.push("--bootstrap".to_string());
                 }
-                self.container_docker(container, &action_state, &args, None, timeout)?
+                Ok(self.container_docker(container, &action_state, &args, None, timeout)?)
+            } else {
+                bail!(
+                    "buildx inspect {name} failed with code {}: {}",
+                    inspect_result.code,
+                    inspect_result.stderr.trim()
+                );
+            }
+        })();
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                // The lease capability covers the whole setup/use attempt.
+                // Revoke it on any later Buildx failure, otherwise a failed
+                // setup could leave the next guest request with persistent
+                // builder access.
+                if driver.eq_ignore_ascii_case("docker-container")
+                    && let Some(lease) = self.docker_lease.as_ref()
+                {
+                    lease.revoke_persistent_builder(&name)?;
+                }
+                return Err(error);
             }
         };
+        if result.code != 0
+            && driver.eq_ignore_ascii_case("docker-container")
+            && let Some(lease) = self.docker_lease.as_ref()
+        {
+            // A command can complete with a nonzero exit code without
+            // producing a Rust error. Do not leave the builder capability
+            // active after a failed `buildx use` or `buildx create`.
+            lease.revoke_persistent_builder(&name)?;
+        }
         if let Some(run_root) = lifecycle.as_ref().map(|(_, run_root)| run_root)
             && let Some(report) =
                 crate::buildkit::maybe_reap_idle_builders(run_root, std::time::SystemTime::now())
@@ -5376,10 +5452,7 @@ where
             StepCommandState {
                 outputs: [
                     ("name".to_string(), name.clone()),
-                    (
-                        "driver".to_string(),
-                        native_input_or(&action_state, action, "driver", "docker-container")?,
-                    ),
+                    ("driver".to_string(), driver),
                     (
                         "platforms".to_string(),
                         "linux/amd64,linux/arm64".to_string(),
@@ -5390,6 +5463,140 @@ where
                 ..StepCommandState::default()
             },
         ))
+    }
+
+    fn ensure_persistent_buildkit_volume(
+        &mut self,
+        container: &JobContainerSpec,
+        builder: &str,
+    ) -> Result<()> {
+        if self.docker_lease.is_none() {
+            return Ok(());
+        }
+        let volume = crate::buildkit::daemon_state_volume(builder);
+        let _volume_lock = self
+            .docker_lease
+            .as_ref()
+            .context("Docker lease disappeared before BuildKit volume setup")?
+            .lock_volume_name(&volume)?;
+        self.run_docker(&[
+            "volume".into(),
+            "create".into(),
+            "--driver".into(),
+            "local".into(),
+            "--label".into(),
+            format!("{}={}", crate::docker_lease::JOB_ID_LABEL, container.name),
+            "--label".into(),
+            format!(
+                "{}={}",
+                crate::docker_lease::DAEMON_ID_LABEL,
+                container.daemon_id
+            ),
+            volume.clone(),
+        ])?;
+        let inspected = self.runner.run(
+            "docker",
+            &crate::docker_lease::inspect_volume_identity_args(&volume),
+        )?;
+        if inspected.code != 0 {
+            bail!(
+                "inspect persistent BuildKit state volume {volume} failed with code {}: {}",
+                inspected.code,
+                inspected.stderr.trim()
+            );
+        }
+        self.docker_lease
+            .as_ref()
+            .context("Docker lease disappeared during BuildKit volume setup")?
+            .register_persistent_volume_inspect(
+                &volume,
+                inspected.stdout.as_bytes(),
+                &container.daemon_id,
+            )
+    }
+
+    fn ensure_persistent_buildkit_image(&mut self, builder: &str) -> Result<()> {
+        let tag = crate::docker_lease::PERSISTENT_BUILDKIT_IMAGE;
+        let pinned = crate::docker_lease::PERSISTENT_BUILDKIT_REPO_DIGEST;
+        let inspect_args = |reference: &str| {
+            vec![
+                "image".to_string(),
+                "inspect".to_string(),
+                "--format".to_string(),
+                "{{json .}}".to_string(),
+                reference.to_string(),
+            ]
+        };
+        // Resolve and pull the immutable digest first. A mutable tag is never
+        // the source of trust; it is only retagged to the already verified
+        // local image for Buildx's normal docker-container request.
+        let mut pinned_inspected = self.runner.run("docker", &inspect_args(pinned))?;
+        if pinned_inspected.code != 0 {
+            self.run_docker(&["image".into(), "pull".into(), pinned.into()])?;
+            pinned_inspected = self.runner.run("docker", &inspect_args(pinned))?;
+        }
+        if pinned_inspected.code != 0 {
+            bail!(
+                "inspect pinned BuildKit image {pinned} failed with code {}: {}",
+                pinned_inspected.code,
+                pinned_inspected.stderr.trim()
+            );
+        }
+        let pinned_image: Value = serde_json::from_str(pinned_inspected.stdout.trim())
+            .context("parse pinned BuildKit image inspect")?;
+        let pinned_id = pinned_image
+            .get("Id")
+            .and_then(Value::as_str)
+            .context("pinned BuildKit image inspect omitted Id")?;
+        if !pinned_id.starts_with("sha256:") {
+            bail!("pinned BuildKit image inspect returned a mutable ID");
+        }
+        let repo_digests = pinned_image
+            .get("RepoDigests")
+            .and_then(Value::as_array)
+            .context("pinned BuildKit image inspect omitted RepoDigests")?;
+        if !repo_digests
+            .iter()
+            .filter_map(Value::as_str)
+            .any(crate::docker_lease::is_approved_persistent_repo_digest)
+        {
+            bail!(
+                "host BuildKit image {pinned} is not pinned to the approved RepoDigest {}",
+                crate::docker_lease::PERSISTENT_BUILDKIT_REPO_DIGEST
+            );
+        }
+        let mut tagged = self.runner.run("docker", &inspect_args(tag))?;
+        let tag_needs_rewrite = if tagged.code != 0 {
+            true
+        } else {
+            let tagged_image: Value = serde_json::from_str(tagged.stdout.trim())
+                .context("parse host BuildKit tag inspect before rewrite")?;
+            tagged_image.get("Id").and_then(Value::as_str) != Some(pinned_id)
+        };
+        if tag_needs_rewrite {
+            // A guest may have attempted to retag or pull the mutable name
+            // between jobs. Rebind it to the verified digest before granting
+            // the persistent builder capability; never bless the existing tag
+            // merely because it exists.
+            self.run_docker(&["image".into(), "tag".into(), pinned.into(), tag.into()])?;
+            tagged = self.runner.run("docker", &inspect_args(tag))?;
+        }
+        if tagged.code != 0 {
+            bail!(
+                "inspect host-approved BuildKit tag {tag} failed with code {}: {}",
+                tagged.code,
+                tagged.stderr.trim()
+            );
+        }
+        let tagged_image: Value = serde_json::from_str(tagged.stdout.trim())
+            .context("parse host-approved BuildKit tag inspect")?;
+        if tagged_image.get("Id").and_then(Value::as_str) != Some(pinned_id) {
+            bail!("host BuildKit tag {tag} does not reference the approved immutable image");
+        }
+        self.docker_lease
+            .as_ref()
+            .context("Docker lease disappeared during BuildKit image setup")?
+            .register_persistent_builder_image(builder, pinned_id)
     }
 
     fn native_docker_login(
@@ -6004,13 +6211,14 @@ where
         }
         let id = crate::docker_lease::attest_container_identity(
             &inspected.stdout,
-            captured_id,
-            name,
-            image,
-            network,
-            name,
-            daemon_id,
-            Some(&["sh", "-c", crate::container::JOB_CONTAINER_PID1]),
+            &crate::docker_lease::ContainerIdentityExpectation {
+                expected_id: captured_id,
+                expected_name: name,
+                expected_image: image,
+                expected_network: network,
+                expected_labels: Some((name, daemon_id)),
+                expected_command: Some(&["sh", "-c", crate::container::JOB_CONTAINER_PID1]),
+            },
         )?;
         Ok(Some(id))
     }
@@ -6109,6 +6317,14 @@ where
             Some(daemon_id),
         )?;
         Ok(true)
+    }
+
+    #[cfg(unix)]
+    fn lock_host_volume(&self, volume: &str) -> Result<crate::docker_lease::VolumeOperationLocks> {
+        let socket = crate::docker::engine::resolve_docker_endpoint()
+            .context("resolve Docker endpoint for host volume lock")?
+            .socket;
+        crate::docker_lease::lock_host_volume_name(&socket, volume)
     }
 
     /// Refresh the job liveness fence immediately before deleting a named
@@ -6219,6 +6435,8 @@ where
                 .iter()
                 .filter(|volume| !crate::buildkit::is_persistent_builder_object(volume))
             {
+                #[cfg(unix)]
+                let _volume_lock = self.lock_host_volume(volume)?;
                 if self.attest_volume_target(volume, &container.name, &container.daemon_id)? {
                     attested_volumes.push(volume.clone());
                 }
@@ -6232,6 +6450,8 @@ where
                 self.run_docker_cleanup(args).map(|_| ())
             })?;
             for volume in volumes {
+                #[cfg(unix)]
+                let _volume_lock = self.lock_host_volume(&volume)?;
                 if self.attest_volume_target(&volume, &container.name, &container.daemon_id)? {
                     self.ensure_job_not_live_before_buildkit_volume_delete(container)?;
                     self.run_docker_cleanup(&crate::docker_lease::force_remove_volume_args(&[
@@ -6394,6 +6614,8 @@ where
             .collect::<Vec<_>>();
         let mut attested_volumes = Vec::with_capacity(volumes.len());
         for volume in volumes {
+            #[cfg(unix)]
+            let _volume_lock = self.lock_host_volume(&volume)?;
             if !self.attest_volume_target(&volume, &container.name, &container.daemon_id)? {
                 continue;
             }
@@ -6401,6 +6623,8 @@ where
         }
         if !attested_volumes.is_empty() {
             for volume in attested_volumes {
+                #[cfg(unix)]
+                let _volume_lock = self.lock_host_volume(&volume)?;
                 // Re-attest immediately before removal. Volume deletion has
                 // no compare-and-delete API; this is the narrowest safe
                 // window and leaves a replacement untouched on mismatch.
@@ -7013,7 +7237,23 @@ where
     }
 
     fn reclaim_stale_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
+        #[cfg(unix)]
+        let mut volume_locks = BTreeMap::new();
         crate::docker_lease::reclaim_stale_job_owned(job_id, |args| {
+            #[cfg(unix)]
+            if self.runner.is_host_process_runner()
+                && args.first().map(String::as_str) == Some("volume")
+            {
+                let target = args
+                    .iter()
+                    .rev()
+                    .find(|arg| !arg.starts_with('-'))
+                    .cloned()
+                    .context("Docker volume reclaim omitted its target")?;
+                if !volume_locks.contains_key(&target) {
+                    volume_locks.insert(target.clone(), self.lock_host_volume(&target)?);
+                }
+            }
             self.run_docker_cleanup(args).map(|result| result.stdout)
         })
     }
@@ -14724,6 +14964,21 @@ fn collect_workspace_children(
     }
 }
 
+/// `buildx inspect` uses a nonzero exit code for both an absent builder and
+/// real daemon/CLI failures. Only its exact typed absence diagnostic may
+/// trigger the create path.
+fn buildx_inspect_reports_missing_builder(result: &CommandResult, builder: &str) -> bool {
+    if result.code == 0 {
+        return false;
+    }
+    let expected = format!("no builder \"{builder}\" found");
+    result.stderr.lines().any(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix("ERROR:").map_or(line, str::trim);
+        line == expected
+    })
+}
+
 fn normalize_path(path: &Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
@@ -16212,6 +16467,25 @@ mod tests {
             env: &[(String, String)],
         ) -> Result<CommandResult> {
             let mut result = self.inner.run_with_env(program, args, env)?;
+            self.script_stderr(&mut result);
+            Ok(result)
+        }
+
+        fn run_with_stdin_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            stdin: &str,
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            let mut result = self.inner.run_with_stdin_timeout_with_env(
+                program,
+                args,
+                env,
+                stdin,
+                Duration::ZERO,
+            )?;
             self.script_stderr(&mut result);
             Ok(result)
         }
@@ -21571,11 +21845,15 @@ type=sha,format=long,prefix=,enable=true"
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::inert(RecordingRunner {
-            calls: Vec::new(),
-            stdin: Vec::new(),
-            env: Vec::new(),
-            codes: vec![0, 0, 1],
+        let missing_builder = "ERROR: no builder \"velnor-builder-shared-unbounded-v1-trusted-unknown-unknown-repository\" found";
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner {
+            inner: RecordingRunner {
+                calls: Vec::new(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+                codes: vec![0, 0, 1],
+            },
+            stderrs: vec![missing_builder.to_owned(); 3],
         })
         .with_trust_scope("trusted");
         let spec = container(&temp);
@@ -21619,7 +21897,7 @@ type=sha,format=long,prefix=,enable=true"
             "org.opencontainers.image.source=https://github.com/ChainArgos/java-monorepo"
         ));
         let runner = executor.runner();
-        let calls = docker_call_strings(&runner.calls);
+        let calls = docker_call_strings(&runner.inner.calls);
         // Persistent builder: default requested name, trusted test scope,
         // unknown tier (no ref signals in the fixture env),
         // unknown-repository fixture repo.
@@ -21633,16 +21911,14 @@ type=sha,format=long,prefix=,enable=true"
             builder,
             "velnor-builder-shared-unbounded-v1-trusted-unknown-unknown-repository"
         );
-        // Unbounded: the builder daemon is created with no resource
-        // `--driver-opt` sizing (no cpu-*/memory= entries at all).
+        // Unbounded: the builder daemon has only the reviewed provenance
+        // opt-out, with no cpu-*/memory= resource sizing.
         let create = calls
             .iter()
             .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
             .expect("buildx create call");
-        assert!(
-            !create.contains("'--driver-opt'"),
-            "builder daemon must be created unbounded, got: {create}"
-        );
+        assert!(create.contains("'--driver-opt' 'provenance-add-gha=false'"));
+        assert!(!create.contains("cpu-period=") && !create.contains("memory="));
         assert!(create.contains(&format!(
             "'--config' '/__t/buildkitd-config-{builder}.toml'"
         )));
@@ -21650,14 +21926,14 @@ type=sha,format=long,prefix=,enable=true"
             fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
         );
-        let login_call = runner.calls.iter().position(|(program, args)| {
+        let login_call = runner.inner.calls.iter().position(|(program, args)| {
             program == "docker"
                 && args.join(" ").contains(
                     "'login' 'https://index.docker.io/v1/' '--username' 'docker-user' '--password-stdin'",
                 )
         });
         assert!(login_call.is_some());
-        assert_eq!(runner.stdin[login_call.unwrap()], "docker-token");
+        assert_eq!(runner.inner.stdin[login_call.unwrap()], "docker-token");
         let build_call = calls.iter().position(|c| {
             c.contains("'buildx' 'build'")
                 && !c.contains("'--load'")
@@ -21701,6 +21977,7 @@ type=sha,format=long,prefix=,enable=true"
         assert!(bake_invocation.contains("PR_NUMBER=42"));
         assert_eq!(
             runner
+                .inner
                 .calls
                 .iter()
                 .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
@@ -30824,6 +31101,96 @@ fi"#
         );
         assert!(!calls.iter().any(|c| c.contains("'buildx' 'create'")));
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn buildx_inspect_only_treats_exact_missing_diagnostic_as_absent() {
+        let missing = CommandResult {
+            code: 1,
+            stdout: String::new(),
+            stderr: "ERROR: no builder \"builder\" found\n".into(),
+        };
+        assert!(buildx_inspect_reports_missing_builder(&missing, "builder"));
+
+        let daemon_error = CommandResult {
+            code: 1,
+            stdout: String::new(),
+            stderr: "ERROR: Cannot connect to the Docker daemon\n".into(),
+        };
+        assert!(!buildx_inspect_reports_missing_builder(
+            &daemon_error,
+            "builder"
+        ));
+
+        let other_builder = CommandResult {
+            code: 1,
+            stdout: String::new(),
+            stderr: "ERROR: no builder \"other\" found\n".into(),
+        };
+        assert!(!buildx_inspect_reports_missing_builder(
+            &other_builder,
+            "builder"
+        ));
+    }
+
+    #[test]
+    fn native_setup_buildx_rejects_unapproved_inline_config_before_write() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "buildx".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerSetupBuildx,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("name".into(), "builder".into()),
+                    ("driver".into(), "docker-container".into()),
+                    (
+                        "buildkitd-config-inline".into(),
+                        "[registry.\"docker.io\"]\n  insecure = true\n".into(),
+                    ),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let failed = results
+            .iter()
+            .find(|result| {
+                result
+                    .stderr
+                    .contains("reviewed mirror-only BuildKit configuration")
+            })
+            .expect("unapproved BuildKit config failure");
+        assert_eq!(failed.exit_code, 1);
+        assert!(failed
+            .stderr
+            .contains("reviewed mirror-only BuildKit configuration"));
+        assert!(!executor
+            .runner()
+            .calls
+            .iter()
+            .any(|(_, args)| args.iter().any(|arg| arg == "buildx")));
+        assert!(!fs::read_dir(&temp)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("buildkitd-config-")));
         fs::remove_dir_all(temp).unwrap();
     }
 
