@@ -278,13 +278,13 @@ async fn mount_set_get_or_create(server: &MockServer) {
 async fn mount_set_adopt_with_drift(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            set_json_without_group_identity_with_policy(
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(set_json_with_policy(
                 SCALE_SET_ID,
                 &["velnor", "stale-label"],
                 false,
-            ),
-        ))
+            )),
+        )
         .mount(server)
         .await;
     Mock::given(method("PATCH"))
@@ -923,7 +923,7 @@ async fn registration_get_or_create_then_reconciles_labels() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registration_pinned_group_id_ignores_name_hint_without_renaming() {
+async fn registration_pinned_group_id_rejects_omitted_group_identity() {
     let server = MockServer::start().await;
     let client = test_client(&server).await;
     Mock::given(method("GET"))
@@ -943,12 +943,13 @@ async fn registration_pinned_group_id_ignores_name_hint_without_renaming() {
         set_name: None,
         labels: vec!["velnor".to_owned(), "linux".to_owned()],
     };
-    let reconciled = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+    let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
         .await
-        .unwrap();
-    assert_eq!(reconciled.group_id, GROUP_ID);
-    assert!(reconciled.group_name.is_empty());
-    assert!(reconciled.set.runner_group_name.is_empty());
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted runner group ID"),
+        "unscoped adoption must prove its group: {error:#}"
+    );
     assert_eq!(
         server
             .received_requests()
@@ -1131,6 +1132,58 @@ async fn registration_adopt_by_id_patches_drifted_labels() {
     assert_eq!(patch_body["runnerGroupId"], serde_json::json!(GROUP_ID));
     assert_eq!(patch_body["runnerGroupName"], serde_json::json!(GROUP_NAME));
     assert_eq!(set_delete_calls(&server).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_pinned_group_id_patch_omits_stale_name_hint() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(set_json_with_policy(
+                SCALE_SET_ID,
+                &["velnor", "stale-label"],
+                false,
+            )),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(set_json_without_group_identity(
+                SCALE_SET_ID,
+                &["velnor", "linux"],
+            )),
+        )
+        .mount(&server)
+        .await;
+
+    let plan = RegistrationPlan {
+        group_id: Some(GROUP_ID),
+        group_name: Some("stale-name-hint".to_owned()),
+        set_id: Some(SCALE_SET_ID),
+        set_name: None,
+        labels: vec!["velnor".to_owned(), "linux".to_owned()],
+    };
+    let reconciled = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+        .await
+        .unwrap();
+    assert_eq!(reconciled.set.runner_group_id, GROUP_ID);
+    assert!(reconciled.set.runner_group_name.is_empty());
+
+    let patch_request = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.method == wiremock::http::Method::PATCH)
+        .unwrap();
+    let patch_body: serde_json::Value = serde_json::from_slice(&patch_request.body).unwrap();
+    assert_eq!(patch_body["runnerGroupId"], serde_json::json!(GROUP_ID));
+    assert!(patch_body.get("runnerGroupName").is_none());
+    assert!(!String::from_utf8_lossy(&patch_request.body).contains("stale-name-hint"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

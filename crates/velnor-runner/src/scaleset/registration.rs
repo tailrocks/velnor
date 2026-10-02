@@ -149,6 +149,14 @@ async fn adopt_by_id(
         .get_runner_scale_set_by_id(set_id)
         .await
         .with_context(|| format!("adopt scale set {set_id}"))?;
+    // Get-by-ID is not scoped to a runner group. A missing group ID cannot
+    // prove that this object belongs to the configured group, even though the
+    // group fields are optional on ordinary group-scoped responses.
+    if live.runner_group_id == 0 {
+        anyhow::bail!(
+            "adopt scale set {set_id}: unscoped response omitted runner group ID; refusing adoption"
+        );
+    }
     let expected_set_name = live.name.clone();
     let (set, labels_updated) = reconcile_live_set(
         client,
