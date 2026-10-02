@@ -671,6 +671,12 @@ rm -rf "$manifests"
     fn setup_action_fixture() -> String {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
+        let path = if path.exists() {
+            path
+        } else {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/actions/setup-velnor-workflow/action.yml")
+        };
         std::fs::read_to_string(path).expect("read setup-action fixture")
     }
 
@@ -8582,6 +8588,12 @@ fn builtin_generated_actions() -> BTreeMap<PathBuf, String> {
 fn report_velnor_ci_outcomes_action_template() -> String {
     let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml");
+    let action_path = if action_path.exists() {
+        action_path
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/actions/report-velnor-ci-outcomes/action.yml")
+    };
     fs::read_to_string(&action_path).unwrap_or_else(|error| {
         panic!("read {}: {error}", action_path.display());
     })
@@ -13562,6 +13574,12 @@ mod tests {
     fn declared_setup_action() -> String {
         let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
+        let action_path = if action_path.exists() {
+            action_path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/actions/setup-velnor-workflow/action.yml")
+        };
         must(
             fs::read_to_string(&action_path),
             "read declared setup action",
