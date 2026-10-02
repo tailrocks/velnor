@@ -832,18 +832,18 @@ mod tests {
             "write recorded output",
         );
         must(
-            fs::create_dir_all(root.join("config/fleet")),
-            "create fleet config directory",
+            fs::create_dir_all(root.join("state")),
+            "create cache config directory",
         );
         must(
-            fs::write(root.join("config/fleet/velnor-host.env"), "MANUAL=1\n"),
-            "write manual fleet config",
+            fs::write(root.join("state/cache.env"), "MANUAL=1\n"),
+            "write manual cache config",
         );
         must(
             fs::write(
                 root.join(crate::s2::OWNERSHIP_STATE),
                 format!(
-                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\n",
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nstate/cache.env\t0000000000000000\n",
                     crate::s2::GENERATOR_REVISION
                 ),
             ),
@@ -856,7 +856,7 @@ mod tests {
         );
         assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
         assert!(files.contains(&".github/workflows/forged.yml".to_owned()));
-        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        assert!(files.contains(&"state/cache.env".to_owned()));
         // The initial scan has no renderer-bound sidecar proof. A recorded
         // dynamic path therefore remains an input until the convergence pass.
         assert!(files.contains(&".github/workflows/Generated.yml".to_owned()));
@@ -893,13 +893,13 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                &[crate::s2::GeneratedAliasPath::FleetHostEnv],
+                &[crate::s2::GeneratedAliasPath::new("state/cache.env")],
                 Some(&verified),
             ),
             "scan with a renderer-bound generated alias",
         );
         assert!(
-            !files.contains(&"config/fleet/velnor-host.env".to_owned()),
+            !files.contains(&"state/cache.env".to_owned()),
             "a trusted generated alias is excluded from scanner inputs"
         );
 
@@ -907,7 +907,7 @@ mod tests {
             fs::write(
                 root.join(crate::s2::OWNERSHIP_STATE),
                 format!(
-                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nconfig/fleet/velnor-host.env\t0000000000000000\n",
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\n",
                     crate::s2::GENERATOR_REVISION
                 ),
             ),
@@ -917,14 +917,14 @@ mod tests {
             repository_files(&root, &[]),
             "scan after fleet config ownership is recorded",
         );
-        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        assert!(files.contains(&"state/cache.env".to_owned()));
 
-        let declared_source = vec!["config/fleet/velnor-host.env".to_owned()];
+        let declared_source = vec!["state/cache.env".to_owned()];
         let files = must(
             super::repository_files_with_static_sources(&root, &[], &declared_source),
             "scan declared fleet config source",
         );
-        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        assert!(files.contains(&"state/cache.env".to_owned()));
 
         let files = must(
             super::repository_files_with_static_files_and_owned_paths(
@@ -932,22 +932,22 @@ mod tests {
                 &[],
                 &declared_source,
                 &[],
-                &[crate::s2::GeneratedAliasPath::FleetHostEnv],
+                &[crate::s2::GeneratedAliasPath::new("state/cache.env")],
                 Some(&verified),
             ),
             "scan declared fleet source with generated alias channel",
         );
         assert!(
-            files.contains(&"config/fleet/velnor-host.env".to_owned()),
-            "a declared fleet source remains a scanner input"
+            files.contains(&"state/cache.env".to_owned()),
+            "a declared cache source remains a scanner input"
         );
 
-        let unrelated_source = vec!["config/fleet/other.env".to_owned()];
+        let unrelated_source = vec!["state/other.env".to_owned()];
         let files = must(
             super::repository_files_with_static_sources(&root, &[], &unrelated_source),
             "scan without a matching static source",
         );
-        assert!(files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        assert!(files.contains(&"state/cache.env".to_owned()));
     }
 
     #[test]

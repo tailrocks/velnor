@@ -1873,7 +1873,7 @@ const MR_BOXINGTON_VERSION: &str = "1.12.0";
 /// mbx's action-store budget setting (`gc.max_size`). It is the bound the
 /// automatic sweep prunes the store to after a build, and the only budget
 /// that applies on a hosted runner: `gc.max_total_size` is unset there and
-/// governs the Velnor hosts' combined store (`config/fleet/velnor-host.env`).
+/// governs the host's combined store, whose artifact path is repository-configured.
 pub(crate) const MR_BOXINGTON_STORE_BUDGET_ENV: &str = "MBX_GC_MAX_SIZE";
 /// The action-store budget every GitHub-backend Mr. Boxington job exports.
 ///
@@ -3213,9 +3213,9 @@ pub struct ProjectConfig {
     /// Generator-only GitHub cache retention from `[cache.github]`. Never
     /// serialized into `project.toml`.
     pub(crate) github_cache: config::CacheGithubSection,
-    /// Generator-only Velnor host cache budgets from `[cache.velnor]`. Never
+    /// Generator-only host cache budgets from `[cache.host]`. Never
     /// serialized into `project.toml`.
-    pub(crate) velnor_host_cache: config::CacheVelnorSection,
+    pub(crate) host_cache: config::CacheHostSection,
 }
 
 /// A repository-local file the generated output owns verbatim: the repository
@@ -3854,14 +3854,13 @@ fn scan_target_once(
         .unwrap_or_default();
     validate_static_source_root_identity(root, &scan_root_identity, "after static-file preflight")?;
     let static_output_paths = static_files.output_paths.clone();
-    let generated_aliases = if generation
+    let generated_aliases = generation
         .as_ref()
-        .is_some_and(|generation| generation.cache_velnor().has_overrides())
-    {
-        vec![crate::s2::GeneratedAliasPath::FleetHostEnv]
-    } else {
-        Vec::new()
-    };
+        .filter(|generation| generation.cache_host().has_overrides())
+        .and_then(|generation| generation.cache_host().artifact())
+        .and_then(|artifact| artifact.path.as_deref())
+        .map(|path| vec![crate::s2::GeneratedAliasPath::new(path)])
+        .unwrap_or_default();
     let shape = scan::scan_shape_with_static_files_and_owned_paths(
         root,
         scan_runners,
@@ -4900,7 +4899,7 @@ fn apply_generation_config(
     read_static_files(config, generation.static_files(), preflight, static_sources)?;
     apply_reviewer_rows(config, generation.reviewers());
     config.github_cache = generation.cache_github().clone();
-    config.velnor_host_cache = generation.cache_velnor().clone();
+    config.host_cache = generation.cache_host().clone();
     validate_velnor_pull_request_contract(config)?;
     refresh_mr_boxington_note(config);
     refresh_swift_executor_note(config);
@@ -6701,8 +6700,8 @@ const MR_BOXINGTON_STORE_BUDGET_STEP: &str = "Bound the Mr. Boxington store";
 /// export still needs; the budget is therefore a property of "runs mbx on a
 /// hosted runner", checked over every rendered workflow instead of being
 /// remembered per job. A local-backend job runs on a Velnor host whose
-/// persistent store is budgeted by `config/fleet/velnor-host.env`; exporting
-/// the hosted ceiling there would shrink the shared store.
+/// persistent store is budgeted by the repository-declared host artifact;
+/// exporting the hosted ceiling there would shrink the shared store.
 ///
 /// # Errors
 /// Returns a usage error naming the workflow and job that breaks the rule.
@@ -6739,7 +6738,7 @@ pub(crate) fn validate_hosted_mr_boxington_store_budget(
                 return Err(GeneratorError::usage(format!(
                     "{path}: job `{job}` exports the hosted Mr. Boxington store budget `{export}` \
                      around a local-backend store; the Velnor host budgets its persistent store \
-                     in config/fleet/velnor-host.env, and the hosted ceiling would shrink it"
+                     in the declared host cache artifact, and the hosted ceiling would shrink it"
                 )));
             }
         }
@@ -9163,11 +9162,10 @@ fn generated_files_with_surface(
     for (path, content) in builtin_generated_actions() {
         files.entry(path).or_insert(content);
     }
-    if config.velnor_host_cache.has_overrides() {
-        files.insert(
-            PathBuf::from("config/fleet/velnor-host.env"),
-            config::render_velnor_host_env(&config.velnor_host_cache),
-        );
+    if config.host_cache.has_overrides() {
+        if let Some((path, content)) = config::render_cache_artifact(&config.host_cache) {
+            files.insert(path, content);
+        }
     }
     files.insert(
         PathBuf::from(GITHUB_AGENTS_MD),
@@ -11323,23 +11321,9 @@ fn reject_managed_symlink_ancestors<'a>(
     root: &Path,
     generated: impl IntoIterator<Item = &'a PathBuf>,
 ) -> Result<(), GeneratorError> {
-    let mut managed = BTreeSet::from([
-        PathBuf::from(".github"),
-        PathBuf::from("config"),
-        PathBuf::from("config/fleet"),
-    ]);
+    let mut managed = BTreeSet::from([PathBuf::from(".github")]);
     for relative in generated {
-        managed.extend(
-            relative
-                .ancestors()
-                .skip(1)
-                .filter(|ancestor| {
-                    ancestor.starts_with(".github")
-                        || *ancestor == Path::new("config")
-                        || ancestor.starts_with("config/fleet")
-                })
-                .map(Path::to_path_buf),
-        );
+        managed.extend(relative.ancestors().skip(1).map(Path::to_path_buf));
     }
     for relative in managed {
         let path = root.join(relative);
@@ -11946,15 +11930,14 @@ fn ownership_state_content(
 
 fn managed_relative_path(value: &str) -> Result<PathBuf, GeneratorError> {
     let path = Path::new(value);
-    if !path
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
+    if !value.is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        && !value.starts_with(".git/")
+        && value != ".git"
+        && path_spelling_is_supported(value)
     {
-        return Err(GeneratorError::usage(
-            "generated ownership state contains an unsafe path",
-        ));
-    }
-    if value.starts_with(".github/") || value == "config/fleet/velnor-host.env" {
         return Ok(path.to_path_buf());
     }
     Err(GeneratorError::usage(
@@ -13024,12 +13007,12 @@ mod tests {
 
     #[test]
     fn static_source_paths_use_scanner_separators() {
-        let relative = Path::new("config").join("fleet").join("velnor-host.env");
+        let relative = Path::new("state").join("cache.env");
         let normalized = must(
             static_source_relative_path(&relative),
             "normalize source scanner path",
         );
-        assert_eq!(normalized, "config/fleet/velnor-host.env");
+        assert_eq!(normalized, "state/cache.env");
     }
 
     #[test]
@@ -15265,7 +15248,7 @@ mod tests {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
-            velnor_host_cache: config::CacheVelnorSection::default(),
+            host_cache: config::CacheHostSection::default(),
         }
     }
 
@@ -22013,7 +21996,7 @@ channel = "stable"
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
-            velnor_host_cache: config::CacheVelnorSection::default(),
+            host_cache: config::CacheHostSection::default(),
         };
         must(
             fs::write(root.join(".github/ci/project.toml"), config.toml()),
@@ -23626,11 +23609,11 @@ channel = "stable"
         let baseline_keys = github_lane_cache_key_lines(
             &WorkflowIr::from_config(&baseline.config).render(WorkflowKind::Main),
         );
-        let artifact_path = PathBuf::from("config/fleet/velnor-host.env");
+        let artifact_path = PathBuf::from("state/cache.env");
         assert!(
             !must(generated_files(&baseline.config), "generate baseline")
                 .contains_key(&artifact_path),
-            "an unconfigured host cache must not emit the fleet env file",
+            "an unconfigured host cache must not emit a cache artifact",
         );
         must(
             fs::write(
@@ -23638,7 +23621,9 @@ channel = "stable"
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
                  [cache.github]\nbudget_bytes = 8589934592\n\
-                 [cache.velnor]\nbudget_bytes = 53687091200\n",
+                 [cache.host]\nbudget_bytes = 53687091200\n\
+                 [cache.host.artifact]\npath = \"state/cache.env\"\n\
+                 template = \"BUDGET={budget_bytes}\\n\"\n",
             ),
             "write cache generation config",
         );
@@ -23659,8 +23644,13 @@ channel = "stable"
         );
         assert_eq!(
             files.get(&artifact_path).map(String::as_str),
-            Some(config::render_velnor_host_env(&with_cache.config.velnor_host_cache).as_str()),
-            "an explicit host cache override must emit its fleet env file",
+            Some(
+                config::render_cache_artifact(&with_cache.config.host_cache)
+                    .map(|(_, content)| content)
+                    .unwrap_or_default()
+                    .as_str(),
+            ),
+            "an explicit host cache override must emit its declared artifact",
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -23673,7 +23663,9 @@ channel = "stable"
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
                  [cache.github]\nbudget_bytes = 8589934592\n\
-                 [cache.velnor]\nbudget_bytes = 53687091200\n",
+                 [cache.host]\nbudget_bytes = 53687091200\n\
+                 [cache.host.artifact]\npath = \"state/cache.env\"\n\
+                 template = \"BUDGET={budget_bytes}\\n\"\n",
             ),
         );
         let scanned = must(
@@ -23701,8 +23693,8 @@ channel = "stable"
         );
         let files = must(generated_files(&scanned.config), "generate");
         assert!(
-            files.contains_key(&PathBuf::from("config/fleet/velnor-host.env")),
-            "generator must emit velnor-host.env fleet snippet",
+            files.contains_key(&PathBuf::from("state/cache.env")),
+            "generator must emit the declared host cache artifact",
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -25208,13 +25200,13 @@ channel = "stable"
     fn declared_static_source_hardlink_preserves_stale_output() {
         let root = temporary_repository("static-source-stale-output");
         let source = PathBuf::from(".github-gen/sources/static.yml");
-        let stale = PathBuf::from("config/fleet/velnor-host.env");
+        let stale = PathBuf::from("state/cache.env");
         must(
             fs::create_dir_all(root.join(".github-gen/sources")),
             "create static source directory",
         );
         must(
-            fs::create_dir_all(root.join("config/fleet")),
+            fs::create_dir_all(root.join("state")),
             "create stale output directory",
         );
         must(
@@ -25267,7 +25259,7 @@ channel = "stable"
             "read migrated ownership state",
         );
         assert!(
-            !state.contains("config/fleet/velnor-host.env"),
+            !state.contains("state/cache.env"),
             "migrated static source must leave stale output ownership"
         );
         let _ = fs::remove_dir_all(root);

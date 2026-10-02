@@ -797,11 +797,13 @@ fn generated_static_source_is_retained_during_output_migration(pipeline: Pipelin
     // owns. The next config explicitly adopts that path as static input.
     fs::write(
         &config,
-        format!("{base}\n[cache.velnor]\nbudget_bytes = 53687091200\n"),
+        format!(
+            "{base}\n[cache.host]\nbudget_bytes = 53687091200\n\n[cache.host.artifact]\npath = \"state/cache.env\"\ntemplate = \"CACHE={{budget_bytes}}\\n\"\n"
+        ),
     )
     .unwrap();
     generate_ok(&root, &output, false);
-    let source = root.join("config/fleet/velnor-host.env");
+    let source = root.join("state/cache.env");
     assert!(
         source.is_file(),
         "cache config must generate the source sidecar"
@@ -813,7 +815,7 @@ fn generated_static_source_is_retained_during_output_migration(pipeline: Pipelin
     fs::write(
         &config,
         format!(
-            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"config/fleet/velnor-host.env\"\n"
+            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"state/cache.env\"\n"
         ),
     )
     .unwrap();
@@ -858,12 +860,14 @@ fn separate_output_keeps_static_source_while_removing_stale_output(pipeline: Pip
 
     fs::write(
         &config,
-        format!("{base}\n[cache.velnor]\nbudget_bytes = 53687091200\n"),
+        format!(
+            "{base}\n[cache.host]\nbudget_bytes = 53687091200\n\n[cache.host.artifact]\npath = \"state/cache.env\"\ntemplate = \"CACHE={{budget_bytes}}\\n\"\n"
+        ),
     )
     .unwrap();
     generate_ok(&root, &output, false);
-    let generated_sidecar = output.join("config/fleet/velnor-host.env");
-    let source = root.join("config/fleet/velnor-host.env");
+    let generated_sidecar = output.join("state/cache.env");
+    let source = root.join("state/cache.env");
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     let source_bytes = fs::read(&generated_sidecar).unwrap();
     fs::write(&source, &source_bytes).unwrap();
@@ -872,7 +876,7 @@ fn separate_output_keeps_static_source_while_removing_stale_output(pipeline: Pip
     fs::write(
         &config,
         format!(
-            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"config/fleet/velnor-host.env\"\n"
+            "{base}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"state/cache.env\"\n"
         ),
     )
     .unwrap();
@@ -1011,16 +1015,18 @@ fn static_source_rejects_active_fleet_cache_feedback(pipeline: Pipeline) {
     let output = root.clone();
     let config = root.join(".github-gen/velnor-workflow.toml");
     let base = fs::read_to_string(&config).unwrap();
-    let with_cache = format!("{base}\n[cache.velnor]\nbudget_bytes = 53687091200\n");
+    let with_cache = format!(
+        "{base}\n[cache.host]\nbudget_bytes = 53687091200\n\n[cache.host.artifact]\npath = \"state/cache.env\"\ntemplate = \"CACHE={{budget_bytes}}\\n\"\n"
+    );
     fs::write(&config, &with_cache).unwrap();
     generate_ok(&root, &output, false);
-    let source = root.join("config/fleet/velnor-host.env");
+    let source = root.join("state/cache.env");
     let before = fs::read(&source).unwrap();
 
     fs::write(
         &config,
         format!(
-            "{with_cache}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"config/fleet/velnor-host.env\"\n"
+            "{with_cache}\n[[static_files]]\nfile = \".github/migrated.env\"\nsource = \"state/cache.env\"\n"
         ),
     )
     .unwrap();
@@ -1031,7 +1037,7 @@ fn static_source_rejects_active_fleet_cache_feedback(pipeline: Pipeline) {
         "self-referential output is rejected"
     );
     assert!(
-        stderr.contains("cannot source `config/fleet/velnor-host.env`"),
+        stderr.contains("cannot source `state/cache.env`"),
         "the rejection names the generated source collision: {stderr}"
     );
     assert_eq!(fs::read(&source).unwrap(), before);

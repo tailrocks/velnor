@@ -677,7 +677,7 @@ impl From<RepositoryShape> for ProjectConfig {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+            host_cache: crate::s2::config::CacheHostSection::default(),
             check_profiles: Vec::new(),
             rust_pin: None,
         }

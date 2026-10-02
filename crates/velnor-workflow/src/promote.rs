@@ -867,7 +867,7 @@ mod tests {
             "velnor-promote-stale-{}-{nonce}",
             std::process::id()
         ));
-        let output = PathBuf::from("config/fleet/velnor-host.env");
+        let output = PathBuf::from("state/cache.env");
         let output_path = root.join(&output);
         let output_parent = output_path.parent().unwrap_or(&root);
         must(

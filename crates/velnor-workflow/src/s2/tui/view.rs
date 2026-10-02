@@ -787,7 +787,7 @@ mod tests {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+            host_cache: crate::s2::config::CacheHostSection::default(),
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));
