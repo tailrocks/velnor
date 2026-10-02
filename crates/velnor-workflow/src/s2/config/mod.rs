@@ -23,6 +23,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
+use crate::ensure_no_symlinked_path_ancestors;
+use crate::is_contained_repository_path;
 use crate::s2::provider::{parse_provider_set, parse_selectors, ProviderId, ProviderSelector};
 use crate::s2::{content_digest_bytes, GeneratorError};
 
@@ -40,6 +42,14 @@ const CONFIG_SCHEMA: i64 = 2;
 /// # Errors
 /// Returns filesystem errors and parse errors with the affected path.
 pub(crate) fn load(path: &Path) -> Result<RepoGenerationConfig, GeneratorError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| GeneratorError::io("inspect generation config", path, &error))?;
+    if !metadata.file_type().is_file() {
+        return Err(GeneratorError::usage(format!(
+            "generation config is not a regular file: {}",
+            path.display()
+        )));
+    }
     let bytes = fs::read(path)
         .map_err(|error| GeneratorError::io("read generation config", path, &error))?;
     parse(path, &bytes)
@@ -53,13 +63,35 @@ pub(crate) fn load(path: &Path) -> Result<RepoGenerationConfig, GeneratorError> 
 /// # Errors
 /// Returns filesystem errors and parse errors with the affected path.
 pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, GeneratorError> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_dir() => (),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(GeneratorError::usage(format!(
+                "refusing symlinked repository root: {}",
+                root.display()
+            )));
+        }
+        Ok(_) => {
+            return Err(GeneratorError::usage(format!(
+                "repository root is not a directory: {}",
+                root.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GeneratorError::io("inspect repository root", root, &error)),
+    }
     let path = root.join(GENERATION_CONFIG_PATH);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_dir() => Err(GeneratorError::usage(format!(
-            "generation config is a directory: {}",
+    ensure_no_symlinked_path_ancestors(root, Path::new(GENERATION_CONFIG_PATH))?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => load(&path).map(Some),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(GeneratorError::usage(format!(
+            "generation config must not be a symlink: {}",
             path.display()
         ))),
-        Ok(_) => load(&path).map(Some),
+        Ok(_) => Err(GeneratorError::usage(format!(
+            "generation config is not a regular file: {}",
+            path.display()
+        ))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(GeneratorError::io(
             "inspect generation config",
@@ -3434,13 +3466,6 @@ fn starts_with_generated_github_path(path: &Path) -> bool {
         Some(Component::Normal(component))
             if component.to_string_lossy().eq_ignore_ascii_case(".github")
     )
-}
-
-fn is_contained_repository_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.contains('\\')
-        && !path.split('/').any(|segment| segment == "..")
 }
 
 /// The publishers the renderer implements, and the contract fields each one
@@ -7728,6 +7753,33 @@ mod tests {
     }
 
     #[test]
+    fn cache_artifact_paths_reject_git_directory_components() {
+        for path in [
+            ".git",
+            ".git/cache.env",
+            ".GIT/cache.env",
+            "nested/.git/cache.env",
+            "nested/.GIT/cache.env",
+        ] {
+            let config = format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [cache.host.artifact]\npath = {path:?}\ntemplate = \"cache=1\\n\"\n"
+            );
+            let error = must_fail(
+                super::parse(
+                    Path::new(".github-gen/velnor-workflow.toml"),
+                    config.as_bytes(),
+                ),
+                "cache artifact path into Git metadata must fail at ingestion",
+            );
+            assert!(
+                error.to_string().contains("safe repository-relative path"),
+                "{path} must be rejected by config ingestion: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn static_source_cannot_consume_cache_generated_artifact() {
         let root = scanned_root("static-source-cache-coexistence");
         let source = root.join("state/cache.env");
@@ -8003,6 +8055,64 @@ mod tests {
         );
         let discovered = must(discover(&root), "discover present config");
         assert!(discovered.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_symlinked_config_parent_and_repository_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = scanned_root("discovery-symlink-guard");
+        let path = root.join(GENERATION_CONFIG_PATH);
+        let git_config = root.join(".git/velnor-workflow.toml");
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create config directory",
+        );
+        must(
+            fs::create_dir_all(git_config.parent().unwrap_or(&root)),
+            "create Git metadata directory",
+        );
+        must(
+            fs::write(
+                &git_config,
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write Git metadata config",
+        );
+        must(
+            symlink("../.git/velnor-workflow.toml", &path),
+            "symlink config into Git metadata",
+        );
+        let load_error = must_some_error(load(&path).err(), "load must reject config symlink");
+        assert!(load_error.contains("not a regular file"), "{load_error}");
+        let leaf_error = must_some_error(discover(&root).err(), "reject config symlink");
+        assert!(leaf_error.contains("symlink"), "{leaf_error}");
+
+        must(fs::remove_file(&path), "remove config symlink");
+        must(
+            fs::remove_dir(path.parent().unwrap_or(&root)),
+            "remove config directory",
+        );
+        must(
+            symlink(".git", root.join(".github-gen")),
+            "symlink config parent into Git metadata",
+        );
+        let parent_error = must_some_error(discover(&root).err(), "reject config parent symlink");
+        assert!(
+            parent_error.contains("symlinked ancestor"),
+            "{parent_error}"
+        );
+
+        let root_alias = root.with_extension("root-link");
+        must(symlink(&root, &root_alias), "symlink repository root");
+        let root_error = must_some_error(discover(&root_alias).err(), "reject root symlink");
+        assert!(
+            root_error.contains("symlinked repository root"),
+            "{root_error}"
+        );
+        let _ = fs::remove_file(root_alias);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -8460,6 +8570,35 @@ mod tests {
             "enabled docs with a non-https site_url must fail",
         );
         assert!(bad_url.to_string().contains("site_url"), "{bad_url}");
+    }
+
+    #[test]
+    fn docs_paths_reject_portable_repository_escapes_and_keep_unicode() {
+        for path in [
+            "C:/outside",
+            "C:outside",
+            "Ｃ：／outside",
+            "//server/share",
+            "\\\\server\\share",
+            "settings:stream",
+            "NUL",
+            "CON.txt",
+            "COM¹",
+            "LPT²",
+            ".git/config",
+            ".g\u{0131}t/config",
+            "dir/.git.",
+            "dir/.git ",
+        ] {
+            assert!(
+                validate_docs_path(path, "site_dir").is_err(),
+                "unsafe docs path must fail on every host: {path:?}"
+            );
+        }
+        must(
+            validate_docs_path("café/assets", "site_dir"),
+            "Unicode docs paths remain supported",
+        );
     }
 
     #[test]

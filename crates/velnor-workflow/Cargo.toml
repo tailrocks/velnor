@@ -52,6 +52,7 @@ rustix = { workspace = true, features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
 same-file = { workspace = true }
+win-file-id = "=0.1.2"
 
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
