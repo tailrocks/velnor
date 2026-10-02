@@ -186,6 +186,15 @@ struct HtmlStep {
     external_id: String,
 }
 
+/// Parsed HTML evidence plus the digest of the exact response body. The
+/// parsed step map drives comparison; the digest binds watch snapshots to the
+/// raw payload without retaining or serializing the whole page in identity.
+#[derive(Debug, Clone)]
+struct HtmlEvidence {
+    steps: BTreeMap<u64, HtmlStep>,
+    digest: String,
+}
+
 /// Lane-level log-content affordances (per-step blobs are not API-reachable
 /// for V2 jobs, so content is judged per lane, structure per step).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -214,8 +223,12 @@ struct RunSummary {
 struct PairEvidence {
     github_html: BTreeMap<u64, HtmlStep>,
     velnor_html: BTreeMap<u64, HtmlStep>,
+    github_html_digest: String,
+    velnor_html_digest: String,
     github_log: String,
     velnor_log: String,
+    github_log_digest: String,
+    velnor_log_digest: String,
     github_content: LaneLogStats,
     velnor_content: LaneLogStats,
 }
@@ -240,6 +253,7 @@ struct RunEvidenceIdentity {
     summary: RunSummary,
     jobs: Vec<ApiJob>,
     artifacts: BTreeMap<String, ArtifactRef>,
+    payload_digests: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1198,10 +1212,31 @@ fn ensure_run_snapshot_stable(first: &RunSummary, second: &RunSummary) -> Result
 }
 
 fn evidence_identity(validated: &ValidatedRun) -> RunEvidenceIdentity {
+    let mut payload_digests = BTreeMap::new();
+    for ((github_id, velnor_id), evidence) in &validated.pair_evidence {
+        let prefix = format!("pair/{github_id}/{velnor_id}");
+        payload_digests.insert(
+            format!("{prefix}/github-html"),
+            evidence.github_html_digest.clone(),
+        );
+        payload_digests.insert(
+            format!("{prefix}/velnor-html"),
+            evidence.velnor_html_digest.clone(),
+        );
+        payload_digests.insert(
+            format!("{prefix}/github-log"),
+            evidence.github_log_digest.clone(),
+        );
+        payload_digests.insert(
+            format!("{prefix}/velnor-log"),
+            evidence.velnor_log_digest.clone(),
+        );
+    }
     RunEvidenceIdentity {
         summary: validated.summary.clone(),
         jobs: canonical_job_identities(&validated.job_identities),
         artifacts: validated.artifact_identities.clone(),
+        payload_digests,
     }
 }
 
@@ -1226,10 +1261,9 @@ fn ensure_evidence_identity_stable(
 
 /// Re-fetch the complete identity snapshot used to bind evidence to one run.
 ///
-/// This intentionally stops at the run summary, attempt-scoped job census, and
-/// artifact metadata/archive verification. The HTML and log payloads are
-/// already validated by `validate_run_evidence`; this pass closes the race in
-/// which a run, job, or artifact is replaced after those payloads were read.
+/// Re-fetches the run summary, attempt-scoped job census, artifact
+/// metadata/archive, and every HTML/log payload digest. This closes the race
+/// in which any identity or evidence payload changes after the first read.
 fn fetch_run_evidence_identity(repo: &str, run_id: u64) -> Result<RunEvidenceIdentity> {
     let summary = fetch_run_summary(repo, run_id)?;
     validate_run_summary(&summary, run_id)?;
@@ -1245,12 +1279,49 @@ fn fetch_run_evidence_identity(repo: &str, run_id: u64) -> Result<RunEvidenceIde
         .iter()
         .map(|(_, velnor, _)| velnor.id)
         .collect();
-    let artifacts =
+    let artifact_evidence =
         fetch_velnor_job_log_artifacts(repo, run_id, &summary, &expected_velnor_job_ids)?;
+    let mut payload_digests = BTreeMap::new();
+    for (github, velnor, _) in &census.matched {
+        let github_html = fetch_job_html_steps(github, repo, &summary).with_context(|| {
+            format!(
+                "recheck GitHub job {} HTML evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let velnor_html = fetch_job_html_steps(velnor, repo, &summary).with_context(|| {
+            format!(
+                "recheck Velnor job {} HTML evidence for run {run_id}",
+                velnor.id
+            )
+        })?;
+        let github_log = fetch_github_job_log(repo, github.id).with_context(|| {
+            format!(
+                "recheck GitHub job {} log evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let velnor_log = artifact_evidence
+            .content_by_job
+            .get(&velnor.id)
+            .with_context(|| format!("missing Velnor job-log evidence for job {}", velnor.id))?;
+        let prefix = format!("pair/{}/{}", github.id, velnor.id);
+        payload_digests.insert(format!("{prefix}/github-html"), github_html.digest);
+        payload_digests.insert(format!("{prefix}/velnor-html"), velnor_html.digest);
+        payload_digests.insert(
+            format!("{prefix}/github-log"),
+            sha256_digest(github_log.as_bytes()),
+        );
+        payload_digests.insert(
+            format!("{prefix}/velnor-log"),
+            sha256_digest(velnor_log.as_bytes()),
+        );
+    }
     Ok(RunEvidenceIdentity {
         summary,
         jobs: canonical_job_identities(&fetched_jobs.identities),
-        artifacts: artifacts.artifacts,
+        artifacts: artifact_evidence.artifacts,
+        payload_digests,
     })
 }
 
@@ -1338,13 +1409,19 @@ fn validate_run_evidence(
                 velnor.id
             );
         }
+        let github_log_digest = sha256_digest(github_log.as_bytes());
+        let velnor_log_digest = sha256_digest(velnor_log.as_bytes());
         pair_evidence.insert(
             (github.id, velnor.id),
             PairEvidence {
-                github_html,
-                velnor_html,
+                github_html: github_html.steps,
+                velnor_html: velnor_html.steps,
+                github_html_digest: github_html.digest,
+                velnor_html_digest: velnor_html.digest,
                 github_log,
                 velnor_log,
+                github_log_digest,
+                velnor_log_digest,
                 github_content,
                 velnor_content,
             },
@@ -1429,11 +1506,7 @@ fn github_auth_token() -> Result<String> {
 
 /// Job page HTML via authenticated curl (`gh api` cannot fetch web routes —
 /// curl also sidesteps the reqwest TLS-fingerprint throttle).
-fn fetch_job_html_steps(
-    job: &Job,
-    repo: &str,
-    summary: &RunSummary,
-) -> Result<BTreeMap<u64, HtmlStep>> {
+fn fetch_job_html_steps(job: &Job, repo: &str, summary: &RunSummary) -> Result<HtmlEvidence> {
     let url = job
         .html_url
         .as_deref()
@@ -1443,11 +1516,7 @@ fn fetch_job_html_steps(
     fetch_job_html_steps_with_token(job.id, url, &token)
 }
 
-fn fetch_job_html_steps_with_token(
-    job_id: u64,
-    url: &str,
-    token: &str,
-) -> Result<BTreeMap<u64, HtmlStep>> {
+fn fetch_job_html_steps_with_token(job_id: u64, url: &str, token: &str) -> Result<HtmlEvidence> {
     const ARGS: &[&str] = &[
         "-fsS",
         "--max-redirs",
@@ -1465,7 +1534,7 @@ fn fetch_job_html_steps_with_token_http_fixture(
     job_id: u64,
     url: &str,
     token: &str,
-) -> Result<BTreeMap<u64, HtmlStep>> {
+) -> Result<HtmlEvidence> {
     fetch_job_html_steps_with_curl_args(job_id, url, token, &["-fsS", "--max-redirs", "0"])
 }
 
@@ -1474,7 +1543,7 @@ fn fetch_job_html_steps_with_curl_args(
     url: &str,
     token: &str,
     base_args: &[&str],
-) -> Result<BTreeMap<u64, HtmlStep>> {
+) -> Result<HtmlEvidence> {
     if token.trim().is_empty() {
         bail!("GitHub authentication token is empty");
     }
@@ -1505,7 +1574,10 @@ fn fetch_job_html_steps_with_curl_args(
     if steps.is_empty() {
         bail!("job {job_id} page contained no check-step evidence");
     }
-    Ok(steps)
+    Ok(HtmlEvidence {
+        steps,
+        digest: sha256_digest(html.as_bytes()),
+    })
 }
 
 /// Extract `<check-step …>` elements: `data-number` plus whether
@@ -3014,6 +3086,24 @@ mod tests {
                     "job-log-7".to_owned(),
                     artifact_ref(101, "job-log-7"),
                 )]),
+                payload_digests: BTreeMap::from([
+                    (
+                        "pair/7/8/github-html".to_owned(),
+                        sha256_digest(b"github html"),
+                    ),
+                    (
+                        "pair/7/8/velnor-html".to_owned(),
+                        sha256_digest(b"velnor html"),
+                    ),
+                    (
+                        "pair/7/8/github-log".to_owned(),
+                        sha256_digest(b"github log"),
+                    ),
+                    (
+                        "pair/7/8/velnor-log".to_owned(),
+                        sha256_digest(b"velnor log"),
+                    ),
+                ]),
             },
         }
     }
@@ -3062,6 +3152,10 @@ mod tests {
                     .map(|step| step.number)
                     .collect::<Vec<_>>(),
             ),
+            github_html_digest: sha256_digest(b"github html"),
+            velnor_html_digest: sha256_digest(b"velnor html"),
+            github_log_digest: sha256_digest(b"github log\n"),
+            velnor_log_digest: sha256_digest(b"velnor log\n"),
             github_log: "github log\n".to_owned(),
             velnor_log: "velnor log\n".to_owned(),
             github_content: analyze_lane_log("github log\n"),
@@ -3307,7 +3401,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_snapshot_comparison_includes_run_job_and_artifact_identity() {
+    fn watch_snapshot_comparison_includes_run_job_artifact_and_payload_identity() {
         let first = evidence_snapshot_fixture();
         assert!(evidence_snapshots_stable(
             std::slice::from_ref(&first),
@@ -3331,10 +3425,34 @@ mod tests {
         changed = first.clone();
         changed
             .identity
+            .payload_digests
+            .get_mut("pair/7/8/github-html")
+            .unwrap()
+            .clone_from(&sha256_digest(b"changed github html"));
+        assert!(!evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&changed),
+        ));
+
+        changed = first.clone();
+        changed
+            .identity
             .artifacts
             .get_mut("job-log-7")
             .unwrap()
             .digest = Some(format!("sha256:{}", "b".repeat(64)));
+        assert!(!evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&changed),
+        ));
+
+        changed = first.clone();
+        changed
+            .identity
+            .payload_digests
+            .get_mut("pair/7/8/github-log")
+            .unwrap()
+            .clone_from(&sha256_digest(b"changed github log"));
         assert!(!evidence_snapshots_stable(
             std::slice::from_ref(&first),
             std::slice::from_ref(&changed),
@@ -3581,7 +3699,7 @@ mod tests {
         )
         .unwrap();
         server.join().unwrap();
-        assert_eq!(steps.keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(steps.steps.keys().copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
