@@ -91,6 +91,13 @@ docker/bake-action                   docker/setup-qemu-action
 hadolint/hadolint-action             sigstore/cosign-installer
 ```
 
+For the pinned v7.4.0 `docker/build-push-action` reference, Velnor uses its
+native `DockerBuildPush` adapter. It runs the build operation but not the
+action's post callback. The Native lane therefore does not export or upload
+`.dockerbuild` build-history artifacts, add the action's Build summary, or
+clean up the action's own temporary directory. This is not full v7.4.0 action
+parity.
+
 `velnor-workflow` generates the workflow files and local reusable-workflow calls
 in the repository. Velnor does not fetch a workflow provider at runtime. The
 remaining fetched action surfaces use pinned commit SHAs and closed input
