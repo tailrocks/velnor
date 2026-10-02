@@ -2573,6 +2573,41 @@ fn aggregate_files_inner(
     head_sha: &str,
     explicit_run: Option<&RunIdentity>,
 ) -> Result<AggregateVerdict, String> {
+    let prepared = prepare_aggregate_files(
+        expected_json,
+        results_json,
+        base_sha,
+        head_sha,
+        explicit_run,
+    )?;
+    let (results, observed) = parse_aggregate_results(&prepared)?;
+    validate_aggregate_result_identities(&prepared, &observed)?;
+    Ok(aggregate(
+        &ExpectedWork {
+            units: prepared.units,
+            planned_no_work: prepared.expected_file.planned_no_work,
+        },
+        &results,
+        &prepared.expected_file.prerequisites,
+    ))
+}
+
+struct PreparedAggregateFiles {
+    expected_file: ExpectedWorkFile,
+    results_file: ResultsFile,
+    file_base: String,
+    units: BTreeMap<String, ExpectedUnit>,
+    run: Option<RunIdentity>,
+    expected_pairs: Option<BTreeSet<(String, ProviderId)>>,
+}
+
+fn prepare_aggregate_files(
+    expected_json: &str,
+    results_json: &str,
+    base_sha: &str,
+    head_sha: &str,
+    explicit_run: Option<&RunIdentity>,
+) -> Result<PreparedAggregateFiles, String> {
     let expected_file: ExpectedWorkFile = serde_json::from_str(expected_json)
         .map_err(|error| format!("the expected-work file is not valid JSON: {error}"))?;
     let results_file: ResultsFile = serde_json::from_str(results_json)
@@ -2646,22 +2681,35 @@ fn aggregate_files_inner(
     } else {
         None
     };
-    let mut results = Vec::with_capacity(results_file.results.len());
-    let mut observed = Vec::with_capacity(results_file.results.len());
-    for result in &results_file.results {
-        if run.is_some() && result.reused_from.is_some() {
+    Ok(PreparedAggregateFiles {
+        expected_file,
+        results_file,
+        file_base,
+        units,
+        run,
+        expected_pairs,
+    })
+}
+
+fn parse_aggregate_results(
+    prepared: &PreparedAggregateFiles,
+) -> Result<(Vec<ReportedResult>, Vec<ObservedResult>), String> {
+    let mut results = Vec::with_capacity(prepared.results_file.results.len());
+    let mut observed = Vec::with_capacity(prepared.results_file.results.len());
+    for result in &prepared.results_file.results {
+        if prepared.run.is_some() && result.reused_from.is_some() {
             return Err(format!(
                 "strict live result `{}` carries reused_from; live results must be executed",
                 result.unit
             ));
         }
         let outcome = parse_outcome(&result.outcome, result.reason.as_deref())?;
-        if let Some(run) = &run {
+        if let Some(run) = &prepared.run {
             observed.push(parse_live_observed_result(
                 result,
-                &file_base,
+                &prepared.file_base,
                 run,
-                units.get(&result.unit),
+                prepared.units.get(&result.unit),
             )?);
         }
         results.push(ReportedResult {
@@ -2672,8 +2720,15 @@ fn aggregate_files_inner(
             reused_from: result.reused_from.clone(),
         });
     }
-    if let (Some(run), Some(expected_pairs)) = (&run, expected_pairs) {
-        let failures = identity_failures(&expected_pairs, &observed, run);
+    Ok((results, observed))
+}
+
+fn validate_aggregate_result_identities(
+    prepared: &PreparedAggregateFiles,
+    observed: &[ObservedResult],
+) -> Result<(), String> {
+    if let (Some(run), Some(expected_pairs)) = (&prepared.run, &prepared.expected_pairs) {
+        let failures = identity_failures(expected_pairs, observed, run);
         if !failures.is_empty() {
             let classes = failures
                 .iter()
@@ -2683,14 +2738,7 @@ fn aggregate_files_inner(
             return Err(format!("live result identity rejected: {classes}"));
         }
     }
-    Ok(aggregate(
-        &ExpectedWork {
-            units,
-            planned_no_work: expected_file.planned_no_work,
-        },
-        &results,
-        &expected_file.prerequisites,
-    ))
+    Ok(())
 }
 
 /// Parse the expected unit rows, retaining the legacy shape when strict live
@@ -3094,12 +3142,11 @@ fn validate_run_identity(
 }
 
 fn required_live_field<'a>(
-    value: &'a Option<String>,
+    value: Option<&'a str>,
     name: &str,
     unit: &str,
 ) -> Result<&'a str, String> {
     value
-        .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("live result `{unit}` is missing identity field {name}"))
 }
@@ -3113,16 +3160,21 @@ fn parse_live_observed_result(
     if result.unit.is_empty() || result.lane.is_empty() {
         return Err("live result identity has an empty unit or lane".to_owned());
     }
-    let repository = required_live_field(&result.repository, "repository", &result.unit)?;
-    let base_sha = required_live_field(&result.base_sha, "base_sha", &result.unit)?;
-    let head_sha = required_live_field(&result.head_sha, "head_sha", &result.unit)?;
-    let run_id = required_live_field(&result.run_id, "run_id", &result.unit)?;
-    let run_attempt = required_live_field(&result.run_attempt, "run_attempt", &result.unit)?;
-    let plan_digest = required_live_field(&result.plan_digest, "plan_digest", &result.unit)?;
-    let provider_name = required_live_field(&result.provider, "provider", &result.unit)?;
-    let platform_name = required_live_field(&result.platform, "platform", &result.unit)?;
-    let command_digest =
-        required_live_field(&result.command_digest, "command_digest", &result.unit)?;
+    let repository = required_live_field(result.repository.as_deref(), "repository", &result.unit)?;
+    let base_sha = required_live_field(result.base_sha.as_deref(), "base_sha", &result.unit)?;
+    let head_sha = required_live_field(result.head_sha.as_deref(), "head_sha", &result.unit)?;
+    let run_id = required_live_field(result.run_id.as_deref(), "run_id", &result.unit)?;
+    let run_attempt =
+        required_live_field(result.run_attempt.as_deref(), "run_attempt", &result.unit)?;
+    let plan_digest =
+        required_live_field(result.plan_digest.as_deref(), "plan_digest", &result.unit)?;
+    let provider_name = required_live_field(result.provider.as_deref(), "provider", &result.unit)?;
+    let platform_name = required_live_field(result.platform.as_deref(), "platform", &result.unit)?;
+    let command_digest = required_live_field(
+        result.command_digest.as_deref(),
+        "command_digest",
+        &result.unit,
+    )?;
     if base_sha != expected_base_sha {
         return Err(format!(
             "live result `{}` has base SHA `{base_sha}`, expected `{expected_base_sha}`",
