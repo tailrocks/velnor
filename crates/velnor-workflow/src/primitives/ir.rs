@@ -141,7 +141,7 @@ const DOCKER_SEED_SNAPSHOT_NAMESPACE: &str = "velnor-docker-seed";
 /// unit restore another unit's tool set and skip an install. Keep this
 /// parameterization at the render boundary so collapsed kind jobs use their
 /// dispatch input while direct unit jobs use the concrete unit id.
-fn parameterize_cargo_bin_cache_key(rendered: String, unit_key: &str) -> String {
+fn parameterize_cargo_bin_cache_key(rendered: &str, unit_key: &str) -> String {
     const HASH_SEGMENT: &str = "${{ hashFiles('mise.lock', 'mise.toml') }}";
     const KEY_PREFIX: &str = "velnor-cargo-bin-v2-${{ runner.os }}-${{ runner.arch }}";
     let unscoped = format!("{KEY_PREFIX}-{HASH_SEGMENT}");
@@ -7532,7 +7532,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         cache_save: bool,
     ) {
         output.push_str(&parameterize_cargo_bin_cache_key(
-            hosted_cargo_bin_toolchain_restore(),
+            &hosted_cargo_bin_toolchain_restore(),
             unit_key,
         ));
         output.push_str(&hosted_cargo_bin_toolchain_verify(tool_list));
@@ -7543,7 +7543,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         if cache_save {
             output.push_str(&parameterize_cargo_bin_cache_key(
-                hosted_cargo_bin_toolchain_save(&self.default_branch),
+                &hosted_cargo_bin_toolchain_save(&self.default_branch),
                 unit_key,
             ));
         }
