@@ -45,13 +45,14 @@ pub(crate) fn release_workflow_text() -> Option<String> {
     match std::fs::read_to_string(&workflow_path) {
         Ok(workflow) => Some(workflow),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let velnor_config = repository_root.join(".velnor/config.toml");
+            if velnor_config.exists() {
+                return None;
+            }
             let config_path = repository_root.join(".github/ci/project.toml");
-            let config_text = std::fs::read_to_string(&config_path).unwrap_or_else(|read_error| {
-                panic!(
-                    "release workflow is absent and generator policy cannot be read from {}: {read_error}",
-                    config_path.display()
-                )
-            });
+            let Ok(config_text) = std::fs::read_to_string(&config_path) else {
+                return None;
+            };
             let config: toml::Value = toml::from_str(&config_text).unwrap_or_else(|parse_error| {
                 panic!("release workflow is absent and generator policy is invalid: {parse_error}")
             });

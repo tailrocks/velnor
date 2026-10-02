@@ -2355,6 +2355,12 @@ mod tests {
     fn report_action_template_pins_cache_outcome_schema_version() {
         let action_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml");
+        let action_path = if action_path.exists() {
+            action_path
+        } else {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/actions/report-velnor-ci-outcomes/action.yml")
+        };
         let action = must(
             std::fs::read_to_string(&action_path),
             &format!("read {}", action_path.display()),

@@ -1,0 +1,11 @@
+schema = 1
+
+[workflow]
+default_branch = "main"
+
+[stacks.rust]
+compile_driver = "mbx"
+test_runner = "cargo_nextest"
+
+[discovery]
+exclude = ["**/fixtures/**", "**/fixtures-*/**"]

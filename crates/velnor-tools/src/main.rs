@@ -1,3 +1,4 @@
+#![allow(rustdoc::all)]
 mod audit_ci;
 mod evidence_check;
 mod fleet_policy;
