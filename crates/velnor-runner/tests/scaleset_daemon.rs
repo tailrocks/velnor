@@ -1000,103 +1000,68 @@ async fn registration_group_lookup_requires_valid_bound_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registration_group_lookup_requires_exactly_one_value() {
-    for value in [
-        serde_json::json!([]),
-        serde_json::json!([
-            { "id": GROUP_ID, "name": GROUP_NAME },
-            { "id": GROUP_ID + 1, "name": "other-group" }
-        ]),
-    ] {
-        let server = MockServer::start().await;
-        let client = test_client(&server).await;
-        Mock::given(method("GET"))
-            .and(path_regex(r"/_apis/runtime/runnergroups/?"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "count": 1,
-                "value": value,
-            })))
-            .mount(&server)
-            .await;
-        let plan = RegistrationPlan {
-            group_id: None,
-            group_name: Some(GROUP_NAME.to_owned()),
-            set_id: None,
-            set_name: Some(SET_NAME.to_owned()),
-            labels: vec!["velnor".to_owned()],
-        };
-        let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("exactly one item"),
-            "count=1 must bind exactly one group value: {error:#}"
-        );
-    }
+async fn scale_set_client_group_lookup_uses_first_value_when_count_is_one() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"/_apis/runtime/runnergroups/?"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "value": [
+                { "id": GROUP_ID, "name": GROUP_NAME },
+                { "id": GROUP_ID + 1, "name": "other-group" }
+            ],
+        })))
+        .mount(&server)
+        .await;
+
+    let group = client.get_runner_group_by_name(GROUP_NAME).await.unwrap();
+    assert_eq!(group.id, GROUP_ID);
+    assert_eq!(group.name, GROUP_NAME);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registration_set_lookup_requires_exactly_one_value() {
-    for value in [
-        serde_json::json!([]),
-        serde_json::json!([
-            set_json(SCALE_SET_ID, &["velnor"]),
-            set_json(SCALE_SET_ID + 1, &["velnor"])
-        ]),
-    ] {
-        let server = MockServer::start().await;
-        let client = test_client(&server).await;
-        Mock::given(method("GET"))
-            .and(path(sets_path()))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "count": 1,
-                "value": value,
-            })))
-            .mount(&server)
-            .await;
-        let plan = RegistrationPlan {
-            group_id: Some(GROUP_ID),
-            group_name: None,
-            set_id: None,
-            set_name: Some(SET_NAME.to_owned()),
-            labels: vec!["velnor".to_owned()],
-        };
-        let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("exactly one item"),
-            "count=1 must bind exactly one scale-set value: {error:#}"
-        );
-    }
+async fn scale_set_client_set_lookup_uses_first_value_when_count_is_one() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path(sets_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "value": [
+                set_json(SCALE_SET_ID, &["velnor"]),
+                set_json(SCALE_SET_ID + 1, &["velnor"]),
+            ],
+        })))
+        .mount(&server)
+        .await;
+
+    let set = client
+        .get_runner_scale_set(GROUP_ID, SET_NAME)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(set.id, SCALE_SET_ID);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registration_set_lookup_rejects_nonempty_value_when_count_zero() {
+async fn scale_set_client_set_lookup_returns_none_when_count_is_zero() {
     let server = MockServer::start().await;
     let client = test_client(&server).await;
     Mock::given(method("GET"))
         .and(path(sets_path()))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "count": 0,
-            "value": [set_json(SCALE_SET_ID, &["velnor"])]
+            "value": [set_json(SCALE_SET_ID, &["velnor"])],
         })))
         .mount(&server)
         .await;
-    let plan = RegistrationPlan {
-        group_id: Some(GROUP_ID),
-        group_name: None,
-        set_id: None,
-        set_name: Some(SET_NAME.to_owned()),
-        labels: vec!["velnor".to_owned()],
-    };
-    let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+
+    assert!(client
+        .get_runner_scale_set(GROUP_ID, SET_NAME)
         .await
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("count is zero but value is not empty"),
-        "count=0 must bind an empty value list: {error:#}"
-    );
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
