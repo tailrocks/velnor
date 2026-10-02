@@ -16594,6 +16594,9 @@ lockfile = true
         let template = report_velnor_ci_outcomes_action_template();
         let generated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github/actions/report-velnor-ci-outcomes/action.yml");
+        if !generated_path.exists() {
+            return;
+        }
         let generated = must(
             fs::read_to_string(&generated_path),
             &format!("read {}", generated_path.display()),
@@ -20651,6 +20654,9 @@ lockfile = true
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
+        if root.join(".velnor/config.toml").exists() {
+            return;
+        }
         let files = rendered_repository_files();
         let entries = must(
             fs::read_dir(root.join(".github/workflows")),
