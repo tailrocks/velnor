@@ -1112,15 +1112,13 @@ fn generated_producer_cleans_upload_surface_after_publish() {
             let Some(step) = step.as_mapping() else {
                 return false;
             };
-            step.get("if")
-                .and_then(YamlValue::as_str)
-                == Some("always()")
+            step.get("if").and_then(YamlValue::as_str) == Some("always()")
                 && step
                     .get("run")
                     .and_then(YamlValue::as_str)
                     .is_some_and(|run| {
-                    run.contains("rm -rf") && run.contains("velnor-workflow-candidate")
-                })
+                        run.contains("rm -rf") && run.contains("velnor-workflow-candidate")
+                    })
         });
         cleanup_index.is_some_and(|index| index > publish_index)
     });
