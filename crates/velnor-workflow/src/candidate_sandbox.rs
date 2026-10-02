@@ -492,7 +492,7 @@ fn normalized_socket_host(path: &Path, source: &str) -> Result<String, String> {
 }
 
 #[cfg(unix)]
-fn default_socket_candidates(home: Option<&Path>, runtime_dir: Option<&Path>) -> Vec<PathBuf> {
+fn default_socket_candidates(home: Option<&Path>, _runtime_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     #[cfg(target_os = "macos")]
     {
@@ -507,7 +507,7 @@ fn default_socket_candidates(home: Option<&Path>, runtime_dir: Option<&Path>) ->
     {
         candidates.push(PathBuf::from("/var/run/docker.sock"));
         candidates.push(PathBuf::from("/run/docker.sock"));
-        if let Some(runtime_dir) = runtime_dir {
+        if let Some(runtime_dir) = _runtime_dir {
             candidates.push(runtime_dir.join("docker.sock"));
         }
         if let Some(home) = home {
@@ -2103,6 +2103,27 @@ mod tests {
     use std::ffi::OsStr;
     use std::os::unix::net::UnixListener;
 
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn must_fail<T, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(_) => panic!("{context}: expected an error"),
+            Err(error) => error,
+        }
+    }
+
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}: expected a value"),
+        }
+    }
+
     fn header(name: &str, kind: EntryType, size: u64) -> [u8; ARCHIVE_BLOCK_SIZE] {
         let mut header = TarHeader::new_ustar();
         header
@@ -2132,8 +2153,8 @@ mod tests {
         *tar_header.as_bytes()
     }
 
-    fn append_entry(archive: &mut Vec<u8>, header: [u8; ARCHIVE_BLOCK_SIZE], payload: &[u8]) {
-        archive.extend_from_slice(&header);
+    fn append_entry(archive: &mut Vec<u8>, header: &[u8; ARCHIVE_BLOCK_SIZE], payload: &[u8]) {
+        archive.extend_from_slice(header);
         archive.extend_from_slice(payload);
         let padded = (payload.len() + ARCHIVE_BLOCK_SIZE - 1) & !(ARCHIVE_BLOCK_SIZE - 1);
         archive.resize(archive.len() + padded - payload.len(), 0);
@@ -2164,7 +2185,7 @@ mod tests {
             });
         append_entry(
             archive,
-            header("PaxHeaders/entry", EntryType::XHeader, payload.len() as u64),
+            &header("PaxHeaders/entry", EntryType::XHeader, payload.len() as u64),
             &payload,
         );
     }
@@ -2175,13 +2196,19 @@ mod tests {
         append_pax(&mut archive, &[("size", "5")]);
         append_entry(
             &mut archive,
-            header("render.txt", EntryType::Regular, 3),
+            &header("render.txt", EntryType::Regular, 3),
             b"hello",
         );
         finish_archive(&mut archive);
 
-        let entries = parse_render_archive(&archive).expect("effective PAX size is valid");
-        let RenderEntry::File { bytes, .. } = entries.get(Path::new("render.txt")).unwrap() else {
+        let entries = must(
+            parse_render_archive(&archive),
+            "effective PAX size is valid",
+        );
+        let RenderEntry::File { bytes, .. } = must_some(
+            entries.get(Path::new("render.txt")),
+            "effective PAX render entry",
+        ) else {
             panic!("expected regular file entry")
         };
         assert_eq!(bytes, b"hello");
@@ -2190,12 +2217,18 @@ mod tests {
         append_pax(&mut understated, &[("size", "3")]);
         append_entry(
             &mut understated,
-            header("short.txt", EntryType::Regular, 5),
+            &header("short.txt", EntryType::Regular, 5),
             b"abc",
         );
         finish_archive(&mut understated);
-        let entries = parse_render_archive(&understated).expect("understated PAX size is valid");
-        let RenderEntry::File { bytes, .. } = entries.get(Path::new("short.txt")).unwrap() else {
+        let entries = must(
+            parse_render_archive(&understated),
+            "understated PAX size is valid",
+        );
+        let RenderEntry::File { bytes, .. } = must_some(
+            entries.get(Path::new("short.txt")),
+            "understated PAX render entry",
+        ) else {
             panic!("expected regular file entry")
         };
         assert_eq!(bytes, b"abc");
@@ -2211,12 +2244,15 @@ mod tests {
         append_pax(&mut archive, &[("size", "1024")]);
         append_entry(
             &mut archive,
-            header("visible", EntryType::Regular, 1),
+            &header("visible", EntryType::Regular, 1),
             &hidden,
         );
         finish_archive(&mut archive);
 
-        let entries = parse_render_archive(&archive).expect("hidden header remains payload");
+        let entries = must(
+            parse_render_archive(&archive),
+            "hidden header remains payload",
+        );
         assert_eq!(entries.len(), 1);
         assert!(entries.contains_key(Path::new("visible")));
     }
@@ -2226,7 +2262,7 @@ mod tests {
         let mut truncated = Vec::new();
         append_entry(
             &mut truncated,
-            header(
+            &header(
                 "truncated",
                 EntryType::Regular,
                 ARCHIVE_BLOCK_SIZE as u64 * 2,
@@ -2234,79 +2270,107 @@ mod tests {
             &[b'x'; ARCHIVE_BLOCK_SIZE],
         );
         finish_archive(&mut truncated);
-        assert!(preflight_archive(&truncated, OUTPUT_CONTENT_LIMIT)
-            .expect_err("truncated payload")
-            .contains("terminator"));
+        assert!(must_fail(
+            preflight_archive(&truncated, OUTPUT_CONTENT_LIMIT),
+            "truncated payload"
+        )
+        .contains("terminator"));
 
         let mut interior_newline = Vec::new();
         append_pax(&mut interior_newline, &[("path", "has\nnewline")]);
         append_entry(
             &mut interior_newline,
-            header("entry", EntryType::Regular, 0),
+            &header("entry", EntryType::Regular, 0),
             &[],
         );
         finish_archive(&mut interior_newline);
-        assert!(preflight_archive(&interior_newline, OUTPUT_CONTENT_LIMIT)
-            .expect_err("interior newline")
-            .contains("newline"));
+        assert!(must_fail(
+            preflight_archive(&interior_newline, OUTPUT_CONTENT_LIMIT),
+            "interior newline"
+        )
+        .contains("newline"));
 
         let mut duplicate = Vec::new();
         append_pax(&mut duplicate, &[("size", "1"), ("size", "1")]);
-        append_entry(&mut duplicate, header("entry", EntryType::Regular, 1), b"x");
+        append_entry(
+            &mut duplicate,
+            &header("entry", EntryType::Regular, 1),
+            b"x",
+        );
         finish_archive(&mut duplicate);
-        assert!(preflight_archive(&duplicate, OUTPUT_CONTENT_LIMIT)
-            .expect_err("duplicate PAX size")
-            .contains("repeats"));
+        assert!(must_fail(
+            preflight_archive(&duplicate, OUTPUT_CONTENT_LIMIT),
+            "duplicate PAX size"
+        )
+        .contains("repeats"));
 
         let mut trailing = Vec::new();
         append_entry(
             &mut trailing,
-            header("@LongLink", EntryType::GNULongName, 8),
+            &header("@LongLink", EntryType::GNULongName, 8),
             b"name\0tail",
         );
         finish_archive(&mut trailing);
-        assert!(preflight_archive(&trailing, OUTPUT_CONTENT_LIMIT)
-            .expect_err("GNU trailing data")
-            .contains("NUL"));
+        assert!(must_fail(
+            preflight_archive(&trailing, OUTPUT_CONTENT_LIMIT),
+            "GNU trailing data"
+        )
+        .contains("NUL"));
 
         let mut repeated_nul = Vec::new();
         append_entry(
             &mut repeated_nul,
-            header("@LongLink", EntryType::GNULongName, 6),
+            &header("@LongLink", EntryType::GNULongName, 6),
             b"name\0\0",
         );
         finish_archive(&mut repeated_nul);
-        assert!(preflight_archive(&repeated_nul, OUTPUT_CONTENT_LIMIT)
-            .expect_err("repeated GNU terminator")
-            .contains("repeated"));
+        assert!(must_fail(
+            preflight_archive(&repeated_nul, OUTPUT_CONTENT_LIMIT),
+            "repeated GNU terminator"
+        )
+        .contains("repeated"));
 
         assert_eq!(
-            parse_gnu_metadata(b"unterminated").unwrap(),
+            must(
+                parse_gnu_metadata(b"unterminated"),
+                "unterminated GNU metadata"
+            ),
             b"unterminated"
         );
-        assert_eq!(parse_gnu_metadata(b"terminated\0").unwrap(), b"terminated");
+        assert_eq!(
+            must(
+                parse_gnu_metadata(b"terminated\0"),
+                "terminated GNU metadata"
+            ),
+            b"terminated"
+        );
     }
 
     #[test]
     fn archive_metadata_budgets_have_per_extension_and_total_caps() {
         let mut total = 0;
-        account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT)
-            .expect("per-extension boundary");
-        assert!(
-            account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT + 1)
-                .expect_err("per-extension cap")
-                .contains("extension metadata")
+        must(
+            account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT),
+            "per-extension boundary",
         );
+        assert!(must_fail(
+            account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT + 1),
+            "per-extension cap"
+        )
+        .contains("extension metadata"));
 
         let mut total = 0;
         for _ in 0..(ARCHIVE_METADATA_TOTAL_LIMIT / ARCHIVE_METADATA_EXTENSION_LIMIT) {
-            account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT)
-                .expect("aggregate boundary");
+            must(
+                account_archive_metadata(&mut total, ARCHIVE_METADATA_EXTENSION_LIMIT),
+                "aggregate boundary",
+            );
         }
         assert_eq!(total, ARCHIVE_METADATA_TOTAL_LIMIT);
-        assert!(account_archive_metadata(&mut total, 1)
-            .expect_err("aggregate cap")
-            .contains("metadata exceeds"));
+        assert!(
+            must_fail(account_archive_metadata(&mut total, 1), "aggregate cap")
+                .contains("metadata exceeds")
+        );
     }
 
     #[test]
@@ -2322,25 +2386,27 @@ mod tests {
         gnu_name.push(0);
         append_entry(
             &mut archive,
-            header("@LongLink", EntryType::GNULongName, gnu_name.len() as u64),
+            &header("@LongLink", EntryType::GNULongName, gnu_name.len() as u64),
             &gnu_name,
         );
         let mut gnu_link = long_link.as_bytes().to_vec();
         gnu_link.push(0);
         append_entry(
             &mut archive,
-            header("@LongLink", EntryType::GNULongLink, gnu_link.len() as u64),
+            &header("@LongLink", EntryType::GNULongLink, gnu_link.len() as u64),
             &gnu_link,
         );
         append_entry(
             &mut archive,
-            header_with_link("short", EntryType::Symlink, 0, "short-target"),
+            &header_with_link("short", EntryType::Symlink, 0, "short-target"),
             &[],
         );
         finish_archive(&mut archive);
 
-        let entries = parse_render_archive(&archive).expect("GNU metadata combination");
-        let Some(RenderEntry::Symlink { target }) = entries.get(Path::new(long_name)) else {
+        let entries = must(parse_render_archive(&archive), "GNU metadata combination");
+        let RenderEntry::Symlink { target } =
+            must_some(entries.get(Path::new(long_name)), "GNU long-name entry")
+        else {
             panic!("expected GNU long-name symlink")
         };
         assert_eq!(target, Path::new(long_link));
@@ -2355,9 +2421,7 @@ mod tests {
                 target: PathBuf::from("../outside"),
             },
         );
-        assert!(validate_render_entries(&escape)
-            .expect_err("symlink escape")
-            .contains("escapes"));
+        assert!(must_fail(validate_render_entries(&escape), "symlink escape").contains("escapes"));
 
         let mut child = BTreeMap::new();
         child.insert(
@@ -2373,16 +2437,15 @@ mod tests {
                 bytes: Vec::new(),
             },
         );
-        assert!(validate_render_entries(&child)
-            .expect_err("child through symlink")
-            .contains("non-directory"));
+        assert!(
+            must_fail(validate_render_entries(&child), "child through symlink")
+                .contains("non-directory")
+        );
 
         let deep = (0..=ARCHIVE_PATH_COMPONENT_LIMIT)
             .map(|index| format!("component-{index}"))
             .collect::<PathBuf>();
-        assert!(safe_archive_path(&deep)
-            .expect_err("deep archive path")
-            .contains("components"));
+        assert!(must_fail(safe_archive_path(&deep), "deep archive path").contains("components"));
 
         let mut safe = BTreeMap::new();
         safe.insert(
@@ -2401,9 +2464,12 @@ mod tests {
             &mut archive,
             &[("size", &(OUTPUT_CONTENT_LIMIT as u64 + 1).to_string())],
         );
-        append_entry(&mut archive, header("large", EntryType::Regular, 0), &[]);
+        append_entry(&mut archive, &header("large", EntryType::Regular, 0), &[]);
         finish_archive(&mut archive);
-        let error = preflight_archive(&archive, OUTPUT_CONTENT_LIMIT).expect_err("oversize");
+        let error = must_fail(
+            preflight_archive(&archive, OUTPUT_CONTENT_LIMIT),
+            "oversize",
+        );
         assert!(error.contains("exceeds"), "unexpected error: {error}");
     }
 
@@ -2413,7 +2479,7 @@ mod tests {
         let mut metadata_archive = Vec::new();
         append_entry(
             &mut metadata_archive,
-            header(
+            &header(
                 "PaxHeaders/entry",
                 EntryType::XHeader,
                 oversized.len() as u64,
@@ -2421,28 +2487,32 @@ mod tests {
             oversized.as_bytes(),
         );
         finish_archive(&mut metadata_archive);
-        assert!(preflight_archive(&metadata_archive, OUTPUT_CONTENT_LIMIT)
-            .expect_err("oversized PAX metadata")
-            .contains("metadata"));
+        assert!(must_fail(
+            preflight_archive(&metadata_archive, OUTPUT_CONTENT_LIMIT),
+            "oversized PAX metadata"
+        )
+        .contains("metadata"));
 
         let long_path = "p".repeat(ARCHIVE_PATH_LIMIT + 1);
         let mut path_archive = Vec::new();
         append_pax(&mut path_archive, &[("path", &long_path)]);
         append_entry(
             &mut path_archive,
-            header("entry", EntryType::Regular, 0),
+            &header("entry", EntryType::Regular, 0),
             &[],
         );
         finish_archive(&mut path_archive);
-        assert!(preflight_archive(&path_archive, OUTPUT_CONTENT_LIMIT)
-            .expect_err("oversized PAX path")
-            .contains("path"));
+        assert!(must_fail(
+            preflight_archive(&path_archive, OUTPUT_CONTENT_LIMIT),
+            "oversized PAX path"
+        )
+        .contains("path"));
 
         let long_gnu = vec![b'g'; ARCHIVE_PATH_LIMIT + 2];
         let mut gnu_archive = Vec::new();
         append_entry(
             &mut gnu_archive,
-            header(
+            &header(
                 "././@LongLink",
                 EntryType::GNULongName,
                 long_gnu.len() as u64,
@@ -2450,9 +2520,11 @@ mod tests {
             &long_gnu,
         );
         finish_archive(&mut gnu_archive);
-        assert!(preflight_archive(&gnu_archive, OUTPUT_CONTENT_LIMIT)
-            .expect_err("oversized GNU metadata")
-            .contains("GNU metadata"));
+        assert!(must_fail(
+            preflight_archive(&gnu_archive, OUTPUT_CONTENT_LIMIT),
+            "oversized GNU metadata"
+        )
+        .contains("GNU metadata"));
     }
 
     #[test]
@@ -2461,30 +2533,34 @@ mod tests {
         for index in 0..=ARCHIVE_MEMBER_LIMIT {
             append_entry(
                 &mut members,
-                header(&format!("entry-{index}"), EntryType::Directory, 0),
+                &header(&format!("entry-{index}"), EntryType::Directory, 0),
                 &[],
             );
         }
         finish_archive(&mut members);
-        assert!(preflight_archive(&members, OUTPUT_CONTENT_LIMIT)
-            .expect_err("member limit")
-            .contains("members"));
+        assert!(must_fail(
+            preflight_archive(&members, OUTPUT_CONTENT_LIMIT),
+            "member limit"
+        )
+        .contains("members"));
 
         let mut cumulative = Vec::new();
         append_entry(
             &mut cumulative,
-            header("one", EntryType::Regular, 4),
+            &header("one", EntryType::Regular, 4),
             b"1111",
         );
         append_entry(
             &mut cumulative,
-            header("two", EntryType::Regular, 4),
+            &header("two", EntryType::Regular, 4),
             b"2222",
         );
         finish_archive(&mut cumulative);
-        assert!(preflight_archive(&cumulative, 7)
-            .expect_err("cumulative content limit")
-            .contains("cumulative"));
+        assert!(must_fail(
+            preflight_archive(&cumulative, 7),
+            "cumulative content limit"
+        )
+        .contains("cumulative"));
     }
 
     #[test]
@@ -2492,36 +2568,47 @@ mod tests {
         let mut checksum = Vec::new();
         let mut checksum_header = header("checksum", EntryType::Regular, 0);
         checksum_header[0] ^= 1;
-        append_entry(&mut checksum, checksum_header, &[]);
+        append_entry(&mut checksum, &checksum_header, &[]);
         finish_archive(&mut checksum);
-        assert!(preflight_archive(&checksum, OUTPUT_CONTENT_LIMIT)
-            .expect_err("checksum")
-            .contains("checksum"));
+        assert!(must_fail(
+            preflight_archive(&checksum, OUTPUT_CONTENT_LIMIT),
+            "checksum"
+        )
+        .contains("checksum"));
 
         let mut terminator = Vec::new();
-        append_entry(&mut terminator, header("entry", EntryType::Regular, 0), &[]);
+        append_entry(
+            &mut terminator,
+            &header("entry", EntryType::Regular, 0),
+            &[],
+        );
         terminator.extend_from_slice(&[0; ARCHIVE_BLOCK_SIZE]);
-        assert!(preflight_archive(&terminator, OUTPUT_CONTENT_LIMIT)
-            .expect_err("terminator")
-            .contains("terminator"));
+        assert!(must_fail(
+            preflight_archive(&terminator, OUTPUT_CONTENT_LIMIT),
+            "terminator"
+        )
+        .contains("terminator"));
 
         let mut sparse = Vec::new();
-        append_entry(&mut sparse, header("sparse", EntryType::GNUSparse, 0), &[]);
+        append_entry(&mut sparse, &header("sparse", EntryType::GNUSparse, 0), &[]);
         finish_archive(&mut sparse);
-        assert!(preflight_archive(&sparse, OUTPUT_CONTENT_LIMIT)
-            .expect_err("sparse")
-            .contains("sparse"));
+        assert!(
+            must_fail(preflight_archive(&sparse, OUTPUT_CONTENT_LIMIT), "sparse")
+                .contains("sparse")
+        );
 
         let mut global = Vec::new();
         append_entry(
             &mut global,
-            header("global", EntryType::XGlobalHeader, 0),
+            &header("global", EntryType::XGlobalHeader, 0),
             &[],
         );
         finish_archive(&mut global);
-        assert!(preflight_archive(&global, OUTPUT_CONTENT_LIMIT)
-            .expect_err("global PAX")
-            .contains("global PAX"));
+        assert!(must_fail(
+            preflight_archive(&global, OUTPUT_CONTENT_LIMIT),
+            "global PAX"
+        )
+        .contains("global PAX"));
     }
 
     struct TestSocket {
@@ -2596,14 +2683,16 @@ mod tests {
                 .unwrap_or_else(|error| panic!("resolve test Docker socket: {error}"));
         assert_eq!(endpoint.socket, socket.path);
         assert_eq!(endpoint.host, format!("unix://{}", socket.path.display()));
-        let error = endpoint_from_candidates(
-            [
-                socket.root.join("missing-a.sock"),
-                socket.root.join("missing-b.sock"),
-            ],
-            "portable local default",
-        )
-        .expect_err("missing defaults must not fall back");
+        let error = must_fail(
+            endpoint_from_candidates(
+                [
+                    socket.root.join("missing-a.sock"),
+                    socket.root.join("missing-b.sock"),
+                ],
+                "portable local default",
+            ),
+            "missing defaults must not fall back",
+        );
         assert!(error.contains("no existing local Docker Unix socket"));
     }
 
@@ -2652,9 +2741,10 @@ mod tests {
             r#"{"Endpoints":{"docker":{"Host":"tcp://attacker.example:2376"}}}"#,
         )
         .unwrap_or_else(|error| panic!("write test Docker context: {error}"));
-        let error =
-            resolve_docker_endpoint_from(None, None, None, Some(&config), Some(&socket.root), None)
-                .expect_err("remote context must be rejected");
+        let error = must_fail(
+            resolve_docker_endpoint_from(None, None, None, Some(&config), Some(&socket.root), None),
+            "remote context must be rejected",
+        );
         assert!(error.contains("refusing remote Docker endpoint"));
     }
 
