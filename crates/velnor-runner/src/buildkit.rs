@@ -69,12 +69,14 @@
 //! live under `/run`, while a durable owner record under the storage lib root
 //! preserves current-generation identity across reboot. The horizon pass
 //! converges registered current builders and exact reserved pre-generation
-//! names whose missing runtime claims pass a host-wide quiescence check.
+//! names only while their runtime claims remain readable. Missing claims are
+//! pinned because container snapshots cannot prove runner admission quiescence.
 //!
-//! Torn claims and owner records fail closed, so their builder is never
-//! stopped, pruned, or deleted. Every torn read logs an ERROR with its path;
-//! the operator recovery is to quiesce jobs, repair the record, and let the
-//! next claim recreate runtime state. Doctor surfaces unreadable claim files.
+//! Torn claims, missing claims, and owner records fail closed, so their
+//! builder is never stopped, pruned, or deleted. Every unreadable ownership
+//! read logs an ERROR with its path. For a current builder, after all jobs
+//! using its Docker endpoint are quiescent, remove the owner record to permit
+//! a fresh claim. Doctor surfaces unreadable claim files.
 //!
 //! Legacy slot-scoped builders (`velnor-builder-<requested>-<slot>`, from
 //! before persistence) keep their destroy-at-teardown path: teardown matches
@@ -496,6 +498,23 @@ fn read_claims(path: &Path) -> Result<BuilderClaims> {
     parse_claims(path, &bytes)
 }
 
+fn runtime_claims_missing(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("runtime claims file {} is a symlink", path.display());
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            anyhow::bail!(
+                "runtime claims path {} is not a regular file",
+                path.display()
+            );
+        }
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error).with_context(|| format!("stat {}", path.display())),
+    }
+}
+
 fn parse_claims(path: &Path, bytes: &[u8]) -> Result<BuilderClaims> {
     let claims: BuilderClaims =
         serde_json::from_slice(bytes).with_context(|| format!("parse {}", path.display()))?;
@@ -556,15 +575,15 @@ impl OwnershipReadError {
 }
 
 /// Read ownership for a maintenance pass. Old capped names predate the
-/// current generation and their claim files lived under `/run`, so a reboot
-/// can remove the owner record while leaving Docker's builder container.
-/// The old generation's reserved namespace is itself the durable owner marker;
-/// an existing mismatched or unreadable file still fails closed.
+/// current generation and their claims lived under `/run`; their namespace
+/// remains recognized only when the runtime claim file is present. Missing
+/// claims never become an empty holder set: Docker's container snapshot does
+/// not cover runner admission markers, and a current owner record cannot
+/// identify which jobs hold its builder.
 fn read_claims_for_reaping(
     path: &Path,
     builder: &str,
     registry_root: Option<&Path>,
-    allow_legacy_missing: bool,
 ) -> Result<Option<BuilderClaims>, OwnershipReadError> {
     if let Some(claims) = read_registered_claims(path, builder)
         .map_err(|source| OwnershipReadError::claims(path, source))?
@@ -573,7 +592,7 @@ fn read_claims_for_reaping(
             && let Some(registry_root) = registry_root
         {
             // An existing malformed or mismatched durable record is a hard
-            // stop. A valid runtime claim may recreate a missing marker below.
+            // stop. A valid runtime claim may recreate a missing owner record.
             let _ = read_owner_record(registry_root, builder).map_err(|source| {
                 OwnershipReadError::owner_record(registry_root, builder, source)
             })?;
@@ -590,24 +609,20 @@ fn read_claims_for_reaping(
             ));
         }
     }
-    if is_legacy_capped_builder_name(builder) && allow_legacy_missing {
-        // Explicit migration exception: this exact old formatter namespace
-        // was the durable owner marker before records survived reboot.
-        return Ok(Some(BuilderClaims {
-            builder: builder.to_string(),
-            ..BuilderClaims::default()
-        }));
-    }
     if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
         && let Some(registry_root) = registry_root
         && read_owner_record(registry_root, builder)
             .map_err(|source| OwnershipReadError::owner_record(registry_root, builder, source))?
             .is_some()
     {
-        return Ok(Some(BuilderClaims {
-            builder: builder.to_string(),
-            ..BuilderClaims::default()
-        }));
+        return Err(OwnershipReadError::owner_record(
+            registry_root,
+            builder,
+            anyhow::anyhow!(
+                "runtime claim file {} is missing; durable ownership cannot prove this builder has no holders; after all jobs using this Docker endpoint are quiescent, remove the owner record to allow a fresh claim",
+                path.display(),
+            ),
+        ));
     }
     Ok(None)
 }
@@ -668,7 +683,7 @@ fn log_torn_claims(builder: &str, path: &Path, error: &anyhow::Error) {
         builder,
         path = %path.display(),
         error = format!("{error:#}"),
-        "torn claim file treated as claimed; to recover: quiesce this daemon's jobs, \
+        "torn claim file treated as claimed; to recover: quiesce all jobs using this Docker endpoint, \
          delete the claim file, and let the next claim recreate it"
     );
 }
@@ -679,7 +694,7 @@ fn log_unreadable_ownership(builder: &str, ownership_path: &Path, error: &anyhow
         builder,
         ownership_path = %ownership_path.display(),
         error = format!("{error:#}"),
-        "unreadable BuildKit ownership state treated as claimed; quiesce jobs, repair the runtime claim or durable owner record, then retry"
+        "unreadable BuildKit ownership state treated as claimed; quiesce all jobs using this Docker endpoint, repair the runtime claim or durable owner record, then retry"
     );
 }
 
@@ -750,6 +765,16 @@ fn claim_builder_with_registry(
 ) -> Result<()> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
+    if runtime_claims_missing(&path)?
+        && builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
+        && let Some(registry_root) = registry_root
+        && read_owner_record(registry_root, builder)?.is_some()
+    {
+        anyhow::bail!(
+            "runtime claims for registered BuildKit builder {builder} are missing; after all jobs using this Docker endpoint are quiescent, remove owner record {} before setup creates a fresh claim",
+            owner_registry_file(registry_root, builder).display()
+        );
+    }
     let mut claims = match read_claims(&path) {
         Ok(claims) => claims,
         Err(error) => {
@@ -809,11 +834,56 @@ pub(crate) fn release_and_stop_if_last(
     stop: impl FnOnce() -> Result<bool>,
     start: impl FnOnce() -> Result<bool>,
 ) -> Result<ReleaseOutcome> {
+    let registry_root = claims_registry_root();
+    release_and_stop_if_last_with_registry(
+        run_root,
+        registry_root.as_deref(),
+        builder,
+        container,
+        stop,
+        start,
+    )
+}
+
+fn release_and_stop_if_last_with_registry(
+    run_root: &Path,
+    registry_root: Option<&Path>,
+    builder: &str,
+    container: &str,
+    stop: impl FnOnce() -> Result<bool>,
+    start: impl FnOnce() -> Result<bool>,
+) -> Result<ReleaseOutcome> {
     let _lifecycle = crate::capacity::FilesystemCoordinator::lock_shared(run_root)
         .context("lock BuildKit lifecycle for release")?;
     let path = claims_file(run_root, builder);
     let removed_last = {
         let _lock = lock_claims(builder, &path)?;
+        if runtime_claims_missing(&path)? && is_persistent_builder_name(builder) {
+            if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
+                && let Some(registry_root) = registry_root
+                && read_owner_record(registry_root, builder)?.is_some()
+            {
+                tracing::warn!(
+                    target: "velnor.buildkit",
+                    builder,
+                    container,
+                    owner_record = %owner_registry_file(registry_root, builder).display(),
+                    "skip BuildKit release because registered runtime claims are missing; after all jobs using this Docker endpoint are quiescent, remove the owner record before a fresh claim"
+                );
+            } else {
+                tracing::warn!(
+                    target: "velnor.buildkit",
+                    builder,
+                    container,
+                    "skip BuildKit release because runtime claims are missing; no holder can be removed safely"
+                );
+            }
+            return Ok(ReleaseOutcome {
+                removed_last: false,
+                stopped: false,
+                restarted: false,
+            });
+        }
         let mut claims = match read_claims(&path) {
             Ok(claims) => claims,
             Err(error) => {
@@ -852,10 +922,11 @@ pub(crate) fn release_and_stop_if_last(
     // back. A torn recheck reads as claimed and restarts too.
     let raced = {
         let _lock = lock_claims(builder, &path)?;
-        match read_claims(&path) {
-            Ok(claims) => !claims.holders.is_empty(),
+        match read_claims_for_reaping(&path, builder, registry_root) {
+            Ok(Some(claims)) => !claims.holders.is_empty(),
+            Ok(None) => true,
             Err(error) => {
-                log_torn_claims(builder, &path, &error);
+                log_unreadable_ownership(builder, &error.path, &error.source);
                 true
             }
         }
@@ -1215,7 +1286,6 @@ pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> Pre
             &claims_file(run_root, &builder),
             &builder,
             registry_root.as_deref(),
-            false,
         ) {
             Ok(Some(_)) => persistent.push(builder),
             Ok(None) => report.failures.push(format!(
@@ -1275,7 +1345,6 @@ pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> Pre
                 &path,
                 &builder,
                 registry_root.as_deref(),
-                false,
             ) {
                 Ok(Some(claims)) => claims,
                 Ok(None) => {
@@ -1338,7 +1407,7 @@ pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> Pre
                 .failures
                 .push(format!("stop builder {builder}: {error:#}"));
         }
-        let raced = match holders_remain(&path, &builder) {
+        let raced = match holders_remain(&path, &builder, registry_root.as_deref()) {
             Ok(raced) => raced,
             Err(error) => {
                 report
@@ -1533,21 +1602,22 @@ fn reconcile_orphan_owner_records(
 /// Locked holder recheck after unlocked Docker work. A torn claim file
 /// reads as claimed, so the caller stops, restarts, or keeps — never
 /// deletes.
-fn holders_remain(path: &Path, builder: &str) -> Result<bool> {
+fn holders_remain(path: &Path, builder: &str, registry_root: Option<&Path>) -> Result<bool> {
     let _lock = lock_claims(builder, path)?;
-    match read_claims(path) {
-        Ok(claims) => Ok(!claims.holders.is_empty()),
+    match read_claims_for_reaping(path, builder, registry_root) {
+        Ok(Some(claims)) => Ok(!claims.holders.is_empty()),
+        Ok(None) => Ok(true),
         Err(error) => {
-            log_torn_claims(builder, path, &error);
+            log_unreadable_ownership(builder, &error.path, &error.source);
             Ok(true)
         }
     }
 }
 
 /// Converge owned builders under the filesystem-wide lifecycle lock. Current
-/// names require a matching durable owner record or readable claim. Missing
-/// `/run` state is recoverable only for the exact old formatter namespace,
-/// after the global running-job scan proves the old generation quiescent.
+/// names require matching owner records and readable runtime claims. Missing
+/// claims fail closed because a Docker snapshot cannot prove runner admission
+/// quiescence.
 pub(crate) fn reap_idle_builders(run_root: &Path, now: SystemTime) -> HorizonReport {
     let _coordinator = match crate::capacity::FilesystemCoordinator::lock_exclusive(run_root) {
         Ok(coordinator) => coordinator,
@@ -1608,40 +1678,22 @@ fn reap_idle_builders_with_registry(
             return report;
         }
     };
-    let active_job_container = present
-        .iter()
-        .any(|name| name.starts_with(crate::docker_lease::JOB_CONTAINER_NAME_PREFIX));
     let registered_builders: BTreeSet<String> = builders.iter().cloned().collect();
     for builder in builders
         .into_iter()
         .filter(|builder| is_persistent_builder_name(builder))
     {
         let path = claims_file(run_root, &builder);
-        let legacy_missing_claim = if is_legacy_capped_builder_name(&builder) {
-            match std::fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                Err(error) => {
-                    report
-                        .failures
-                        .push(format!("stat ownership for {builder}: {error:#}"));
-                    continue;
-                }
-                Ok(_) => false,
-            }
-        } else {
-            false
-        };
-        if legacy_missing_claim && active_job_container {
-            report.failures.push(format!(
-                "leave old BuildKit builder {builder} untouched: a running job container prevents reboot quiescence proof"
-            ));
-            continue;
-        }
-        match read_claims_for_reaping(&path, &builder, registry_root, !active_job_container) {
+        match read_claims_for_reaping(&path, &builder, registry_root) {
             Ok(Some(_)) => {}
             Ok(None) => {
+                let reason = if is_legacy_capped_builder_name(&builder) {
+                    "legacy runtime claims are absent or mismatched; runner admission quiescence cannot be proven"
+                } else {
+                    "Velnor ownership record is absent or mismatched"
+                };
                 report.failures.push(format!(
-                    "leave BuildKit builder {builder} untouched: Velnor ownership record is absent or mismatched"
+                    "leave BuildKit builder {builder} untouched: {reason}"
                 ));
                 continue;
             }
@@ -1669,12 +1721,7 @@ fn reap_idle_builders_with_registry(
                     continue;
                 }
             };
-            let mut claims = match read_claims_for_reaping(
-                &path,
-                &builder,
-                registry_root,
-                !active_job_container,
-            ) {
+            let mut claims = match read_claims_for_reaping(&path, &builder, registry_root) {
                 Ok(Some(claims)) => claims,
                 Ok(None) => {
                     report.failures.push(format!(
@@ -1723,7 +1770,7 @@ fn reap_idle_builders_with_registry(
                 // `buildx rm --keep-state` past, or a crashed delete):
                 // recheck, then remove the registration, any orphaned
                 // volume, and the claim file.
-                match holders_remain(&path, &builder) {
+                match holders_remain(&path, &builder, registry_root) {
                     Ok(true) => continue,
                     Ok(false) => {}
                     Err(error) => {
@@ -1771,7 +1818,7 @@ fn reap_idle_builders_with_registry(
                 stop_ms = stop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 "horizon stop ran outside the claim lock"
             );
-            let raced = match holders_remain(&path, &builder) {
+            let raced = match holders_remain(&path, &builder, registry_root) {
                 Ok(true) => {
                     tracing::warn!(
                         target: "velnor.buildkit",
@@ -1814,7 +1861,7 @@ fn reap_idle_builders_with_registry(
                 ));
                 continue;
             }
-            match holders_remain(&path, &builder) {
+            match holders_remain(&path, &builder, registry_root) {
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(error) => {
@@ -1842,7 +1889,7 @@ fn reap_idle_builders_with_registry(
             None => {}
             Some(idle) if idle < IDLE_DELETE_AFTER => {}
             Some(_) => {
-                match holders_remain(&path, &builder) {
+                match holders_remain(&path, &builder, registry_root) {
                     Ok(true) => continue,
                     Ok(false) => {}
                     Err(error) => {
@@ -2173,7 +2220,6 @@ mod tests {
         let external = "external-buildx-cache".to_string();
         let unregistered_current = "velnor-builder-shared-unbounded-v1-external-cache".to_string();
         claim_builder(&run_root, &legacy, "slot-old", "velnor-job-old").unwrap();
-        abandon_claims(&run_root, &legacy);
         claim_builder(&run_root, &current, "slot-new", "velnor-job-new").unwrap();
         abandon_claims(&run_root, &current);
 
@@ -2228,38 +2274,52 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_reaper_recovers_old_ownership_after_run_state_is_lost() {
-        let root = temp_root("upgrade-reap-after-reboot");
+    fn legacy_builder_missing_claim_stays_pinned_without_admission_proof() {
+        let root = temp_root("legacy-reap-after-reboot");
         let run_root = root.join("run");
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
+        let inspected = std::cell::RefCell::new(Vec::new());
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let restarted = std::cell::RefCell::new(Vec::new());
         let removed = std::cell::RefCell::new(Vec::new());
-        let now = SystemTime::now();
 
-        // `/run/velnor` is tmpfs. After a reboot the old BuildKit daemon can
-        // remain in Docker while its runtime claim file is gone. The prior
-        // generation's reserved namespace is the durable ownership marker.
+        // A Docker snapshot cannot prove that another runner has not already
+        // acquired a job and is waiting to create its job container.
         assert!(!claims_file(&run_root, &legacy).exists());
         let report = reap_idle_builders_with(
             &run_root,
-            now,
+            SystemTime::now(),
             || Ok(vec![legacy.clone(), "external-builder".to_string()]),
             || Ok(BTreeSet::new()),
-            |_| {
+            |name| {
+                inspected.borrow_mut().push(name.to_string());
                 Ok(crate::docker::client::ExitInfo {
-                    status: Some(crate::docker::client::ContainerState::Exited),
-                    finished: Some(now),
+                    status: None,
+                    finished: None,
                 })
             },
-            |_| panic!("stopped old builder needs no stop call"),
-            |_| panic!("no holder race exists"),
+            |name| {
+                stopped.borrow_mut().push(name.to_string());
+                Ok(true)
+            },
+            |name| {
+                restarted.borrow_mut().push(name.to_string());
+                Ok(true)
+            },
             |builder| {
                 removed.borrow_mut().push(builder.to_string());
                 Ok(())
             },
         );
 
-        assert_eq!(report.deleted, vec![legacy.clone()]);
-        assert_eq!(*removed.borrow(), vec![legacy.clone()]);
+        assert!(report.deleted.is_empty());
+        assert!(inspected.borrow().is_empty());
+        assert!(stopped.borrow().is_empty());
+        assert!(restarted.borrow().is_empty());
+        assert!(removed.borrow().is_empty());
+        assert!(report.failures.iter().any(|failure| {
+            failure.contains(&legacy) && failure.contains("admission quiescence")
+        }));
         assert!(!claims_file(&run_root, &legacy).exists());
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -2363,7 +2423,7 @@ mod tests {
     }
 
     #[test]
-    fn current_builder_owner_record_recovers_runtime_state_after_reboot() {
+    fn current_builder_missing_claim_stays_pinned_after_reboot() {
         let root = temp_root("current-reap-after-reboot");
         let run_root = root.join("run");
         let registry_root = owner_registry_root(&root.join("lib"));
@@ -2373,10 +2433,8 @@ mod tests {
         assert!(owner_path.exists());
         assert!(!claims_file(&run_root, &builder).exists());
 
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(20_000_000);
-        let finished = now
-            .checked_sub(IDLE_DELETE_AFTER + Duration::from_secs(1))
-            .unwrap();
+        let now = SystemTime::now();
+        let inspected = std::cell::RefCell::new(Vec::new());
         let removed = std::cell::RefCell::new(Vec::new());
         let report = reap_idle_builders_with_registry(
             &run_root,
@@ -2385,24 +2443,262 @@ mod tests {
             || Ok(vec![builder.clone()]),
             || Ok(BTreeSet::new()),
             |daemon| {
-                assert_eq!(daemon, daemon_container_name(&builder));
+                inspected.borrow_mut().push(daemon.to_string());
                 Ok(crate::docker::client::ExitInfo {
-                    status: Some(crate::docker::client::ContainerState::Exited),
-                    finished: Some(finished),
+                    status: None,
+                    finished: None,
                 })
             },
-            |_| panic!("stopped builder needs no stop call"),
-            |_| panic!("no holder race exists"),
+            |_| Ok(true),
+            |_| Ok(true),
             |removed_builder| {
                 removed.borrow_mut().push(removed_builder.to_string());
                 Ok(())
             },
         );
 
-        assert_eq!(report.deleted, vec![builder.clone()]);
-        assert_eq!(*removed.borrow(), vec![builder.clone()]);
+        assert!(inspected.borrow().is_empty());
+        assert!(removed.borrow().is_empty());
+        assert!(report.deleted.is_empty());
+        assert!(report.stopped.is_empty());
+        assert!(report
+            .unreadable_claims
+            .contains(&owner_path.display().to_string()));
         assert!(!claims_file(&run_root, &builder).exists());
-        assert!(!owner_path.exists());
+        assert!(owner_path.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn current_builder_missing_claim_blocks_setup_and_release_but_fresh_owner_claims() {
+        let root = temp_root("current-claim-missing-owner-guard");
+        let run_root = root.join("run");
+        let registry_root = owner_registry_root(&root.join("lib"));
+        let registered = test_builder();
+        ensure_owner_record(&registry_root, &registered).unwrap();
+        let registered_claim = claims_file(&run_root, &registered);
+        assert!(!registered_claim.exists());
+
+        assert!(claim_builder_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &registered,
+            "slot-new",
+            "velnor-job-new",
+        )
+        .is_err());
+        assert!(!registered_claim.exists());
+
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let restarted = std::cell::RefCell::new(Vec::new());
+        let outcome = release_and_stop_if_last_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &registered,
+            "velnor-job-old",
+            || {
+                stopped.borrow_mut().push(registered.clone());
+                Ok(true)
+            },
+            || {
+                restarted.borrow_mut().push(registered.clone());
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert!(!outcome.removed_last);
+        assert!(!outcome.stopped);
+        assert!(!outcome.restarted);
+        assert!(stopped.borrow().is_empty());
+        assert!(restarted.borrow().is_empty());
+        assert!(!registered_claim.exists());
+
+        let fresh = persistent_builder_name("fresh", "trusted", TRUST_TIER_BRANCH, Some("o/r"));
+        let fresh_claim = claims_file(&run_root, &fresh);
+        assert!(!owner_registry_file(&registry_root, &fresh).exists());
+        let outcome = release_and_stop_if_last_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &fresh,
+            "velnor-job-old",
+            || {
+                stopped.borrow_mut().push(fresh.clone());
+                Ok(true)
+            },
+            || {
+                restarted.borrow_mut().push(fresh.clone());
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert!(!outcome.removed_last);
+        assert!(!outcome.stopped);
+        assert!(!outcome.restarted);
+        assert!(stopped.borrow().is_empty());
+        assert!(restarted.borrow().is_empty());
+        assert!(!fresh_claim.exists());
+        assert!(!owner_registry_file(&registry_root, &fresh).exists());
+
+        claim_builder_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &fresh,
+            "slot-new",
+            "velnor-job-new",
+        )
+        .unwrap();
+        assert!(fresh_claim.exists());
+        assert!(owner_registry_file(&registry_root, &fresh).exists());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn release_recheck_restarts_when_current_claim_disappears() {
+        let root = temp_root("release-current-claim-disappears");
+        let run_root = root.join("run");
+        let registry_root = owner_registry_root(&root.join("lib"));
+        let builder = test_builder();
+        claim_builder_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &builder,
+            "slot-1",
+            "velnor-job-a",
+        )
+        .unwrap();
+        let claim_path = claims_file(&run_root, &builder);
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let restarted = std::cell::RefCell::new(Vec::new());
+
+        let outcome = release_and_stop_if_last_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &builder,
+            "velnor-job-a",
+            || {
+                stopped.borrow_mut().push(builder.clone());
+                std::fs::remove_file(&claim_path).unwrap();
+                Ok(true)
+            },
+            || {
+                restarted.borrow_mut().push(builder.clone());
+                Ok(true)
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.removed_last);
+        assert!(outcome.stopped);
+        assert!(outcome.restarted);
+        assert_eq!(*stopped.borrow(), vec![builder.clone()]);
+        assert_eq!(*restarted.borrow(), vec![builder.clone()]);
+        assert!(!claim_path.exists());
+        assert!(owner_registry_file(&registry_root, &builder).exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn horizon_recheck_treats_a_missing_current_claim_as_still_held() {
+        let root = temp_root("horizon-current-claim-disappears-after-inspect");
+        let run_root = root.join("run");
+        let registry_root = owner_registry_root(&root.join("lib"));
+        let builder = test_builder();
+        claim_builder_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &builder,
+            "slot-gone",
+            "velnor-job-gone",
+        )
+        .unwrap();
+        let claim_path = claims_file(&run_root, &builder);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(20_000_000);
+        let old_finished = now
+            .checked_sub(IDLE_DELETE_AFTER + Duration::from_secs(1))
+            .unwrap();
+        let removed = std::cell::RefCell::new(Vec::new());
+
+        let report = reap_idle_builders_with_registry(
+            &run_root,
+            Some(&registry_root),
+            now,
+            || Ok(vec![builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |_| {
+                std::fs::remove_file(&claim_path).unwrap();
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Exited),
+                    finished: Some(old_finished),
+                })
+            },
+            |_| Ok(true),
+            |_| Ok(true),
+            |name| {
+                removed.borrow_mut().push(name.to_string());
+                Ok(())
+            },
+        );
+
+        assert!(report.deleted.is_empty());
+        assert!(removed.borrow().is_empty());
+        assert!(!claim_path.exists());
+        assert!(owner_registry_file(&registry_root, &builder).exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn current_builder_missing_claim_with_live_job_is_not_stopped_or_removed() {
+        let root = temp_root("current-reap-missing-claim-live-job");
+        let run_root = root.join("run");
+        let registry_root = owner_registry_root(&root.join("lib"));
+        let builder = test_builder();
+        ensure_owner_record(&registry_root, &builder).unwrap();
+        let claim_path = claims_file(&run_root, &builder);
+        assert!(!claim_path.exists());
+
+        let inspected = std::cell::RefCell::new(Vec::new());
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let restarted = std::cell::RefCell::new(Vec::new());
+        let removed = std::cell::RefCell::new(Vec::new());
+        let report = reap_idle_builders_with_registry(
+            &run_root,
+            Some(&registry_root),
+            SystemTime::now(),
+            || Ok(vec![builder.clone()]),
+            || Ok(["velnor-job-live".to_string()].into_iter().collect()),
+            |daemon| {
+                inspected.borrow_mut().push(daemon.to_string());
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Running),
+                    finished: None,
+                })
+            },
+            |name| {
+                stopped.borrow_mut().push(name.to_string());
+                Ok(true)
+            },
+            |name| {
+                restarted.borrow_mut().push(name.to_string());
+                Ok(true)
+            },
+            |name| {
+                removed.borrow_mut().push(name.to_string());
+                Ok(())
+            },
+        );
+
+        assert!(inspected.borrow().is_empty());
+        assert!(stopped.borrow().is_empty());
+        assert!(restarted.borrow().is_empty());
+        assert!(removed.borrow().is_empty());
+        assert!(report.stopped.is_empty());
+        assert!(report.deleted.is_empty());
+        assert!(report.failures.iter().any(|failure| {
+            failure.contains(&builder) && failure.contains("runtime claim file")
+        }));
+        assert!(!claim_path.exists());
+        assert!(owner_registry_file(&registry_root, &builder).exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2562,7 +2858,6 @@ mod tests {
         let registry_root = owner_registry_root(&root.join("lib"));
         let active =
             persistent_builder_name("active-create", "trusted", TRUST_TIER_BRANCH, Some("o/r"));
-        ensure_owner_record(&registry_root, &active).unwrap();
         claim_builder_with_registry(
             &run_root,
             Some(&registry_root),
