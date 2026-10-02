@@ -1974,13 +1974,25 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
         &planned
             .iter()
             .map(|unit| {
-                serde_json::json!({
+                let platform = config
+                    .unit
+                    .iter()
+                    .find(|candidate| candidate.id == unit.unit_id)
+                    .ok_or_else(|| {
+                        GeneratorError::usage(format!(
+                            "CI unit `{}` is missing from the configuration",
+                            unit.unit_id
+                        ))
+                    })?
+                    .platform()?;
+                Ok(serde_json::json!({
                     "unit_id": unit.unit_id,
                     "providers": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
+                    "platform": platform.as_str(),
                     "command_digest": unit.command_digest,
-                })
+                }))
             })
-            .collect::<Vec<_>>(),
+            .collect::<Result<Vec<_>, GeneratorError>>()?,
     )
     .map_err(|error| GeneratorError::usage(format!("serialize plan units: {error}")))?;
     let command_digests_json = serde_json::to_string(

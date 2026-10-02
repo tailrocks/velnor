@@ -99,7 +99,7 @@ fn render_expected_work_upload_step(upload_artifact_pin: &str) -> String {
 /// plan with zero records anyway; every other step fails the check.
 fn render_aggregate_score_steps(runtime_steps: &str, download_artifact_pin: &str) -> String {
     format!(
-        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
+        "{runtime_steps}      - name: Download expected work\n        uses: {download_artifact_pin}\n        with:\n          name: {EXPECTED_WORK_ARTIFACT}\n          path: {EXPECTED_WORK_DIR}\n      - name: Download reported unit results\n        # A no-work plan runs no unit jobs, so zero result artifacts is the\n        # expected case there — and the aggregate fails a real-work plan with\n        # zero records anyway. Tolerate the empty download; never the verdict.\n        continue-on-error: true\n        uses: {download_artifact_pin}\n        with:\n          pattern: {RESULT_ARTIFACT_PREFIX}*\n          merge-multiple: true\n          path: {RESULT_DIR}\n      - name: Collect reported unit results\n        shell: bash\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p {RESULT_DIR}\n          files=({RESULT_DIR}/result-*.json)\n          for file in \"${{files[@]}}\"; do\n            if jq -e 'any(.results[]?; has(\"reused_from\"))' \"$file\" >/dev/null; then\n              echo \"::error::$file carries reused_from without a validate_reuse decision; render emits no reused results\" >&2\n              exit 1\n            fi\n          done\n          if (( ${{#files[@]}} == 0 )); then\n            printf '{{\"results\":[]}}\\n' > {COLLECTED_RESULTS_FILE}\n          else\n            jq -s '{{results: ([.[].results // empty] | add // [])}}' \"${{files[@]}}\" > {COLLECTED_RESULTS_FILE}\n          fi\n          echo \"collected $(jq '.results | length' {COLLECTED_RESULTS_FILE}) reported result(s) from ${{#files[@]}} record file(s)\"\n      - name: Score expected work against reported results\n        env:\n          BASE_SHA: ${{{{ needs.plan.outputs.base_sha }}}}\n          HEAD_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n          VELNOR_RESULT_PLAN_DIGEST: ${{{{ needs.plan.outputs.plan_digest }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          velnor-workflow aggregate --expected {EXPECTED_WORK_FILE} --results {COLLECTED_RESULTS_FILE}\n"
     )
 }
 
@@ -129,7 +129,7 @@ fn render_unit_result_steps(
     record_gate: &str,
 ) -> String {
     format!(
-        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) outcome=success ;;\n            cancelled) outcome=cancelled ;;\n            *) outcome=failure ;;\n          esac\n          mkdir -p {RESULT_DIR}\n          jq -n --arg unit \"$VELNOR_RESULT_UNIT\" --arg lane \"$VELNOR_RESULT_LANE\" --arg outcome \"$outcome\" '{{results: [{{unit: $unit, lane: $lane, outcome: $outcome}}]}}' > \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
+        "      - name: Record unit result\n        if: ${{{{ {record_gate} }}}}\n        env:\n          VELNOR_RESULT_REPOSITORY: ${{{{ github.repository }}}}\n          VELNOR_RESULT_BASE_SHA: ${{{{ inputs.base_sha }}}}\n          VELNOR_RESULT_HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_RESULT_RUN_ID: ${{{{ github.run_id }}}}\n          VELNOR_RESULT_RUN_ATTEMPT: ${{{{ github.run_attempt }}}}\n          VELNOR_RESULT_PLAN_DIGEST: ${{{{ inputs.plan_digest }}}}\n          VELNOR_RESULT_UNIT: ${{{{ inputs.unit }}}}\n          VELNOR_RESULT_LANE: {provider}\n          VELNOR_RESULT_PROVIDER: {provider}\n          VELNOR_RESULT_SELECTED_UNITS: ${{{{ inputs.selected_units }}}}\n          VELNOR_RESULT_OUTCOME: ${{{{ job.status }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$VELNOR_RESULT_OUTCOME\" in\n            success) export VELNOR_RESULT_OUTCOME=success ;;\n            cancelled) export VELNOR_RESULT_OUTCOME=cancelled ;;\n            *) export VELNOR_RESULT_OUTCOME=failure ;;\n          esac\n          unit_json=\"$(jq -e --arg unit \"$VELNOR_RESULT_UNIT\" 'map(select(.unit_id == $unit)) | if length == 1 then .[0] else error(\"selected unit must identify exactly one planned unit\") end' <<<\"$VELNOR_RESULT_SELECTED_UNITS\")\"\n          export VELNOR_RESULT_PLATFORM=\"$(jq -er '.platform | strings | select(length > 0)' <<<\"$unit_json\")\"\n          export VELNOR_RESULT_COMMAND_DIGEST=\"$(jq -er '.command_digest | strings | select(length > 0)' <<<\"$unit_json\")\"\n          mkdir -p {RESULT_DIR}\n          velnor-workflow record-result --output \"{RESULT_DIR}/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"\n      - name: Upload unit result\n        if: ${{{{ {record_gate} }}}}\n        uses: {upload_artifact_pin}\n        with:\n          name: {RESULT_ARTIFACT_PREFIX}${{{{ inputs.unit }}}}-{provider}\n          path: {RESULT_DIR}/result-${{{{ inputs.unit }}}}-{provider}.json\n          if-no-files-found: error\n          overwrite: true\n          retention-days: 7\n"
     )
 }
 
@@ -3695,7 +3695,9 @@ mod tests {
             "result dir creation",
         );
         let write = must_some(
-            steps.find("> \".velnor-ci-results/result-"),
+            steps.find(
+                "velnor-workflow record-result --output \".velnor-ci-results/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json\"",
+            ),
             "first result write",
         );
         assert!(
@@ -3705,6 +3707,33 @@ mod tests {
         assert!(
             steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github-hosted.json"),
             "the upload publishes exactly what the record step wrote: {steps}"
+        );
+        for field in [
+            "VELNOR_RESULT_REPOSITORY: ${{ github.repository }}",
+            "VELNOR_RESULT_BASE_SHA: ${{ inputs.base_sha }}",
+            "VELNOR_RESULT_HEAD_SHA: ${{ inputs.head_sha }}",
+            "VELNOR_RESULT_RUN_ID: ${{ github.run_id }}",
+            "VELNOR_RESULT_RUN_ATTEMPT: ${{ github.run_attempt }}",
+            "VELNOR_RESULT_PLAN_DIGEST: ${{ inputs.plan_digest }}",
+            "VELNOR_RESULT_PROVIDER: github-hosted",
+            "VELNOR_RESULT_SELECTED_UNITS: ${{ inputs.selected_units }}",
+        ] {
+            assert!(
+                steps.contains(field),
+                "strict result record needs {field}: {steps}"
+            );
+        }
+        assert!(
+            steps.contains("export VELNOR_RESULT_PLATFORM=\"$(jq -er '.platform"),
+            "platform must come from the planner's selected-unit record: {steps}"
+        );
+        assert!(
+            steps.contains("export VELNOR_RESULT_COMMAND_DIGEST=\"$(jq -er '.command_digest"),
+            "command identity must come from the planner's selected-unit record: {steps}"
+        );
+        assert!(
+            !steps.contains("jq -n --arg unit"),
+            "the generated unit job must use the schema-2 record writer: {steps}"
         );
     }
 
@@ -3720,7 +3749,7 @@ mod tests {
             "the receipt binds to the enclosing job status: {steps}"
         );
         assert!(
-            steps.contains("*) outcome=failure ;;"),
+            steps.contains("*) export VELNOR_RESULT_OUTCOME=failure ;;"),
             "setup, execution, and any other non-green job state records failure: {steps}"
         );
         assert!(
@@ -3747,6 +3776,10 @@ mod tests {
         assert!(
             mkdir < glob,
             "the collect step creates the result dir before globbing: {steps}"
+        );
+        assert!(
+            steps.contains("VELNOR_RESULT_PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}"),
+            "the aggregate must authenticate its downloaded results with the plan digest: {steps}"
         );
     }
 
