@@ -14093,96 +14093,25 @@ mod tests {
         }
     }
 
-    /// D2 §9 mechanical proof: the legacy lane vocabulary is gone from the
-    /// generator and everything it renders. Each pattern is built with
-    /// `concat!` so this test itself keeps the tree clean.
-    #[test]
-    fn generator_source_and_renders_carry_no_legacy_provider_vocabulary() {
-        const LEGACY: &[&str] = &[
-            concat!("Runner", "Mode"),
-            concat!("Runner", "Lane"),
-            concat!("LANE", "_ADMITTED"),
-            concat!("lanes", ".rs"),
-            concat!("runners", ".rs"),
-            concat!("runner", ".environment"),
-            concat!("inputs", ".lanes"),
-            concat!("inputs", ".runner"),
-            concat!("velnor", "_labels"),
-            concat!("velnor", "_trusted_label"),
-            concat!("github", "_runner"),
-            concat!("macos", "_runner"),
-            concat!("Velnor", "RustNeeds"),
-            concat!("velnor", "_rust_needs"),
-            concat!("pull_request_on_velnor", " ="),
-            concat!("velnor_runner_group", " ="),
-            concat!("default_dispatch_runner", " ="),
-            concat!("automatic_lanes", " ="),
-            concat!("requires", "_trusted ="),
-            concat!("runners", " = \""),
-            concat!("automatic", " = \""),
-        ];
-        const RUNNER_ENVIRONMENT: &str = concat!("runner", ".environment");
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        assert!(
-            !root
-                .join(concat!("src/s2/primitives/lanes", ".rs"))
-                .exists(),
-            concat!("lanes", ".rs", " must stay deleted")
-        );
-        assert!(
-            !root.join(concat!("src/s2/runners", ".rs")).exists(),
-            concat!("runners", ".rs", " must stay deleted")
-        );
-        // The schema-1 tree beside this module legitimately keeps the
-        // legacy lane path; the sweep covers the schema-2 fork only.
-        let mut sources = vec![root.join("src/s2")];
-        let runner_environment_guard_source = root.join("src/s2/primitives/check_profiles.rs");
-        let mut checked = 0_usize;
-        while let Some(dir) = sources.pop() {
-            let entries = must(fs::read_dir(&dir), "read generator source");
-            for entry in entries {
+    const RUNNER_ENVIRONMENT_CONTEXT: &str = concat!("runner", ".environment");
+
+    fn s2_rust_source_paths(root: &Path) -> Vec<PathBuf> {
+        let mut directories = vec![root.join("src/s2")];
+        let mut files = Vec::new();
+        while let Some(directory) = directories.pop() {
+            for entry in must(fs::read_dir(&directory), "read generator source") {
                 let path = must(entry, "read generator source").path();
                 if path.is_dir() {
-                    sources.push(path);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    let content = must(fs::read_to_string(&path), "read generator source");
-                    // The one allowed context is the fail-closed hosted verifier guard.
-                    let content_without_guard_context = if path == runner_environment_guard_source {
-                        let guard_assignment =
-                            format!("VERIFIER_RUNNER_ENVIRONMENT: ${{{{ {RUNNER_ENVIRONMENT} }}}}");
-                        assert_eq!(
-                            content.matches(RUNNER_ENVIRONMENT).count(),
-                            2,
-                            "{} must keep the context to the guard and its assertion",
-                            path.display()
-                        );
-                        assert_eq!(
-                            content.matches(&guard_assignment).count(),
-                            2,
-                            "{} must keep both references in the hosted guard assignment",
-                            path.display()
-                        );
-                        content.replace(RUNNER_ENVIRONMENT, "")
-                    } else {
-                        content.clone()
-                    };
-                    for pattern in LEGACY {
-                        assert!(
-                            !content_without_guard_context.contains(pattern),
-                            "{} carries legacy vocabulary `{pattern}`",
-                            path.display()
-                        );
-                    }
-                    checked += 1;
+                    directories.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    files.push(path);
                 }
             }
         }
-        assert!(checked > 0, "the source walk must cover the generator");
-        // Every rendered family: the scanned polyglot fixture renders the
-        // CI surfaces, and a release-declaring repository renders the
-        // release, preview, maintenance, and nightly surfaces. The bridge
-        // keeps no schema-2 dogfood repository, so there is no third
-        // surface to sweep.
+        files
+    }
+
+    fn s2_rendered_workflow_families() -> Vec<(&'static str, BTreeMap<PathBuf, String>)> {
         let release_config = scanned_release_config();
         let release_files = BTreeMap::from([
             (
@@ -14202,7 +14131,7 @@ mod tests {
                 generated_nightly(&WorkflowIr::from_config(&release_config)),
             ),
         ]);
-        for (name, files) in [
+        vec![
             (
                 "fixture",
                 must(
@@ -14211,75 +14140,187 @@ mod tests {
                 ),
             ),
             ("release", release_files),
-        ] {
-            for (path, content) in &files {
-                let guard_assignment =
-                    format!("VERIFIER_RUNNER_ENVIRONMENT: ${{{{ {RUNNER_ENVIRONMENT} }}}}");
-                let fail_closed_comparison =
-                    "if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then";
-                let mut content_without_guard_context = content.clone();
-                let mut allowed_context_occurrences = 0;
-                for (job, block) in static_workflow_job_blocks(content) {
-                    let context_occurrences = block.matches(RUNNER_ENVIRONMENT).count();
-                    if context_occurrences == 0 {
-                        continue;
-                    }
-                    assert_eq!(
-                        context_occurrences,
-                        1,
-                        "{name} {} job {job} uses the runner context more than once",
-                        path.display()
-                    );
-                    let verifier_profile = job
-                        .strip_prefix("verify-")
-                        .and_then(|suffix| suffix.strip_suffix("-artifacts"));
-                    let verifier_name = verifier_profile
-                        .map(|profile| format!("name: Verify {profile} artifacts"))
-                        .unwrap_or_default();
-                    let steps = named_workflow_steps(&block);
-                    let guard_steps = steps
-                        .iter()
-                        .filter(|(step_name, _)| step_name == "Require GitHub-hosted runner")
-                        .collect::<Vec<_>>();
-                    let first_step_is_guard = block
-                        .lines()
-                        .find(|line| line.trim_start().starts_with("- "))
-                        .is_some_and(|line| {
-                            line.trim_start() == "- name: Require GitHub-hosted runner"
-                        });
-                    assert!(
-                        verifier_profile.is_some()
-                            && block.contains(&verifier_name)
-                            && block.contains("runs-on: ubuntu-latest")
-                            && first_step_is_guard
-                            && guard_steps.len() == 1
-                            && guard_steps[0].1.matches(RUNNER_ENVIRONMENT).count() == 1
-                            && guard_steps[0].1.contains(&guard_assignment)
-                            && guard_steps[0].1.contains(fail_closed_comparison)
-                            && steps.iter().all(|(step_name, step)| {
-                                step_name == "Require GitHub-hosted runner"
-                                    || !step.contains(RUNNER_ENVIRONMENT)
-                            }),
-                        "{name} {} job {job} must be the hosted-only artifact verifier guard",
-                        path.display()
-                    );
-                    content_without_guard_context =
-                        content_without_guard_context.replacen(RUNNER_ENVIRONMENT, "", 1);
-                    allowed_context_occurrences += context_occurrences;
-                }
+        ]
+    }
+
+    fn assert_runner_environment_source_guard(root: &Path) {
+        let guard_source = root.join("src/s2/primitives/check_profiles.rs");
+        let guard_assignment =
+            format!("VERIFIER_RUNNER_ENVIRONMENT: ${{{{ {RUNNER_ENVIRONMENT_CONTEXT} }}}}");
+        let mut guard_source_seen = false;
+        for path in s2_rust_source_paths(root) {
+            let content = must(fs::read_to_string(&path), "read generator source");
+            if path == guard_source {
+                guard_source_seen = true;
                 assert_eq!(
-                    content.matches(RUNNER_ENVIRONMENT).count(),
-                    allowed_context_occurrences,
-                    "{name} {} has runner context outside parsed verifier jobs",
+                    content.matches(RUNNER_ENVIRONMENT_CONTEXT).count(),
+                    2,
+                    "the hosted verifier source must keep only its guard and assertion"
+                );
+                assert_eq!(
+                    content.matches(&guard_assignment).count(),
+                    2,
+                    "both source references must stay in the hosted guard assignment"
+                );
+            } else {
+                assert!(
+                    !content.contains(RUNNER_ENVIRONMENT_CONTEXT),
+                    "{} uses the runner context outside the hosted verifier source",
                     path.display()
                 );
+            }
+        }
+        assert!(
+            guard_source_seen,
+            "the hosted verifier source must be scanned"
+        );
+    }
+
+    fn assert_runner_environment_guard_job(name: &str, path: &Path, job: &str, block: &str) {
+        let guard_assignment =
+            format!("VERIFIER_RUNNER_ENVIRONMENT: ${{{{ {RUNNER_ENVIRONMENT_CONTEXT} }}}}");
+        let fail_closed_comparison =
+            "if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then";
+        assert_eq!(
+            block.matches(RUNNER_ENVIRONMENT_CONTEXT).count(),
+            1,
+            "{name} {} job {job} uses the runner context more than once",
+            path.display()
+        );
+        let profile = job
+            .strip_prefix("verify-")
+            .and_then(|suffix| suffix.strip_suffix("-artifacts"));
+        let verifier_name = profile
+            .map(|profile| format!("name: Verify {profile} artifacts"))
+            .unwrap_or_default();
+        let steps = named_workflow_steps(block);
+        let guard_steps = steps
+            .iter()
+            .filter(|(step_name, _)| step_name == "Require GitHub-hosted runner")
+            .collect::<Vec<_>>();
+        let first_step_is_guard = block
+            .lines()
+            .find(|line| line.trim_start().starts_with("- "))
+            .is_some_and(|line| line.trim_start() == "- name: Require GitHub-hosted runner");
+        assert!(
+            profile.is_some()
+                && block.contains(&verifier_name)
+                && block.contains("runs-on: ubuntu-latest")
+                && first_step_is_guard
+                && guard_steps.len() == 1
+                && guard_steps[0].1.matches(RUNNER_ENVIRONMENT_CONTEXT).count() == 1
+                && guard_steps[0].1.contains(&guard_assignment)
+                && guard_steps[0].1.contains(fail_closed_comparison)
+                && steps.iter().all(|(step_name, step)| {
+                    step_name == "Require GitHub-hosted runner"
+                        || !step.contains(RUNNER_ENVIRONMENT_CONTEXT)
+                }),
+            "{name} {} job {job} must be the first-step hosted-only artifact verifier guard",
+            path.display()
+        );
+    }
+
+    fn assert_runner_environment_render_guard(name: &str, path: &Path, content: &str) {
+        let mut content_without_context = content.to_owned();
+        let mut allowed_occurrences = 0;
+        for (job, block) in static_workflow_job_blocks(content) {
+            let occurrences = block.matches(RUNNER_ENVIRONMENT_CONTEXT).count();
+            if occurrences == 0 {
+                continue;
+            }
+            assert_runner_environment_guard_job(name, path, &job, &block);
+            content_without_context =
+                content_without_context.replacen(RUNNER_ENVIRONMENT_CONTEXT, "", 1);
+            allowed_occurrences += occurrences;
+        }
+        assert_eq!(
+            content.matches(RUNNER_ENVIRONMENT_CONTEXT).count(),
+            allowed_occurrences,
+            "{name} {} has runner context outside parsed verifier jobs",
+            path.display()
+        );
+        assert!(
+            !content_without_context.contains(RUNNER_ENVIRONMENT_CONTEXT),
+            "{name} {} retains runner context after guard removal",
+            path.display()
+        );
+    }
+
+    /// D2 §9 mechanical proof: the legacy lane vocabulary is gone from the
+    /// generator and everything it renders. Each pattern is built with
+    /// `concat!` so this test itself keeps the tree clean.
+    #[test]
+    fn generator_source_and_renders_carry_no_legacy_provider_vocabulary() {
+        const LEGACY: &[&str] = &[
+            concat!("Runner", "Mode"),
+            concat!("Runner", "Lane"),
+            concat!("LANE", "_ADMITTED"),
+            concat!("lanes", ".rs"),
+            concat!("runners", ".rs"),
+            concat!("inputs", ".lanes"),
+            concat!("inputs", ".runner"),
+            concat!("velnor", "_labels"),
+            concat!("velnor", "_trusted_label"),
+            concat!("github", "_runner"),
+            concat!("macos", "_runner"),
+            concat!("Velnor", "RustNeeds"),
+            concat!("velnor", "_rust_needs"),
+            concat!("pull_request_on_velnor", " ="),
+            concat!("velnor_runner_group", " ="),
+            concat!("default_dispatch_runner", " ="),
+            concat!("automatic_lanes", " ="),
+            concat!("requires", "_trusted ="),
+            concat!("runners", " = \""),
+            concat!("automatic", " = \""),
+        ];
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !root
+                .join(concat!("src/s2/primitives/lanes", ".rs"))
+                .exists(),
+            concat!("lanes", ".rs", " must stay deleted")
+        );
+        assert!(
+            !root.join(concat!("src/s2/runners", ".rs")).exists(),
+            concat!("runners", ".rs", " must stay deleted")
+        );
+        // The schema-1 tree beside this module legitimately keeps the
+        // legacy lane path; the sweep covers the schema-2 fork only.
+        let source_paths = s2_rust_source_paths(&root);
+        assert!(
+            !source_paths.is_empty(),
+            "the source walk must cover the generator"
+        );
+        for path in source_paths {
+            let content = must(fs::read_to_string(&path), "read generator source");
+            for pattern in LEGACY {
+                assert!(
+                    !content.contains(pattern),
+                    "{} carries legacy vocabulary `{pattern}`",
+                    path.display()
+                );
+            }
+        }
+        for (name, files) in s2_rendered_workflow_families() {
+            for (path, content) in &files {
                 for pattern in LEGACY {
                     assert!(
-                        !content_without_guard_context.contains(pattern),
+                        !content.contains(pattern),
                         "{name} {} carries legacy vocabulary `{pattern}`",
                         path.display()
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn runner_environment_is_confined_to_hosted_verifier_guard() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert_runner_environment_source_guard(&root);
+        for (name, files) in s2_rendered_workflow_families() {
+            for (path, content) in &files {
+                assert_runner_environment_render_guard(name, path, content);
             }
         }
     }
