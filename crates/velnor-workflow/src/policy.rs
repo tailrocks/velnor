@@ -4276,7 +4276,7 @@ fn audit_required_artifact_consumer(
         audit,
         consumer,
         consumer_id,
-        &expected_needs,
+        expected_needs.as_deref(),
         path,
         job,
         failures,
@@ -4287,12 +4287,12 @@ fn audit_required_artifact_consumer_job(
     audit: &RequiredArtifactAuditContext<'_>,
     consumer: &config::CheckProfileSection,
     consumer_id: &str,
-    expected_needs: &Option<Vec<String>>,
+    expected_needs: Option<&[String]>,
     path: &Path,
     job: &Value,
     failures: &mut PolicyFindings,
 ) {
-    if workflow_job_needs(job).as_ref() != expected_needs.as_ref() {
+    if workflow_job_needs(job).as_deref() != expected_needs {
         record_artifact_finding(
             failures,
             path,
