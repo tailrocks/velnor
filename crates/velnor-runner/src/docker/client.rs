@@ -2053,7 +2053,7 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
             .iter()
             .filter_map(|position| resolved.get(position).cloned().flatten())
             .collect::<Vec<_>>();
-        let mut marked_ids = Vec::new();
+        let mut marked_ids: Vec<String> = Vec::new();
         for id in &dispatched_ids {
             if let Err(error) = set_container_rm_quarantined(engine_key, id, true) {
                 for marked in &marked_ids {
