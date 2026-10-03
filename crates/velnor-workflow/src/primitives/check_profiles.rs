@@ -1277,7 +1277,7 @@ mod tests {
             workflow.contains(
                 "path: ${{ runner.temp }}/velnor-required-artifacts-${{ github.run_id }}-strict"
             ),
-            "the producer uploads a staged relative tree: {workflow}"
+            "the producer upload path uses exact runner.temp and github.run_id expressions: {workflow}"
         );
         assert!(
             workflow.contains("destination=\"$stage/target/ci-evidence/rollup.json\""),
