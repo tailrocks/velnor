@@ -13,9 +13,10 @@
 //! `merge_group`, `workflow_dispatch`): the file then renders those triggers alongside the
 //! shared cron, and profiles in an evented file may omit `schedule` entirely
 //! for a cron-less evented file. One file carries one trigger set — scheduled
-//! and schedule-less profiles never mix in one file — and runners stay
-//! per-profile: each job runs on its own profile's runner exactly as in a
-//! cron-only file, because triggers change when a job runs, never where.
+//! and schedule-less profiles never mix in one file — and profile jobs stay
+//! on their own runners exactly as in a cron-only file. Required-artifact
+//! verifier jobs always use a GitHub-hosted Linux runner, independent of the
+//! producer runner.
 //!
 //! Why a file, not a CI unit: a scheduled check is a whole-repo compliance
 //! probe that needs its own required status context plus main-branch runs
@@ -605,7 +606,7 @@ fn render_artifact_verifier_job(
         |admission| format!("({result_condition}) && {admission}"),
     );
     let _ = writeln!(output, "    if: ${{{{ {condition} }}}}");
-    let _ = writeln!(output, "    runs-on: {}", profile_runs_on(config, profile)?);
+    output.push_str("    runs-on: ubuntu-latest\n");
     let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
     let _ = writeln!(
         output,
@@ -615,6 +616,9 @@ fn render_artifact_verifier_job(
     // The verifier only reads the current run's immutable artifact service.
     // It never checks out or executes repository-controlled code.
     output.push_str("    permissions:\n      actions: read\n    steps:\n");
+    output.push_str(
+        "      - name: Require GitHub-hosted runner\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n          VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set -euo pipefail\n          if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then\n            echo \"artifact verifier requires a GitHub-hosted runner\" >&2\n            exit 1\n          fi\n",
+    );
     let root = format!(
         "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{}",
         profile.id
@@ -1308,9 +1312,9 @@ mod tests {
         );
         assert!(
             workflow.contains(&format!(
-                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && {admission} }}}}\n"
+                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && {admission} }}}}\n    runs-on: ubuntu-latest\n"
             )),
-            "the Velnor verifier combines producer success with canonical provider admission: {workflow}"
+            "the hosted verifier combines producer success with canonical provider admission: {workflow}"
         );
         assert!(
             workflow.contains("artifact-ids: ${{ needs.strict.outputs.artifact_id }}"),
@@ -1336,6 +1340,45 @@ mod tests {
             "find verifier job",
         );
         let verifier = &workflow[verifier_start..];
+        let guard = must_some(
+            verifier.find("- name: Require GitHub-hosted runner"),
+            "find hosted-runner guard",
+        );
+        let clear = must_some(
+            verifier.find("- name: Clear verifier workspace"),
+            "find verifier workspace clear",
+        );
+        let download = must_some(
+            verifier.find("- name: Download immutable strict artifact"),
+            "find immutable artifact download",
+        );
+        let path_check = must_some(
+            verifier.find("path=\"$root/target/ci-evidence/rollup.json\""),
+            "find artifact path check",
+        );
+        assert!(
+            guard < clear && clear < download && download < path_check,
+            "hosted guard must precede all verifier work: {verifier}"
+        );
+        assert!(
+            verifier.contains("VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}"),
+            "the guard binds its value from runner.environment: {verifier}"
+        );
+        assert!(
+            verifier.contains(
+                "if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then"
+            ),
+            "missing runner environment fails closed: {verifier}"
+        );
+        assert!(
+            verifier.contains("runs-on: ubuntu-latest"),
+            "the verifier never follows the profile runner: {verifier}"
+        );
+        assert!(
+            verifier.contains("permissions:\n      actions: read\n    steps:")
+                && !verifier.contains("contents:"),
+            "verifier permissions stay limited to Actions read: {verifier}"
+        );
         assert!(!verifier.contains("Checkout repository"), "{verifier}");
         assert!(
             verifier.contains("path=\"$root/target/ci-evidence/rollup.json\""),

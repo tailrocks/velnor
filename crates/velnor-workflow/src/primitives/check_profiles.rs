@@ -13,9 +13,10 @@
 //! `merge_group`, `workflow_dispatch`): the file then renders those triggers alongside the
 //! shared cron, and profiles in an evented file may omit `schedule` entirely
 //! for a cron-less evented file. One file carries one trigger set — scheduled
-//! and schedule-less profiles never mix in one file — and lanes stay
-//! per-profile: each job runs on its own profile's lane exactly as in a
-//! cron-only file, because triggers change when a job runs, never where.
+//! and schedule-less profiles never mix in one file — and profile jobs stay
+//! on their own lanes exactly as in a cron-only file. Required-artifact
+//! verifier jobs always use a GitHub-hosted Linux runner, independent of the
+//! producer lane.
 //!
 //! Why a file, not a CI unit: a scheduled check is a whole-repo compliance
 //! probe that needs its own required status context plus main-branch runs
@@ -484,12 +485,7 @@ fn render_checks_file(
     }
     for profile in profiles {
         if profile.artifacts_required {
-            render_artifact_verifier_job(
-                &mut output,
-                config,
-                profile,
-                lanes.as_ref().map(|(_, runs_on)| runs_on.as_str()),
-            )?;
+            render_artifact_verifier_job(&mut output, config, profile, lanes.is_some())?;
         }
     }
     Ok(output)
@@ -584,9 +580,19 @@ fn artifact_verifier_job_id(profile_id: &str) -> String {
 fn profile_admission_expression(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
+    lanes_input: bool,
 ) -> Option<String> {
-    (profile.runner == "velnor")
-        .then(|| WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor))
+    if profile.runner == "velnor" {
+        Some(WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor))
+    } else if profile.runner == "github" && lanes_input {
+        let admission =
+            WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor);
+        Some(format!(
+            "github.event_name != 'workflow_dispatch' || inputs.lanes != 'velnor' || ({admission})"
+        ))
+    } else {
+        None
+    }
 }
 
 fn render_profile_job_with_selected_profiles(
@@ -616,7 +622,9 @@ fn render_profile_job_with_selected_profiles(
             .join(", ");
         let _ = writeln!(output, "    needs: [{needs}]");
     }
-    if let Some(admission) = profile_admission_expression(config, profile) {
+    if let Some(admission) =
+        profile_admission_expression(config, profile, dispatch_runs_on.is_some())
+    {
         let _ = writeln!(output, "    if: ${{{{ ({admission}) }}}}");
     }
     if profile.artifacts_required {
@@ -674,7 +682,7 @@ fn render_artifact_verifier_job(
     output: &mut String,
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
-    dispatch_runs_on: Option<&str>,
+    lanes_input: bool,
 ) -> Result<(), GeneratorError> {
     let job_id = artifact_verifier_job_id(&profile.id);
     let _ = writeln!(output, "  {job_id}:");
@@ -685,16 +693,12 @@ fn render_artifact_verifier_job(
     );
     let _ = writeln!(output, "    needs: [{}]", profile.id);
     let result_condition = format!("needs.{}.result == 'success'", profile.id);
-    let condition = profile_admission_expression(config, profile).map_or_else(
+    let condition = profile_admission_expression(config, profile, lanes_input).map_or_else(
         || result_condition.clone(),
         |admission| format!("({result_condition}) && ({admission})"),
     );
     let _ = writeln!(output, "    if: ${{{{ {condition} }}}}");
-    let runs_on = match (dispatch_runs_on, profile.runner.as_str()) {
-        (Some(conditional), "github" | "velnor") => conditional.to_owned(),
-        _ => profile_runs_on(config, profile)?,
-    };
-    let _ = writeln!(output, "    runs-on: {runs_on}");
+    output.push_str("    runs-on: ubuntu-latest\n");
     let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
     let _ = writeln!(
         output,
@@ -704,6 +708,9 @@ fn render_artifact_verifier_job(
     // The verifier only reads the current run's immutable artifact service.
     // It never checks out or executes repository-controlled code.
     output.push_str("    permissions:\n      actions: read\n    steps:\n");
+    output.push_str(
+        "      - name: Require GitHub-hosted runner\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n          VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set -euo pipefail\n          if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then\n            echo \"artifact verifier requires a GitHub-hosted runner\" >&2\n            exit 1\n          fi\n",
+    );
     let root = format!(
         "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{}",
         profile.id
@@ -1192,7 +1199,7 @@ mod tests {
         let workflow = render(&config, None, &selected);
         assert!(
             workflow.contains(&format!("if: ${{{{ ({admission}) }}}}")),
-            "the local artifact producer uses canonical lane admission: {workflow}"
+            "the Velnor artifact producer retains canonical lane admission: {workflow}"
         );
         assert!(
             workflow.contains(
@@ -1216,15 +1223,9 @@ mod tests {
         );
         assert!(
             workflow.contains(
-                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n"
+                &format!("  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && ({admission}) }}}}\n    runs-on: ubuntu-latest\n")
             ),
-            "the verifier is a separate dependent job: {workflow}"
-        );
-        assert!(
-            workflow.contains(&format!(
-                "  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && ({admission}) }}}}\n"
-            )),
-            "the local verifier combines producer success with canonical lane admission: {workflow}"
+            "the hosted verifier also requires the producer's canonical Velnor admission: {workflow}"
         );
         assert!(
             workflow.contains("artifact-ids: ${{ needs.strict.outputs.artifact_id }}"),
@@ -1250,10 +1251,140 @@ mod tests {
             "find verifier job",
         );
         let verifier = &workflow[verifier_start..];
+        let guard = must_some(
+            verifier.find("- name: Require GitHub-hosted runner"),
+            "find hosted-runner guard",
+        );
+        let clear = must_some(
+            verifier.find("- name: Clear verifier workspace"),
+            "find verifier workspace clear",
+        );
+        let download = must_some(
+            verifier.find("- name: Download immutable strict artifact"),
+            "find immutable artifact download",
+        );
+        let path_check = must_some(
+            verifier.find("path=\"$root/target/ci-evidence/rollup.json\""),
+            "find artifact path check",
+        );
+        assert!(
+            guard < clear && clear < download && download < path_check,
+            "hosted guard must precede all verifier work: {verifier}"
+        );
+        assert!(
+            verifier.contains("VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}"),
+            "the guard binds its value from runner.environment: {verifier}"
+        );
+        assert!(
+            verifier.contains(
+                "if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then"
+            ),
+            "missing runner environment fails closed: {verifier}"
+        );
+        assert!(
+            verifier.contains("runs-on: ubuntu-latest"),
+            "the verifier never follows the profile or dispatch runner: {verifier}"
+        );
+        assert!(
+            verifier.contains("permissions:\n      actions: read\n    steps:")
+                && !verifier.contains("contents:"),
+            "verifier permissions stay limited to Actions read: {verifier}"
+        );
         assert!(!verifier.contains("Checkout repository"), "{verifier}");
         assert!(
             verifier.contains("path=\"$root/target/ci-evidence/rollup.json\""),
             "the verifier checks the preserved relative path: {verifier}"
+        );
+    }
+
+    #[test]
+    fn lanes_input_gates_velnor_admission_only_for_velnor_dispatches() {
+        let mut strict = profile("strict");
+        strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
+        strict.artifacts_required = true;
+        let mut config = profile_config(vec![strict]);
+        config.github_runner = "configured-hosted-runner".to_owned();
+        let map = args_for("lanes_input = true");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-daily.yml"),
+            "select the required-artifact profile",
+        );
+        let admission =
+            WorkflowIr::from_config(&config).lane_admission_expression(LaneAdmission::Velnor);
+        let dynamic_gate = format!(
+            "github.event_name != 'workflow_dispatch' || inputs.lanes != 'velnor' || ({admission})"
+        );
+        let workflow = must(
+            render_with_lanes(&config, &selected),
+            "render a GitHub-default lane-input file",
+        );
+        assert!(
+            workflow.contains("inputs.lanes == 'velnor'"),
+            "Velnor remains an allowed dispatch lane: {workflow}"
+        );
+        assert!(
+            workflow.contains(&format!("if: ${{{{ ({dynamic_gate}) }}}}")),
+            "the producer gates a Velnor dispatch with canonical admission: {workflow}"
+        );
+        let verifier_start = must_some(
+            workflow.find("  verify-strict-artifacts:"),
+            "find verifier job",
+        );
+        let verifier = &workflow[verifier_start..];
+        assert!(
+            verifier.contains(&format!(
+                "if: ${{{{ (needs.strict.result == 'success') && ({dynamic_gate}) }}}}"
+            )),
+            "the verifier requires producer success and the same Velnor admission: {verifier}"
+        );
+        assert!(
+            verifier.contains("runs-on: ubuntu-latest"),
+            "verifier ignores profile and configured GitHub runners: {verifier}"
+        );
+        assert!(
+            !verifier.contains("configured-hosted-runner"),
+            "verifier runner is fixed: {verifier}"
+        );
+        assert!(
+            verifier.contains("permissions:\n      actions: read\n    steps:")
+                && !verifier.contains("contents:"),
+            "verifier permissions stay limited to Actions read: {verifier}"
+        );
+        let guard = must_some(
+            verifier.find("- name: Require GitHub-hosted runner"),
+            "find hosted guard",
+        );
+        let clear = must_some(
+            verifier.find("- name: Clear verifier workspace"),
+            "find workspace clear",
+        );
+        let download = must_some(
+            verifier.find("- name: Download immutable strict artifact"),
+            "find artifact download",
+        );
+        let check = must_some(
+            verifier.find("path=\"$root/target/ci-evidence/rollup.json\""),
+            "find artifact path check",
+        );
+        assert!(
+            guard < clear && clear < download && download < check,
+            "guard runs before verifier filesystem and artifact operations: {verifier}"
+        );
+
+        let admission_gate = |event_name: &str, lanes: &str, admitted: bool| {
+            event_name != "workflow_dispatch" || lanes != "velnor" || admitted
+        };
+        assert!(
+            !admission_gate("workflow_dispatch", "velnor", false),
+            "Velnor dispatch requires canonical admission"
+        );
+        assert!(
+            admission_gate("workflow_dispatch", "github", false),
+            "GitHub dispatch does not require Velnor admission"
+        );
+        assert!(
+            admission_gate("push", "velnor", false),
+            "non-dispatch GitHub-default runs do not require Velnor admission"
         );
     }
 
