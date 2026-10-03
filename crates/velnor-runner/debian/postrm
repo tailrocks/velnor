@@ -74,11 +74,53 @@ verify_jobs_slice_inactive() {
 }
 
 remove_stale_jobs_cpu_quota_dropin() {
+  # The package lock serializes cooperating package writes and /etc is
+  # root-owned, so unprivileged users cannot replace this path during the
+  # signature check and unlink. Independent privileged writers are outside
+  # this transaction's guarantee.
+  is_legacy_generated_jobs_cpu_quota_dropin() {
+    # Historical packages recorded no owner metadata. Match the full output
+    # language they generated; an operator edit within that language cannot be
+    # distinguished from the original file by content alone.
+    file="$1"
+    [ ! -L "$file" ] && [ -f "$file" ] \
+      || return 1
+    [ "$(tail -c 1 "$file" | od -An -t x1 | tr -d '[:space:]')" = 0a ] \
+      || return 1
+    awk '
+      function multiple_of_95(value, remainder, position, digit) {
+        remainder = 0
+        for (position = 1; position <= length(value); position++) {
+          digit = substr(value, position, 1)
+          remainder = (remainder * 10 + digit) % 95
+        }
+        return remainder == 0
+      }
+      BEGIN { valid = 1 }
+      NR == 1 { if ($0 != "[Slice]") valid = 0; next }
+      NR == 2 { if ($0 != "# Generated from the host online CPU count during package configuration.") valid = 0; next }
+      NR == 3 { if ($0 != "# CPUQuota is 95% of one CPU per online logical CPU.") valid = 0; next }
+      NR == 4 {
+        quota = $0
+        sub(/^CPUQuota=/, "", quota)
+        sub(/%$/, "", quota)
+        if ($0 !~ /^CPUQuota=[123456789][0123456789]*%$/ || !multiple_of_95(quota)) valid = 0
+        next
+      }
+      { valid = 0 }
+      END { if (NR != 4 || !valid) exit 1 }
+    ' "$file"
+  }
+
   # Older packages generated this exact host-scaled ceiling outside dpkg's
   # file list. Delete only that Velnor-owned file; preserve operator drop-ins.
-  if [ -e "$JOBS_SLICE_DROPIN" ]; then
-    rm -f "$JOBS_SLICE_DROPIN"
-    echo "Removed stale velnor-jobs.slice CPU quota drop-in $JOBS_SLICE_DROPIN."
+  if [ -e "$JOBS_SLICE_DROPIN" ] || [ -L "$JOBS_SLICE_DROPIN" ]; then
+    if is_legacy_generated_jobs_cpu_quota_dropin "$JOBS_SLICE_DROPIN"; then
+      rm -- "$JOBS_SLICE_DROPIN"
+      echo "Removed stale velnor-jobs.slice CPU quota drop-in $JOBS_SLICE_DROPIN."
+    else
+      echo "velnor-runner postrm: preserving unrecognized jobs-slice drop-in $JOBS_SLICE_DROPIN" >&2
+    fi
   fi
   rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
 }

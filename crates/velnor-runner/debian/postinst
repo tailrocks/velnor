@@ -32,9 +32,43 @@ fail() {
 # packages generated a host-scaled CPUQuota drop-in here; upgrades delete
 # that stale ceiling instead of recreating it.
 remove_stale_jobs_cpu_quota_dropin() {
+  is_legacy_generated_jobs_cpu_quota_dropin() {
+    # Historical packages recorded no owner metadata. Match the full output
+    # language they generated; an operator edit within that language cannot be
+    # distinguished from the original file by content alone.
+    file="$1"
+    [ ! -L "$file" ] && [ -f "$file" ] \
+      || return 1
+    [ "$(tail -c 1 "$file" | od -An -t x1 | tr -d '[:space:]')" = 0a ] \
+      || return 1
+    awk '
+      function multiple_of_95(value, remainder, position, digit) {
+        remainder = 0
+        for (position = 1; position <= length(value); position++) {
+          digit = substr(value, position, 1)
+          remainder = (remainder * 10 + digit) % 95
+        }
+        return remainder == 0
+      }
+      BEGIN { valid = 1 }
+      NR == 1 { if ($0 != "[Slice]") valid = 0; next }
+      NR == 2 { if ($0 != "# Generated from the host online CPU count during package configuration.") valid = 0; next }
+      NR == 3 { if ($0 != "# CPUQuota is 95% of one CPU per online logical CPU.") valid = 0; next }
+      NR == 4 {
+        quota = $0
+        sub(/^CPUQuota=/, "", quota)
+        sub(/%$/, "", quota)
+        if ($0 !~ /^CPUQuota=[123456789][0123456789]*%$/ || !multiple_of_95(quota)) valid = 0
+        next
+      }
+      { valid = 0 }
+      END { if (NR != 4 || !valid) exit 1 }
+    ' "$file"
+  }
+
   if [ -e "$JOBS_SLICE_DROPIN" ] || [ -L "$JOBS_SLICE_DROPIN" ]; then
-    [ ! -L "$JOBS_SLICE_DROPIN" ] && [ -f "$JOBS_SLICE_DROPIN" ] \
-      || fail "refusing unexpected stale jobs-slice drop-in type: $JOBS_SLICE_DROPIN"
+    is_legacy_generated_jobs_cpu_quota_dropin "$JOBS_SLICE_DROPIN" \
+      || fail "refusing to remove unrecognized jobs-slice drop-in: $JOBS_SLICE_DROPIN"
     JOBS_SLICE_DROPIN_BACKUP="$JOBS_SLICE_DROPIN_DIR/.10-host-cpu.conf.velnor-backup-$$"
     if [ -e "$JOBS_SLICE_DROPIN_BACKUP" ] || [ -L "$JOBS_SLICE_DROPIN_BACKUP" ]; then
       fail "refusing existing jobs-slice drop-in backup: $JOBS_SLICE_DROPIN_BACKUP"
@@ -42,8 +76,12 @@ remove_stale_jobs_cpu_quota_dropin() {
     JOBS_SLICE_DROPIN_IDENTITY=$(stat -c '%d:%i' "$JOBS_SLICE_DROPIN") \
       || fail "could not pin stale jobs-slice drop-in identity: $JOBS_SLICE_DROPIN"
     trap 'restore_stale_jobs_cpu_quota_dropin "$?"' 0
-    mv "$JOBS_SLICE_DROPIN" "$JOBS_SLICE_DROPIN_BACKUP" \
+    # GNU mv -n uses an atomic no-replace rename when supported. Validate both
+    # names afterward because mv -n may report success when it skips a collision.
+    mv -T -n -- "$JOBS_SLICE_DROPIN" "$JOBS_SLICE_DROPIN_BACKUP" \
       || fail "could not stage stale jobs-slice drop-in for reversible removal"
+    [ ! -e "$JOBS_SLICE_DROPIN" ] && [ ! -L "$JOBS_SLICE_DROPIN" ] \
+      || fail "stale jobs-slice drop-in remained at its source after staging"
     [ ! -L "$JOBS_SLICE_DROPIN_BACKUP" ] && [ -f "$JOBS_SLICE_DROPIN_BACKUP" ] \
       || fail "staged jobs-slice drop-in is not the expected regular file"
     staged_identity=$(stat -c '%d:%i' "$JOBS_SLICE_DROPIN_BACKUP") \
@@ -57,13 +95,16 @@ restore_stale_jobs_cpu_quota_dropin() {
   status="$1"
   trap - 0
   backup=${JOBS_SLICE_DROPIN_BACKUP:-}
-  if [ -n "$backup" ] && { [ -e "$backup" ] || [ -L "$backup" ]; }; then
+  if [ -n "$backup" ]; then
     if [ "$status" -eq 0 ]; then
-      if [ ! -L "$backup" ] && [ -f "$backup" ] \
-        && [ "$(stat -c '%d:%i' "$backup" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ]; then
-        rm -f "$backup" || status=1
+      if [ -e "$backup" ] || [ -L "$backup" ]; then
+        discard_stale_jobs_cpu_quota_dropin_backup "$backup" \
+          || {
+            echo "velnor-runner postinst: could not prove staged drop-in removal; preserving its inode" >&2
+            status=1
+          }
       else
-        echo "velnor-runner postinst: staged drop-in identity changed; preserving it" >&2
+        echo "velnor-runner postinst: staged drop-in backup disappeared; refusing cleanup" >&2
         status=1
       fi
     fi
@@ -71,11 +112,11 @@ restore_stale_jobs_cpu_quota_dropin() {
       if [ ! -e "$JOBS_SLICE_DROPIN" ] && [ ! -L "$JOBS_SLICE_DROPIN" ]; then
         restore_staged_jobs_cpu_quota_dropin_no_clobber "$backup" "$JOBS_SLICE_DROPIN" \
           || echo "velnor-runner postinst: failed to restore $JOBS_SLICE_DROPIN; preserving the staged backup" >&2
-        systemctl daemon-reload \
-          || echo "velnor-runner postinst: failed to reload restored jobs-slice drop-in" >&2
       else
         echo "velnor-runner postinst: cannot restore stale jobs-slice drop-in over a new file" >&2
       fi
+      systemctl daemon-reload \
+        || echo "velnor-runner postinst: failed to reload restored jobs-slice drop-in" >&2
     fi
     if [ "$status" -eq 0 ]; then
       rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
@@ -85,22 +126,110 @@ restore_stale_jobs_cpu_quota_dropin() {
   exit "$status"
 }
 
+discard_stale_jobs_cpu_quota_dropin_backup() {
+  backup="$1"
+  if [ "${JOBS_SLICE_DROPIN_FD_OPEN:-0}" != 1 ]; then
+    [ ! -L "$backup" ] && [ -f "$backup" ] \
+      && [ "$(stat -c '%d:%i' "$backup" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
+      || return 1
+    exec 8<"$backup" || return 1
+    JOBS_SLICE_DROPIN_FD_OPEN=1
+  fi
+  restore_fd_path=/proc/$$/fd/8
+  [ "$(stat -L -c '%d:%i' "$restore_fd_path" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
+    || return 1
+  discard_status=1
+  if discard_expected_stale_jobs_cpu_quota_dropin_backup "$backup" "$restore_fd_path"; then
+    exec 8<&- || return 1
+    JOBS_SLICE_DROPIN_FD_OPEN=0
+    discard_status=0
+  fi
+  return "$discard_status"
+}
+
+discard_expected_stale_jobs_cpu_quota_dropin_backup() {
+  backup="$1"
+  restore_fd_path="$2"
+
+  # The package transaction lock serializes cooperating package writers, and
+  # the installed /etc/systemd/system directory is root-owned. This 0700
+  # same-filesystem quarantine also excludes non-root writers while the entry
+  # is checked and unlinked; only the quarantined name is passed to rm. The
+  # inode guarantee does not cover a separate privileged root actor that
+  # bypasses the package lock or mutates the quarantined file contents.
+  discard_dir=$(umask 077 && mktemp -d "$JOBS_SLICE_DROPIN_DIR/.10-host-cpu.conf.cleanup-XXXXXX") \
+    || return 1
+  chmod 700 "$discard_dir" || { rmdir "$discard_dir" 2>/dev/null || true; return 1; }
+  discard_file=$discard_dir/backup
+  mv -T -n -- "$backup" "$discard_file" || true
+  if [ -e "$discard_file" ] || [ -L "$discard_file" ]; then
+    discard_identity=$(stat -c '%d:%i' "$discard_file" 2>/dev/null || true)
+    discard_fd_identity=$(stat -L -c '%d:%i' "$restore_fd_path" 2>/dev/null || true)
+    if [ ! -L "$discard_file" ] && [ -f "$discard_file" ] \
+      && [ "$discard_identity" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
+      && [ "$discard_fd_identity" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ]; then
+      if rm -- "$discard_file" \
+        && [ ! -e "$discard_file" ] && [ ! -L "$discard_file" ]; then
+        if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+          rmdir "$discard_dir" || return 1
+          return 0
+        fi
+        echo "velnor-runner postinst: a new drop-in backup appeared during cleanup; preserving it" >&2
+        rmdir "$discard_dir" 2>/dev/null || true
+        return 1
+      fi
+      echo "velnor-runner postinst: could not unlink quarantined drop-in; preserving $discard_dir" >&2
+      return 1
+    fi
+    # The public name changed before the atomic move. Restore that entry only
+    # if its name is still free; otherwise preserve it in the private quarantine.
+    if [ ! -e "$backup" ] && [ ! -L "$backup" ] \
+      && mv -T -n -- "$discard_file" "$backup" \
+      && [ ! -e "$discard_file" ] && [ ! -L "$discard_file" ]; then
+      rmdir "$discard_dir" 2>/dev/null || true
+    else
+      echo "velnor-runner postinst: unexpected backup preserved at $discard_file" >&2
+    fi
+    return 1
+  fi
+  rmdir "$discard_dir" 2>/dev/null || true
+  return 1
+}
+
 restore_staged_jobs_cpu_quota_dropin_no_clobber() {
   backup="$1"
   destination="$2"
 
-  # A same-directory hard link arbitrates destination creation atomically;
-  # coreutils ln -T treats a newly appeared directory as the destination too.
-  [ ! -L "$backup" ] && [ -f "$backup" ] \
-    && [ "$(stat -c '%d:%i' "$backup" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
-    || return 1
-  ln -T -- "$backup" "$destination" || return 1
-  [ ! -L "$destination" ] && [ -f "$destination" ] \
+  # Keep the checked inode open and link through its procfs descriptor. The
+  # descriptor remains pinned if the backup pathname changes; ln -T arbitrates
+  # destination creation atomically and treats a new directory as a collision.
+  if [ "${JOBS_SLICE_DROPIN_FD_OPEN:-0}" != 1 ]; then
+    [ ! -L "$backup" ] && [ -f "$backup" ] \
+      && [ "$(stat -c '%d:%i' "$backup" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
+      || return 1
+    exec 8<"$backup" || return 1
+    JOBS_SLICE_DROPIN_FD_OPEN=1
+  fi
+  restore_fd_path=/proc/$$/fd/8
+  restore_fd_identity=$(stat -L -c '%d:%i' "$restore_fd_path" 2>/dev/null || true)
+  if [ "$restore_fd_identity" != "${JOBS_SLICE_DROPIN_IDENTITY:-}" ]; then
+    exec 8<&-
+    JOBS_SLICE_DROPIN_FD_OPEN=0
+    return 1
+  fi
+  restore_status=1
+  if ln -L -T -- "$restore_fd_path" "$destination" \
+    && [ ! -L "$destination" ] && [ -f "$destination" ] \
     && [ "$(stat -c '%d:%i' "$destination" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
-    && [ "$(stat -c '%d:%i' "$backup" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
-    || return 1
-  rm -- "$backup" || return 1
-  [ ! -e "$backup" ] && [ ! -L "$backup" ]
+    && [ "$(stat -L -c '%d:%i' "$restore_fd_path" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ]; then
+    discard_expected_stale_jobs_cpu_quota_dropin_backup "$backup" "$restore_fd_path" \
+      && restore_status=0
+  fi
+  if [ "$restore_status" -eq 0 ]; then
+    exec 8<&- || restore_status=1
+    JOBS_SLICE_DROPIN_FD_OPEN=0
+  fi
+  return "$restore_status"
 }
 
 verify_jobs_slice_has_no_resource_ceilings() {
