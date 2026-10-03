@@ -1543,7 +1543,7 @@ pub(crate) fn is_contained_repository_path(path: &str) -> bool {
 /// Refuse a repository-relative operation if any directory component below
 /// the repository root is a symlink. `symlink_metadata` keeps this check from
 /// following the link whose presence would redirect a later rename or unlink.
-/// This is a static-path guard: GenerationLock serializes Velnor mutators, but
+/// This is a static-path guard: `GenerationLock` serializes Velnor mutators, but
 /// path-based checks do not prevent concurrent replacement by other processes.
 pub(crate) fn ensure_no_symlinked_path_ancestors(
     root: &Path,
@@ -10974,7 +10974,7 @@ impl StagedTree {
             | FilePreimage::Symlink { .. }
             | FilePreimage::Directory
             | FilePreimage::Special => (),
-            _ => {
+            FilePreimage::Missing => {
                 return Err(GeneratorError::usage(format!(
                     "generated plan routes a file through the move-aside: {}",
                     relative.display()
@@ -11271,7 +11271,7 @@ fn install_staged_file(
             )));
         }
     }
-    let current = capture_file_preimage(&path, relative)?;
+    let current = capture_file_preimage(path, relative)?;
     if &current != expected {
         return Err(preimage_changed(relative));
     }

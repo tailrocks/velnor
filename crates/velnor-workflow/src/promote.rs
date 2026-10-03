@@ -75,6 +75,29 @@ fn replace_promotion_pin(
         return Ok(());
     }
 
+    // Atomic rename can replace a pin even when the caller cannot open the
+    // existing file for writing. Preserve the prior in-place write
+    // authorization contract before creating a sibling stage. `write(true)`
+    // does not truncate unless `truncate(true)` is also requested.
+    super::ensure_no_symlinked_path_ancestors(repo, relative)?;
+    let writable_pin = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|error| GeneratorError::io("open generation config for writing", path, &error))?;
+    let opened_metadata = writable_pin
+        .metadata()
+        .map_err(|error| GeneratorError::io("inspect writable generation config", path, &error))?;
+    if !opened_metadata.file_type().is_file()
+        || !same_permission_state(&opened_metadata.permissions(), permissions)
+    {
+        return Err(GeneratorError::usage(format!(
+            "generation config changed after promotion preflight: {}; review again",
+            path.display()
+        )));
+    }
+    drop(writable_pin);
+
     let parent = path
         .parent()
         .ok_or_else(|| GeneratorError::usage("generation config has no parent directory"))?;
@@ -1010,7 +1033,7 @@ impl Snapshot {
                 )),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
                 Err(error) => {
-                    failures.push(format!("inspect recovery link {}: {error}", path.display()))
+                    failures.push(format!("inspect recovery link {}: {error}", path.display()));
                 }
             }
         }
@@ -1573,6 +1596,116 @@ mod tests {
             "pin read must reject a fifo without opening it",
         );
         assert!(error.contains("non-regular generation config"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promotion_pin_replacement_requires_existing_pin_write_access() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let uid_output = must(
+            std::process::Command::new("id").arg("-u").output(),
+            "read effective uid for permission test",
+        );
+        assert!(
+            uid_output.status.success(),
+            "id -u failed: {}",
+            String::from_utf8_lossy(&uid_output.stderr)
+        );
+        let effective_uid = match String::from_utf8_lossy(&uid_output.stdout)
+            .trim()
+            .parse::<u32>()
+        {
+            Ok(uid) => uid,
+            Err(error) => panic!("parse effective uid from id -u: {error}"),
+        };
+        if effective_uid == 0 {
+            eprintln!(
+                "skipping write-permission regression: effective uid 0 can bypass Unix mode-bit denial"
+            );
+            return;
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-promote-pin-write-access-{}-{nonce}",
+            std::process::id()
+        ));
+        must(
+            std::fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        let pin = root.join(GENERATION_CONFIG);
+        must(
+            std::fs::write(&pin, "old pin bytes\n"),
+            "write generation config",
+        );
+        must(
+            std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o444)),
+            "remove generation config write permission",
+        );
+        let before = must(
+            std::fs::symlink_metadata(&pin),
+            "inspect protected generation config",
+        );
+        let permissions = before.permissions();
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(&pin)
+        {
+            Ok(file) => {
+                drop(file);
+                let _ = std::fs::remove_dir_all(&root);
+                eprintln!(
+                    "skipping write-permission regression: effective credentials can write mode-0444 files"
+                );
+                return;
+            }
+            Err(error) => assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "mode-0444 fixture failed for an unexpected reason: {error}"
+            ),
+        }
+
+        let error = must_fail(
+            replace_promotion_pin(
+                &root,
+                Path::new(GENERATION_CONFIG),
+                &pin,
+                "old pin bytes\n",
+                "new pin bytes\n",
+                &permissions,
+            ),
+            "pin replacement must preserve in-place write authorization",
+        );
+        assert!(
+            error.contains("open generation config for writing"),
+            "{error}"
+        );
+        assert_eq!(
+            must(std::fs::read(&pin), "read unchanged generation config"),
+            b"old pin bytes\n"
+        );
+        let after = must(
+            std::fs::symlink_metadata(&pin),
+            "reinspect protected generation config",
+        );
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_eq!(after.permissions().mode() & 0o777, 0o444);
+        assert_eq!(
+            must(
+                std::fs::read_dir(root.join(".github-gen")),
+                "inspect config directory after refused replacement"
+            )
+            .count(),
+            1,
+            "failed write preflight must not create a staged sibling"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

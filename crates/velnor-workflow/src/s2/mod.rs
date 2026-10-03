@@ -9246,7 +9246,7 @@ impl StagedTree {
             | FilePreimage::Symlink { .. }
             | FilePreimage::Directory
             | FilePreimage::Special => (),
-            _ => {
+            FilePreimage::Missing => {
                 return Err(GeneratorError::usage(format!(
                     "generated plan routes a file through the move-aside: {}",
                     relative.display()
