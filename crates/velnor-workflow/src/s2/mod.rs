@@ -14095,6 +14095,42 @@ mod tests {
 
     const RUNNER_ENVIRONMENT_CONTEXT: &str = concat!("runner", ".environment");
 
+    fn without_runner_environment_context(content: &str) -> String {
+        content.replace(RUNNER_ENVIRONMENT_CONTEXT, "")
+    }
+
+    fn legacy_provider_vocabulary_match<'a>(
+        content: &str,
+        patterns: &'a [&'a str],
+    ) -> Option<&'a str> {
+        patterns
+            .iter()
+            .copied()
+            .find(|pattern| content.contains(pattern))
+    }
+
+    fn legacy_provider_vocabulary_after_context_scrub<'a>(
+        content: &str,
+        patterns: &'a [&'a str],
+    ) -> Option<&'a str> {
+        let content_without_context = without_runner_environment_context(content);
+        legacy_provider_vocabulary_match(&content_without_context, patterns)
+    }
+
+    fn assert_no_legacy_provider_vocabulary(
+        name: &str,
+        path: &Path,
+        content: &str,
+        patterns: &[&str],
+    ) {
+        assert_eq!(
+            legacy_provider_vocabulary_after_context_scrub(content, patterns),
+            None,
+            "{name} {} carries legacy vocabulary",
+            path.display()
+        );
+    }
+
     fn s2_rust_source_paths(root: &Path) -> Vec<PathBuf> {
         let mut directories = vec![root.join("src/s2")];
         let mut files = Vec::new();
@@ -14291,27 +14327,30 @@ mod tests {
             !source_paths.is_empty(),
             "the source walk must cover the generator"
         );
+        // The context is allowed only in its structurally verified guard and
+        // assertion. Remove just those approved occurrences before searching
+        // for legacy strings that could otherwise be split across the token.
+        assert_runner_environment_source_guard(&root);
         for path in source_paths {
             let content = must(fs::read_to_string(&path), "read generator source");
-            for pattern in LEGACY {
-                assert!(
-                    !content.contains(pattern),
-                    "{} carries legacy vocabulary `{pattern}`",
-                    path.display()
-                );
-            }
+            assert_no_legacy_provider_vocabulary("generator source", &path, &content, LEGACY);
         }
         for (name, files) in s2_rendered_workflow_families() {
             for (path, content) in &files {
-                for pattern in LEGACY {
-                    assert!(
-                        !content.contains(pattern),
-                        "{name} {} carries legacy vocabulary `{pattern}`",
-                        path.display()
-                    );
-                }
+                assert_runner_environment_render_guard(name, path, content);
+                assert_no_legacy_provider_vocabulary(name, path, content, LEGACY);
             }
         }
+    }
+
+    #[test]
+    fn legacy_vocabulary_sweep_catches_tokens_split_by_runner_context() {
+        let split_legacy_token = format!("velnor{RUNNER_ENVIRONMENT_CONTEXT}_labels");
+        let patterns = [concat!("velnor", "_labels")];
+        assert_eq!(
+            legacy_provider_vocabulary_after_context_scrub(&split_legacy_token, &patterns),
+            Some(concat!("velnor", "_labels"))
+        );
     }
 
     #[test]
