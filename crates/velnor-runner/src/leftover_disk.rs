@@ -4262,8 +4262,8 @@ mod tests {
         assert_eq!(opened_anchor_identity, anchor_identity);
         let pinned_candidate = open_directory_child(&parent, &name).unwrap();
         let candidate_identity = directory_identity(&pinned_candidate).unwrap();
-        let FilesystemMountIdentity::LinuxMountId(mount_id) = &anchor_identity.mount else {
-            panic!("expected Linux mount identity");
+        let mount_id = match &anchor_identity.mount {
+            FilesystemMountIdentity::LinuxMountId(mount_id) => *mount_id,
         };
         let identity_of = |_: &Path, device, mount_id| (device, mount_id);
         let fail_after_first_unlink =
@@ -4276,7 +4276,7 @@ mod tests {
             &anchor_identity,
             &root_path,
             anchor_identity.device,
-            Some(*mount_id),
+            Some(mount_id),
             Some(&candidate_identity),
             Some(&pinned_candidate),
             &identity_of,
