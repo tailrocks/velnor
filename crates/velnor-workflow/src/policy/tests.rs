@@ -1516,7 +1516,11 @@ fn required_artifact_split_workflow_tree(name: &str) -> PathBuf {
     )
     .replace(
         "[[declare]]\nprimitive = \"scheduled-checks\"\nfile = \"checks.yml\"\n[declare.args]\nprofiles = [\"producer\", \"consumer\"]",
-        "[[declare]]\nprimitive = \"scheduled-checks\"\nfile = \"producer-only.yml\"\n[declare.args]\nprofiles = [\"producer\"]\n\n[[declare]]\nprimitive = \"scheduled-checks\"\nfile = \"checks.yml\"\n[declare.args]\nprofiles = [\"producer\", \"consumer\"]",
+        "[[declare]]\nprimitive = \"scheduled-checks\"\nfile = \"producer-only.yml\"\n[declare.args]\nprofiles = [\"producer\"]\n\n[[declare]]\nprimitive = \"scheduled-checks\"\nfile = \"checks.yml\"\n[declare.args]\nprofiles = [\"consumer\"]",
+    )
+    .replace(
+        "tasks = [\"consume\"]\nneeds = [\"producer\"]",
+        "tasks = [\"consume\"]",
     );
     write(&config_path, &generation);
     for (path, content) in must(
@@ -1659,9 +1663,10 @@ fn required_artifact_lanes_findings(name: &str, workflow: &str, runner: &str) ->
 }
 
 fn required_artifact_runner_profile_contracts(canonical: &str) {
+    let findings = required_artifact_mutation_findings("required-artifact-canonical", canonical);
     assert!(
-        required_artifact_mutation_findings("required-artifact-canonical", canonical).is_empty(),
-        "canonical verifier was rejected"
+        findings.is_empty(),
+        "canonical verifier was rejected: {findings:?}"
     );
     let macos = canonical.replace("ubuntu-24.04", "macos-15");
     assert!(
@@ -2795,11 +2800,12 @@ fn required_artifact_split_workflows_are_audited_per_file() {
         .and_then(|mapping| mapping.get_mut("jobs"))
         .and_then(Value::as_mapping_mut)
         .unwrap_or_else(|| panic!("producer-only workflow jobs exist"));
-    assert!(jobs.remove("producer").is_some(), "producer job exists");
-    assert!(
-        jobs.remove("verify-producer-artifacts").is_some(),
-        "producer verifier exists"
-    );
+    let producer = jobs
+        .remove("producer")
+        .unwrap_or_else(|| panic!("producer job exists"));
+    let verifier = jobs
+        .remove("verify-producer-artifacts")
+        .unwrap_or_else(|| panic!("producer verifier exists"));
     write(
         &producer_only_path,
         &must(
@@ -2807,9 +2813,37 @@ fn required_artifact_split_workflows_are_audited_per_file() {
             "serialize producer-only workflow without producer/verifier",
         ),
     );
+
+    let checks_path = root.join(".github/workflows/checks.yml");
+    let content = must(fs::read_to_string(&checks_path), "read checks workflow");
+    let mut checks: Value = must(serde_yaml::from_str(&content), "parse checks workflow");
+    let checks_jobs = checks
+        .as_mapping_mut()
+        .and_then(|mapping| mapping.get_mut("jobs"))
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("checks workflow jobs exist"));
+    assert!(
+        checks_jobs
+            .insert("producer".to_owned(), producer)
+            .is_none(),
+        "checks workflow has no producer before mutation"
+    );
+    assert!(
+        checks_jobs
+            .insert("verify-producer-artifacts".to_owned(), verifier)
+            .is_none(),
+        "checks workflow has no producer verifier before mutation"
+    );
+    write(
+        &checks_path,
+        &must(
+            serde_yaml::to_string(&checks),
+            "serialize checks workflow with moved producer/verifier",
+        ),
+    );
     let audit = must(
         audit_workflows(&root),
-        "audit split workflow with missing producer/verifier pair",
+        "audit split workflow with producer/verifier moved to another file",
     );
     assert!(
         audit.structure.iter().any(|finding| {
