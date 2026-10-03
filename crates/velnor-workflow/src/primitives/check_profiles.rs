@@ -430,7 +430,28 @@ fn render_checks_file(
     if let Some((default, _)) = &lanes {
         output.push_str(lanes_dispatch_inputs(*default));
     }
-    output.push_str("\n\npermissions:\n  contents: read\n\nconcurrency:\n");
+    output.push_str("\n\npermissions:\n  contents: read\n\n");
+    render_event_concurrency(&mut output, stem, events);
+    output.push_str("jobs:\n");
+    for profile in profiles {
+        render_profile_job_with_selected_profiles(
+            &mut output,
+            config,
+            profile,
+            profiles,
+            lanes.as_ref().map(|(_, runs_on)| runs_on.as_str()),
+        )?;
+    }
+    for profile in profiles {
+        if profile.artifacts_required {
+            render_artifact_verifier_job(&mut output, config, profile, lanes.is_some());
+        }
+    }
+    Ok(output)
+}
+
+fn render_event_concurrency(output: &mut String, stem: &str, events: &[String]) {
+    output.push_str("concurrency:\n");
     let has_pull_request = events.iter().any(|event| event == "pull_request");
     let has_committed_event = events
         .iter()
@@ -462,33 +483,16 @@ fn render_checks_file(
         // PR attempts supersede each other for fast feedback. Committed and
         // merge-queue evidence uses the non-canceling path above, so a later
         // event cannot erase a predecessor's verdict.
-        output.push_str(
-            "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n",
-        );
+        output.push_str("  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\n");
     } else if has_committed_event {
         // A push or merge-group run is evidence for a committed/candidate
         // tree. The SHA-scoped group above prevents pending replacement.
-        output.push_str("  cancel-in-progress: false\n\njobs:\n");
+        output.push_str("  cancel-in-progress: false\n\n");
     } else {
         // A cron-only or dispatch-only file has no candidate/main event to
         // preserve, so retain the historical supersession behavior.
-        output.push_str("  cancel-in-progress: true\n\njobs:\n");
+        output.push_str("  cancel-in-progress: true\n\n");
     }
-    for profile in profiles {
-        render_profile_job_with_selected_profiles(
-            &mut output,
-            config,
-            profile,
-            profiles,
-            lanes.as_ref().map(|(_, runs_on)| runs_on.as_str()),
-        )?;
-    }
-    for profile in profiles {
-        if profile.artifacts_required {
-            render_artifact_verifier_job(&mut output, config, profile, lanes.is_some());
-        }
-    }
-    Ok(output)
 }
 
 /// The resolved lanes override for a file: the shared dispatch default plus
