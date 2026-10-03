@@ -489,12 +489,37 @@ pub(crate) fn control_plane_provider(universe: &ProviderSet) -> ProviderId {
     }
 }
 
-/// A GitHub-owned execution label: inherently hosted, never a trust fact.
-/// Hosted selectors must use these exclusively; anything else in a hosted
-/// selector could route a hosted-only tree onto caller-managed runners.
+/// Standard GitHub-hosted runner labels from the
+/// [GitHub runner-selection docs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job#choosing-github-hosted-runners).
+/// Hosted selectors must use these exact labels; accepting a prefix could
+/// route a hosted-only tree onto caller-managed runners.
+const GITHUB_HOSTED_LABELS: &[&str] = &[
+    "ubuntu-slim",
+    "ubuntu-latest",
+    "ubuntu-24.04",
+    "ubuntu-22.04",
+    "ubuntu-26.04",
+    "ubuntu-24.04-arm",
+    "ubuntu-22.04-arm",
+    "ubuntu-26.04-arm",
+    "windows-latest",
+    "windows-2025",
+    "windows-2025-vs2026",
+    "windows-2022",
+    "windows-11-arm",
+    "windows-11-vs2026-arm",
+    "macos-15-intel",
+    "macos-26-intel",
+    "macos-latest",
+    "macos-14",
+    "macos-15",
+    "macos-26",
+    "xcode-27",
+];
+
 #[must_use]
 pub(crate) fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+    GITHUB_HOSTED_LABELS.contains(&label)
 }
 
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
@@ -921,6 +946,54 @@ mod tests {
             assert!(
                 error.contains("unknown provider") && error.contains("expected one of"),
                 "unexpected error for `{alias}`: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_hosted_labels_match_the_exact_documented_allowlist() {
+        for label in GITHUB_HOSTED_LABELS {
+            assert!(
+                is_github_owned_label(label),
+                "documented hosted label `{label}` rejected"
+            );
+        }
+
+        for label in [
+            "ubuntu-slim",
+            "ubuntu-22.04-arm",
+            "ubuntu-26.04-arm",
+            "windows-2022",
+            "windows-11-arm",
+            "macos-14",
+            "macos-15-intel",
+        ] {
+            assert!(
+                is_github_owned_label(label),
+                "documented hosted label `{label}` rejected"
+            );
+        }
+
+        for label in [
+            "ubuntu-private",
+            "ubuntu-24.04-custom",
+            "ubuntu-26.04-preview",
+            "macos-custom",
+            "windows-private",
+            "xcode-27-custom",
+            "Ubuntu-24.04",
+            " ubuntu-24.04",
+        ] {
+            assert!(
+                !is_github_owned_label(label),
+                "non-exact hosted label `{label}` accepted"
+            );
+        }
+
+        for label in ["ubuntu-24.04", "ubuntu-26.04", "xcode-27"] {
+            assert!(
+                is_github_owned_label(label),
+                "official label `{label}` rejected"
             );
         }
     }
