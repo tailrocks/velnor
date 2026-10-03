@@ -646,7 +646,12 @@ struct OwnedDockerResources {
     /// accepted. Reused IDs need a durable host readiness proof instead.
     persistent_container_fresh_ids: BTreeSet<String>,
     persistent_container_config_archives: BTreeMap<String, String>,
+    persistent_builder_readiness_epochs: BTreeMap<String, u64>,
+    /// Durable proof cache keyed by immutable container ID. The builder's
+    /// builder generation is implicit because begin/revoke drain admissions;
+    /// each proof also carries the durable per-container start epoch.
     persistent_container_ready_fingerprints: BTreeMap<String, String>,
+    persistent_container_readiness_epochs: BTreeMap<String, u64>,
     /// Per-name operation locks. Docker volumes have no immutable ID, so a
     /// name must stay bound from re-attestation through the forwarded
     /// operation and its response observer.
@@ -663,6 +668,7 @@ struct OwnedDockerResources {
     persistent_exec_builders: BTreeMap<String, String>,
     persistent_exec_containers: BTreeMap<String, String>,
     persistent_exec_generations: BTreeMap<String, u64>,
+    persistent_exec_readiness_epochs: BTreeMap<String, u64>,
 }
 
 #[cfg(unix)]
@@ -682,12 +688,33 @@ struct PersistentBuilderTunnel {
 
 struct OwnedResourceReservation {
     resources: Arc<Mutex<OwnedDockerResources>>,
-    active: bool,
+    state: OwnedResourceReservationState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedResourceReservationState {
+    Reserved,
+    Dispatched,
+    Pinned,
+    Finished,
 }
 
 impl OwnedResourceReservation {
+    fn mark_dispatched(&mut self) -> Result<()> {
+        match self.state {
+            OwnedResourceReservationState::Reserved => {
+                self.state = OwnedResourceReservationState::Dispatched;
+                Ok(())
+            }
+            OwnedResourceReservationState::Dispatched => Ok(()),
+            OwnedResourceReservationState::Pinned | OwnedResourceReservationState::Finished => {
+                bail!("Docker lease resource reservation is no longer dispatchable")
+            }
+        }
+    }
+
     fn finish(&mut self) -> Result<()> {
-        if !self.active {
+        if self.state == OwnedResourceReservationState::Finished {
             return Ok(());
         }
         let mut resources = self
@@ -698,7 +725,7 @@ impl OwnedResourceReservation {
             .reserved_resource_slots
             .checked_sub(1)
             .context("Docker lease resource reservation underflow")?;
-        self.active = false;
+        self.state = OwnedResourceReservationState::Finished;
         Ok(())
     }
 
@@ -706,13 +733,15 @@ impl OwnedResourceReservation {
     /// its response could not be attested or fully observed. Releasing that
     /// reservation would let later concurrent creates exceed the cap.
     fn pin(&mut self) {
-        self.active = false;
+        if self.state != OwnedResourceReservationState::Finished {
+            self.state = OwnedResourceReservationState::Pinned;
+        }
     }
 }
 
 impl Drop for OwnedResourceReservation {
     fn drop(&mut self) {
-        if !self.active {
+        if self.state != OwnedResourceReservationState::Reserved {
             return;
         }
         let Ok(mut resources) = self.resources.lock() else {
@@ -740,6 +769,14 @@ fn finish_resource_reservation_after_observation(
             }
             Err(error)
         }
+    }
+}
+
+fn pin_resource_reservation_after_uncertain_dispatch(
+    reservation: &mut Option<OwnedResourceReservation>,
+) {
+    if let Some(reservation) = reservation.as_mut() {
+        reservation.pin();
     }
 }
 
@@ -822,6 +859,95 @@ fn ensure_persistent_builder_generation_locked(
     Ok(())
 }
 
+fn require_persistent_container_ready_locked(
+    resources: &OwnedDockerResources,
+    builder: &str,
+    container_id: &str,
+) -> Result<()> {
+    let current_epoch = resources
+        .persistent_builder_readiness_epochs
+        .get(builder)
+        .copied()
+        .context("persistent BuildKit has no current readiness epoch")?;
+    let expected = resources
+        .persistent_builder_config_fingerprints
+        .get(builder)
+        .context("persistent BuildKit config mode was not registered")?;
+    if resources
+        .persistent_container_ready_fingerprints
+        .get(container_id)
+        != Some(expected)
+        || resources
+            .persistent_container_readiness_epochs
+            .get(container_id)
+            != Some(&current_epoch)
+    {
+        bail!("persistent BuildKit exec requires exact durable readiness proof");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn accept_reused_persistent_container_readiness(
+    policy: &DockerLeasePolicy,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    generation: u64,
+    config_fingerprint: &str,
+) -> Result<()> {
+    let result = (|| {
+        note_current_persistent_readiness(
+            policy,
+            domain,
+            builder,
+            generation,
+            container_id,
+            config_fingerprint,
+        )
+    })();
+    if let Err(error) = result {
+        // The inspect response was strict, but its durable readiness proof
+        // was missing, unreadable, or stale. Remove this immutable binding
+        // and any exec IDs derived from it before returning the inspect
+        // failure to the guest.
+        policy
+            .forget_persistent_container_fenced(container_id, Some((builder, generation)))
+            .context("forget unready persistent BuildKit container binding")?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn note_current_persistent_readiness(
+    policy: &DockerLeasePolicy,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+    generation: u64,
+    container_id: &str,
+    config_fingerprint: &str,
+) -> Result<u64> {
+    let readiness_epoch = crate::buildkit::builder_readiness_epoch(domain, builder)?;
+    if !crate::buildkit::builder_readiness_matches_epoch(
+        domain,
+        builder,
+        container_id,
+        config_fingerprint,
+        readiness_epoch,
+    )? {
+        bail!("persistent BuildKit container has no matching durable readiness proof");
+    }
+    policy.note_persistent_ready_container(
+        builder,
+        generation,
+        container_id,
+        config_fingerprint,
+        readiness_epoch,
+    )?;
+    Ok(readiness_epoch)
+}
+
 fn remove_persistent_execs_for_builder(resources: &mut OwnedDockerResources, builder: &str) {
     let removed = resources
         .persistent_exec_builders
@@ -835,6 +961,7 @@ fn remove_persistent_execs_for_builder(resources: &mut OwnedDockerResources, bui
         resources.persistent_exec_builders.remove(&id);
         resources.persistent_exec_containers.remove(&id);
         resources.persistent_exec_generations.remove(&id);
+        resources.persistent_exec_readiness_epochs.remove(&id);
     }
 }
 
@@ -851,6 +978,7 @@ fn remove_persistent_execs_for_container(resources: &mut OwnedDockerResources, c
         resources.persistent_exec_builders.remove(&id);
         resources.persistent_exec_containers.remove(&id);
         resources.persistent_exec_generations.remove(&id);
+        resources.persistent_exec_readiness_epochs.remove(&id);
     }
 }
 
@@ -890,96 +1018,323 @@ pub(crate) struct VolumeOperationLocks {
     _guards: Vec<VolumeNameLockGuard>,
 }
 
-/// Durable fence for a dispatched persistent BuildKit ContainerCreate.
-/// Moby may complete create after a client context/socket is cancelled and
-/// can report 404 before the late-created object appears. Drop intentionally
-/// leaves the marker behind; only the observer for this exact, completely
-/// framed Engine response may remove it.
+/// Durable journal handle for one persistent BuildKit ContainerCreate. Moby
+/// may complete create after a client context/socket is cancelled and can
+/// report 404 before the late-created object appears. Drop never clears the
+/// transaction; only exact archive/start/readiness proof can settle it.
 #[cfg(unix)]
 struct PersistentBuildKitCreateFence {
-    root: Arc<crate::fs_copy::NoFollowDestinationDir>,
-    marker_name: String,
-    expected: Vec<u8>,
-    settled: bool,
+    domain: crate::buildkit::PersistentBuildKitDomain,
+    record: crate::buildkit::PendingBuildKitCreateTransaction,
 }
 
 #[cfg(unix)]
 impl PersistentBuildKitCreateFence {
     fn begin(
-        root: Arc<crate::fs_copy::NoFollowDestinationDir>,
-        engine_id: &str,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
         builder: &str,
         generation: u64,
         volume: &str,
         container_name: &str,
+        config_fingerprint: &str,
+        expected_image_id: &str,
+        expects_config: bool,
         request: &[u8],
     ) -> Result<Self> {
-        let marker_name = pending_buildkit_create_marker_name(volume);
-        if root
-            .open_relative_file_if_exists(Path::new(&marker_name))?
-            .is_some()
-        {
-            bail!("persistent BuildKit create is already unresolved for volume {volume:?}");
-        }
-        let request_fingerprint = Sha256::digest(request)
+        let request_sha256 = Sha256::digest(request)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let expected = serde_json::to_vec(&serde_json::json!({
-            "version": 1,
-            "engine_id": engine_id,
-            "builder": builder,
-            "generation": generation,
-            "volume": volume,
-            "container_name": container_name,
-            "request_sha256": request_fingerprint,
-        }))
-        .context("encode persistent BuildKit create fence")?;
-        let mut marker = root
-            .open_or_create_lock_file(OsStr::new(&marker_name))
-            .with_context(|| format!("create persistent BuildKit create fence {marker_name}"))?;
-        marker
-            .write_all(&expected)
-            .context("write persistent BuildKit create fence")?;
-        marker
-            .sync_all()
-            .context("persist persistent BuildKit create fence")?;
-        root.sync_directory()
-            .context("persist persistent BuildKit create fence directory")?;
+        let body = docker_request_body(request)?;
+        let expected_create_shape = normalized_persistent_create_shape(
+            body,
+            container_name,
+            volume,
+            &domain.token,
+            expected_image_id,
+        )?;
+        let shape = Sha256::digest(serde_json::to_vec(&expected_create_shape)?)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let record = crate::buildkit::PendingBuildKitCreateTransaction {
+            version: 1,
+            transaction_id: uuid::Uuid::new_v4().to_string(),
+            engine_id: domain.engine_id.clone(),
+            domain_token: domain.token.clone(),
+            builder: builder.to_owned(),
+            generation,
+            config_fingerprint: config_fingerprint.to_owned(),
+            state_volume: volume.to_owned(),
+            container_name: container_name.to_owned(),
+            request_sha256,
+            normalized_shape_sha256: shape,
+            expected_create_shape,
+            expected_image_id: expected_image_id.to_owned(),
+            expects_config,
+            phase: crate::buildkit::PendingBuildKitCreatePhase::Dispatched,
+            container_id: None,
+            attested_shape_sha256: None,
+            archived_config_fingerprint: None,
+        };
+        crate::buildkit::begin_pending_buildkit_create_transaction(domain, record.clone())?;
         Ok(Self {
-            root,
-            marker_name,
-            expected,
-            settled: false,
+            domain: domain.clone(),
+            record,
         })
     }
 
-    fn settle(&mut self) -> Result<()> {
-        if self.settled {
-            return Ok(());
-        }
-        let mut marker = self
-            .root
-            .open_relative_file(Path::new(&self.marker_name))
-            .with_context(|| {
-                format!("open persistent BuildKit create fence {}", self.marker_name)
-            })?;
-        let mut observed = Vec::new();
-        marker
-            .read_to_end(&mut observed)
-            .context("read persistent BuildKit create fence")?;
-        if observed != self.expected {
-            bail!("persistent BuildKit create fence identity changed before settlement");
-        }
-        self.root
-            .remove_tree_entry(OsStr::new(&self.marker_name))
-            .context("remove settled persistent BuildKit create fence")?;
-        self.root
-            .sync_directory()
-            .context("persist settled persistent BuildKit create fence removal")?;
-        self.settled = true;
+    fn bind_container(&mut self, container_id: &str, shape_sha256: &str) -> Result<()> {
+        self.record = crate::buildkit::bind_pending_buildkit_create_container(
+            &self.domain,
+            &self.record.builder,
+            &self.record.transaction_id,
+            container_id,
+            shape_sha256,
+        )?;
         Ok(())
     }
+
+    fn record_archive(&mut self, container_id: &str, fingerprint: &str) -> Result<()> {
+        self.record = crate::buildkit::record_pending_buildkit_create_archive(
+            &self.domain,
+            &self.record.builder,
+            &self.record.transaction_id,
+            container_id,
+            fingerprint,
+        )?;
+        Ok(())
+    }
+
+    fn mark_started(&mut self, container_id: &str) -> Result<()> {
+        self.record = crate::buildkit::mark_pending_buildkit_create_started(
+            &self.domain,
+            &self.record.builder,
+            &self.record.transaction_id,
+            container_id,
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn normalized_persistent_create_shape(
+    body: &[u8],
+    container_name: &str,
+    volume: &str,
+    domain_token: &str,
+    expected_image_id: &str,
+) -> Result<Value> {
+    let mut value = parse_create_value(body)?;
+    let object = value
+        .as_object_mut()
+        .context("persistent BuildKit create body must be an object")?;
+    let labels_key = object
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("Labels"))
+        .cloned()
+        .context("persistent BuildKit create omitted ownership labels")?;
+    let labels = object
+        .get_mut(&labels_key)
+        .and_then(Value::as_object_mut)
+        .context("persistent BuildKit create labels must be an object")?;
+    labels.insert(
+        JOB_ID_LABEL.to_owned(),
+        Value::String("<creator-job>".into()),
+    );
+    labels.insert(
+        BUILDKIT_DOMAIN_LABEL.to_owned(),
+        Value::String(domain_token.to_owned()),
+    );
+    let normalized = serde_json::json!({
+        "name": container_name,
+        "volume": volume,
+        "image_id": expected_image_id,
+        "create": value,
+    });
+    Ok(normalized)
+}
+
+#[cfg(unix)]
+fn persistent_inspected_create_shape_sha256(body: &[u8]) -> Result<String> {
+    let object = parse_api_object(body, "container")?;
+    let name = api_object_string(&object, "Name")?;
+    let image_id = api_object_string(&object, "Image")?;
+    let config = api_object_field(&object, "Config")
+        .context("persistent container inspect omitted Config")?;
+    let host_config = api_object_field(&object, "HostConfig")
+        .context("persistent container inspect omitted HostConfig")?;
+    let mounts = api_object_field(&object, "Mounts")
+        .context("persistent container inspect omitted Mounts")?;
+    let normalized = serde_json::json!({
+        "name": name,
+        "image_id": image_id,
+        "config": config,
+        "host_config": host_config,
+        "mounts": mounts,
+    });
+    let bytes = serde_json::to_vec(&normalized)
+        .context("serialize attested persistent BuildKit create shape")?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+#[cfg(unix)]
+fn json_matches_expected_projection(expected: &Value, actual: &Value) -> bool {
+    match (expected, actual) {
+        (Value::Object(expected), Value::Object(actual)) => expected.iter().all(|(key, value)| {
+            actual
+                .iter()
+                .find(|(actual_key, _)| actual_key.eq_ignore_ascii_case(key))
+                .is_some_and(|(_, actual_value)| {
+                    json_matches_expected_projection(value, actual_value)
+                })
+        }),
+        (Value::Array(expected), Value::Array(actual)) => {
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(actual)
+                    .all(|(expected, actual)| json_matches_expected_projection(expected, actual))
+        }
+        _ => expected == actual,
+    }
+}
+
+#[cfg(unix)]
+fn normalize_buildkit_job_label(value: &mut Value) -> Result<()> {
+    let labels = value
+        .as_object_mut()
+        .context("BuildKit create shape labels must be an object")?;
+    let job_label = labels
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case(JOB_ID_LABEL))
+        .cloned()
+        .context("BuildKit create shape omitted its job label")?;
+    labels.insert(job_label, Value::String("<creator-job>".to_owned()));
+    Ok(())
+}
+
+/// Match every explicitly supplied, validated create field against the
+/// corresponding immutable inspect field. Docker may add default fields, so
+/// compare the complete request projection as a case-insensitive subset;
+/// unsafe or unexpected inspected fields are rejected separately by the
+/// strict persistent-container attestor.
+#[cfg(unix)]
+fn pending_create_shape_matches_inspect(
+    expected_shape: &Value,
+    inspect_object: &Map<String, Value>,
+) -> Result<bool> {
+    let expected_create = expected_shape
+        .get("create")
+        .and_then(Value::as_object)
+        .context("pending BuildKit transaction omitted normalized create shape")?;
+    let actual_config = api_object_field(inspect_object, "Config")
+        .and_then(Value::as_object)
+        .context("inspected BuildKit container omitted Config")?;
+    let actual_host_config = api_object_field(inspect_object, "HostConfig")
+        .and_then(Value::as_object)
+        .context("inspected BuildKit container omitted HostConfig")?;
+
+    for (key, expected) in expected_create {
+        match key.to_ascii_lowercase().as_str() {
+            "hostconfig" => {
+                if !json_matches_expected_projection(
+                    expected,
+                    &Value::Object(actual_host_config.clone()),
+                ) {
+                    return Ok(false);
+                }
+            }
+            // The API create's NetworkingConfig is required empty by the
+            // validator. Docker's inspect representation is NetworkSettings,
+            // which is runtime state and is checked through HostConfig and
+            // the exact bridge-mode policy instead.
+            "networkingconfig" => {}
+            "labels" => {
+                let mut expected_labels = expected.clone();
+                let Some(actual_labels) = api_object_field(actual_config, key) else {
+                    return Ok(false);
+                };
+                let mut actual_labels = actual_labels.clone();
+                normalize_buildkit_job_label(&mut expected_labels)?;
+                normalize_buildkit_job_label(&mut actual_labels)?;
+                if !json_matches_expected_projection(&expected_labels, &actual_labels) {
+                    return Ok(false);
+                }
+            }
+            _ => {
+                let Some(actual) = api_object_field(actual_config, key) else {
+                    return Ok(false);
+                };
+                if !json_matches_expected_projection(expected, actual) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn bind_persistent_create_fence_to_inspect(
+    fence: &mut PersistentBuildKitCreateFence,
+    body: &[u8],
+) -> Result<()> {
+    let (id, shape, _) = attest_pending_buildkit_create_inspect(body, &fence.record)?;
+    fence.bind_container(&id, &shape)
+}
+
+#[cfg(unix)]
+pub(crate) fn attest_pending_buildkit_create_inspect(
+    body: &[u8],
+    transaction: &crate::buildkit::PendingBuildKitCreateTransaction,
+) -> Result<(String, String, String)> {
+    let allowed = BTreeSet::from([transaction.builder.clone()]);
+    let images = BTreeMap::from([(
+        transaction.builder.clone(),
+        transaction.expected_image_id.clone(),
+    )]);
+    let (name, id, volume, image_id, has_config) =
+        attest_persistent_buildkit_container(body, &transaction.container_name, &allowed, &images)?;
+    if name != transaction.container_name
+        || volume != transaction.state_volume
+        || image_id != transaction.expected_image_id
+        || has_config != transaction.expects_config
+    {
+        bail!("inspected BuildKit create shape does not match durable transaction intent");
+    }
+    if transaction
+        .container_id
+        .as_deref()
+        .is_some_and(|expected| expected != id)
+    {
+        bail!("inspected BuildKit create immutable ID changed from transaction");
+    }
+    let object = parse_api_object(body, "container")?;
+    let state = api_object_field(&object, "State")
+        .and_then(Value::as_object)
+        .and_then(|state| api_object_field(state, "Status"))
+        .and_then(Value::as_str)
+        .context("inspected BuildKit create omitted state")?
+        .to_owned();
+    if !matches!(state.as_str(), "created" | "running") {
+        bail!("BuildKit create is in non-recoverable state {state:?}");
+    }
+    let shape = persistent_inspected_create_shape_sha256(body)?;
+    if !pending_create_shape_matches_inspect(&transaction.expected_create_shape, &object)? {
+        bail!("inspected BuildKit container differs from durable normalized create intent");
+    }
+    if transaction
+        .attested_shape_sha256
+        .as_deref()
+        .is_some_and(|expected| expected != shape)
+    {
+        bail!("inspected BuildKit create shape changed from durable transaction");
+    }
+    Ok((id, shape, state))
 }
 
 #[cfg(unix)]
@@ -1001,6 +1356,97 @@ fn ensure_no_pending_buildkit_create(
         bail!("persistent BuildKit create remains unresolved for volume {volume:?}");
     }
     Ok(())
+}
+
+#[cfg(unix)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyPendingBuildKitCreateMarker {
+    version: u32,
+    engine_id: String,
+    builder: String,
+    generation: u64,
+    volume: String,
+    container_name: String,
+    request_sha256: String,
+}
+
+#[cfg(unix)]
+fn migrate_legacy_pending_buildkit_create(
+    runtime_root: &crate::fs_copy::NoFollowDestinationDir,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    volume: &str,
+) -> Result<()> {
+    let marker_name = pending_buildkit_create_marker_name(volume);
+    let Some(mut marker) = runtime_root
+        .open_relative_file_if_exists(Path::new(&marker_name))
+        .with_context(|| format!("open legacy BuildKit create marker {marker_name} safely"))?
+    else {
+        return Ok(());
+    };
+    let mut bytes = Vec::new();
+    Read::take(&mut marker, 4097)
+        .read_to_end(&mut bytes)
+        .context("read legacy BuildKit create marker")?;
+    if bytes.len() > 4096 {
+        bail!("legacy BuildKit create marker exceeds the migration limit");
+    }
+    let legacy: LegacyPendingBuildKitCreateMarker = serde_json::from_slice(&bytes)
+        .context("parse legacy BuildKit create marker; keep it fenced for operator repair")?;
+    if legacy.version != 1
+        || legacy.engine_id != domain.engine_id
+        || legacy.volume != volume
+        || crate::buildkit::persistent_builder_domain_token(&legacy.builder)
+            != Some(domain.token.as_str())
+        || crate::buildkit::daemon_state_volume(&legacy.builder) != volume
+        || crate::buildkit::daemon_container_name(&legacy.builder) != legacy.container_name
+        || legacy.generation == 0
+        || legacy.request_sha256.len() != 64
+        || !legacy
+            .request_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("legacy BuildKit create marker identity is uncertain; keep it fenced");
+    }
+    crate::buildkit::quarantine_legacy_pending_buildkit_create(domain, volume, &bytes)?;
+    runtime_root
+        .remove_tree_entry(OsStr::new(&marker_name))
+        .context("remove durably quarantined legacy BuildKit create marker")?;
+    runtime_root
+        .sync_directory()
+        .context("sync removal of legacy BuildKit create marker")
+}
+
+#[cfg(unix)]
+fn ensure_domain_pending_buildkit_create_clear(
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    volume: &str,
+    access: Option<&crate::buildkit::PendingBuildKitCreateAccess>,
+) -> Result<()> {
+    let Some(builder) = persistent_buildkit_volume_builder_name(volume) else {
+        return Ok(());
+    };
+    if persistent_buildkit_domain_token(builder) != Some(domain.token.as_str())
+        || crate::buildkit::daemon_state_volume(builder) != volume
+    {
+        return Ok(());
+    }
+    if crate::buildkit::legacy_pending_buildkit_create_is_quarantined(domain, volume)? {
+        bail!("legacy persistent BuildKit create remains quarantined for operator repair");
+    }
+    let Some(transaction) = crate::buildkit::pending_buildkit_create_transaction(domain, builder)?
+    else {
+        return Ok(());
+    };
+    if access.is_some_and(|access| {
+        access.builder == builder
+            && access.generation == transaction.generation
+            && access.transaction_id == transaction.transaction_id
+    }) {
+        return Ok(());
+    }
+    bail!("persistent BuildKit create transaction remains unresolved for {volume:?}");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1052,6 +1498,7 @@ struct PersistentBuilderAdmission {
     builder: String,
     generation: u64,
     container_id: Option<String>,
+    readiness_epoch: Option<u64>,
     is_bootstrap_create: bool,
     is_bootstrap_conflict_waiter: bool,
 }
@@ -1063,6 +1510,7 @@ impl fmt::Debug for PersistentBuilderAdmission {
             .field("builder", &self.builder)
             .field("generation", &self.generation)
             .field("container_id", &self.container_id)
+            .field("readiness_epoch", &self.readiness_epoch)
             .field("is_bootstrap_create", &self.is_bootstrap_create)
             .field(
                 "is_bootstrap_conflict_waiter",
@@ -1077,6 +1525,7 @@ struct PersistentBuilderRecoveryAdmission {
     changed: Arc<Condvar>,
     builder: String,
     generation: u64,
+    counted_request: bool,
 }
 
 impl Drop for PersistentBuilderAdmission {
@@ -1126,6 +1575,18 @@ impl Drop for PersistentBuilderRecoveryAdmission {
                 .persistent_builder_recovery_generations
                 .remove(&self.builder);
         }
+        if self.counted_request
+            && let Some(in_flight) = resources
+                .persistent_builder_requests_in_flight
+                .get_mut(&self.builder)
+        {
+            *in_flight = in_flight.saturating_sub(1);
+            if *in_flight == 0 {
+                resources
+                    .persistent_builder_requests_in_flight
+                    .remove(&self.builder);
+            }
+        }
         self.changed.notify_all();
     }
 }
@@ -1163,6 +1624,39 @@ fn decrement_bootstrap_create_count(resources: &mut OwnedDockerResources, builde
 }
 
 impl PersistentBuilderAdmission {
+    fn readiness_epoch(&self) -> Option<u64> {
+        self.readiness_epoch
+    }
+
+    fn set_readiness_epoch(&mut self, readiness_epoch: u64) {
+        self.readiness_epoch = Some(readiness_epoch);
+    }
+
+    fn validate_before_dispatch(&self, route: AuthorizedDockerRoute) -> Result<()> {
+        let resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        ensure_persistent_builder_generation_locked(&resources, &self.builder, self.generation)?;
+        if let Some(container_id) = self.container_id.as_deref() {
+            let current_epoch = resources
+                .persistent_builder_readiness_epochs
+                .get(&self.builder)
+                .copied()
+                .unwrap_or_default();
+            if self.readiness_epoch != Some(current_epoch) {
+                bail!("persistent BuildKit request was authorized in a stale readiness epoch");
+            }
+            if matches!(
+                route,
+                AuthorizedDockerRoute::PersistentExecCreate | AuthorizedDockerRoute::PersistentExec
+            ) {
+                require_persistent_container_ready_locked(&resources, &self.builder, container_id)?;
+            }
+        }
+        Ok(())
+    }
+
     fn has_other_bootstrap_create(&self) -> Result<bool> {
         let resources = self
             .resources
@@ -1322,6 +1816,28 @@ impl AuthorizedDockerRequest {
         })
     }
 
+    fn readiness_epoch(&self) -> Option<u64> {
+        self._persistent_builder
+            .as_ref()
+            .and_then(PersistentBuilderAdmission::readiness_epoch)
+    }
+
+    fn set_readiness_epoch(&mut self, readiness_epoch: u64) -> Result<()> {
+        let admission = self
+            ._persistent_builder
+            .as_mut()
+            .context("persistent BuildKit route has no capability admission")?;
+        admission.set_readiness_epoch(readiness_epoch);
+        Ok(())
+    }
+
+    fn validate_persistent_dispatch(&self, route: AuthorizedDockerRoute) -> Result<()> {
+        if let Some(admission) = self._persistent_builder.as_ref() {
+            admission.validate_before_dispatch(route)?;
+        }
+        Ok(())
+    }
+
     fn has_other_persistent_bootstrap_create(&self) -> Result<bool> {
         self._persistent_builder
             .as_ref()
@@ -1354,6 +1870,129 @@ impl AuthorizedDockerRequest {
             .context("persistent Docker upgrade has no builder admission")?
             .register_tunnel(host, client)
     }
+}
+
+/// Validate a persistent request at its dispatch boundary. The caller must
+/// hold the Engine/state-volume flock for the bound immutable container.
+#[cfg(unix)]
+fn validate_persistent_route_under_volume_lock(
+    authorization: &mut AuthorizedDockerRequest,
+    policy: &DockerLeasePolicy,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    route: AuthorizedDockerRoute,
+) -> Result<()> {
+    authorization.validate_persistent_dispatch(route)?;
+    let Some((builder, _generation)) = authorization.fence() else {
+        return Ok(());
+    };
+    let expected_epoch = authorization
+        .readiness_epoch()
+        .context("persistent BuildKit route has no readiness epoch")?;
+    let durable_epoch = crate::buildkit::builder_readiness_epoch(domain, builder)?;
+    if durable_epoch != expected_epoch {
+        if route != AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container) {
+            bail!("persistent BuildKit request was admitted in a stale durable readiness epoch");
+        }
+        let container_id = authorization
+            .container_id()
+            .context("persistent container inspect has no immutable container ID")?;
+        let config_fingerprint = policy.persistent_builder_config_fingerprint(builder)?;
+        if !crate::buildkit::builder_readiness_matches_epoch(
+            domain,
+            builder,
+            container_id,
+            &config_fingerprint,
+            durable_epoch,
+        )? {
+            bail!("persistent container inspect cannot refresh an unready durable epoch");
+        }
+        let (_, generation) = authorization
+            .fence()
+            .context("persistent container inspect has no capability generation")?;
+        policy.note_persistent_ready_container(
+            builder,
+            generation,
+            container_id,
+            &config_fingerprint,
+            durable_epoch,
+        )?;
+        authorization.set_readiness_epoch(durable_epoch)?;
+    }
+    match route {
+        AuthorizedDockerRoute::PersistentExecCreate | AuthorizedDockerRoute::PersistentExec => {
+            let container_id = authorization
+                .container_id()
+                .context("persistent BuildKit exec route has no immutable container ID")?;
+            let config_fingerprint = policy.persistent_builder_config_fingerprint(builder)?;
+            if !crate::buildkit::builder_readiness_matches_epoch(
+                domain,
+                builder,
+                container_id,
+                &config_fingerprint,
+                expected_epoch,
+            )? {
+                bail!("persistent BuildKit exec lacks current durable readiness proof");
+            }
+        }
+        AuthorizedDockerRoute::Persistent(DockerResourceKind::Container) => {
+            let container_id = authorization
+                .container_id()
+                .context("persistent BuildKit start has no immutable container ID")?;
+            let config_fingerprint = policy.persistent_builder_config_fingerprint(builder)?;
+            if !crate::buildkit::builder_starting_readiness_matches_epoch(
+                domain,
+                builder,
+                container_id,
+                &config_fingerprint,
+                expected_epoch,
+            )? {
+                bail!("persistent BuildKit start lost its durable start epoch");
+            }
+        }
+        AuthorizedDockerRoute::PersistentBootstrap
+        | AuthorizedDockerRoute::PersistentArchive
+        | AuthorizedDockerRoute::PersistentImagePull
+        | AuthorizedDockerRoute::PersistentImageInspect
+        | AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container) => {}
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn advance_persistent_start_epoch_under_volume_lock(
+    authorization: &mut AuthorizedDockerRequest,
+    policy: &DockerLeasePolicy,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+) -> Result<u64> {
+    let route = authorization.route;
+    authorization.validate_persistent_dispatch(route)?;
+    let (builder, generation) = authorization
+        .fence()
+        .context("persistent BuildKit start has no capability generation")?;
+    let container_id = authorization
+        .container_id()
+        .context("persistent BuildKit start has no immutable container ID")?;
+    let config_fingerprint = policy.persistent_builder_config_fingerprint(builder)?;
+    let expected_epoch = authorization
+        .readiness_epoch()
+        .context("persistent BuildKit start has no readiness epoch")?;
+    let new_epoch = crate::buildkit::invalidate_builder_readiness_before_start(
+        domain,
+        builder,
+        container_id,
+        &config_fingerprint,
+        expected_epoch,
+    )?;
+    policy.note_persistent_start_epoch(
+        builder,
+        generation,
+        container_id,
+        expected_epoch,
+        new_epoch,
+    )?;
+    authorization.set_readiness_epoch(new_epoch)?;
+    Ok(new_epoch)
 }
 
 /// An authorization denial that must reach the guest as a Docker-shaped HTTP
@@ -1444,13 +2083,16 @@ impl DockerLeasePolicy {
                 next_persistent_builder_tunnel: 0,
                 persistent_container_fresh_ids: BTreeSet::new(),
                 persistent_container_config_archives: BTreeMap::new(),
+                persistent_builder_readiness_epochs: BTreeMap::new(),
                 persistent_container_ready_fingerprints: BTreeMap::new(),
+                persistent_container_readiness_epochs: BTreeMap::new(),
                 volume_locks: BTreeMap::new(),
                 execs: BTreeSet::new(),
                 persistent_execs: BTreeSet::new(),
                 persistent_exec_builders: BTreeMap::new(),
                 persistent_exec_containers: BTreeMap::new(),
                 persistent_exec_generations: BTreeMap::new(),
+                persistent_exec_readiness_epochs: BTreeMap::new(),
                 reserved_resource_slots: 0,
             })),
             persistent_builder_requests_changed: Arc::new(Condvar::new()),
@@ -1471,7 +2113,7 @@ impl DockerLeasePolicy {
         resources.reserved_resource_slots += 1;
         Ok(OwnedResourceReservation {
             resources: Arc::clone(&self.resources),
-            active: true,
+            state: OwnedResourceReservationState::Reserved,
         })
     }
 
@@ -1500,6 +2142,11 @@ impl DockerLeasePolicy {
             .get(builder)
             .copied()
             .context("persistent BuildKit builder has no capability generation")?;
+        let readiness_epoch = resources
+            .persistent_builder_readiness_epochs
+            .get(builder)
+            .copied()
+            .unwrap_or_default();
         let in_flight = resources
             .persistent_builder_requests_in_flight
             .get(builder)
@@ -1516,6 +2163,7 @@ impl DockerLeasePolicy {
             builder: builder.to_owned(),
             generation,
             container_id: None,
+            readiness_epoch: Some(readiness_epoch),
             is_bootstrap_create: false,
             is_bootstrap_conflict_waiter: false,
         })
@@ -1586,7 +2234,207 @@ impl DockerLeasePolicy {
             changed: Arc::clone(&self.persistent_builder_requests_changed),
             builder: builder.to_owned(),
             generation,
+            counted_request: false,
         }))
+    }
+
+    fn begin_pending_create_recovery(
+        &self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        builder: &str,
+        generation: u64,
+        config_fingerprint: &str,
+    ) -> Result<Option<PersistentBuilderRecoveryAdmission>> {
+        let mut resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        ensure_persistent_builder_generation_locked(&resources, builder, generation)?;
+        if !resources
+            .persistent_builder_creator_leases
+            .get(builder)
+            .is_some_and(|lease| lease.matches(domain, builder, config_fingerprint, generation))
+        {
+            bail!("pending-create recovery lacks this generation's creator lease");
+        }
+        if resources
+            .persistent_builder_requests_closing
+            .contains(builder)
+            || resources
+                .persistent_builder_recovery_generations
+                .contains_key(builder)
+        {
+            return Ok(None);
+        }
+        // The caller itself accounts for one active request. Recovery must be
+        // the only request using this builder so no guest start/archive or
+        // competing create can observe a half-recovered daemon.
+        if resources
+            .persistent_builder_requests_in_flight
+            .get(builder)
+            .copied()
+            .unwrap_or_default()
+            != 1
+            || resources
+                .persistent_builder_create_requests_in_flight
+                .get(builder)
+                .copied()
+                .unwrap_or_default()
+                > 1
+        {
+            return Ok(None);
+        }
+        resources
+            .persistent_builder_recovery_generations
+            .insert(builder.to_owned(), generation);
+        Ok(Some(PersistentBuilderRecoveryAdmission {
+            resources: Arc::clone(&self.resources),
+            changed: Arc::clone(&self.persistent_builder_requests_changed),
+            builder: builder.to_owned(),
+            generation,
+            counted_request: false,
+        }))
+    }
+
+    fn begin_pending_create_setup_recovery(
+        &self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        builder: &str,
+        generation: u64,
+        config_fingerprint: &str,
+    ) -> Result<Option<PersistentBuilderRecoveryAdmission>> {
+        let mut resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        if resources.persistent_builder_generations.get(builder) != Some(&generation)
+            || !resources.persistent_builder_setups.contains(builder)
+            || resources.persistent_builders.contains(builder)
+            || resources
+                .persistent_builder_config_fingerprints
+                .get(builder)
+                .map(String::as_str)
+                != Some(config_fingerprint)
+        {
+            bail!("pending-create recovery is outside the current host setup generation");
+        }
+        if !resources
+            .persistent_builder_creator_leases
+            .get(builder)
+            .is_some_and(|lease| lease.matches(domain, builder, config_fingerprint, generation))
+        {
+            bail!("pending-create setup recovery lacks its exact creator lease");
+        }
+        if resources
+            .persistent_builder_requests_closing
+            .contains(builder)
+            || resources
+                .persistent_builder_recovery_generations
+                .contains_key(builder)
+        {
+            return Ok(None);
+        }
+        if resources
+            .persistent_builder_requests_in_flight
+            .get(builder)
+            .copied()
+            .unwrap_or_default()
+            != 0
+            || resources
+                .persistent_builder_create_requests_in_flight
+                .get(builder)
+                .copied()
+                .unwrap_or_default()
+                != 0
+        {
+            bail!("guest Docker requests are active during host BuildKit setup recovery");
+        }
+        let in_flight = resources
+            .persistent_builder_requests_in_flight
+            .get(builder)
+            .copied()
+            .unwrap_or_default()
+            .checked_add(1)
+            .context("persistent BuildKit setup recovery count overflow")?;
+        resources
+            .persistent_builder_requests_in_flight
+            .insert(builder.to_owned(), in_flight);
+        resources
+            .persistent_builder_recovery_generations
+            .insert(builder.to_owned(), generation);
+        Ok(Some(PersistentBuilderRecoveryAdmission {
+            resources: Arc::clone(&self.resources),
+            changed: Arc::clone(&self.persistent_builder_requests_changed),
+            builder: builder.to_owned(),
+            generation,
+            counted_request: true,
+        }))
+    }
+
+    fn ensure_pending_create_creator_lease(
+        &self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        builder: &str,
+        config_fingerprint: &str,
+        generation: u64,
+    ) -> Result<()> {
+        {
+            let resources = self
+                .resources
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+            if resources.persistent_builder_generations.get(builder) != Some(&generation)
+                || (!resources.persistent_builders.contains(builder)
+                    && !resources.persistent_builder_setups.contains(builder))
+            {
+                bail!("persistent BuildKit capability was revoked or replaced");
+            }
+            if resources
+                .persistent_builder_creator_leases
+                .get(builder)
+                .is_some_and(|lease| lease.matches(domain, builder, config_fingerprint, generation))
+            {
+                return Ok(());
+            }
+            if resources
+                .persistent_builder_creator_leases
+                .contains_key(builder)
+            {
+                bail!("pending-create recovery found a different live creator lease");
+            }
+        }
+
+        let lease = crate::buildkit::begin_persistent_builder_creator_lease(
+            domain,
+            builder,
+            config_fingerprint,
+            generation,
+        )?;
+        let mut resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        if resources
+            .persistent_builder_requests_closing
+            .contains(builder)
+            || resources.persistent_builder_generations.get(builder) != Some(&generation)
+            || (!resources.persistent_builders.contains(builder)
+                && !resources.persistent_builder_setups.contains(builder))
+            || resources
+                .persistent_builder_config_fingerprints
+                .get(builder)
+                .map(String::as_str)
+                != Some(config_fingerprint)
+            || resources
+                .persistent_builder_creator_leases
+                .contains_key(builder)
+        {
+            bail!("pending-create recovery admission changed while acquiring creator lease");
+        }
+        resources
+            .persistent_builder_creator_leases
+            .insert(builder.to_owned(), lease);
+        Ok(())
     }
 
     fn with_persistent_builder_admission_closed<T>(
@@ -2045,6 +2893,28 @@ impl DockerLeasePolicy {
         }
         if matches!(
             route,
+            AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container)
+        ) {
+            // A fresh inspect must revalidate durable readiness before it can
+            // leave BuildKit exec authority enabled. Retire cached readiness
+            // and derived exec IDs under the same registry lock before the
+            // request is dispatched; the observer restores readiness only
+            // after the immutable ID and durable record both pass.
+            if let Some(id) = resources
+                .persistent_containers
+                .iter()
+                .find(|(name, id)| name == &target || id == &target)
+                .map(|(_, id)| id.clone())
+            {
+                resources
+                    .persistent_container_ready_fingerprints
+                    .remove(&id);
+                resources.persistent_container_readiness_epochs.remove(&id);
+                remove_persistent_execs_for_container(&mut resources, &id);
+            }
+        }
+        if matches!(
+            route,
             AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
         ) {
             let (_, id) = resources
@@ -2054,17 +2924,35 @@ impl DockerLeasePolicy {
                     (name.as_str() == target.as_str() || id.as_str() == target.as_str())
                         && persistent_buildkit_builder_name(name) == Some(builder.as_str())
                 })
+                .map(|(name, id)| (name.clone(), id.clone()))
                 .context("persistent start route lost its container binding")?;
             let expected = resources
                 .persistent_builder_config_fingerprints
                 .get(&builder)
                 .context("persistent BuildKit config mode was not registered")?;
-            let ready = resources.persistent_container_ready_fingerprints.get(id) == Some(expected);
-            let fresh = resources.persistent_container_fresh_ids.contains(id)
-                && resources.persistent_container_config_archives.get(id) == Some(expected);
+            let current_epoch = resources
+                .persistent_builder_readiness_epochs
+                .get(&builder)
+                .copied()
+                .unwrap_or_default();
+            let ready = resources.persistent_container_ready_fingerprints.get(&id)
+                == Some(expected)
+                && resources.persistent_container_readiness_epochs.get(&id) == Some(&current_epoch);
+            let fresh = resources.persistent_container_fresh_ids.contains(&id)
+                && resources.persistent_container_config_archives.get(&id) == Some(expected);
             if !ready && !fresh {
                 bail!("persistent BuildKit start lacks exact config and readiness proof");
             }
+        } else if matches!(route, AuthorizedDockerRoute::PersistentExecCreate) {
+            let (_, id) = resources
+                .persistent_containers
+                .iter()
+                .find(|(name, id)| {
+                    (name.as_str() == target.as_str() || id.as_str() == target.as_str())
+                        && persistent_buildkit_builder_name(name) == Some(builder.as_str())
+                })
+                .context("persistent exec-create route lost its container binding")?;
+            require_persistent_container_ready_locked(&resources, &builder, id)?;
         }
         let mut admission = self.admit_persistent_builder_locked(&mut resources, &builder)?;
         admission.container_id = resources
@@ -2115,9 +3003,19 @@ impl DockerLeasePolicy {
         }) {
             bail!("persistent BuildKit exec container binding is stale");
         }
+        let readiness_epoch = resources
+            .persistent_exec_readiness_epochs
+            .get(&exec_id)
+            .copied()
+            .context("persistent BuildKit exec has no readiness epoch")?;
+        if resources.persistent_builder_readiness_epochs.get(&builder) != Some(&readiness_epoch) {
+            bail!("persistent BuildKit exec belongs to a stale readiness epoch");
+        }
+        require_persistent_container_ready_locked(&resources, &builder, &container_id)?;
         let mut admission = self.admit_persistent_builder_locked(&mut resources, &builder)?;
         debug_assert_eq!(admission.generation, generation);
         admission.container_id = Some(container_id);
+        admission.readiness_epoch = Some(readiness_epoch);
         authorization._persistent_builder = Some(admission);
         Ok(authorization)
     }
@@ -2137,6 +3035,10 @@ impl DockerLeasePolicy {
             .persistent_builder_generations
             .entry(builder.clone())
             .or_insert(1);
+        resources
+            .persistent_builder_readiness_epochs
+            .entry(builder.clone())
+            .or_insert(0);
         resources
             .persistent_builder_config_fingerprints
             .entry(builder.clone())
@@ -2174,6 +3076,9 @@ impl DockerLeasePolicy {
             resources
                 .persistent_builder_config_fingerprints
                 .insert(builder.clone(), config_fingerprint.to_owned());
+            resources
+                .persistent_builder_readiness_epochs
+                .insert(builder.clone(), 0);
             let volume = crate::buildkit::daemon_state_volume(&builder);
             resources.persistent_volumes.remove(&volume);
             resources
@@ -2196,6 +3101,7 @@ impl DockerLeasePolicy {
                 resources.persistent_container_fresh_ids.remove(id);
                 resources.persistent_container_config_archives.remove(id);
                 resources.persistent_container_ready_fingerprints.remove(id);
+                resources.persistent_container_readiness_epochs.remove(id);
             }
             remove_persistent_execs_for_builder(resources, &builder);
             resources.persistent_builder_setups.insert(builder.clone());
@@ -2206,7 +3112,7 @@ impl DockerLeasePolicy {
     /// Complete host-side setup and expose the exact builder capability to
     /// the guest. Both the pinned image and state volume must already be
     /// registered by strict host inspection.
-    fn complete_persistent_builder_setup(&self, builder: &str) -> Result<()> {
+    fn complete_persistent_builder_setup(&self, builder: &str, readiness_epoch: u64) -> Result<()> {
         let builder = validate_owned_resource_id(builder, "persistent BuildKit builder")?;
         let volume = crate::buildkit::daemon_state_volume(&builder);
         let mut resources = self
@@ -2228,6 +3134,17 @@ impl DockerLeasePolicy {
         {
             bail!("persistent BuildKit config mode was not registered");
         }
+        let current_epoch = resources
+            .persistent_builder_readiness_epochs
+            .get(&builder)
+            .copied()
+            .unwrap_or_default();
+        if current_epoch > readiness_epoch {
+            bail!("BuildKit setup readiness epoch moved backwards");
+        }
+        resources
+            .persistent_builder_readiness_epochs
+            .insert(builder.clone(), readiness_epoch);
         resources.persistent_builder_setups.remove(&builder);
         resources.persistent_builders.insert(builder);
         Ok(())
@@ -2274,6 +3191,20 @@ impl DockerLeasePolicy {
         resources
             .persistent_container_ready_fingerprints
             .insert(container_id.to_owned(), config_fingerprint.to_owned());
+        let readiness_epoch = resources
+            .persistent_builder_readiness_epochs
+            .get(builder)
+            .copied()
+            .unwrap_or_default();
+        resources
+            .persistent_container_readiness_epochs
+            .insert(container_id.to_owned(), readiness_epoch);
+        resources
+            .persistent_container_fresh_ids
+            .remove(container_id);
+        resources
+            .persistent_container_config_archives
+            .remove(container_id);
         Ok(())
     }
 
@@ -2340,6 +3271,7 @@ impl DockerLeasePolicy {
                 resources.persistent_container_fresh_ids.remove(id);
                 resources.persistent_container_config_archives.remove(id);
                 resources.persistent_container_ready_fingerprints.remove(id);
+                resources.persistent_container_readiness_epochs.remove(id);
             }
             resources
                 .persistent_container_volumes
@@ -2399,7 +3331,13 @@ impl DockerLeasePolicy {
         else {
             return Ok(false);
         };
-        let ready = resources.persistent_container_ready_fingerprints.get(id) == Some(expected);
+        let current_epoch = resources
+            .persistent_builder_readiness_epochs
+            .get(builder)
+            .copied()
+            .unwrap_or_default();
+        let ready = resources.persistent_container_ready_fingerprints.get(id) == Some(expected)
+            && resources.persistent_container_readiness_epochs.get(id) == Some(&current_epoch);
         let fresh = resources.persistent_container_fresh_ids.contains(id)
             && resources.persistent_container_config_archives.get(id) == Some(expected);
         Ok(resources.persistent_builders.contains(builder) && (ready || fresh))
@@ -2429,14 +3367,20 @@ impl DockerLeasePolicy {
         let Some(generation) = resources.persistent_exec_generations.get(exec_id) else {
             return Ok(false);
         };
+        let Some(readiness_epoch) = resources.persistent_exec_readiness_epochs.get(exec_id) else {
+            return Ok(false);
+        };
         if resources.persistent_builder_generations.get(builder) != Some(generation)
             || !resources.persistent_builders.contains(builder)
+            || resources.persistent_builder_readiness_epochs.get(builder) != Some(readiness_epoch)
         {
             return Ok(false);
         }
-        Ok(resources.persistent_containers.iter().any(|(name, id)| {
+        let container_is_current = resources.persistent_containers.iter().any(|(name, id)| {
             id == container_id && persistent_buildkit_builder_name(name) == Some(builder.as_str())
-        }))
+        });
+        Ok(container_is_current
+            && require_persistent_container_ready_locked(&resources, builder, container_id).is_ok())
     }
 
     fn persistent_exec_binding(&self, exec_id: &str) -> Result<(String, String, u64)> {
@@ -2508,7 +3452,22 @@ impl DockerLeasePolicy {
         crate::buildkit::record_persistent_builder_creator_archive(
             &domain,
             builder,
+            generation,
             fingerprint,
+            container_id,
+            fingerprint,
+        )?;
+        let access = crate::buildkit::pending_buildkit_create_access(
+            &domain,
+            builder,
+            fingerprint,
+            generation,
+        )?
+        .context("persistent BuildKit archive has no durable pending-create transaction")?;
+        crate::buildkit::record_pending_buildkit_create_archive(
+            &domain,
+            builder,
+            &access.transaction_id,
             container_id,
             fingerprint,
         )?;
@@ -2615,6 +3574,7 @@ impl DockerLeasePolicy {
         generation: u64,
         container_id: &str,
         config_fingerprint: &str,
+        readiness_epoch: u64,
     ) -> Result<()> {
         let mut resources = self
             .resources
@@ -2627,6 +3587,10 @@ impl DockerLeasePolicy {
             .context("persistent BuildKit config mode was not registered")?;
         if expected != config_fingerprint
             || !resources.persistent_builders.contains(builder)
+            || resources
+                .persistent_builder_readiness_epochs
+                .get(builder)
+                .is_some_and(|current| *current > readiness_epoch)
             || !resources.persistent_containers.iter().any(|(name, id)| {
                 id == container_id && persistent_buildkit_builder_name(name) == Some(builder)
             })
@@ -2636,10 +3600,108 @@ impl DockerLeasePolicy {
         resources
             .persistent_container_ready_fingerprints
             .insert(container_id.to_owned(), config_fingerprint.to_owned());
+        resources
+            .persistent_container_readiness_epochs
+            .insert(container_id.to_owned(), readiness_epoch);
+        resources
+            .persistent_builder_readiness_epochs
+            .insert(builder.to_owned(), readiness_epoch);
+        resources
+            .persistent_container_fresh_ids
+            .remove(container_id);
+        resources
+            .persistent_container_config_archives
+            .remove(container_id);
         // Durable readiness has already been recorded by the start/recovery
         // path. Release the process-shared creator lock only after that proof
         // exists, allowing another lease to reuse the same builder.
         resources.persistent_builder_creator_leases.remove(builder);
+        Ok(())
+    }
+
+    fn note_persistent_ready_container_during_setup(
+        &self,
+        builder: &str,
+        generation: u64,
+        container_id: &str,
+        config_fingerprint: &str,
+        readiness_epoch: u64,
+    ) -> Result<()> {
+        let mut resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        if resources.persistent_builder_generations.get(builder) != Some(&generation)
+            || !resources.persistent_builder_setups.contains(builder)
+            || resources
+                .persistent_builder_config_fingerprints
+                .get(builder)
+                .map(String::as_str)
+                != Some(config_fingerprint)
+            || resources
+                .persistent_builder_readiness_epochs
+                .get(builder)
+                .is_some_and(|current| *current > readiness_epoch)
+            || !resources.persistent_containers.iter().any(|(name, id)| {
+                id == container_id && persistent_buildkit_builder_name(name) == Some(builder)
+            })
+        {
+            bail!("recovered BuildKit readiness changed before setup registration");
+        }
+        resources
+            .persistent_container_ready_fingerprints
+            .insert(container_id.to_owned(), config_fingerprint.to_owned());
+        resources
+            .persistent_container_readiness_epochs
+            .insert(container_id.to_owned(), readiness_epoch);
+        resources
+            .persistent_builder_readiness_epochs
+            .insert(builder.to_owned(), readiness_epoch);
+        resources
+            .persistent_container_fresh_ids
+            .remove(container_id);
+        resources
+            .persistent_container_config_archives
+            .remove(container_id);
+        Ok(())
+    }
+
+    fn note_persistent_start_epoch(
+        &self,
+        builder: &str,
+        generation: u64,
+        container_id: &str,
+        expected_epoch: u64,
+        new_epoch: u64,
+    ) -> Result<()> {
+        let mut resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        ensure_persistent_builder_generation_locked(&resources, builder, generation)?;
+        let current = resources
+            .persistent_builder_readiness_epochs
+            .get(builder)
+            .copied()
+            .unwrap_or_default();
+        if current != expected_epoch
+            || expected_epoch.checked_add(1) != Some(new_epoch)
+            || !resources.persistent_containers.iter().any(|(name, id)| {
+                id == container_id && persistent_buildkit_builder_name(name) == Some(builder)
+            })
+        {
+            bail!("persistent BuildKit start epoch changed before capability invalidation");
+        }
+        resources
+            .persistent_builder_readiness_epochs
+            .insert(builder.to_owned(), new_epoch);
+        resources
+            .persistent_container_ready_fingerprints
+            .remove(container_id);
+        resources
+            .persistent_container_readiness_epochs
+            .remove(container_id);
+        remove_persistent_execs_for_container(&mut resources, container_id);
         Ok(())
     }
 
@@ -3060,6 +4122,15 @@ impl DockerLeasePolicy {
         &self,
         names: &BTreeSet<String>,
     ) -> Result<VolumeOperationLocks> {
+        self.lock_volume_names_with_create_access(names, None, None)
+    }
+
+    fn lock_volume_names_with_create_access(
+        &self,
+        names: &BTreeSet<String>,
+        domain: Option<&crate::buildkit::PersistentBuildKitDomain>,
+        access: Option<&crate::buildkit::PendingBuildKitCreateAccess>,
+    ) -> Result<VolumeOperationLocks> {
         if names.is_empty() {
             return Ok(VolumeOperationLocks::default());
         }
@@ -3123,7 +4194,18 @@ impl DockerLeasePolicy {
                     guard.file = file;
                     #[cfg(unix)]
                     if let Some(root) = self.volume_lock_root.as_deref() {
-                        if let Err(error) = ensure_no_pending_buildkit_create(root, &name) {
+                        let marker_result = if let Some(domain) = domain {
+                            migrate_legacy_pending_buildkit_create(root, domain, &name).and_then(
+                                |_| {
+                                    ensure_domain_pending_buildkit_create_clear(
+                                        domain, &name, access,
+                                    )
+                                },
+                            )
+                        } else {
+                            ensure_no_pending_buildkit_create(root, &name)
+                        };
+                        if let Err(error) = marker_result {
                             drop(guard);
                             return Err(error);
                         }
@@ -3445,6 +4527,7 @@ impl DockerLeasePolicy {
             resources
                 .persistent_container_ready_fingerprints
                 .remove(&id);
+            resources.persistent_container_readiness_epochs.remove(&id);
             remove_persistent_execs_for_container(&mut resources, &id);
         }
         for name in removed_names {
@@ -3556,7 +4639,23 @@ impl DockerLeasePolicy {
             if expected_builder != builder {
                 bail!("persistent container response belongs to another builder");
             }
-            ensure_persistent_builder_generation_locked(&resources, expected_builder, generation)?;
+            let setup_recovery = resources
+                .persistent_builder_setups
+                .contains(expected_builder)
+                && resources
+                    .persistent_builder_recovery_generations
+                    .get(expected_builder)
+                    == Some(&generation);
+            if resources
+                .persistent_builder_generations
+                .get(expected_builder)
+                != Some(&generation)
+                || (!resources.persistent_builders.contains(expected_builder) && !setup_recovery)
+            {
+                bail!(
+                    "persistent BuildKit container response lost its setup or request generation"
+                );
+            }
         }
         let replaced_ids = resources
             .persistent_containers
@@ -3573,8 +4672,20 @@ impl DockerLeasePolicy {
             resources
                 .persistent_container_ready_fingerprints
                 .remove(&old_id);
+            resources
+                .persistent_container_readiness_epochs
+                .remove(&old_id);
             remove_persistent_execs_for_container(&mut resources, &old_id);
         }
+        // Re-inspection is a new readiness decision even when Docker returns
+        // the same immutable ID. Invalidate cached authority before replacing
+        // the binding; the host response observer restores it only after the
+        // durable readiness record passes again.
+        resources
+            .persistent_container_ready_fingerprints
+            .remove(&id);
+        resources.persistent_container_readiness_epochs.remove(&id);
+        remove_persistent_execs_for_container(&mut resources, &id);
         resources
             .persistent_containers
             .retain(|existing_name, existing_id| existing_name != &name && existing_id != &id);
@@ -3702,6 +4813,7 @@ impl DockerLeasePolicy {
         builder: &str,
         container_id: &str,
         generation: u64,
+        readiness_epoch: u64,
     ) -> Result<()> {
         let builder = validate_owned_resource_id(builder, "persistent BuildKit builder")?;
         if !(200..300).contains(&status) {
@@ -3720,6 +4832,9 @@ impl DockerLeasePolicy {
             .lock()
             .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
         ensure_persistent_builder_generation_locked(&resources, &builder, generation)?;
+        if resources.persistent_builder_readiness_epochs.get(&builder) != Some(&readiness_epoch) {
+            bail!("persistent BuildKit exec response belongs to a stale readiness epoch");
+        }
         if !resources.persistent_builders.contains(&builder)
             || !resources.persistent_containers.iter().any(|(name, id)| {
                 id == container_id
@@ -3728,6 +4843,7 @@ impl DockerLeasePolicy {
         {
             bail!("persistent BuildKit exec response arrived after its container was revoked");
         }
+        require_persistent_container_ready_locked(&resources, &builder, container_id)?;
         if !resources.execs.contains(&identifier)
             && owned_resource_count(&resources) >= MAX_OWNED_DOCKER_RESOURCES
         {
@@ -3743,7 +4859,10 @@ impl DockerLeasePolicy {
             .insert(identifier.clone(), container_id.to_owned());
         resources
             .persistent_exec_generations
-            .insert(identifier, generation);
+            .insert(identifier.clone(), generation);
+        resources
+            .persistent_exec_readiness_epochs
+            .insert(identifier, readiness_epoch);
         Ok(())
     }
 
@@ -5300,24 +6419,463 @@ fn recover_unbound_created_builder_for_request(
             return Err(error);
         }
     };
-    let recovered = crate::buildkit::recover_conflicting_created_builder_in_domain(
+    let recovered = recover_pending_buildkit_create_under_gate(
+        policy,
+        host_socket,
         domain,
         builder,
-        container_id,
+        generation,
         config_fingerprint,
-        |target, fingerprint| {
-            upload_approved_buildkit_archive_on_host(host_socket, target, fingerprint)
-        },
+        _recovery,
     )?;
-    if recovered {
-        policy.note_persistent_ready_container(
+    let Some(recovered_id) = recovered else {
+        return Ok(crate::buildkit::builder_readiness_matches(
+            domain,
             builder,
-            generation,
             container_id,
             config_fingerprint,
-        )?;
+        )?);
+    };
+    if recovered_id != container_id {
+        bail!("pending BuildKit recovery changed immutable container ID");
     }
-    Ok(recovered)
+    note_current_persistent_readiness(
+        policy,
+        domain,
+        builder,
+        generation,
+        &recovered_id,
+        config_fingerprint,
+    )?;
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn recover_pending_buildkit_create_for_request(
+    policy: &DockerLeasePolicy,
+    host_socket: &Path,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+    generation: u64,
+    config_fingerprint: &str,
+) -> Result<Option<String>> {
+    if !has_recoverable_pending_buildkit_create(domain, builder)? {
+        return Ok(None);
+    }
+    policy.ensure_pending_create_creator_lease(domain, builder, config_fingerprint, generation)?;
+    let Some(recovery) =
+        policy.begin_pending_create_recovery(domain, builder, generation, config_fingerprint)?
+    else {
+        bail!("another active Docker request prevents pending BuildKit recovery");
+    };
+    recover_pending_buildkit_create_under_gate(
+        policy,
+        host_socket,
+        domain,
+        builder,
+        generation,
+        config_fingerprint,
+        recovery,
+    )
+}
+
+#[cfg(unix)]
+fn recover_pending_buildkit_create_for_setup_with_volume_lock(
+    policy: &DockerLeasePolicy,
+    host_socket: &Path,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+    generation: u64,
+    config_fingerprint: &str,
+    engine_id: &str,
+    lock_volume: impl FnMut(
+        &crate::buildkit::PersistentBuildKitDomain,
+        &str,
+        &crate::buildkit::PendingBuildKitCreateAccess,
+    ) -> Result<VolumeOperationLocks>,
+) -> Result<Option<String>> {
+    let mut transport = HostPendingBuildKitRecoveryTransport { host_socket };
+    recover_pending_buildkit_create_for_setup_with_volume_lock_and_transport(
+        policy,
+        domain,
+        builder,
+        generation,
+        config_fingerprint,
+        engine_id,
+        lock_volume,
+        &mut transport,
+    )
+}
+
+#[cfg(unix)]
+fn recover_pending_buildkit_create_for_setup_with_volume_lock_and_transport(
+    policy: &DockerLeasePolicy,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+    generation: u64,
+    config_fingerprint: &str,
+    engine_id: &str,
+    lock_volume: impl FnMut(
+        &crate::buildkit::PersistentBuildKitDomain,
+        &str,
+        &crate::buildkit::PendingBuildKitCreateAccess,
+    ) -> Result<VolumeOperationLocks>,
+    transport: &mut impl PendingBuildKitRecoveryTransport,
+) -> Result<Option<String>> {
+    if !has_recoverable_pending_buildkit_create(domain, builder)? {
+        return Ok(None);
+    }
+    if engine_id != domain.engine_id {
+        bail!("pending BuildKit setup recovery resolved another Docker Engine");
+    }
+    policy.ensure_pending_create_creator_lease(domain, builder, config_fingerprint, generation)?;
+    let Some(recovery) = policy.begin_pending_create_setup_recovery(
+        domain,
+        builder,
+        generation,
+        config_fingerprint,
+    )?
+    else {
+        bail!("another lifecycle operation blocks pending BuildKit setup recovery");
+    };
+    let container_id = recover_pending_buildkit_create_under_gate_with_volume_lock(
+        policy,
+        domain,
+        builder,
+        generation,
+        config_fingerprint,
+        recovery,
+        lock_volume,
+        transport,
+    )?
+    .context("pending BuildKit setup recovery did not settle its transaction")?;
+    let readiness_epoch = crate::buildkit::builder_readiness_epoch(domain, builder)?;
+    if !crate::buildkit::builder_readiness_matches_epoch(
+        domain,
+        builder,
+        &container_id,
+        config_fingerprint,
+        readiness_epoch,
+    )? {
+        bail!("pending BuildKit setup recovery lacks a Ready proof for its immutable ID");
+    }
+    policy.note_persistent_ready_container_during_setup(
+        builder,
+        generation,
+        &container_id,
+        config_fingerprint,
+        readiness_epoch,
+    )?;
+    Ok(Some(container_id))
+}
+
+fn has_recoverable_pending_buildkit_create(
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<bool> {
+    if crate::buildkit::pending_buildkit_create_transaction(domain, builder)?.is_some() {
+        return Ok(true);
+    }
+    let volume = crate::buildkit::daemon_state_volume(builder);
+    if crate::buildkit::legacy_pending_buildkit_create_is_quarantined(domain, &volume)? {
+        bail!("legacy persistent BuildKit create remains quarantined for operator repair");
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn recover_pending_buildkit_create_under_gate(
+    policy: &DockerLeasePolicy,
+    host_socket: &Path,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+    generation: u64,
+    config_fingerprint: &str,
+    recovery: PersistentBuilderRecoveryAdmission,
+) -> Result<Option<String>> {
+    let mut transport = HostPendingBuildKitRecoveryTransport { host_socket };
+    recover_pending_buildkit_create_under_gate_with_volume_lock(
+        policy,
+        domain,
+        builder,
+        generation,
+        config_fingerprint,
+        recovery,
+        |domain, volume, access| lock_host_volume_name_for_pending_create(domain, volume, access),
+        &mut transport,
+    )
+}
+
+#[cfg(unix)]
+trait PendingBuildKitRecoveryTransport {
+    fn inspect_volume(&mut self, target: &str) -> Result<(u16, Vec<u8>)>;
+    fn inspect_container(&mut self, target: &str) -> Result<(u16, Vec<u8>)>;
+    fn upload_archive(&mut self, container_id: &str, config_fingerprint: &str) -> Result<()>;
+    fn start_container(&mut self, container_id: &str) -> Result<()>;
+    fn publish_readiness(
+        &mut self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        builder: &str,
+        container_id: &str,
+        config_fingerprint: &str,
+        readiness_epoch: u64,
+    ) -> Result<()>;
+}
+
+#[cfg(unix)]
+struct HostPendingBuildKitRecoveryTransport<'a> {
+    host_socket: &'a Path,
+}
+
+#[cfg(unix)]
+impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport<'_> {
+    fn inspect_volume(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
+        inspect_volume_on_host(self.host_socket, target)
+    }
+
+    fn inspect_container(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
+        inspect_container_on_host(self.host_socket, target)
+    }
+
+    fn upload_archive(&mut self, container_id: &str, config_fingerprint: &str) -> Result<()> {
+        upload_approved_buildkit_archive_on_host(self.host_socket, container_id, config_fingerprint)
+    }
+
+    fn start_container(&mut self, container_id: &str) -> Result<()> {
+        crate::docker::Docker::host()
+            .container_start(container_id)
+            .map(|_| ())
+    }
+
+    fn publish_readiness(
+        &mut self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        builder: &str,
+        container_id: &str,
+        config_fingerprint: &str,
+        readiness_epoch: u64,
+    ) -> Result<()> {
+        crate::buildkit::persist_builder_readiness_after_start(
+            domain,
+            builder,
+            container_id,
+            config_fingerprint,
+            readiness_epoch,
+        )
+    }
+}
+
+#[cfg(unix)]
+fn recover_pending_buildkit_create_under_gate_with_volume_lock(
+    policy: &DockerLeasePolicy,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    builder: &str,
+    generation: u64,
+    config_fingerprint: &str,
+    _recovery: PersistentBuilderRecoveryAdmission,
+    mut lock_volume: impl FnMut(
+        &crate::buildkit::PersistentBuildKitDomain,
+        &str,
+        &crate::buildkit::PendingBuildKitCreateAccess,
+    ) -> Result<VolumeOperationLocks>,
+    transport: &mut impl PendingBuildKitRecoveryTransport,
+) -> Result<Option<String>> {
+    let Some(mut transaction) =
+        crate::buildkit::pending_buildkit_create_transaction(domain, builder)?
+    else {
+        return Ok(None);
+    };
+    if transaction.config_fingerprint != config_fingerprint
+        || transaction.state_volume != crate::buildkit::daemon_state_volume(builder)
+        || transaction.container_name != crate::buildkit::daemon_container_name(builder)
+        || crate::buildkit::persistent_builder_domain_token(builder) != Some(domain.token.as_str())
+    {
+        bail!("pending BuildKit create does not match this builder domain or config");
+    }
+    // The transaction may have completed while this request waited on the
+    // process-shared creator flock. Re-read it only after taking the local
+    // recovery gate, then require the exact same durable transaction identity.
+    let Some(current) = crate::buildkit::pending_buildkit_create_transaction(domain, builder)?
+    else {
+        return Ok(None);
+    };
+    if current.transaction_id != transaction.transaction_id {
+        bail!("pending BuildKit create changed while entering recovery");
+    }
+    transaction = current;
+    let access = crate::buildkit::pending_buildkit_create_access(
+        domain,
+        builder,
+        config_fingerprint,
+        generation,
+    )?
+    .context("pending BuildKit recovery lacks its exact lock bypass")?;
+    let volume_lock = lock_volume(domain, &transaction.state_volume, &access)?;
+    let (volume_status, volume_body) = transport
+        .inspect_volume(&transaction.state_volume)
+        .context("inspect pending BuildKit state volume before recovery")?;
+    if !(200..300).contains(&volume_status) {
+        bail!("pending BuildKit state volume inspect returned HTTP {volume_status}");
+    }
+    policy.record_persistent_volume_inspect(
+        &transaction.state_volume,
+        volume_status,
+        &volume_body,
+    )?;
+
+    let initial_target = transaction
+        .container_id
+        .as_deref()
+        .unwrap_or(&transaction.container_name);
+    let (status, body) = transport
+        .inspect_container(initial_target)
+        .context("inspect pending BuildKit container before recovery")?;
+    if !(200..300).contains(&status) {
+        bail!(
+            "pending BuildKit container inspect returned HTTP {status}; transaction remains fenced"
+        );
+    }
+    let (container_id, shape, state) = attest_pending_buildkit_create_inspect(&body, &transaction)?;
+    if let Some(expected_shape) = transaction.attested_shape_sha256.as_deref()
+        && expected_shape != shape
+    {
+        bail!("pending BuildKit container full shape differs from its durable attestation");
+    }
+    crate::buildkit::bind_pending_buildkit_create_container(
+        domain,
+        builder,
+        &transaction.transaction_id,
+        &container_id,
+        &shape,
+    )?;
+    crate::buildkit::bind_persistent_builder_creator_container(
+        domain,
+        builder,
+        generation,
+        config_fingerprint,
+        &container_id,
+    )?;
+    policy.record_persistent_container_inspect_fenced(
+        &transaction.container_name,
+        status,
+        &body,
+        Some((builder, generation)),
+    )?;
+    transaction = crate::buildkit::pending_buildkit_create_transaction(domain, builder)?
+        .context("pending BuildKit transaction disappeared after container binding")?;
+
+    if crate::buildkit::builder_readiness_matches(
+        domain,
+        builder,
+        &container_id,
+        config_fingerprint,
+    )? {
+        if state != "running" {
+            bail!("durable BuildKit readiness names a non-running container");
+        }
+        crate::buildkit::mark_pending_buildkit_create_existing_ready(
+            domain,
+            builder,
+            &transaction.transaction_id,
+            &container_id,
+            &state,
+        )?;
+        crate::buildkit::finish_pending_buildkit_create_transaction(
+            domain,
+            builder,
+            &transaction.transaction_id,
+            &container_id,
+            config_fingerprint,
+        )?;
+        drop(volume_lock);
+        return Ok(Some(container_id));
+    }
+
+    if state == "running"
+        && transaction.archived_config_fingerprint.as_deref() != Some(config_fingerprint)
+    {
+        bail!("running pending BuildKit container has no durable matching archive proof");
+    }
+    let readiness_epoch = if state == "created" {
+        // Reapply the exact approved payload after every recovery cut. The
+        // journal's prior archive response may have reached durable storage
+        // while the Engine archive was incomplete or its container remained
+        // Created; extraction of this one fixed file is idempotent.
+        transport
+            .upload_archive(&container_id, config_fingerprint)
+            .context("reapply the pending BuildKit transaction's approved config archive")?;
+        crate::buildkit::record_persistent_builder_creator_archive(
+            domain,
+            builder,
+            generation,
+            config_fingerprint,
+            &container_id,
+            config_fingerprint,
+        )?;
+        crate::buildkit::record_pending_buildkit_create_archive(
+            domain,
+            builder,
+            &transaction.transaction_id,
+            &container_id,
+            config_fingerprint,
+        )?;
+        transaction = crate::buildkit::pending_buildkit_create_transaction(domain, builder)?
+            .context("pending BuildKit transaction disappeared after archive proof")?;
+
+        let (status, body) = transport
+            .inspect_container(&container_id)
+            .context("re-inspect pending BuildKit container after archive")?;
+        if !(200..300).contains(&status) {
+            bail!("pending BuildKit container re-inspect returned HTTP {status}");
+        }
+        let (rechecked_id, rechecked_shape, rechecked_state) =
+            attest_pending_buildkit_create_inspect(&body, &transaction)?;
+        if rechecked_id != container_id || rechecked_shape != shape || rechecked_state != "created"
+        {
+            bail!("pending BuildKit container changed after config archive");
+        }
+        let current_epoch = crate::buildkit::builder_readiness_epoch(domain, builder)?;
+        let epoch = crate::buildkit::invalidate_builder_readiness_before_start(
+            domain,
+            builder,
+            &container_id,
+            config_fingerprint,
+            current_epoch,
+        )?;
+        transport
+            .start_container(&container_id)
+            .context("start the attested pending BuildKit container")?;
+        crate::buildkit::mark_pending_buildkit_create_started(
+            domain,
+            builder,
+            &transaction.transaction_id,
+            &container_id,
+        )?;
+        epoch
+    } else if state == "running" {
+        let current_epoch = crate::buildkit::builder_readiness_epoch(domain, builder)?;
+        crate::buildkit::invalidate_builder_readiness_before_start(
+            domain,
+            builder,
+            &container_id,
+            config_fingerprint,
+            current_epoch,
+        )?
+    } else {
+        bail!("pending BuildKit container is {state}; recovery remains fenced");
+    };
+
+    drop(volume_lock);
+    transport
+        .publish_readiness(
+            domain,
+            builder,
+            &container_id,
+            config_fingerprint,
+            readiness_epoch,
+        )
+        .context("publish readiness after pending BuildKit create recovery")?;
+    Ok(Some(container_id))
 }
 
 fn validate_persistent_archive_request(request: &[u8], target: &str) -> Result<String> {
@@ -6608,9 +8166,10 @@ fn is_persistent_buildkit_container_name(container: &str) -> bool {
     persistent_buildkit_builder_name(container).is_some()
 }
 
-/// Buildx appends a decimal node index to every docker-container name. Velnor
-/// owns only node 0, so reject every other persistent-name node before it can
-/// fall through to generic guest create and escape the domain reaper.
+/// Buildx's generated node names append a decimal index, but `--node` can
+/// supply a custom name. Velnor owns generated node 0 only, so reject every
+/// other reserved numeric node here. Custom names fall through to generic
+/// create validation, which denies Buildx's required `Privileged: true`.
 fn is_reserved_persistent_buildkit_container_name(container: &str) -> bool {
     let Some(rest) = container.strip_prefix("buildx_buildkit_") else {
         return false;
@@ -6634,10 +8193,10 @@ pub(crate) fn is_persistent_buildkit_volume_name(volume: &str) -> bool {
     persistent_buildkit_volume_builder_name(volume).is_some()
 }
 
-/// Cleanup quarantine for every persistent Buildx node volume. Authorization
-/// and attestation still use the exact node-zero matcher above; a retired or
-/// appended node has no durable domain proof and must not be deleted by a
-/// generic job-volume cleanup pass.
+/// Cleanup quarantine for every structurally named Velnor Buildx node volume,
+/// including retired and appended numeric nodes. Authorization and attestation
+/// still use the exact node-zero matcher above; these children have no durable
+/// domain proof and must not be deleted by generic job-volume cleanup.
 pub(crate) fn is_persistent_buildkit_volume_object(volume: &str) -> bool {
     crate::buildkit::is_persistent_builder_object(volume)
 }
@@ -6824,7 +8383,7 @@ fn attest_persistent_buildkit_volume_fields(
 /// network, and exact expected state-volume mount all bind the object to
 /// Velnor's persistent-builder contract. The volume itself is re-attested
 /// separately before a start or guest mount.
-fn attest_persistent_buildkit_container(
+pub(crate) fn attest_persistent_buildkit_container(
     body: &[u8],
     target: &str,
     allowed_builders: &BTreeSet<String>,
@@ -7487,9 +9046,10 @@ pub fn remove_job_owned(
     if !snapshot.networks.is_empty() {
         remove(&force_remove_network_args(&snapshot.networks))?;
     }
-    // Persistent BuildKit state is shared across jobs. Claim release and the
-    // dedicated BuildKit cleanup own those names; generic job teardown must
-    // never remove them just because the creating job label is present.
+    // Persistent BuildKit state is shared across jobs. Registered node-0
+    // builders are removed by domain lifecycle cleanup. Unregistered appended
+    // numeric nodes remain quarantined for explicit operator cleanup; generic
+    // teardown must never remove any persistent marker by creator job label.
     let volumes = snapshot
         .volumes
         .iter()
@@ -7781,6 +9341,8 @@ pub struct DockerLeaseGuard {
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
     policy: Arc<DockerLeasePolicy>,
+    #[cfg(unix)]
+    host_socket: PathBuf,
     #[cfg(unix)]
     conns: Arc<LeaseConnSet>,
     #[cfg(unix)]
@@ -8079,8 +9641,129 @@ impl DockerLeaseGuard {
             .begin_persistent_builder_setup(builder, config_fingerprint)
     }
 
-    pub(crate) fn complete_persistent_builder_setup(&self, builder: &str) -> Result<()> {
-        self.policy.complete_persistent_builder_setup(builder)
+    #[cfg(unix)]
+    pub(crate) fn recover_pending_buildkit_create_before_volume_setup(
+        &self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        builder: &str,
+        generation: u64,
+        config_fingerprint: &str,
+    ) -> Result<Option<String>> {
+        if !has_recoverable_pending_buildkit_create(domain, builder)? {
+            return Ok(None);
+        }
+        let engine_id = require_volume_lock_engine_id(
+            crate::docker::engine::daemon_identity_blocking(&self.host_socket)
+                .map(|identity| identity.id),
+        )?;
+        recover_pending_buildkit_create_for_setup_with_volume_lock(
+            &self.policy,
+            &self.host_socket,
+            domain,
+            builder,
+            generation,
+            config_fingerprint,
+            &engine_id,
+            lock_host_volume_name_for_pending_create,
+        )
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn recover_pending_buildkit_create_before_volume_setup(
+        &self,
+        _domain: &crate::buildkit::PersistentBuildKitDomain,
+        _builder: &str,
+        _generation: u64,
+        _config_fingerprint: &str,
+    ) -> Result<Option<String>> {
+        bail!("pending BuildKit setup recovery requires a local Unix Docker Engine")
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn complete_persistent_builder_setup(
+        &self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        builder: &str,
+    ) -> Result<()> {
+        let config_fingerprint = self.policy.persistent_builder_config_fingerprint(builder)?;
+        let approved_images = self.policy.persistent_builder_images()?;
+        let allowed_builders = BTreeSet::from([builder.to_owned()]);
+        crate::buildkit::promote_builder_readiness_v1_with(
+            domain,
+            builder,
+            &config_fingerprint,
+            |volume| lock_host_volume_name_for_domain(domain, volume),
+            || {
+                let endpoint = crate::docker::engine::resolve_docker_endpoint()
+                    .context("resolve Docker Engine for readiness migration")?;
+                if endpoint.socket != self.host_socket {
+                    bail!("Docker endpoint changed during BuildKit readiness migration");
+                }
+                let engine_id = crate::docker::engine::daemon_identity_blocking(&self.host_socket)
+                    .map(|identity| identity.id)
+                    .filter(|identity| !identity.trim().is_empty())
+                    .context("Docker Engine ID is unavailable during readiness migration")?;
+                if engine_id != domain.engine_id {
+                    bail!("Docker Engine changed during BuildKit readiness migration");
+                }
+                Ok(())
+            },
+            |builder, volume, container_id| {
+                let volume_output = crate::docker::client::host_call(
+                    &inspect_persistent_buildkit_volume_args(volume),
+                )
+                .with_context(|| format!("inspect legacy BuildKit state volume {volume}"))?;
+                attest_persistent_buildkit_volume_identity(&volume_output, volume, &domain.token)?;
+                let (status, body) = inspect_container_on_host(&self.host_socket, container_id)?;
+                if status != 200 {
+                    bail!("legacy BuildKit container inspect returned HTTP {status}");
+                }
+                let (name, inspected_id, inspected_volume, _, has_config_flag) =
+                    attest_persistent_buildkit_container(
+                        &body,
+                        container_id,
+                        &allowed_builders,
+                        &approved_images,
+                    )?;
+                if name != crate::buildkit::daemon_container_name(builder)
+                    || inspected_id != container_id
+                    || inspected_volume != volume
+                    || !crate::buildkit::config_mode_matches_command(
+                        &config_fingerprint,
+                        has_config_flag,
+                    )
+                {
+                    bail!("legacy BuildKit container does not match its exact domain/config");
+                }
+                let state = crate::docker::Docker::host()
+                    .inspect_exit(container_id)
+                    .context("inspect legacy BuildKit container state")?;
+                if state.status != Some(crate::docker::client::ContainerState::Running) {
+                    bail!("legacy BuildKit container is not running during readiness migration");
+                }
+                Ok(())
+            },
+            crate::buildkit::wait_for_attested_buildkit_ready,
+        )?;
+        crate::buildkit::recover_starting_builder_in_domain(domain, builder, &config_fingerprint)?;
+        let volume = crate::buildkit::daemon_state_volume(builder);
+        let _volume_lock = lock_host_volume_name_for_domain(domain, &volume)?;
+        let readiness_epoch = crate::buildkit::builder_readiness_epoch_for_setup(
+            domain,
+            builder,
+            &config_fingerprint,
+        )?;
+        self.policy
+            .complete_persistent_builder_setup(builder, readiness_epoch)
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn complete_persistent_builder_setup(
+        &self,
+        _domain: &crate::buildkit::PersistentBuildKitDomain,
+        _builder: &str,
+    ) -> Result<()> {
+        bail!("persistent BuildKit setup requires a local Unix Docker Engine")
     }
 
     pub(crate) fn revoke_persistent_builder(&self, builder: &str) -> Result<()> {
@@ -8109,6 +9792,23 @@ impl DockerLeaseGuard {
     pub(crate) fn lock_volume_name(&self, volume: &str) -> Result<VolumeOperationLocks> {
         self.policy
             .lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+    }
+
+    /// Acquire the lease's local and cross-process volume lock while also
+    /// migrating any pre-domain BuildKit create marker into durable domain
+    /// quarantine. Persistent volume creation must use this path so a reboot
+    /// cannot erase its only pending-create fence.
+    #[cfg(unix)]
+    pub(crate) fn lock_volume_name_for_domain(
+        &self,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        volume: &str,
+    ) -> Result<VolumeOperationLocks> {
+        self.policy.lock_volume_names_with_create_access(
+            &BTreeSet::from([volume.to_owned()]),
+            Some(domain),
+            None,
+        )
     }
 
     /// Register a host-inspected persistent BuildKit state volume before the
@@ -8140,7 +9840,24 @@ pub(crate) fn lock_host_volume_name(
     let root = docker_volume_lock_root(host_socket)?;
     let policy =
         DockerLeasePolicy::new_with_volume_lock_root("velnor-host-volume-lock", Some(root))?;
-    policy.lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+    if persistent_buildkit_volume_builder_name(volume).is_some() {
+        let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+            .context("resolve domain before locking a persistent BuildKit volume")?;
+        let engine_id = require_volume_lock_engine_id(
+            crate::docker::engine::daemon_identity_blocking(host_socket)
+                .map(|identity| identity.id),
+        )?;
+        if domain.engine_id != engine_id {
+            bail!("persistent BuildKit volume lock resolved a different Docker Engine");
+        }
+        policy.lock_volume_names_with_create_access(
+            &BTreeSet::from([volume.to_owned()]),
+            Some(&domain),
+            None,
+        )
+    } else {
+        policy.lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+    }
 }
 
 /// Acquire an engine-wide volume lock when the caller already resolved the
@@ -8149,14 +9866,35 @@ pub(crate) fn lock_host_volume_name(
 /// the runner runs under a different temporary directory.
 #[cfg(unix)]
 pub(crate) fn lock_host_volume_name_for_domain(
-    identity_root: &Path,
-    engine_id: &str,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
     volume: &str,
 ) -> Result<VolumeOperationLocks> {
-    let root = docker_volume_lock_root_for_domain(identity_root, engine_id)?;
+    let root = docker_volume_lock_root_for_domain(&domain.identity_root, &domain.engine_id)?;
     let policy =
         DockerLeasePolicy::new_with_volume_lock_root("velnor-host-volume-lock", Some(root))?;
-    policy.lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+    policy.lock_volume_names_with_create_access(
+        &BTreeSet::from([volume.to_owned()]),
+        Some(domain),
+        None,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn lock_host_volume_name_for_pending_create(
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+    volume: &str,
+    access: &crate::buildkit::PendingBuildKitCreateAccess,
+) -> Result<VolumeOperationLocks> {
+    let root = docker_volume_lock_root_for_domain(&domain.identity_root, &domain.engine_id)?;
+    let policy = DockerLeasePolicy::new_with_volume_lock_root(
+        "velnor-buildkit-create-recovery",
+        Some(root),
+    )?;
+    policy.lock_volume_names_with_create_access(
+        &BTreeSet::from([volume.to_owned()]),
+        Some(domain),
+        Some(access),
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -8430,6 +10168,7 @@ fn bind_unix_lease_with_volume_lock_root(
     let conns_thread = Arc::clone(&conns);
     let policy_thread = Arc::clone(&policy);
     let listen_path_thread = listen_path.clone();
+    let guard_host_socket = host_socket.clone();
     let accept_thread = std::thread::Builder::new()
         .name(format!("velnor-docker-lease-{}", job_id))
         .spawn(move || {
@@ -8452,6 +10191,8 @@ fn bind_unix_lease_with_volume_lock_root(
         shutdown,
         accept_thread: Some(accept_thread),
         policy,
+        #[cfg(unix)]
+        host_socket: guard_host_socket,
         conns,
         shutdown_wake: Some(wake_writer),
     })
@@ -8647,6 +10388,7 @@ fn handle_client_with(
             }
         };
         let route = authorization.route;
+        let mut request_readiness_epoch = authorization.readiness_epoch();
         // Snapshot the immutable authorization fields into owned values so
         // the response observer can retire this request's admission without
         // borrowing the same `authorization` object immutably across dispatch.
@@ -8662,6 +10404,8 @@ fn handle_client_with(
             route,
             AuthorizedDockerRoute::PersistentBootstrap
                 | AuthorizedDockerRoute::PersistentArchive
+                | AuthorizedDockerRoute::PersistentImagePull
+                | AuthorizedDockerRoute::PersistentImageInspect
                 | AuthorizedDockerRoute::PersistentExecCreate
                 | AuthorizedDockerRoute::PersistentExec
                 | AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
@@ -8708,6 +10452,36 @@ fn handle_client_with(
             }
             _ => None,
         };
+        #[cfg(unix)]
+        if matches!(
+            route,
+            AuthorizedDockerRoute::PersistentBootstrap
+                | AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container)
+        ) && let Some((builder, generation)) = request_fence
+        {
+            let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+                .context("resolve domain before pending BuildKit create recovery")?;
+            let config_fingerprint = policy.persistent_builder_config_fingerprint(builder)?;
+            if let Some(container_id) = recover_pending_buildkit_create_for_request(
+                &policy,
+                host_socket,
+                &domain,
+                builder,
+                generation,
+                &config_fingerprint,
+            )? {
+                let readiness_epoch = note_current_persistent_readiness(
+                    &policy,
+                    &domain,
+                    builder,
+                    generation,
+                    &container_id,
+                    &config_fingerprint,
+                )?;
+                authorization.set_readiness_epoch(readiness_epoch)?;
+                request_readiness_epoch = Some(readiness_epoch);
+            }
+        }
         let mut resource_reservation = if matches!(route, AuthorizedDockerRoute::Create(_))
             || matches!(route, AuthorizedDockerRoute::PersistentExecCreate)
         {
@@ -8755,6 +10529,7 @@ fn handle_client_with(
                                 )?,
                             job_id,
                             daemon_id,
+                            request_fence,
                         )
                     }
                     AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container)
@@ -8768,6 +10543,7 @@ fn handle_client_with(
                                 .context("persistent inspect omitted its immutable target")?,
                             job_id,
                             daemon_id,
+                            request_fence,
                         )
                     }
                     AuthorizedDockerRoute::PersistentArchive
@@ -8784,6 +10560,36 @@ fn handle_client_with(
                                 )?,
                             job_id,
                             daemon_id,
+                            request_fence,
+                        )
+                    }
+                    AuthorizedDockerRoute::PersistentExec => preflight_persistent_container_volume(
+                        &policy,
+                        host_socket,
+                        authorization
+                            .container_id()
+                            .context("persistent exec route omitted its immutable container ID")?,
+                        job_id,
+                        daemon_id,
+                        request_fence,
+                    ),
+                    AuthorizedDockerRoute::PersistentImagePull
+                    | AuthorizedDockerRoute::PersistentImageInspect => {
+                        let (builder, _) = authorization
+                            .fence()
+                            .context("persistent image route omitted its builder generation")?;
+                        let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+                            .context("resolve BuildKit domain before image dispatch")?;
+                        let engine_id = require_volume_lock_engine_id(
+                            crate::docker::engine::daemon_identity_blocking(host_socket)
+                                .map(|identity| identity.id),
+                        )?;
+                        if engine_id != domain.engine_id {
+                            bail!("persistent image route resolved another Docker Engine");
+                        }
+                        lock_host_volume_name_for_domain(
+                            &domain,
+                            &crate::buildkit::daemon_state_volume(builder),
                         )
                     }
                     AuthorizedDockerRoute::Create(DockerResourceKind::Volume) => {
@@ -8826,6 +10632,16 @@ fn handle_client_with(
             } else {
                 None
             };
+            if matches!(route, AuthorizedDockerRoute::PersistentExec) {
+                let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+                    .context("resolve BuildKit domain before persistent exec dispatch")?;
+                validate_persistent_route_under_volume_lock(
+                    &mut authorization,
+                    &policy,
+                    &domain,
+                    route,
+                )?;
+            }
             host.write_all(&forwarded)
                 .context("forward Docker API request through job lease")?;
             // Keep the same idle timeout on hijacked streams. Clearing it
@@ -8847,6 +10663,7 @@ fn handle_client_with(
                     // 101 response headers, but not for the long-lived
                     // buildctl stream.
                     authorization._persistent_builder.take();
+                    volume_locks.take();
                     let result =
                         proxy_until_closed(host, client, &response.bytes[response.header_end..]);
                     drop(tunnel);
@@ -8875,6 +10692,30 @@ fn handle_client_with(
         if host_state.is_none() {
             host_state = Some(connect_lease_host(host_socket, &conns)?);
         }
+        if matches!(
+            route,
+            AuthorizedDockerRoute::PersistentBootstrap
+                | AuthorizedDockerRoute::PersistentArchive
+                | AuthorizedDockerRoute::PersistentImagePull
+                | AuthorizedDockerRoute::PersistentImageInspect
+                | AuthorizedDockerRoute::PersistentExecCreate
+                | AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
+                | AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container)
+                | AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Volume)
+        ) && !(matches!(
+            route,
+            AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
+        ) && request_method == "POST")
+        {
+            let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+                .context("resolve domain before persistent BuildKit preflight")?;
+            validate_persistent_route_under_volume_lock(
+                &mut authorization,
+                &policy,
+                &domain,
+                route,
+            )?;
+        }
         let mut create_fence = if matches!(route, AuthorizedDockerRoute::PersistentBootstrap) {
             let (builder, generation) = request_fence
                 .context("persistent BuildKit create omitted capability generation")?;
@@ -8891,6 +10732,18 @@ fn handle_client_with(
                 bail!("persistent BuildKit lease endpoint changed Engine identity");
             }
             let volume = crate::buildkit::daemon_state_volume(builder);
+            let config_fingerprint = policy.persistent_builder_config_fingerprint(builder)?;
+            let expected_image_id = policy.persistent_builder_image(builder)?;
+            let create_value = parse_create_value(docker_request_body(&forwarded)?)?;
+            let expects_config = api_object_field(
+                create_value
+                    .as_object()
+                    .context("persistent BuildKit create body must be an object")?,
+                "Cmd",
+            )
+            .map(buildkit_command_has_approved_config)
+            .transpose()?
+            .unwrap_or(false);
             let root = policy
                 .volume_lock_root
                 .as_ref()
@@ -8913,12 +10766,14 @@ fn handle_client_with(
                 return Ok(());
             }
             Some(PersistentBuildKitCreateFence::begin(
-                root,
-                &engine_id,
+                &domain,
                 builder,
                 generation,
                 &volume,
                 container_name,
+                &config_fingerprint,
+                &expected_image_id,
+                expects_config,
                 &forwarded,
             )?)
         } else {
@@ -8929,13 +10784,49 @@ fn handle_client_with(
             // the state is `Some` here.
             #[allow(clippy::expect_used, reason = "host state just initialized")]
             let (host, _) = host_state.as_mut().expect("host state initialized");
+            if matches!(
+                route,
+                AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
+            ) && request_method == "POST"
+            {
+                let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+                    .context("resolve domain before persistent BuildKit start")?;
+                let epoch = advance_persistent_start_epoch_under_volume_lock(
+                    &mut authorization,
+                    &policy,
+                    &domain,
+                )?;
+                request_readiness_epoch = Some(epoch);
+            }
+            if matches!(
+                route,
+                AuthorizedDockerRoute::PersistentBootstrap
+                    | AuthorizedDockerRoute::PersistentArchive
+                    | AuthorizedDockerRoute::PersistentImagePull
+                    | AuthorizedDockerRoute::PersistentImageInspect
+                    | AuthorizedDockerRoute::PersistentExecCreate
+                    | AuthorizedDockerRoute::PersistentExec
+                    | AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
+                    | AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container)
+                    | AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Volume)
+            ) {
+                let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+                    .context("resolve domain before persistent BuildKit dispatch")?;
+                validate_persistent_route_under_volume_lock(
+                    &mut authorization,
+                    &policy,
+                    &domain,
+                    route,
+                )?;
+            }
+            if let Some(reservation) = resource_reservation.as_mut() {
+                reservation.mark_dispatched()?;
+            }
             if let Err(error) = host
                 .write_all(&forwarded)
                 .context("forward Docker API request through job lease")
             {
-                if let Some(reservation) = resource_reservation.as_mut() {
-                    reservation.pin();
-                }
+                pin_resource_reservation_after_uncertain_dispatch(&mut resource_reservation);
                 eprintln!("T004 host write error: {error:#}");
                 if conns.is_shutdown() {
                     return Ok(());
@@ -8974,10 +10865,10 @@ fn handle_client_with(
                         AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
                     ) && request_method == "POST"),
                 detach_client_on_hup: matches!(route, AuthorizedDockerRoute::PersistentBootstrap),
-                observe_after_delivery_on_success: matches!(
-                    route,
-                    AuthorizedDockerRoute::PersistentBootstrap
-                ),
+                // BuildKit's 2xx create response must not reach the guest
+                // until the exact immutable host object has been inspected
+                // and durably bound to the pending-create transaction.
+                observe_after_delivery_on_success: false,
                 detach_signal: matches!(route, AuthorizedDockerRoute::PersistentBootstrap)
                     .then(|| Arc::clone(&conns.shutdown)),
                 persistent_image_ids: if redact_persistent_image_inspect {
@@ -8992,18 +10883,7 @@ fn handle_client_with(
                 &mut client,
                 &request_method,
                 response_options,
-                |status, body, client_connected| {
-                    if matches!(route, AuthorizedDockerRoute::PersistentBootstrap) {
-                        if let Some(fence) = create_fence.as_mut() {
-                            fence.settle()?;
-                        }
-                        if !client_connected {
-                            // Buildx will abandon this exchange. Keep the
-                            // creator lease unbound so its next owner can
-                            // recover an exact Created object after settlement.
-                            return Ok(());
-                        }
-                    }
+                |status, body, _client_connected| {
                     if matches!(route, AuthorizedDockerRoute::PersistentBootstrap)
                         && (status == 409 || !(200..300).contains(&status))
                     {
@@ -9047,13 +10927,24 @@ fn handle_client_with(
                         let target = create_container_name
                             .as_deref()
                             .context("persistent BuildKit create omitted its container name")?;
-                        observe_persistent_bootstrap_response_fenced(
+                        observe_persistent_bootstrap_response_fenced_with_binding(
                             policy.as_ref(),
                             target,
                             status,
                             body,
                             request_fence,
                             |candidate| inspect_container_on_host(host_socket, candidate),
+                            |target, inspect_body| {
+                                let fence = create_fence.as_mut().context(
+                                    "persistent BuildKit create lost its durable transaction",
+                                )?;
+                                bind_persistent_create_fence_to_inspect(fence, inspect_body)
+                                    .with_context(|| {
+                                        format!(
+                                            "bind inspected persistent BuildKit create {target}"
+                                        )
+                                    })
+                            },
                             |policy, target, fence| {
                                 let builder = policy.persistent_container_builder(target)?;
                                 let container_id = policy.persistent_container_id(target)?;
@@ -9091,12 +10982,64 @@ fn handle_client_with(
                                 )? {
                                     bail!("conflicting persistent BuildKit container disappeared before it became ready");
                                 }
-                                policy.note_persistent_ready_container(
+                                if let Some(transaction) =
+                                    crate::buildkit::pending_buildkit_create_transaction(
+                                        &domain, &builder,
+                                    )?
+                                {
+                                    if transaction.container_id.as_deref()
+                                        != Some(container_id.as_str())
+                                    {
+                                        bail!(
+                                            "conflict readiness does not match pending create ID"
+                                        );
+                                    }
+                                    let (inspect_status, inspect_body) = inspect_container_on_host(
+                                        host_socket,
+                                        &container_id,
+                                    )
+                                    .context(
+                                        "re-attest BuildKit conflict state before settling create",
+                                    )?;
+                                    if !(200..300).contains(&inspect_status) {
+                                        bail!("BuildKit conflict re-attestation returned HTTP {inspect_status}");
+                                    }
+                                    let (inspected_id, inspected_shape, inspected_state) =
+                                        attest_pending_buildkit_create_inspect(
+                                            &inspect_body,
+                                            &transaction,
+                                        )?;
+                                    if inspected_id != container_id
+                                        || inspected_state != "running"
+                                        || transaction.attested_shape_sha256.as_deref()
+                                            != Some(inspected_shape.as_str())
+                                    {
+                                        bail!("BuildKit conflict is not the same attested running daemon");
+                                    }
+                                    crate::buildkit::mark_pending_buildkit_create_existing_ready(
+                                        &domain,
+                                        &builder,
+                                        &transaction.transaction_id,
+                                        &container_id,
+                                        &inspected_state,
+                                    )?;
+                                    crate::buildkit::finish_pending_buildkit_create_transaction(
+                                        &domain,
+                                        &builder,
+                                        &transaction.transaction_id,
+                                        &container_id,
+                                        &config_fingerprint,
+                                    )?;
+                                }
+                                note_current_persistent_readiness(
+                                    policy,
+                                    &domain,
                                     &builder,
                                     generation,
                                     &container_id,
                                     &config_fingerprint,
-                                )
+                                )?;
+                                Ok(())
                             },
                         )?;
                     }
@@ -9127,6 +11070,8 @@ fn handle_client_with(
                             builder,
                             container_id,
                             generation,
+                            request_readiness_epoch
+                                .context("persistent exec create omitted its readiness epoch")?,
                         );
                         finish_resource_reservation_after_observation(
                             &mut resource_reservation,
@@ -9148,36 +11093,42 @@ fn handle_client_with(
                             if status == 404 {
                                 return Ok(());
                             }
-                            let builder = policy.persistent_container_builder(target)?;
                             let id = if let Some(id) = authorized_container_id {
                                 id.to_owned()
                             } else {
                                 policy.persistent_container_id(target)?
                             };
-                            let generation = request_fence
-                                .map(|(_, generation)| generation)
-                                .context("persistent inspect omitted capability generation")?;
-                            let config_fingerprint =
-                                policy.persistent_builder_config_fingerprint(&builder)?;
                             if !policy.is_fresh_persistent_container(&id)? {
-                                let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
-                                    .context(
-                                    "resolve domain before reusing BuildKit container",
-                                )?;
-                                if !crate::buildkit::builder_readiness_matches(
-                                    &domain,
-                                    &builder,
-                                    &id,
-                                    &config_fingerprint,
-                                )? {
-                                    bail!("persistent BuildKit container has no matching durable readiness proof");
+                                let readiness = (|| {
+                                    let builder = policy.persistent_container_builder(target)?;
+                                    let generation =
+                                        request_fence.map(|(_, generation)| generation).context(
+                                            "persistent inspect omitted capability generation",
+                                        )?;
+                                    let config_fingerprint =
+                                        policy.persistent_builder_config_fingerprint(&builder)?;
+                                    let domain =
+                                        crate::buildkit::PersistentBuildKitDomain::resolve()
+                                            .context(
+                                                "resolve domain before reusing BuildKit container",
+                                            )?;
+                                    accept_reused_persistent_container_readiness(
+                                        &policy,
+                                        &domain,
+                                        &builder,
+                                        &id,
+                                        generation,
+                                        &config_fingerprint,
+                                    )
+                                })();
+                                if let Err(error) = readiness {
+                                    policy
+                                        .forget_persistent_container_fenced(target, request_fence)
+                                        .context(
+                                            "forget persistent BuildKit binding after readiness failure",
+                                        )?;
+                                    return Err(error);
                                 }
-                                policy.note_persistent_ready_container(
-                                    &builder,
-                                    generation,
-                                    &id,
-                                    &config_fingerprint,
-                                )?;
                             }
                         }
                         AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
@@ -9190,19 +11141,41 @@ fn handle_client_with(
                             let config_fingerprint =
                                 policy.persistent_builder_config_fingerprint(builder)?;
                             if (200..300).contains(&status) || status == 304 {
+                                let domain = crate::buildkit::PersistentBuildKitDomain::resolve()?;
+                                if let Some(access) =
+                                    crate::buildkit::pending_buildkit_create_access(
+                                        &domain,
+                                        builder,
+                                        &config_fingerprint,
+                                        generation,
+                                    )?
+                                {
+                                    crate::buildkit::mark_pending_buildkit_create_started(
+                                        &domain,
+                                        builder,
+                                        &access.transaction_id,
+                                        id,
+                                    )?;
+                                }
                                 // This helper takes the same Engine/volume
                                 // flock to re-attest and persist readiness.
                                 // Release the request's preflight descriptor
                                 // first, then let the helper reacquire it and
                                 // verify the immutable ID under that lock.
                                 volume_locks.take();
+                                let readiness_epoch = request_readiness_epoch.context(
+                                    "persistent start response omitted its readiness epoch",
+                                )?;
                                 crate::buildkit::persist_builder_readiness_after_start(
-                                    &crate::buildkit::PersistentBuildKitDomain::resolve()?,
+                                    &domain,
                                     builder,
                                     id,
                                     &config_fingerprint,
+                                    readiness_epoch,
                                 )?;
-                                policy.note_persistent_ready_container(
+                                note_current_persistent_readiness(
+                                    policy,
+                                    &domain,
                                     builder,
                                     generation,
                                     id,
@@ -9254,12 +11227,10 @@ fn handle_client_with(
             let reusable = match forwarded {
                 Ok(reusable) => reusable,
                 Err(error) => {
-                    if let Some(reservation) = resource_reservation.as_mut() {
-                        // The request reached the Engine, so an incomplete or
-                        // malformed response cannot prove that no object was
-                        // created. Keep the slot occupied fail-closed.
-                        reservation.pin();
-                    }
+                    // The request reached the Engine, so an incomplete or
+                    // malformed response cannot prove that no object was
+                    // created. Keep the slot occupied fail-closed.
+                    pin_resource_reservation_after_uncertain_dispatch(&mut resource_reservation);
                     if error.downcast_ref::<GuestClosed>().is_some() {
                         return Ok(());
                     }
@@ -9406,6 +11377,7 @@ fn preflight_persistent_container_volume(
     target: &str,
     job_id: &str,
     daemon_id: &str,
+    request_fence: Option<(&str, u64)>,
 ) -> Result<VolumeOperationLocks> {
     let builder = persistent_buildkit_builder_name(target)
         .map(str::to_owned)
@@ -9419,7 +11391,28 @@ fn preflight_persistent_container_volume(
     }
     let expected_id = policy.persistent_container_id(target).ok();
     let names = BTreeSet::from([volume.clone()]);
-    let locks = policy.lock_volume_names(&names)?;
+    let (fenced_builder, generation) =
+        request_fence.context("persistent container preflight omitted capability generation")?;
+    if fenced_builder != builder {
+        bail!("persistent container preflight builder differs from capability owner");
+    }
+    let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
+        .context("resolve selected BuildKit domain for container preflight")?;
+    if persistent_buildkit_domain_token(&builder) != Some(domain.token.as_str()) {
+        bail!("persistent container preflight resolved another BuildKit domain");
+    }
+    let config_fingerprint = policy.persistent_builder_config_fingerprint(&builder)?;
+    let create_access = crate::buildkit::pending_buildkit_create_access(
+        &domain,
+        &builder,
+        &config_fingerprint,
+        generation,
+    )?;
+    let locks = policy.lock_volume_names_with_create_access(
+        &names,
+        Some(&domain),
+        create_access.as_ref(),
+    )?;
     preflight_volume_identity(
         policy,
         host_socket,
@@ -9535,7 +11528,10 @@ fn inspect_volume_on_host(host_socket: &Path, target: &str) -> Result<(u16, Vec<
 }
 
 #[cfg(unix)]
-fn inspect_container_on_host(host_socket: &Path, target: &str) -> Result<(u16, Vec<u8>)> {
+pub(crate) fn inspect_container_on_host(
+    host_socket: &Path,
+    target: &str,
+) -> Result<(u16, Vec<u8>)> {
     inspect_object_on_host(host_socket, "containers", target, "container")
 }
 
@@ -9569,6 +11565,29 @@ fn observe_persistent_bootstrap_response_fenced(
     mut inspect: impl FnMut(&str) -> Result<(u16, Vec<u8>)>,
     mut start_conflict: impl FnMut(&DockerLeasePolicy, &str, Option<(&str, u64)>) -> Result<()>,
 ) -> Result<()> {
+    observe_persistent_bootstrap_response_fenced_with_binding(
+        policy,
+        target,
+        status,
+        body,
+        request_fence,
+        inspect,
+        |_, _| Ok(()),
+        |policy, target, fence| start_conflict(policy, target, fence),
+    )
+}
+
+#[cfg(unix)]
+fn observe_persistent_bootstrap_response_fenced_with_binding(
+    policy: &DockerLeasePolicy,
+    target: &str,
+    status: u16,
+    body: &[u8],
+    request_fence: Option<(&str, u64)>,
+    mut inspect: impl FnMut(&str) -> Result<(u16, Vec<u8>)>,
+    mut bind_transaction: impl FnMut(&str, &[u8]) -> Result<()>,
+    mut start_conflict: impl FnMut(&DockerLeasePolicy, &str, Option<(&str, u64)>) -> Result<()>,
+) -> Result<()> {
     if status == 409 {
         let (inspect_status, inspect_body) = match inspect(target) {
             Ok(result) => result,
@@ -9596,6 +11615,7 @@ fn observe_persistent_bootstrap_response_fenced(
             &inspect_body,
             request_fence,
         )?;
+        bind_transaction(target, &inspect_body)?;
         return start_conflict(policy, target, request_fence);
     }
 
@@ -9630,8 +11650,9 @@ fn observe_persistent_bootstrap_response_fenced(
         policy.forget_persistent_container_fenced(&candidate, request_fence)?;
         return Err(error);
     }
+    let id = policy.persistent_container_id(target)?;
+    bind_transaction(&id, &inspect_body)?;
     if let Some((builder, generation)) = request_fence {
-        let id = policy.persistent_container_id(target)?;
         policy.note_fresh_persistent_container(builder, generation, &id)?;
         let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
             .context("resolve persistent BuildKit creator domain after inspect")?;
@@ -9639,6 +11660,7 @@ fn observe_persistent_bootstrap_response_fenced(
         crate::buildkit::bind_persistent_builder_creator_container(
             &domain,
             builder,
+            generation,
             &config_fingerprint,
             &id,
         )?;
@@ -9685,11 +11707,47 @@ fn inspect_object_on_host(
 
     let mut response = Vec::new();
     let mut scratch = [0_u8; PROXY_COPY_BUFFER];
-    let header_end = loop {
-        if let Some(index) = response.windows(4).position(|window| window == b"\r\n\r\n") {
-            break index + 4;
+    let mut header_start = 0;
+    let (status, header_start, header_end) = loop {
+        if let Some(index) = response[header_start..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            let header_end = header_start + index + 4;
+            if header_end > MAX_PROXY_HEADER {
+                bail!("Docker object re-attestation headers exceed lease proxy limit");
+            }
+            let header = std::str::from_utf8(&response[header_start..header_end])
+                .context("Docker object re-attestation headers must be UTF-8")?;
+            let status_line = header
+                .split("\r\n")
+                .next()
+                .context("Docker object re-attestation status line")?;
+            let mut status_parts = status_line.split_ascii_whitespace();
+            let version = status_parts
+                .next()
+                .context("Docker object re-attestation response version")?;
+            if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+                bail!("unsupported Docker object re-attestation response version {version:?}");
+            }
+            let status = status_parts
+                .next()
+                .context("Docker object re-attestation status code")?
+                .parse::<u16>()
+                .context("parse Docker object re-attestation status code")?;
+            if !(100..=599).contains(&status) {
+                bail!("Docker object re-attestation has invalid HTTP status {status}");
+            }
+            if (100..200).contains(&status) && status != 101 {
+                header_start = header_end;
+                continue;
+            }
+            if status == 101 {
+                bail!("Docker object re-attestation unexpectedly switched protocols");
+            }
+            break (status, header_start, header_end);
         }
-        if response.len() > MAX_PROXY_HEADER {
+        if response.len() >= MAX_PROXY_HEADER {
             bail!("Docker object re-attestation headers exceed lease proxy limit");
         }
         let read = stream
@@ -9700,7 +11758,7 @@ fn inspect_object_on_host(
         }
         response.extend_from_slice(&scratch[..read]);
     };
-    let header = std::str::from_utf8(&response[..header_end])
+    let header = std::str::from_utf8(&response[header_start..header_end])
         .context("Docker object re-attestation headers must be UTF-8")?;
     let mut lines = header.split("\r\n");
     let status_line = lines
@@ -9713,11 +11771,14 @@ fn inspect_object_on_host(
     if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
         bail!("unsupported Docker object re-attestation response version {version:?}");
     }
-    let status = status_parts
+    let parsed_status = status_parts
         .next()
         .context("Docker object re-attestation status code")?
         .parse::<u16>()
         .context("parse Docker object re-attestation status code")?;
+    if parsed_status != status {
+        bail!("Docker object re-attestation status changed while parsing headers");
+    }
     let mut content_length = None;
     let mut chunked = false;
     for line in lines {
@@ -11517,19 +13578,328 @@ mod tests {
     #[cfg(unix)]
     fn test_pending_buildkit_create_fence(
         root: &Path,
-        volume: &str,
-    ) -> PersistentBuildKitCreateFence {
-        let root = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(root).unwrap();
-        PersistentBuildKitCreateFence::begin(
-            Arc::new(root),
-            "test-engine-id",
-            "builder-domain-test",
-            7,
-            volume,
-            "buildx_buildkit_builder-domain-test0",
-            b"POST /containers/create?name=buildx_buildkit_builder-domain-test0 HTTP/1.1\r\n\r\n",
+    ) -> (
+        crate::buildkit::PersistentBuildKitDomain,
+        crate::buildkit::PersistentBuildKitCreatorLease,
+        PersistentBuildKitCreateFence,
+        String,
+        String,
+    ) {
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            root,
+            "pending-create-test-storage",
+            "pending-create-test-engine",
         )
+        .unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "test",
+            "scope",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let volume = crate::buildkit::daemon_state_volume(&builder);
+        let container_name = crate::buildkit::daemon_container_name(&builder);
+        let generation = 7;
+        let config_fingerprint = "no-config-v1";
+        let expected_image_id = format!("sha256:{}", "a".repeat(64));
+        let creator = crate::buildkit::begin_persistent_builder_creator_lease(
+            &domain,
+            &builder,
+            config_fingerprint,
+            generation,
+        )
+        .unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "Image": expected_image_id,
+            "Cmd": ["buildkitd"],
+            "HostConfig": {
+                "Privileged": true,
+                "Init": true,
+                "RestartPolicy": {"Name": "unless-stopped"},
+                "Mounts": [{
+                    "Type": "volume",
+                    "Source": volume,
+                    "Target": "/var/lib/buildkit"
+                }]
+            },
+            "Labels": {
+                JOB_ID_LABEL: "test-job",
+                BUILDKIT_DOMAIN_LABEL: domain.token
+            }
+        }))
+        .unwrap();
+        let request = api_request(
+            "POST",
+            &format!("/containers/create?name={container_name}"),
+            &body,
+        );
+        let fence = PersistentBuildKitCreateFence::begin(
+            &domain,
+            &builder,
+            generation,
+            &volume,
+            &container_name,
+            config_fingerprint,
+            &expected_image_id,
+            false,
+            &request,
+        )
+        .unwrap();
+        (domain, creator, fence, builder, volume)
+    }
+
+    #[cfg(unix)]
+    struct FakePendingBuildKitRecoveryTransport {
+        volume_response: (u16, Vec<u8>),
+        container_responses: std::collections::VecDeque<(u16, Vec<u8>)>,
+        archived: Vec<String>,
+        started: Vec<String>,
+        published: Vec<(String, u64)>,
+        volume_lock_probe: Option<(PathBuf, String)>,
+    }
+
+    #[cfg(unix)]
+    impl FakePendingBuildKitRecoveryTransport {
+        fn assert_volume_lock_held(&self) {
+            if let Some((root, volume)) = &self.volume_lock_probe {
+                assert!(
+                    try_lock_volume_name_at_for_test(root, volume)
+                        .unwrap()
+                        .is_none(),
+                    "pending-create recovery must hold the cross-process volume lock"
+                );
+            }
+        }
+
+        fn assert_volume_lock_released(&self) {
+            if let Some((root, volume)) = &self.volume_lock_probe {
+                assert!(
+                    try_lock_volume_name_at_for_test(root, volume)
+                        .unwrap()
+                        .is_some(),
+                    "BuildKit worker readiness must be probed without the volume lock"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl PendingBuildKitRecoveryTransport for FakePendingBuildKitRecoveryTransport {
+        fn inspect_volume(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
+            self.assert_volume_lock_held();
+            let value: Value = serde_json::from_slice(&self.volume_response.1)?;
+            assert_eq!(value.get("Name").and_then(Value::as_str), Some(target));
+            Ok(self.volume_response.clone())
+        }
+
+        fn inspect_container(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
+            self.assert_volume_lock_held();
+            let response = self
+                .container_responses
+                .pop_front()
+                .context("test recovery has no scripted container inspection")?;
+            if response.0 == 200 {
+                let value: Value = serde_json::from_slice(&response.1)?;
+                let name = value
+                    .get("Name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let id = value.get("Id").and_then(Value::as_str).unwrap_or_default();
+                assert!(
+                    target == id || target == name.trim_start_matches('/'),
+                    "recovery inspected unexpected target {target:?}"
+                );
+            }
+            Ok(response)
+        }
+
+        fn upload_archive(&mut self, container_id: &str, config_fingerprint: &str) -> Result<()> {
+            self.assert_volume_lock_held();
+            assert!(!container_id.is_empty());
+            assert!(!config_fingerprint.is_empty());
+            self.archived.push(container_id.to_owned());
+            Ok(())
+        }
+
+        fn start_container(&mut self, container_id: &str) -> Result<()> {
+            self.assert_volume_lock_held();
+            self.started.push(container_id.to_owned());
+            Ok(())
+        }
+
+        fn publish_readiness(
+            &mut self,
+            domain: &crate::buildkit::PersistentBuildKitDomain,
+            builder: &str,
+            container_id: &str,
+            config_fingerprint: &str,
+            readiness_epoch: u64,
+        ) -> Result<()> {
+            self.assert_volume_lock_released();
+            crate::buildkit::publish_builder_readiness_for_epoch(
+                domain,
+                builder,
+                container_id,
+                config_fingerprint,
+                readiness_epoch,
+            )?;
+            let transaction =
+                crate::buildkit::pending_buildkit_create_transaction(domain, builder)?
+                    .context("test readiness publication lost pending transaction")?;
+            crate::buildkit::finish_pending_buildkit_create_transaction(
+                domain,
+                builder,
+                &transaction.transaction_id,
+                container_id,
+                config_fingerprint,
+            )?;
+            self.published
+                .push((container_id.to_owned(), readiness_epoch));
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn pending_recovery_volume_inspect(
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        volume: &str,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "Name": volume,
+            "Driver": "local",
+            "Labels": {
+                JOB_ID_LABEL: "previous-job",
+                BUILDKIT_DOMAIN_LABEL: domain.token.as_str(),
+            },
+            "Options": null,
+        }))
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn pending_recovery_container_inspect(
+        transaction: &crate::buildkit::PendingBuildKitCreateTransaction,
+        container_id: &str,
+        state: &str,
+        mismatch: bool,
+    ) -> Vec<u8> {
+        let token = if mismatch {
+            "wrong-buildkit-domain"
+        } else {
+            transaction.domain_token.as_str()
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "Id": container_id,
+            "Name": format!("/{}", transaction.container_name),
+            "Image": transaction.expected_image_id.as_str(),
+            "Config": {
+                "Image": transaction.expected_image_id.as_str(),
+                "Cmd": ["buildkitd"],
+                "Labels": {
+                    JOB_ID_LABEL: "previous-job",
+                    BUILDKIT_DOMAIN_LABEL: token,
+                },
+            },
+            "HostConfig": {
+                "Privileged": true,
+                "Init": true,
+                "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+                "Mounts": [{
+                    "Type": "volume",
+                    "Source": transaction.state_volume.as_str(),
+                    "Target": "/var/lib/buildkit",
+                }],
+                "NetworkMode": "default",
+            },
+            "Mounts": [{
+                "Type": "volume",
+                "Name": transaction.state_volume.as_str(),
+                "Destination": "/var/lib/buildkit",
+                "Driver": "local",
+                "Mode": "",
+                "RW": true,
+                "Propagation": "rprivate",
+                "NonRecursive": false,
+            }],
+            "State": {"Status": state},
+        }))
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn pending_recovery_setup(
+        prefix: &str,
+    ) -> (
+        PathBuf,
+        crate::buildkit::PersistentBuildKitDomain,
+        DockerLeasePolicy,
+        u64,
+        String,
+        String,
+        crate::buildkit::PendingBuildKitCreateTransaction,
+    ) {
+        let root = test_storage_root(prefix);
+        let (domain, creator, fence, builder, volume) = test_pending_buildkit_create_fence(&root);
+        drop((creator, fence));
+        let transaction = crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            transaction.phase,
+            crate::buildkit::PendingBuildKitCreatePhase::Dispatched
+        );
+        assert!(transaction.container_id.is_none());
+
+        let policy = DockerLeasePolicy::new_with_volume_lock_root(
+            "pending-create-recovery-test-job",
+            Some(root.clone()),
+        )
+        .unwrap();
+        let generation = policy
+            .begin_persistent_builder_setup(&builder, &transaction.config_fingerprint)
+            .unwrap();
+        policy
+            .register_persistent_builder_image(&builder, &transaction.expected_image_id)
+            .unwrap();
+        (
+            root,
+            domain,
+            policy,
+            generation,
+            builder,
+            volume,
+            transaction,
+        )
+    }
+
+    #[cfg(unix)]
+    fn recover_pending_with_test_transport(
+        domain: &crate::buildkit::PersistentBuildKitDomain,
+        policy: &DockerLeasePolicy,
+        generation: u64,
+        builder: &str,
+        transaction: &crate::buildkit::PendingBuildKitCreateTransaction,
+        transport: &mut FakePendingBuildKitRecoveryTransport,
+    ) -> Result<Option<String>> {
+        recover_pending_buildkit_create_for_setup_with_volume_lock_and_transport(
+            policy,
+            domain,
+            builder,
+            generation,
+            &transaction.config_fingerprint,
+            &domain.engine_id,
+            |domain, volume, access| {
+                assert_eq!(access.builder, builder);
+                assert_eq!(access.transaction_id, transaction.transaction_id);
+                policy.lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume.to_owned()]),
+                    Some(domain),
+                    Some(access),
+                )
+            },
+            transport,
+        )
     }
 
     #[cfg(unix)]
@@ -11542,11 +13912,10 @@ mod tests {
         let policy = Arc::new(
             DockerLeasePolicy::new_with_volume_lock_root("create-job", Some(root.clone())).unwrap(),
         );
-        let volume = "buildx_buildkit_builder-domain-test_state";
+        let (domain, creator, fence, builder, volume) = test_pending_buildkit_create_fence(&root);
         let volume_locks = policy
-            .lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+            .lock_volume_names(&BTreeSet::from([volume.clone()]))
             .unwrap();
-        let fence = test_pending_buildkit_create_fence(&root, volume);
         let (mut engine, mut host) = UnixStream::pair().unwrap();
         let (mut sink, guest) = UnixStream::pair().unwrap();
         let conns = LeaseConnSet::new(Arc::new(AtomicBool::new(false)));
@@ -11556,8 +13925,6 @@ mod tests {
         let detach_signal = Some(Arc::clone(&conns.shutdown));
         conns.abort();
 
-        let marker_name = pending_buildkit_create_marker_name(volume);
-        assert!(std::fs::symlink_metadata(root.join(&marker_name)).is_ok());
         assert!(try_lock_volume_name_at_for_test(&root, volume)
             .unwrap()
             .is_none());
@@ -11579,7 +13946,7 @@ mod tests {
                 ForwardResponseOptions {
                     defer_response_until_observed: true,
                     detach_client_on_hup: true,
-                    observe_after_delivery_on_success: true,
+                    observe_after_delivery_on_success: false,
                     detach_signal,
                     ..ForwardResponseOptions::default()
                 },
@@ -11587,7 +13954,7 @@ mod tests {
                     assert_eq!(status, 201);
                     assert_eq!(body, br#"{"Id":"late-container-id"}"#);
                     assert!(!client_connected, "aborted guest must stay detached");
-                    fence.settle()
+                    Ok(())
                 },
             );
             drop(volume_locks);
@@ -11600,12 +13967,17 @@ mod tests {
         release_tx.send(()).unwrap();
         let result = finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok(), "{result:?}");
-        assert!(std::fs::symlink_metadata(root.join(&marker_name)).is_err());
+        assert!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .is_some()
+        );
         assert!(try_lock_volume_name_at_for_test(&root, volume)
             .unwrap()
             .is_some());
         engine_thread.join().unwrap();
         proxy_thread.join().unwrap();
+        drop(creator);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -11657,36 +14029,781 @@ mod tests {
     #[test]
     fn unresolved_create_fence_fails_closed_without_response_evidence() {
         let root = test_storage_root("pending-create-fail-closed");
-        let volume = "buildx_buildkit_builder-domain-test_state";
-        let _fence = test_pending_buildkit_create_fence(&root, volume);
-        let marker_name = pending_buildkit_create_marker_name(volume);
-        let marker_bytes = std::fs::read(root.join(&marker_name)).unwrap();
-        let marker: Value = serde_json::from_slice(&marker_bytes).unwrap();
-        assert_eq!(marker["engine_id"], "test-engine-id");
-        assert_eq!(marker["builder"], "builder-domain-test");
-        assert_eq!(marker["generation"], 7);
-        assert_eq!(marker["volume"], volume);
+        let (domain, creator, fence, builder, volume) = test_pending_buildkit_create_fence(&root);
+        let transaction = crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        let journal = serde_json::to_value(&transaction).unwrap();
+        assert_eq!(journal["engine_id"], domain.engine_id);
+        assert_eq!(journal["builder"], builder);
+        assert_eq!(journal["generation"], 7);
+        assert_eq!(journal["state_volume"], volume);
         assert_eq!(
-            marker["container_name"],
-            "buildx_buildkit_builder-domain-test0"
+            journal["container_name"],
+            crate::buildkit::daemon_container_name(&builder)
         );
+        assert_eq!(journal["phase"], "dispatched");
         let policy = DockerLeasePolicy::new_with_volume_lock_root(
             "fail-closed-create-job",
             Some(root.clone()),
         )
         .unwrap();
         let error = policy
-            .lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+            .lock_volume_names_with_create_access(
+                &BTreeSet::from([volume.clone()]),
+                Some(&domain),
+                None,
+            )
             .unwrap_err();
         assert!(error.to_string().contains("remains unresolved"));
-        drop(_fence);
+        drop((fence, creator));
         assert!(
             policy
-                .lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+                .lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume]),
+                    Some(&domain),
+                    None,
+                )
                 .is_err(),
-            "dropping the response handler must retain quarantine"
+            "dropping creator and response leases must retain the transaction"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatched_create_recovers_exact_created_container_without_saved_id() {
+        let (root, domain, policy, generation, builder, volume, transaction) =
+            pending_recovery_setup("pending-create-recover-created");
+        let container_id = "a".repeat(64);
+        let inspect =
+            pending_recovery_container_inspect(&transaction, &container_id, "created", false);
+        let mut transport = FakePendingBuildKitRecoveryTransport {
+            volume_response: (200, pending_recovery_volume_inspect(&domain, &volume)),
+            container_responses: std::collections::VecDeque::from([
+                (200, inspect.clone()),
+                (200, inspect),
+            ]),
+            archived: Vec::new(),
+            started: Vec::new(),
+            published: Vec::new(),
+            volume_lock_probe: Some((root.clone(), volume.clone())),
+        };
+
+        let recovered = recover_pending_with_test_transport(
+            &domain,
+            &policy,
+            generation,
+            &builder,
+            &transaction,
+            &mut transport,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(recovered, container_id);
+        assert_eq!(transport.archived, vec![container_id.clone()]);
+        assert_eq!(transport.started, vec![container_id.clone()]);
+        assert_eq!(transport.published.len(), 1);
+        assert_eq!(transport.published[0].0, container_id);
+        assert!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .is_none()
+        );
+        assert!(crate::buildkit::builder_readiness_matches(
+            &domain,
+            &builder,
+            &recovered,
+            &transaction.config_fingerprint,
+        )
+        .unwrap());
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatched_create_404_retains_fence_then_recovers_when_container_appears() {
+        let (root, domain, policy, generation, builder, volume, transaction) =
+            pending_recovery_setup("pending-create-404-later-appears");
+        let original = transaction.clone();
+        let container_id = "b".repeat(64);
+        let mut absent_transport = FakePendingBuildKitRecoveryTransport {
+            volume_response: (200, pending_recovery_volume_inspect(&domain, &volume)),
+            container_responses: std::collections::VecDeque::from([(404, Vec::new())]),
+            archived: Vec::new(),
+            started: Vec::new(),
+            published: Vec::new(),
+            volume_lock_probe: Some((root.clone(), volume.clone())),
+        };
+
+        let first = recover_pending_with_test_transport(
+            &domain,
+            &policy,
+            generation,
+            &builder,
+            &transaction,
+            &mut absent_transport,
+        );
+        assert!(first.is_err());
+        assert!(absent_transport.archived.is_empty());
+        assert!(absent_transport.started.is_empty());
+        assert!(absent_transport.published.is_empty());
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "404 is not proof that an ambiguous ContainerCreate cannot appear later"
+        );
+        assert!(policy
+            .lock_volume_names_with_create_access(
+                &BTreeSet::from([volume.clone()]),
+                Some(&domain),
+                None,
+            )
+            .is_err());
+
+        let inspect =
+            pending_recovery_container_inspect(&transaction, &container_id, "created", false);
+        let mut appeared_transport = FakePendingBuildKitRecoveryTransport {
+            volume_response: (200, pending_recovery_volume_inspect(&domain, &volume)),
+            container_responses: std::collections::VecDeque::from([
+                (200, inspect.clone()),
+                (200, inspect),
+            ]),
+            archived: Vec::new(),
+            started: Vec::new(),
+            published: Vec::new(),
+            volume_lock_probe: Some((root.clone(), volume.clone())),
+        };
+        let recovered = recover_pending_with_test_transport(
+            &domain,
+            &policy,
+            generation,
+            &builder,
+            &transaction,
+            &mut appeared_transport,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered, container_id);
+        assert_eq!(appeared_transport.archived, vec![container_id.clone()]);
+        assert_eq!(appeared_transport.started, vec![container_id.clone()]);
+        assert!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .is_none()
+        );
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatched_create_config_mismatch_retains_fence_without_inspection() {
+        let (root, domain, policy, generation, builder, volume, transaction) =
+            pending_recovery_setup("pending-create-config-mismatch");
+        let original = transaction.clone();
+        let mut transport = FakePendingBuildKitRecoveryTransport {
+            volume_response: (200, pending_recovery_volume_inspect(&domain, &volume)),
+            container_responses: std::collections::VecDeque::new(),
+            archived: Vec::new(),
+            started: Vec::new(),
+            published: Vec::new(),
+            volume_lock_probe: Some((root.clone(), volume.clone())),
+        };
+        let mut lock_acquired = false;
+
+        let result = recover_pending_buildkit_create_for_setup_with_volume_lock_and_transport(
+            &policy,
+            &domain,
+            &builder,
+            generation,
+            "no-config-v2",
+            &domain.engine_id,
+            |_, _, _| {
+                lock_acquired = true;
+                Ok(VolumeOperationLocks::default())
+            },
+            &mut transport,
+        );
+
+        assert!(result.is_err(), "different config intent must fail closed");
+        assert!(
+            !lock_acquired,
+            "mismatched config cannot acquire bypass lock"
+        );
+        assert!(transport.container_responses.is_empty());
+        assert!(transport.archived.is_empty());
+        assert!(transport.started.is_empty());
+        assert!(transport.published.is_empty());
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "config mismatch cannot rewrite or clear the original transaction"
+        );
+        assert!(policy
+            .lock_volume_names_with_create_access(&BTreeSet::from([volume]), Some(&domain), None,)
+            .is_err());
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatched_create_identity_mismatch_retains_fence_without_mutation() {
+        let (root, domain, policy, generation, builder, volume, transaction) =
+            pending_recovery_setup("pending-create-identity-mismatch");
+        let original = transaction.clone();
+        let container_id = "c".repeat(64);
+        let inspect =
+            pending_recovery_container_inspect(&transaction, &container_id, "created", true);
+        let mut transport = FakePendingBuildKitRecoveryTransport {
+            volume_response: (200, pending_recovery_volume_inspect(&domain, &volume)),
+            container_responses: std::collections::VecDeque::from([(200, inspect)]),
+            archived: Vec::new(),
+            started: Vec::new(),
+            published: Vec::new(),
+            volume_lock_probe: Some((root.clone(), volume.clone())),
+        };
+
+        let result = recover_pending_with_test_transport(
+            &domain,
+            &policy,
+            generation,
+            &builder,
+            &transaction,
+            &mut transport,
+        );
+
+        assert!(result.is_err());
+        assert!(transport.archived.is_empty());
+        assert!(transport.started.is_empty());
+        assert!(transport.published.is_empty());
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "identity mismatch cannot bind or clear the durable transaction"
+        );
+        assert!(policy
+            .lock_volume_names_with_create_access(&BTreeSet::from([volume]), Some(&domain), None,)
+            .is_err());
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_recovery_missing_volume_fails_before_volume_creation_and_keeps_transaction() {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixListener;
+
+        let root = test_storage_root("pending-create-setup-missing-volume");
+        let (domain, creator, fence, builder, volume) = test_pending_buildkit_create_fence(&root);
+        let original = crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        drop((creator, fence));
+
+        let policy =
+            DockerLeasePolicy::new_with_volume_lock_root("setup-recovery-job", Some(root.clone()))
+                .unwrap();
+        let config_fingerprint = "no-config-v1";
+        let generation = policy
+            .begin_persistent_builder_setup(&builder, config_fingerprint)
+            .unwrap();
+        let socket = root.join("fake-engine.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let expected_path = format!("/v1.43/volumes/{volume}");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut scratch = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut scratch).unwrap();
+                assert_ne!(read, 0, "host closed before volume inspect request arrived");
+                request.extend_from_slice(&scratch[..read]);
+            }
+            assert!(String::from_utf8_lossy(&request)
+                .starts_with(&format!("GET {expected_path} HTTP/1.1\r\n")));
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let mut volume_create_called = false;
+        let result = recover_pending_buildkit_create_for_setup_with_volume_lock(
+            &policy,
+            &socket,
+            &domain,
+            &builder,
+            generation,
+            config_fingerprint,
+            &domain.engine_id,
+            |_, requested_volume, access| {
+                assert_eq!(requested_volume, volume.as_str());
+                assert_eq!(access.builder, builder);
+                assert_eq!(access.transaction_id, original.transaction_id);
+                Ok(VolumeOperationLocks::default())
+            },
+        )
+        .map(|_| {
+            volume_create_called = true;
+        });
+        server.join().unwrap();
+
+        assert!(
+            result.is_err(),
+            "missing transaction volume must block setup"
+        );
+        assert!(
+            !volume_create_called,
+            "volume creation must follow recovery"
+        );
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "uncertain recovery must retain the exact durable transaction"
+        );
+        assert!(
+            policy
+                .lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume]),
+                    Some(&domain),
+                    None,
+                )
+                .is_err(),
+            "ordinary setup locks stay fenced after failed recovery"
+        );
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_without_pending_transaction_still_respects_legacy_create_quarantine() {
+        let root = test_storage_root("pending-create-legacy-quarantine");
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            &root,
+            "legacy-quarantine-test-storage",
+            "legacy-quarantine-test-engine",
+        )
+        .unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "test",
+            "scope",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let volume = crate::buildkit::daemon_state_volume(&builder);
+        crate::buildkit::quarantine_legacy_pending_buildkit_create(
+            &domain,
+            &volume,
+            br#"{"legacy":"marker-without-recovery-proof"}"#,
+        )
+        .unwrap();
+
+        let policy = DockerLeasePolicy::new_with_volume_lock_root(
+            "legacy-quarantine-setup-job",
+            Some(root.clone()),
+        )
+        .unwrap();
+        let generation = policy
+            .begin_persistent_builder_setup(&builder, "no-config-v1")
+            .unwrap();
+        let recovery = recover_pending_buildkit_create_for_setup_with_volume_lock(
+            &policy,
+            Path::new("/unused-docker.sock"),
+            &domain,
+            &builder,
+            generation,
+            "no-config-v1",
+            &domain.engine_id,
+            |_, _, _| panic!("quarantined setup must not acquire a volume lock"),
+        );
+        let mut volume_create_called = false;
+        let result =
+            crate::executor::ensure_persistent_buildkit_volume_after_recovery(recovery, || {
+                volume_create_called = true;
+                Ok(())
+            });
+        let error = result.unwrap_err();
+
+        assert!(error.to_string().contains("quarantined"));
+        assert!(
+            !volume_create_called,
+            "durable-only quarantine must stop executor before Docker volume create"
+        );
+        assert!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::buildkit::legacy_pending_buildkit_create_is_quarantined(&domain, &volume)
+                .unwrap()
+        );
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_migrates_runtime_create_marker_before_volume_create_and_survives_runtime_loss() {
+        let root = test_storage_root("pending-create-runtime-marker-migration");
+        let identity_root = root.join("storage");
+        let runtime_root = root.join("run");
+        std::fs::create_dir_all(&identity_root).unwrap();
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            &identity_root,
+            "runtime-marker-storage",
+            "runtime-marker-engine",
+        )
+        .unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "test",
+            "scope",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let volume = crate::buildkit::daemon_state_volume(&builder);
+        let marker_name = pending_buildkit_create_marker_name(&volume);
+        let marker_bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "engine_id": domain.engine_id.clone(),
+            "builder": builder.clone(),
+            "generation": 1,
+            "volume": volume.clone(),
+            "container_name": crate::buildkit::daemon_container_name(&builder),
+            "request_sha256": "a".repeat(64),
+        }))
+        .unwrap();
+        std::fs::write(runtime_root.join(&marker_name), &marker_bytes).unwrap();
+
+        let policy = DockerLeasePolicy::new_with_volume_lock_root(
+            "runtime-marker-migration-job",
+            Some(runtime_root.clone()),
+        )
+        .unwrap();
+        let generation = policy
+            .begin_persistent_builder_setup(&builder, "no-config-v1")
+            .unwrap();
+        // Match executor ordering: recovery returns None when there is no
+        // durable journal/quarantine, then the domain-aware volume lock must
+        // migrate the old runtime marker before the Docker create closure.
+        let recovery = recover_pending_buildkit_create_for_setup_with_volume_lock(
+            &policy,
+            Path::new("/unused-docker.sock"),
+            &domain,
+            &builder,
+            generation,
+            "no-config-v1",
+            &domain.engine_id,
+            |_, _, _| panic!("no durable transaction means no recovery lock"),
+        );
+        assert!(recovery.as_ref().unwrap().is_none());
+        let mut volume_create_called = false;
+        let result =
+            crate::executor::ensure_persistent_buildkit_volume_after_recovery(recovery, || {
+                let volume_lock = policy.lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume.clone()]),
+                    Some(&domain),
+                    None,
+                );
+                crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
+                    volume_create_called = true;
+                    Ok(())
+                })
+            });
+        assert!(result.unwrap_err().to_string().contains("quarantined"));
+        assert!(
+            !volume_create_called,
+            "migrated runtime marker must block executor volume creation"
+        );
+        assert!(!runtime_root.join(&marker_name).exists());
+        assert!(
+            crate::buildkit::legacy_pending_buildkit_create_is_quarantined(&domain, &volume)
+                .unwrap()
+        );
+
+        // `/run` can disappear at reboot; the selected durable storage root
+        // retains the quarantine and blocks the next setup without the old
+        // marker file.
+        drop(policy);
+        std::fs::remove_dir_all(&runtime_root).unwrap();
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        let restarted_policy = DockerLeasePolicy::new_with_volume_lock_root(
+            "runtime-marker-migration-restarted-job",
+            Some(runtime_root.clone()),
+        )
+        .unwrap();
+        let volume_lock = restarted_policy.lock_volume_names_with_create_access(
+            &BTreeSet::from([volume.clone()]),
+            Some(&domain),
+            None,
+        );
+        let result = crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
+            volume_create_called = true;
+            Ok(())
+        });
+        assert!(result.unwrap_err().to_string().contains("quarantined"));
+        assert!(
+            !volume_create_called,
+            "durable quarantine must survive runtime-root loss"
+        );
+        drop(restarted_policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mismatched_runtime_create_marker_stays_unmodified_and_unquarantined() {
+        for mismatch in ["engine", "domain", "volume", "builder", "container"] {
+            let suffix = format!("pending-create-runtime-marker-wrong-{mismatch}");
+            let root = test_storage_root(&suffix);
+            let identity_root = root.join("storage");
+            let runtime_root = root.join("run");
+            std::fs::create_dir_all(&identity_root).unwrap();
+            std::fs::create_dir_all(&runtime_root).unwrap();
+            let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+                &identity_root,
+                "runtime-marker-storage",
+                "runtime-marker-engine",
+            )
+            .unwrap();
+            let requested_builder = crate::buildkit::persistent_builder_name_for_domain(
+                &domain.token,
+                "test",
+                "scope",
+                crate::buildkit::TRUST_TIER_BRANCH,
+                Some("org/repo"),
+            );
+            let volume = crate::buildkit::daemon_state_volume(&requested_builder);
+            let marker_builder = match mismatch {
+                "domain" => {
+                    let foreign_root = root.join("foreign-storage");
+                    std::fs::create_dir_all(&foreign_root).unwrap();
+                    let foreign = crate::buildkit::PersistentBuildKitDomain::from_identities(
+                        &foreign_root,
+                        "other-storage",
+                        domain.engine_id.as_str(),
+                    )
+                    .unwrap();
+                    crate::buildkit::persistent_builder_name_for_domain(
+                        &foreign.token,
+                        "test",
+                        "scope",
+                        crate::buildkit::TRUST_TIER_BRANCH,
+                        Some("org/repo"),
+                    )
+                }
+                "builder" => crate::buildkit::persistent_builder_name_for_domain(
+                    &domain.token,
+                    "other-builder",
+                    "scope",
+                    crate::buildkit::TRUST_TIER_BRANCH,
+                    Some("org/repo"),
+                ),
+                _ => requested_builder.clone(),
+            };
+            let marker_name = pending_buildkit_create_marker_name(&volume);
+            let marker_container = if mismatch == "container" {
+                "buildx_buildkit_wrong-container0".to_owned()
+            } else {
+                crate::buildkit::daemon_container_name(&marker_builder)
+            };
+            let marker_engine = if mismatch == "engine" {
+                "different-engine"
+            } else {
+                domain.engine_id.as_str()
+            };
+            let marker_volume = if mismatch == "volume" {
+                "buildx_buildkit_other-builder0_state"
+            } else {
+                volume.as_str()
+            };
+            let marker_bytes = serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "engine_id": marker_engine,
+                "builder": marker_builder.clone(),
+                "generation": 1,
+                "volume": marker_volume,
+                "container_name": marker_container,
+                "request_sha256": "a".repeat(64),
+            }))
+            .unwrap();
+            let marker_path = runtime_root.join(&marker_name);
+            std::fs::write(&marker_path, &marker_bytes).unwrap();
+
+            let policy = DockerLeasePolicy::new_with_volume_lock_root(
+                "runtime-marker-mismatch-job",
+                Some(runtime_root),
+            )
+            .unwrap();
+            let mut volume_create_called = false;
+            let volume_lock = policy.lock_volume_names_with_create_access(
+                &BTreeSet::from([volume.clone()]),
+                Some(&domain),
+                None,
+            );
+            let result =
+                crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
+                    volume_create_called = true;
+                    Ok(())
+                });
+            assert!(result.is_err());
+            assert!(!volume_create_called);
+            assert_eq!(std::fs::read(marker_path).unwrap(), marker_bytes);
+            assert!(
+                !crate::buildkit::legacy_pending_buildkit_create_is_quarantined(&domain, &volume)
+                    .unwrap(),
+                "a mismatched marker cannot be attributed to this domain/volume"
+            );
+            drop(policy);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_quarantine_cannot_authorize_removing_a_different_runtime_marker() {
+        let root = test_storage_root("pending-create-stale-marker-quarantine");
+        let identity_root = root.join("storage");
+        let runtime_root = root.join("run");
+        std::fs::create_dir_all(&identity_root).unwrap();
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            &identity_root,
+            "runtime-marker-storage",
+            "runtime-marker-engine",
+        )
+        .unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "test",
+            "scope",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let volume = crate::buildkit::daemon_state_volume(&builder);
+        let marker_bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "engine_id": domain.engine_id.clone(),
+            "builder": builder.clone(),
+            "generation": 1,
+            "volume": volume.clone(),
+            "container_name": crate::buildkit::daemon_container_name(&builder),
+            "request_sha256": "a".repeat(64),
+        }))
+        .unwrap();
+        let marker_path = runtime_root.join(pending_buildkit_create_marker_name(&volume));
+        std::fs::write(&marker_path, &marker_bytes).unwrap();
+        crate::buildkit::quarantine_legacy_pending_buildkit_create(
+            &domain,
+            &volume,
+            b"different older marker bytes",
+        )
+        .unwrap();
+
+        let policy = DockerLeasePolicy::new_with_volume_lock_root(
+            "stale-quarantine-marker-job",
+            Some(runtime_root),
+        )
+        .unwrap();
+        let mut volume_create_called = false;
+        let volume_lock = policy.lock_volume_names_with_create_access(
+            &BTreeSet::from([volume.clone()]),
+            Some(&domain),
+            None,
+        );
+        let result = crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
+            volume_create_called = true;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!volume_create_called);
+        assert_eq!(std::fs::read(marker_path).unwrap(), marker_bytes);
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_create_recovery_matches_inspect_to_normalized_create_intent() {
+        let expected = serde_json::json!({
+            "create": {
+                "Image": "sha256:pinned-image",
+                "Cmd": ["buildkitd", "--debug"],
+                "Labels": {
+                    JOB_ID_LABEL: "<creator-job>",
+                    BUILDKIT_DOMAIN_LABEL: "stable-domain"
+                },
+                "HostConfig": {
+                    "Privileged": true,
+                    "Init": true,
+                    "Mounts": [{"Type": "volume", "Source": "builder_state", "Target": "/var/lib/buildkit"}]
+                },
+                "NetworkingConfig": {}
+            }
+        });
+        let actual = serde_json::json!({
+            "Config": {
+                "Image": "sha256:pinned-image",
+                "Cmd": ["buildkitd", "--debug"],
+                "Labels": {
+                    JOB_ID_LABEL: "current-job",
+                    BUILDKIT_DOMAIN_LABEL: "stable-domain"
+                }
+            },
+            "HostConfig": {
+                "Privileged": true,
+                "Init": true,
+                "Mounts": [{"Type": "volume", "Source": "builder_state", "Target": "/var/lib/buildkit", "ReadOnly": false}],
+                "NetworkMode": "default"
+            }
+        });
+        let actual = actual.as_object().unwrap();
+        assert!(pending_create_shape_matches_inspect(&expected, actual).unwrap());
+
+        let mut changed = actual.clone();
+        changed
+            .get_mut("Config")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "Cmd".into(),
+                serde_json::json!(["buildkitd", "--oci-worker-no-process-sandbox"]),
+            );
+        assert!(!pending_create_shape_matches_inspect(&expected, &changed).unwrap());
+
+        let mut changed = actual.clone();
+        changed
+            .get_mut("HostConfig")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut("Mounts")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()[0]["Source"] = serde_json::json!("other_state");
+        assert!(!pending_create_shape_matches_inspect(&expected, &changed).unwrap());
     }
 
     #[test]
@@ -12173,6 +15290,135 @@ mod tests {
             1,
             "uncertain 2xx outcome must retain its capacity reservation"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatched_create_capacity_stays_reserved_when_response_framing_fails() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let policy = DockerLeasePolicy::new("velnor-job-truncated-create-capacity").unwrap();
+        {
+            let mut resources = policy.resources.lock().unwrap();
+            resources.networks.extend(
+                (0..MAX_OWNED_DOCKER_RESOURCES - 1).map(|index| format!("network-{index}")),
+            );
+            assert_eq!(
+                owned_resource_count(&resources),
+                MAX_OWNED_DOCKER_RESOURCES - 1
+            );
+        }
+
+        let mut reservation = Some(policy.reserve_owned_resource_slot().unwrap());
+        reservation.as_mut().unwrap().mark_dispatched().unwrap();
+
+        let (mut engine, mut host) = UnixStream::pair().unwrap();
+        let (_guest, mut client) = UnixStream::pair().unwrap();
+        engine
+            .write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Length: 32\r\nConnection: close\r\n\r\n{\"Id\":\"truncated\"}",
+            )
+            .unwrap();
+        drop(engine);
+        let result = forward_http_response_with_delivery(
+            &mut host,
+            &mut ResponseBuffer::default(),
+            &mut client,
+            "POST",
+            ForwardResponseOptions {
+                defer_response_until_observed: true,
+                capture_body: true,
+                ..ForwardResponseOptions::default()
+            },
+            |_, _, _| panic!("incomplete response must not commit resource ownership"),
+        );
+        assert!(result.is_err());
+        pin_resource_reservation_after_uncertain_dispatch(&mut reservation);
+        assert_eq!(
+            reservation.as_ref().unwrap().state,
+            OwnedResourceReservationState::Pinned
+        );
+        drop(reservation);
+
+        assert_eq!(
+            policy.resources.lock().unwrap().reserved_resource_slots,
+            1,
+            "a dispatched mutation with an incomplete response remains pinned"
+        );
+        assert!(
+            policy.reserve_owned_resource_slot().is_err(),
+            "uncertain create must not let later requests exceed the resource cap"
+        );
+    }
+
+    #[test]
+    fn undispatched_create_capacity_is_released_on_drop() {
+        let policy = DockerLeasePolicy::new("velnor-job-undispatched-create-capacity").unwrap();
+        let reservation = policy.reserve_owned_resource_slot().unwrap();
+        assert_eq!(policy.resources.lock().unwrap().reserved_resource_slots, 1);
+        drop(reservation);
+        assert_eq!(policy.resources.lock().unwrap().reserved_resource_slots, 0);
+        assert!(policy.reserve_owned_resource_slot().is_ok());
+    }
+
+    #[test]
+    fn concurrent_create_capacity_reservations_admit_only_free_slots() {
+        use std::sync::Barrier;
+
+        const ATTEMPTS: usize = 8;
+        let policy = DockerLeasePolicy::new("velnor-job-concurrent-capacity").unwrap();
+        {
+            let mut resources = policy.resources.lock().unwrap();
+            resources.networks.extend(
+                (0..MAX_OWNED_DOCKER_RESOURCES - 3).map(|index| format!("network-{index}")),
+            );
+            assert_eq!(
+                owned_resource_count(&resources),
+                MAX_OWNED_DOCKER_RESOURCES - 2
+            );
+        }
+
+        let barrier = Arc::new(Barrier::new(ATTEMPTS + 1));
+        let (results, received) = std::sync::mpsc::channel();
+        let workers = (0..ATTEMPTS)
+            .map(|index| {
+                let policy = policy.clone();
+                let barrier = Arc::clone(&barrier);
+                let results = results.clone();
+                std::thread::spawn(move || {
+                    let mut reservation = policy.reserve_owned_resource_slot().ok();
+                    let admitted = reservation.is_some();
+                    results.send((index, admitted)).unwrap();
+                    barrier.wait();
+                    if let Some(reservation) = reservation.as_mut() {
+                        policy
+                            .record_owned_resource_identifier(
+                                DockerResourceKind::Network,
+                                format!("concurrent-network-{index}"),
+                            )
+                            .unwrap();
+                        reservation.finish().unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(results);
+
+        let admitted = received
+            .into_iter()
+            .take(ATTEMPTS)
+            .filter(|(_, admitted)| *admitted)
+            .count();
+        barrier.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(admitted, 2);
+        let resources = policy.resources.lock().unwrap();
+        assert_eq!(resources.reserved_resource_slots, 0);
+        assert_eq!(owned_resource_count(&resources), MAX_OWNED_DOCKER_RESOURCES);
     }
 
     #[test]
@@ -13229,6 +16475,24 @@ mod tests {
             policy.authorize(&mount_request).is_err(),
             "container inspect alone must not register the persistent state volume"
         );
+        {
+            let mut resources = policy.resources.lock().unwrap();
+            resources
+                .persistent_container_fresh_ids
+                .insert("persistent-id".to_owned());
+            resources
+                .persistent_container_config_archives
+                .insert("persistent-id".to_owned(), "no-config-v1".to_owned());
+        }
+        let exec_create = api_request(
+            "POST",
+            &format!("/v1.43/containers/{container}/exec"),
+            br#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Cmd":["buildctl","dial-stdio"]}"#,
+        );
+        assert!(
+            policy.authorize(&exec_create).is_err(),
+            "fresh archive proof authorizes start, not BuildKit exec before readiness"
+        );
         assert_eq!(
             policy
                 .authorize(&api_request(
@@ -13239,6 +16503,9 @@ mod tests {
                 .unwrap(),
             AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
         );
+        policy
+            .allow_ready_persistent_container(&builder, "persistent-id", "no-config-v1")
+            .unwrap();
         assert!(policy
             .authorize(&api_request(
                 "DELETE",
@@ -13456,11 +16723,97 @@ mod tests {
             b"",
         );
         assert!(policy.authorize(&image_pull).is_err());
-        policy.complete_persistent_builder_setup(&builder).unwrap();
+        policy
+            .complete_persistent_builder_setup(&builder, 0)
+            .unwrap();
         assert_eq!(
             policy.authorize(&image_pull).unwrap(),
             AuthorizedDockerRoute::PersistentImagePull
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_image_routes_revalidate_epoch_under_state_volume_lock() {
+        let root = test_storage_root("persistent-image-readiness-epoch");
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            &root,
+            "image-epoch-storage",
+            "image-epoch-engine",
+        )
+        .unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "requested",
+            "scope",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("repo-key-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let policy = DockerLeasePolicy::new("velnor-job-image-epoch").unwrap();
+        policy.allow_persistent_builder(&builder).unwrap();
+
+        let requests = [
+            (
+                api_request(
+                    "POST",
+                    "/v1.43/images/create?fromImage=moby%2Fbuildkit&tag=buildx-stable-1",
+                    b"",
+                ),
+                AuthorizedDockerRoute::PersistentImagePull,
+            ),
+            (
+                api_request(
+                    "GET",
+                    "/v1.43/images/moby/buildkit:buildx-stable-1/json",
+                    b"",
+                ),
+                AuthorizedDockerRoute::PersistentImageInspect,
+            ),
+        ];
+        let mut admitted = requests
+            .into_iter()
+            .map(|(request, route)| {
+                let authorization = policy.authorize_admitted(&request).unwrap();
+                assert_eq!(authorization.route, route);
+                authorization
+            })
+            .collect::<Vec<_>>();
+
+        let state_volume = crate::buildkit::daemon_state_volume(&builder);
+        let _volume_lock = lock_host_volume_name_for_domain(&domain, &state_volume).unwrap();
+        for authorization in &mut admitted {
+            validate_persistent_route_under_volume_lock(
+                authorization,
+                &policy,
+                &domain,
+                authorization.route,
+            )
+            .unwrap();
+        }
+
+        // Another proxy starts the same daemon after these image requests
+        // were admitted. Their admission generation remains locally valid,
+        // but the durable epoch check under the shared lock rejects dispatch.
+        crate::buildkit::invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            "image-epoch-container",
+            "no-config-v1",
+            0,
+        )
+        .unwrap();
+        for authorization in &mut admitted {
+            assert!(validate_persistent_route_under_volume_lock(
+                authorization,
+                &policy,
+                &domain,
+                authorization.route,
+            )
+            .is_err());
+        }
+        drop(_volume_lock);
+        admitted.clear();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -13487,6 +16840,19 @@ mod tests {
             .lock()
             .unwrap()
             .persistent_builder_generations[&builder];
+        let create = api_request(
+            "POST",
+            &format!("/v1.43/containers/{container}/exec"),
+            br#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Cmd":["buildctl","dial-stdio"]}"#,
+        );
+        assert!(policy.authorize(&create).is_err());
+        policy
+            .allow_ready_persistent_container(&builder, &owned_container_id, "no-config-v1")
+            .unwrap();
+        assert_eq!(
+            policy.authorize(&create).unwrap(),
+            AuthorizedDockerRoute::PersistentExecCreate
+        );
         let request = api_request("POST", "/v1.43/exec/exec-id/start", b"");
         assert!(policy.authorize(&request).is_err());
         assert!(policy
@@ -13496,6 +16862,7 @@ mod tests {
                 &builder,
                 &owned_container_id,
                 generation,
+                0,
             )
             .is_err());
         assert!(policy.authorize(&request).is_err());
@@ -13506,6 +16873,7 @@ mod tests {
                 &builder,
                 &owned_container_id,
                 generation,
+                0,
             )
             .unwrap();
         let mut upgrade_request = request.clone();
@@ -13521,6 +16889,499 @@ mod tests {
             policy.authorize(&upgrade_request).unwrap(),
             AuthorizedDockerRoute::PersistentExec
         );
+        policy
+            .resources
+            .lock()
+            .unwrap()
+            .persistent_container_ready_fingerprints
+            .remove(&owned_container_id);
+        assert!(policy.authorize(&create).is_err());
+        assert!(policy.authorize(&upgrade_request).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_persistent_readiness_proof_forgets_binding_and_denies_exec() {
+        let root = test_storage_root("persistent-exec-readiness-failure");
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            &root,
+            "readiness-storage",
+            "readiness-engine",
+        )
+        .unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "requested",
+            "scope",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let domain_token = domain.token.as_str();
+        let container = crate::buildkit::daemon_container_name(&builder);
+        let volume = crate::buildkit::daemon_state_volume(&builder);
+        let container_id = "readiness-container-id";
+        let config_fingerprint = "no-config-v1";
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        policy.allow_persistent_builder(&builder).unwrap();
+        policy
+            .register_persistent_builder_image(&builder, "sha256:persistent-image")
+            .unwrap();
+        register_test_persistent_volume_projection(&policy, &volume, domain_token);
+        let inspect = format!(
+            r#"{{"Id":"{container_id}","Image":"sha256:persistent-image","Name":"/{container}","Config":{{"Image":"moby/buildkit:buildx-stable-1","Env":["BUILDKIT_SETUP_CGROUPV2_ROOT=1"],"Entrypoint":["/usr/bin/buildkitd-entrypoint"],"Cmd":[],"Labels":{{"velnor.job-id":"creator-job","velnor.buildkit-domain":"{domain_token}"}}}},"HostConfig":{{"NetworkMode":"bridge","Privileged":true,"Init":true,"CgroupParent":"/docker/buildx","RestartPolicy":{{"Name":"unless-stopped","MaximumRetryCount":0}}}},"Mounts":[{{"Type":"volume","Name":"{volume}","Destination":"/var/lib/buildkit"}}]}}"#
+        );
+        policy
+            .record_persistent_container_inspect(&container, 200, inspect.as_bytes())
+            .unwrap();
+        let generation = policy
+            .resources
+            .lock()
+            .unwrap()
+            .persistent_builder_generations[&builder];
+        assert!(!crate::buildkit::builder_readiness_matches(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+        )
+        .unwrap());
+        assert!(accept_reused_persistent_container_readiness(
+            &policy,
+            &domain,
+            &builder,
+            container_id,
+            generation,
+            config_fingerprint,
+        )
+        .is_err());
+        assert!(policy.persistent_container_id(&container).is_err());
+
+        let exec_create = api_request(
+            "POST",
+            &format!("/v1.43/containers/{container}/exec"),
+            br#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Cmd":["buildctl","dial-stdio"]}"#,
+        );
+        assert!(policy.authorize(&exec_create).is_err());
+        let exec_start = api_request("POST", "/v1.43/exec/stale-exec-id/start", b"");
+        assert!(policy.authorize(&exec_start).is_err());
+
+        // Once the exact durable record exists, inspect promotes this same
+        // immutable ID and the intended BuildKit exec is admitted.
+        policy
+            .record_persistent_container_inspect(&container, 200, inspect.as_bytes())
+            .unwrap();
+        crate::buildkit::write_test_builder_readiness(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+        )
+        .unwrap();
+        assert!(crate::buildkit::builder_readiness_matches(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+        )
+        .unwrap());
+        accept_reused_persistent_container_readiness(
+            &policy,
+            &domain,
+            &builder,
+            container_id,
+            generation,
+            config_fingerprint,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.authorize(&exec_create).unwrap(),
+            AuthorizedDockerRoute::PersistentExecCreate
+        );
+        policy
+            .note_persistent_exec(
+                201,
+                br#"{"Id":"ready-exec-id"}"#,
+                &builder,
+                container_id,
+                generation,
+                1,
+            )
+            .unwrap();
+        let mut ready_exec_start = api_request("POST", "/v1.43/exec/ready-exec-id/start", b"");
+        let header_end = ready_exec_start
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        ready_exec_start.splice(
+            header_end + 2..header_end + 2,
+            b"Connection: Upgrade\r\nUpgrade: tcp\r\n".iter().copied(),
+        );
+        assert_eq!(
+            policy.authorize(&ready_exec_start).unwrap(),
+            AuthorizedDockerRoute::PersistentExec
+        );
+
+        // A restart must retire both cached and durable old readiness before
+        // Docker receives `/start`; a failed worker probe cannot reuse the
+        // pre-restart proof or its exec IDs.
+        let start_request =
+            api_request("POST", &format!("/v1.43/containers/{container}/start"), b"");
+        assert_eq!(
+            policy.authorize(&start_request).unwrap(),
+            AuthorizedDockerRoute::Persistent(DockerResourceKind::Container)
+        );
+        let mut stale_exec_create = policy.authorize_admitted(&exec_create).unwrap();
+        let mut stale_exec_start = policy.authorize_admitted(&ready_exec_start).unwrap();
+        let _volume_lock = lock_host_volume_name_for_domain(
+            &domain,
+            &crate::buildkit::daemon_state_volume(&builder),
+        )
+        .unwrap();
+        // Simulate another proxy advancing the shared durable epoch. Local
+        // authorization still sees epoch 1, so only the durable check under
+        // this Engine-volume lock can reject these preauthorized requests.
+        let external_epoch = crate::buildkit::invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+            1,
+        )
+        .unwrap();
+        assert_eq!(external_epoch, 2);
+        assert!(!crate::buildkit::builder_readiness_matches(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+        )
+        .unwrap());
+        policy
+            .note_persistent_start_epoch(&builder, generation, container_id, 1, external_epoch)
+            .unwrap();
+        let (lock_acquired_tx, lock_acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let (dispatch_denied_tx, dispatch_denied_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _exec_lock = lock_host_volume_name_for_domain(
+                    &domain,
+                    &crate::buildkit::daemon_state_volume(&builder),
+                )
+                .unwrap();
+                lock_acquired_tx.send(()).unwrap();
+                let denied = validate_persistent_route_under_volume_lock(
+                    &mut stale_exec_create,
+                    &policy,
+                    &domain,
+                    AuthorizedDockerRoute::PersistentExecCreate,
+                )
+                .is_err();
+                dispatch_denied_tx.send(denied).unwrap();
+            });
+            assert!(lock_acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err());
+            drop(_volume_lock);
+            lock_acquired_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("exec request should acquire the shared lock after start releases it");
+            assert!(dispatch_denied_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("exec request should finish dispatch validation"));
+        });
+        assert!(validate_persistent_route_under_volume_lock(
+            &mut stale_exec_start,
+            &policy,
+            &domain,
+            AuthorizedDockerRoute::PersistentExec,
+        )
+        .is_err());
+        assert!(policy.authorize(&exec_create).is_err());
+        assert!(policy.authorize(&ready_exec_start).is_err());
+        drop(_volume_lock);
+        drop(stale_exec_create);
+        drop(stale_exec_start);
+
+        // A successful subsequent readiness proof restores only the current
+        // builder's intended exec capability.
+        crate::buildkit::write_test_builder_readiness(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+        )
+        .unwrap();
+        policy
+            .note_persistent_ready_container(
+                &builder,
+                generation,
+                container_id,
+                config_fingerprint,
+                external_epoch,
+            )
+            .unwrap();
+
+        let mut start_authorization = policy.authorize_admitted(&start_request).unwrap();
+        let _start_lock = lock_host_volume_name_for_domain(
+            &domain,
+            &crate::buildkit::daemon_state_volume(&builder),
+        )
+        .unwrap();
+        let restarted_epoch = advance_persistent_start_epoch_under_volume_lock(
+            &mut start_authorization,
+            &policy,
+            &domain,
+        )
+        .unwrap();
+        drop(_start_lock);
+        drop(start_authorization);
+        crate::buildkit::write_test_builder_readiness(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+        )
+        .unwrap();
+        policy
+            .note_persistent_ready_container(
+                &builder,
+                generation,
+                container_id,
+                config_fingerprint,
+                restarted_epoch,
+            )
+            .unwrap();
+        assert_eq!(
+            policy.authorize(&exec_create).unwrap(),
+            AuthorizedDockerRoute::PersistentExecCreate
+        );
+        policy
+            .note_persistent_exec(
+                201,
+                br#"{"Id":"ready-exec-id"}"#,
+                &builder,
+                container_id,
+                generation,
+                restarted_epoch,
+            )
+            .unwrap();
+        assert_eq!(
+            policy.authorize(&ready_exec_start).unwrap(),
+            AuthorizedDockerRoute::PersistentExec
+        );
+
+        // Reinspection of the same immutable ID must revoke the old cached
+        // proof before checking disk. A stale/corrupt durable record must not
+        // leave the previously registered exec ID usable during the check.
+        crate::buildkit::write_test_builder_readiness(
+            &domain,
+            &builder,
+            container_id,
+            "sha256:stale-config",
+        )
+        .unwrap();
+        let inspect_request =
+            api_request("GET", &format!("/v1.43/containers/{container}/json"), b"");
+        assert_eq!(
+            policy.authorize(&inspect_request).unwrap(),
+            AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container)
+        );
+        assert!(policy.authorize(&exec_create).is_err());
+        assert!(policy.authorize(&ready_exec_start).is_err());
+        policy
+            .record_persistent_container_inspect(&container, 200, inspect.as_bytes())
+            .unwrap();
+        assert!(accept_reused_persistent_container_readiness(
+            &policy,
+            &domain,
+            &builder,
+            container_id,
+            generation,
+            config_fingerprint,
+        )
+        .is_err());
+        assert!(policy.persistent_container_id(&container).is_err());
+        assert!(policy.authorize(&exec_create).is_err());
+        assert!(policy.authorize(&ready_exec_start).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_builder_revokes_pre_authorized_exec_until_new_readiness_probe() {
+        let root = test_storage_root("persistent-exec-stopped-readiness");
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            &root,
+            "stopped-storage",
+            "stopped-engine",
+        )
+        .unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "requested",
+            "scope",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("https://github.com/123"),
+        );
+        let domain_token = domain.token.as_str();
+        let container = crate::buildkit::daemon_container_name(&builder);
+        let volume = crate::buildkit::daemon_state_volume(&builder);
+        let container_id = "stopped-builder-container-id";
+        let config_fingerprint = "no-config-v1";
+        let policy = DockerLeasePolicy::new("velnor-job-stopped").unwrap();
+        policy.allow_persistent_builder(&builder).unwrap();
+        policy
+            .register_persistent_builder_image(&builder, "sha256:persistent-image")
+            .unwrap();
+        register_test_persistent_volume_projection(&policy, &volume, domain_token);
+        let inspect = format!(
+            r#"{{"Id":"{container_id}","Image":"sha256:persistent-image","Name":"/{container}","Config":{{"Image":"moby/buildkit:buildx-stable-1","Env":["BUILDKIT_SETUP_CGROUPV2_ROOT=1"],"Entrypoint":["/usr/bin/buildkitd-entrypoint"],"Cmd":[],"Labels":{{"velnor.job-id":"creator-job","velnor.buildkit-domain":"{domain_token}"}}}},"HostConfig":{{"NetworkMode":"bridge","Privileged":true,"Init":true,"CgroupParent":"/docker/buildx","RestartPolicy":{{"Name":"unless-stopped","MaximumRetryCount":0}}}},"Mounts":[{{"Type":"volume","Name":"{volume}","Destination":"/var/lib/buildkit"}}]}}"#
+        );
+        policy
+            .record_persistent_container_inspect(&container, 200, inspect.as_bytes())
+            .unwrap();
+        crate::buildkit::write_test_builder_readiness(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+        )
+        .unwrap();
+        policy
+            .note_persistent_ready_container(&builder, 1, container_id, config_fingerprint, 1)
+            .unwrap();
+
+        let exec_create = api_request(
+            "POST",
+            &format!("/v1.43/containers/{container}/exec"),
+            br#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Cmd":["buildctl","dial-stdio"]}"#,
+        );
+        let mut exec_start = api_request("POST", "/v1.43/exec/stopped-exec/start", b"");
+        let header_end = exec_start
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        exec_start.splice(
+            header_end + 2..header_end + 2,
+            b"Connection: Upgrade\r\nUpgrade: tcp\r\n".iter().copied(),
+        );
+        policy
+            .note_persistent_exec(
+                201,
+                br#"{"Id":"stopped-exec"}"#,
+                &builder,
+                container_id,
+                1,
+                1,
+            )
+            .unwrap();
+        let mut admitted_create = policy.authorize_admitted(&exec_create).unwrap();
+        let mut admitted_start = policy.authorize_admitted(&exec_start).unwrap();
+
+        let _volume_lock = lock_host_volume_name_for_domain(&domain, &volume).unwrap();
+        let stopping_epoch = crate::buildkit::invalidate_builder_readiness_before_stop(
+            &domain,
+            &builder,
+            container_id,
+        )
+        .unwrap()
+        .unwrap()
+        .1;
+        assert_eq!(stopping_epoch, 2);
+        crate::buildkit::publish_builder_stopped_after_stop(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+            stopping_epoch,
+        )
+        .unwrap();
+        assert!(validate_persistent_route_under_volume_lock(
+            &mut admitted_create,
+            &policy,
+            &domain,
+            AuthorizedDockerRoute::PersistentExecCreate,
+        )
+        .is_err());
+        assert!(validate_persistent_route_under_volume_lock(
+            &mut admitted_start,
+            &policy,
+            &domain,
+            AuthorizedDockerRoute::PersistentExec,
+        )
+        .is_err());
+
+        // A fresh Engine inspect of the same immutable ID must not resurrect
+        // the stopped epoch as reusable readiness.
+        policy
+            .record_persistent_container_inspect(&container, 200, inspect.as_bytes())
+            .unwrap();
+        assert!(accept_reused_persistent_container_readiness(
+            &policy,
+            &domain,
+            &builder,
+            container_id,
+            1,
+            config_fingerprint,
+        )
+        .is_err());
+        assert!(
+            policy.authorize(&exec_create).is_err(),
+            "an inspect after stop must not restore exec authority from the old epoch"
+        );
+        drop(_volume_lock);
+
+        let starting_epoch = crate::buildkit::invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+            stopping_epoch,
+        )
+        .unwrap();
+        crate::buildkit::probe_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+            starting_epoch,
+            || Ok(()),
+        )
+        .unwrap();
+        crate::buildkit::publish_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config_fingerprint,
+            starting_epoch,
+        )
+        .unwrap();
+        policy
+            .record_persistent_container_inspect(&container, 200, inspect.as_bytes())
+            .unwrap();
+        policy
+            .note_persistent_ready_container(
+                &builder,
+                1,
+                container_id,
+                config_fingerprint,
+                starting_epoch,
+            )
+            .unwrap();
+        assert_eq!(starting_epoch, 3);
+        assert_eq!(
+            policy.authorize(&exec_create).unwrap(),
+            AuthorizedDockerRoute::PersistentExecCreate,
+            "fresh worker proof restores only new exec creation"
+        );
+        assert!(
+            policy.authorize(&exec_start).is_err(),
+            "old exec ID stays stale"
+        );
+
+        drop(admitted_create);
+        drop(admitted_start);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -14072,6 +17933,15 @@ mod tests {
         assert!(
             policy.authorize(&appended_node_ten).is_err(),
             "Buildx append node 10 is outside Velnor's single-node lifecycle"
+        );
+        let custom_node = api_request(
+            "POST",
+            &format!("/v1.43/containers/create?name=buildx_buildkit_{builder}custom-node"),
+            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"Privileged":true,"RestartPolicy":{"Name":"unless-stopped","MaximumRetryCount":0}}}"#,
+        );
+        assert!(
+            policy.authorize(&custom_node).is_err(),
+            "a custom Buildx --node name must still hit generic privileged-create denial"
         );
 
         policy.allow_persistent_builder(&builder).unwrap();
@@ -16956,40 +20826,106 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
     #[cfg(unix)]
     #[test]
+    fn host_object_inspect_skips_interim_http_response() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = unique_unix_dir("velnor-lease-inspect-interim");
+        let socket_path = dir.join("engine.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let engine = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut scratch = [0_u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut scratch).unwrap();
+                assert_ne!(read, 0, "proxy must send a complete inspect request");
+                request.extend_from_slice(&scratch[..read]);
+            }
+            assert!(request.starts_with(b"GET /v1.43/containers/container-id "));
+            socket
+                .write_all(
+                    b"HTTP/1.1 103 Early Hints\r\nLink: </docs>; rel=preload\r\n\r\n\
+                      HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+                )
+                .unwrap();
+        });
+
+        let (status, body) =
+            inspect_object_on_host(&socket_path, "containers", "container-id", "container")
+                .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, b"{}");
+        engine.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn upgrade_response_status_is_checked_before_switching_to_hijack() {
         use std::os::unix::net::UnixStream;
 
-        for (response, expected_status, expected_tail) in [
+        for (response, expected_status, expected_headers, expected_tail) in [
             (
                 b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\n\r\nstream".as_slice(),
                 101,
+                b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\n\r\n".as_slice(),
                 b"stream".as_slice(),
             ),
             (
                 b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\n\r\nstream".as_slice(),
                 101,
+                b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\n\r\n".as_slice(),
                 b"stream".as_slice(),
             ),
             (
                 b"HTTP/1.1 409 Conflict\r\nContent-Length: 3\r\n\r\nno!".as_slice(),
                 409,
+                b"HTTP/1.1 409 Conflict\r\nContent-Length: 3\r\n\r\n".as_slice(),
                 b"no!".as_slice(),
             ),
             (
                 b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 409 Conflict\r\nContent-Length: 3\r\n\r\nno!".as_slice(),
                 409,
+                b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 409 Conflict\r\nContent-Length: 3\r\n\r\n".as_slice(),
                 b"no!".as_slice(),
             ),
         ] {
             let (mut host, mut engine) = UnixStream::pair().unwrap();
             let (mut client, _client_peer) = UnixStream::pair().unwrap();
-            engine.write_all(response).unwrap();
+            let wire = response.to_vec();
+            engine.write_all(&wire).unwrap();
             engine.shutdown(std::net::Shutdown::Write).unwrap();
 
             let response = read_upgrade_response(&mut host, &mut client).unwrap();
             assert_eq!(response.status, expected_status);
-            assert!(response.bytes[..response.header_end].ends_with(b"\r\n\r\n"));
+            assert_eq!(&response.bytes[..response.header_end], expected_headers);
             assert_eq!(&response.bytes[response.header_end..], expected_tail);
+
+            if expected_status == 409 {
+                let (mut source, mut host) = UnixStream::pair().unwrap();
+                source.write_all(&wire).unwrap();
+                drop(source);
+                let (mut client, mut sink) = UnixStream::pair().unwrap();
+                let mut forwarded_buffer = ResponseBuffer::default();
+                let observed = std::cell::RefCell::new(Vec::new());
+                forward_http_response_with_observer(
+                    &mut host,
+                    &mut forwarded_buffer,
+                    &mut sink,
+                    "POST",
+                    ForwardResponseOptions::default(),
+                    |status, body| {
+                        observed.borrow_mut().push((status, body.to_vec()));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                drop(sink);
+                let mut forwarded = Vec::new();
+                client.read_to_end(&mut forwarded).unwrap();
+                assert_eq!(forwarded, wire);
+                assert_eq!(*observed.borrow(), vec![(409, b"no!".to_vec())]);
+            }
         }
     }
 

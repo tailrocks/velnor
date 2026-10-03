@@ -84,6 +84,7 @@
 
 use anyhow::{Context, Result};
 use serde::de::{MapAccess, Visitor};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -143,10 +144,15 @@ const BUILDER_LIFECYCLE_LOCKS_DIR: &str = "builder-lifecycle-locks";
 /// Process-shared setup leases bind one in-flight Buildx create/archive/start
 /// sequence to its domain, expected config, and immutable daemon ID.
 const BUILDER_CREATOR_LEASES_DIR: &str = "buildkit-creator-leases";
+const BUILDER_CREATE_TRANSACTIONS_DIR: &str = "buildkit-create-transactions";
 const OWNER_REGISTRY_VERSION: u32 = 2;
-const BUILDER_READINESS_VERSION: u32 = 1;
+const BUILDER_READINESS_LEGACY_VERSION: u32 = 1;
+const BUILDER_READINESS_VERSION: u32 = 2;
 const BUILDER_CREATOR_LEASE_VERSION: u32 = 1;
+const BUILDER_CREATE_TRANSACTION_VERSION: u32 = 1;
+const LEGACY_CREATE_QUARANTINE_VERSION: u32 = 2;
 const MAX_BUILDER_CREATOR_LEASE_BYTES: u64 = 4096;
+const MAX_PENDING_BUILDKIT_CREATE_BYTES: u64 = 64 * 1024;
 
 /// Marker file recording the last periodic horizon pass (unix seconds).
 const HORIZON_REAP_MARKER: &str = ".last-horizon-reap";
@@ -201,7 +207,7 @@ pub(crate) fn builder_trust_tier(
 /// Stable, generation-versioned builder name for (requested name, effective
 /// trust scope, trust tier, repository). Trust first, like the store namespaces; the tier keeps
 /// branch jobs out of the release daemon's ID-keyed cache mounts, and the
-/// repository slug keeps one repo's cache out of another's.
+/// canonical repository key keeps one repo's cache out of another's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PersistentBuildKitDomain {
     pub(crate) token: String,
@@ -273,6 +279,9 @@ impl PersistentBuildKitDomain {
         domain_dir
             .open_relative_directory(Path::new(BUILDER_CREATOR_LEASES_DIR))
             .context("initialize BuildKit creator lease directory")?;
+        domain_dir
+            .open_relative_directory(Path::new(BUILDER_CREATE_TRANSACTIONS_DIR))
+            .context("initialize BuildKit create transaction directory")?;
         Ok(Self {
             token,
             engine_id: engine_id.to_string(),
@@ -433,10 +442,12 @@ pub(crate) fn is_persistent_builder_name(builder: &str) -> bool {
 }
 
 /// True when a buildkitd container or state volume belongs to a persistent
-/// builder. The object name embeds the builder name
+/// builder. Generated object names embed the builder name
 /// (`buildx_buildkit_<builder><node>[_state]`), so the marker survives the
-/// embedding. Retired generations and appended node indexes stay quarantined
-/// for explicit operator cleanup rather than infer ownership.
+/// embedding. Retired generations and generated numeric child nodes stay
+/// quarantined for explicit operator cleanup rather than infer ownership.
+/// Custom `--node` names carry no parent-domain proof; the Docker lease denies
+/// their privileged Buildx create path instead of adopting them here.
 pub(crate) fn is_persistent_builder_object(name: &str) -> bool {
     name.split(',')
         .any(|name| buildkit_daemon_builder_name(name).is_some_and(is_persistent_builder_name))
@@ -489,8 +500,12 @@ fn sanitize_builder_segment(value: &str) -> String {
 const DAEMON_CONTAINER_PREFIX: &str = "buildx_buildkit_";
 
 /// The docker-container daemon's container name for a single-node builder.
-/// Velnor owns node 0 only; the lease rejects persistent Buildx node indexes
-/// other than 0 so no appended daemon can escape this lifecycle registry.
+/// Velnor owns the generated node 0 only. The lease rejects reserved numeric
+/// children and denies Buildx's privileged generic create path for custom
+/// `--node` names, so current Buildx append requests cannot create untracked
+/// daemons. Pre-existing custom-name objects lack this reserved numeric shape;
+/// domain maintenance does not adopt them and leaves unproven objects for
+/// explicit operator cleanup.
 pub(crate) fn daemon_container_name(builder: &str) -> String {
     format!("{DAEMON_CONTAINER_PREFIX}{builder}0")
 }
@@ -615,9 +630,21 @@ enum BuilderOwnerPhase {
     Deleting,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BuilderReadinessPhase {
+    Stopping,
+    Stopped,
+    Starting,
+    Ready,
+}
+
+/// Historical readiness schema written before durable start epochs existed.
+/// It is parsed only by the explicit locked promotion path below. Ordinary
+/// readers stay v2-only so a stale v1 proof can never authorize a request.
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BuilderReadinessRecord {
+struct BuilderReadinessRecordV1 {
     version: u32,
     builder: String,
     domain_token: String,
@@ -626,12 +653,28 @@ struct BuilderReadinessRecord {
     config_fingerprint: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderReadinessRecord {
+    version: u32,
+    builder: String,
+    domain_token: String,
+    state_volume: String,
+    container_id: String,
+    config_fingerprint: String,
+    /// Monotonic per-builder start attempt. An older worker probe cannot
+    /// republish readiness after a later start has invalidated it.
+    epoch: u64,
+    phase: BuilderReadinessPhase,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BuilderCreatorLeaseRecord {
     version: u32,
     builder: String,
     domain_token: String,
+    generation: u64,
     config_fingerprint: String,
     container_id: Option<String>,
     archived_config_fingerprint: Option<String>,
@@ -646,6 +689,65 @@ pub(crate) struct PersistentBuildKitCreatorLease {
     config_fingerprint: String,
     generation: u64,
     _lock: std::fs::File,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PendingBuildKitCreatePhase {
+    Dispatched,
+    ContainerBound,
+    ArchiveAccepted,
+    Started,
+    ExistingReady,
+}
+
+/// Durable transaction evidence for a potentially late Docker
+/// ContainerCreate. The record remains until the exact container has passed
+/// archive, start, and worker-readiness proof. `/run` only serializes the
+/// Engine-volume lock; this journal survives reboot with Docker state.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingBuildKitCreateTransaction {
+    pub(crate) version: u32,
+    pub(crate) transaction_id: String,
+    pub(crate) engine_id: String,
+    pub(crate) domain_token: String,
+    pub(crate) builder: String,
+    pub(crate) generation: u64,
+    pub(crate) config_fingerprint: String,
+    pub(crate) state_volume: String,
+    pub(crate) container_name: String,
+    /// Exact forwarded request bytes, retained for audit. Recovery compares
+    /// the normalized shape below because the creator job label varies by job.
+    pub(crate) request_sha256: String,
+    pub(crate) normalized_shape_sha256: String,
+    /// Normalized, label-stable create request projection. Retained so a
+    /// crash before first inspect binding can compare the Docker object with
+    /// create intent rather than trusting only its name and labels.
+    pub(crate) expected_create_shape: serde_json::Value,
+    pub(crate) expected_image_id: String,
+    pub(crate) expects_config: bool,
+    pub(crate) phase: PendingBuildKitCreatePhase,
+    pub(crate) container_id: Option<String>,
+    pub(crate) attested_shape_sha256: Option<String>,
+    pub(crate) archived_config_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingBuildKitCreateAccess {
+    pub(crate) builder: String,
+    pub(crate) generation: u64,
+    pub(crate) transaction_id: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyPendingBuildKitCreateQuarantine {
+    version: u32,
+    engine_id: String,
+    domain_token: String,
+    volume: String,
+    legacy_marker_sha256: String,
 }
 
 /// `None` is an explicit no-config mode; an auto-discovered default config is
@@ -678,6 +780,411 @@ fn builder_creator_file(domain: &PersistentBuildKitDomain, builder: &str) -> Pat
         .root
         .join(BUILDER_CREATOR_LEASES_DIR)
         .join(format!("{digest}.json"))
+}
+
+fn builder_create_transaction_file(domain: &PersistentBuildKitDomain, builder: &str) -> PathBuf {
+    let digest = blake3::hash(builder.as_bytes()).to_hex();
+    domain
+        .root
+        .join(BUILDER_CREATE_TRANSACTIONS_DIR)
+        .join(format!("{digest}.json"))
+}
+
+fn legacy_create_quarantine_file(domain: &PersistentBuildKitDomain, volume: &str) -> PathBuf {
+    let digest = blake3::hash(volume.as_bytes()).to_hex();
+    domain
+        .root
+        .join(BUILDER_CREATE_TRANSACTIONS_DIR)
+        .join(format!("legacy-{digest}.json"))
+}
+
+fn validate_pending_buildkit_create(
+    record: &PendingBuildKitCreateTransaction,
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<()> {
+    let digest = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let expected_shape_bytes = serde_json::to_vec(&record.expected_create_shape)
+        .context("serialize pending BuildKit expected create shape")?;
+    let expected_shape_digest = Sha256::digest(expected_shape_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if record.version != BUILDER_CREATE_TRANSACTION_VERSION
+        || record.transaction_id.is_empty()
+        || record.engine_id != domain.engine_id
+        || record.domain_token != domain.token
+        || record.builder != builder
+        || record.state_volume != daemon_state_volume(builder)
+        || record.container_name != daemon_container_name(builder)
+        || record.config_fingerprint.trim().is_empty()
+        || !digest(&record.request_sha256)
+        || !digest(&record.normalized_shape_sha256)
+        || record.normalized_shape_sha256 != expected_shape_digest
+        || record
+            .expected_create_shape
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            != Some(record.container_name.as_str())
+        || record
+            .expected_create_shape
+            .get("volume")
+            .and_then(serde_json::Value::as_str)
+            != Some(record.state_volume.as_str())
+        || record
+            .expected_create_shape
+            .get("image_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(record.expected_image_id.as_str())
+        || record
+            .expected_create_shape
+            .get("create")
+            .and_then(serde_json::Value::as_object)
+            .is_none()
+        || !record.expected_image_id.starts_with("sha256:")
+    {
+        anyhow::bail!("pending BuildKit create transaction identity is invalid for {builder}");
+    }
+    if let Some(container_id) = record.container_id.as_deref()
+        && (container_id.trim().is_empty() || container_id.chars().any(char::is_control))
+    {
+        anyhow::bail!("pending BuildKit create transaction has an invalid container ID");
+    }
+    if let Some(shape) = record.attested_shape_sha256.as_deref()
+        && !digest(shape)
+    {
+        anyhow::bail!("pending BuildKit create has an invalid inspected-shape fingerprint");
+    }
+    if let Some(archive) = record.archived_config_fingerprint.as_deref()
+        && archive != record.config_fingerprint
+    {
+        anyhow::bail!("pending BuildKit create archive fingerprint does not match config");
+    }
+    match record.phase {
+        PendingBuildKitCreatePhase::Dispatched if record.container_id.is_some() => {
+            anyhow::bail!("dispatched BuildKit create already has a container ID");
+        }
+        PendingBuildKitCreatePhase::ContainerBound
+            if record.container_id.is_none() || record.attested_shape_sha256.is_none() =>
+        {
+            anyhow::bail!("bound BuildKit create is missing ID or full shape proof");
+        }
+        PendingBuildKitCreatePhase::ArchiveAccepted | PendingBuildKitCreatePhase::Started
+            if record.container_id.is_none() || record.archived_config_fingerprint.is_none() =>
+        {
+            anyhow::bail!("BuildKit create phase is missing ID or archive proof");
+        }
+        PendingBuildKitCreatePhase::ExistingReady
+            if record.container_id.is_none()
+                || record.attested_shape_sha256.is_none()
+                || record.archived_config_fingerprint.is_none() =>
+        {
+            anyhow::bail!("existing BuildKit readiness phase is missing ID or shape proof");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Read the durable pending-create record using a bounded no-follow regular
+/// file open. Callers must retain fail-closed behavior for malformed records.
+pub(crate) fn pending_buildkit_create_transaction(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<Option<PendingBuildKitCreateTransaction>> {
+    let path = builder_create_transaction_file(domain, builder);
+    let Some(bytes) =
+        read_control_file_no_follow_with_limit(&path, MAX_PENDING_BUILDKIT_CREATE_BYTES)?
+    else {
+        return Ok(None);
+    };
+    let record: PendingBuildKitCreateTransaction =
+        serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "parse pending BuildKit create transaction {}",
+                path.display()
+            )
+        })?;
+    validate_pending_buildkit_create(&record, domain, builder)?;
+    Ok(Some(record))
+}
+
+/// Persist the intent before ContainerCreate can reach dockerd. The caller
+/// already owns this builder's creator flock, so an existing journal is an
+/// unresolved transaction and cannot be overwritten by a retry.
+pub(crate) fn begin_pending_buildkit_create_transaction(
+    domain: &PersistentBuildKitDomain,
+    record: PendingBuildKitCreateTransaction,
+) -> Result<()> {
+    validate_pending_buildkit_create(&record, domain, &record.builder)?;
+    let directory = open_builder_creator_directory(domain)?;
+    let _state_lock = lock_creator_state_file(&directory, &record.builder)?;
+    if !creator_lock_is_held(&directory, &record.builder)? {
+        anyhow::bail!("pending BuildKit create has no live creator lease");
+    }
+    if legacy_pending_buildkit_create_is_quarantined(domain, &record.state_volume)? {
+        anyhow::bail!("legacy BuildKit create remains quarantined for operator repair");
+    }
+    let path = builder_create_transaction_file(domain, &record.builder);
+    if read_control_file_no_follow_with_limit(&path, MAX_PENDING_BUILDKIT_CREATE_BYTES)?.is_some() {
+        anyhow::bail!(
+            "pending BuildKit create transaction already exists for {}",
+            record.builder
+        );
+    }
+    let bytes =
+        serde_json::to_vec(&record).context("encode pending BuildKit create transaction")?;
+    write_atomic_document(&path, &bytes)
+}
+
+fn update_pending_buildkit_create_transaction(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    transaction_id: &str,
+    update: impl FnOnce(&mut PendingBuildKitCreateTransaction) -> Result<()>,
+) -> Result<PendingBuildKitCreateTransaction> {
+    let directory = open_builder_creator_directory(domain)?;
+    let _state_lock = lock_creator_state_file(&directory, builder)?;
+    if !creator_lock_is_held(&directory, builder)? {
+        anyhow::bail!("pending BuildKit create transaction has no live creator lease");
+    }
+    let path = builder_create_transaction_file(domain, builder);
+    let bytes = read_control_file_no_follow_with_limit(&path, MAX_PENDING_BUILDKIT_CREATE_BYTES)?
+        .context("pending BuildKit create transaction is missing")?;
+    let mut record: PendingBuildKitCreateTransaction = serde_json::from_slice(&bytes)
+        .with_context(|| {
+            format!(
+                "parse pending BuildKit create transaction {}",
+                path.display()
+            )
+        })?;
+    validate_pending_buildkit_create(&record, domain, builder)?;
+    if record.transaction_id != transaction_id {
+        anyhow::bail!("pending BuildKit create transaction ID changed");
+    }
+    update(&mut record)?;
+    validate_pending_buildkit_create(&record, domain, builder)?;
+    let bytes = serde_json::to_vec(&record).context("encode pending BuildKit create update")?;
+    write_atomic_document(&path, &bytes)?;
+    Ok(record)
+}
+
+pub(crate) fn bind_pending_buildkit_create_container(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    transaction_id: &str,
+    container_id: &str,
+    attested_shape_sha256: &str,
+) -> Result<PendingBuildKitCreateTransaction> {
+    update_pending_buildkit_create_transaction(domain, builder, transaction_id, |record| {
+        if record
+            .container_id
+            .as_deref()
+            .is_some_and(|existing| existing != container_id)
+        {
+            anyhow::bail!("pending BuildKit create was already bound to another container ID");
+        }
+        if record
+            .attested_shape_sha256
+            .as_deref()
+            .is_some_and(|existing| existing != attested_shape_sha256)
+        {
+            anyhow::bail!("pending BuildKit create shape changed after binding");
+        }
+        if record.phase == PendingBuildKitCreatePhase::Dispatched {
+            record.phase = PendingBuildKitCreatePhase::ContainerBound;
+        }
+        record.container_id = Some(container_id.to_owned());
+        record.attested_shape_sha256 = Some(attested_shape_sha256.to_owned());
+        Ok(())
+    })
+}
+
+pub(crate) fn record_pending_buildkit_create_archive(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    transaction_id: &str,
+    container_id: &str,
+    archive_fingerprint: &str,
+) -> Result<PendingBuildKitCreateTransaction> {
+    update_pending_buildkit_create_transaction(domain, builder, transaction_id, |record| {
+        if record.container_id.as_deref() != Some(container_id)
+            || record.config_fingerprint != archive_fingerprint
+        {
+            anyhow::bail!("BuildKit archive does not match pending transaction identity");
+        }
+        record.archived_config_fingerprint = Some(archive_fingerprint.to_owned());
+        record.phase = PendingBuildKitCreatePhase::ArchiveAccepted;
+        Ok(())
+    })
+}
+
+pub(crate) fn mark_pending_buildkit_create_started(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    transaction_id: &str,
+    container_id: &str,
+) -> Result<PendingBuildKitCreateTransaction> {
+    update_pending_buildkit_create_transaction(domain, builder, transaction_id, |record| {
+        if record.container_id.as_deref() != Some(container_id)
+            || record.archived_config_fingerprint.as_deref()
+                != Some(record.config_fingerprint.as_str())
+        {
+            anyhow::bail!("BuildKit start lacks matching immutable ID and archive proof");
+        }
+        record.phase = PendingBuildKitCreatePhase::Started;
+        Ok(())
+    })
+}
+
+pub(crate) fn mark_pending_buildkit_create_existing_ready(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    transaction_id: &str,
+    container_id: &str,
+    state: &str,
+) -> Result<PendingBuildKitCreateTransaction> {
+    if state != "running" {
+        anyhow::bail!("existing BuildKit readiness is valid only for a running daemon");
+    }
+    let transaction = pending_buildkit_create_transaction(domain, builder)?
+        .context("pending BuildKit create transaction is missing")?;
+    if transaction.transaction_id != transaction_id
+        || transaction.container_id.as_deref() != Some(container_id)
+        || !builder_readiness_matches(
+            domain,
+            builder,
+            container_id,
+            &transaction.config_fingerprint,
+        )?
+    {
+        anyhow::bail!("existing BuildKit ready state does not match this container");
+    }
+    update_pending_buildkit_create_transaction(domain, builder, transaction_id, |record| {
+        if record.container_id.as_deref() != Some(container_id) {
+            anyhow::bail!("existing BuildKit readiness does not match transaction ID");
+        }
+        record.archived_config_fingerprint = Some(record.config_fingerprint.clone());
+        record.phase = PendingBuildKitCreatePhase::ExistingReady;
+        Ok(())
+    })
+}
+
+/// Remove a journal only after the durable readiness record already matches
+/// its transaction. A crash between readiness publication and this unlink is
+/// therefore idempotently recoverable.
+pub(crate) fn finish_pending_buildkit_create_transaction(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    transaction_id: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+) -> Result<()> {
+    let directory = open_builder_creator_directory(domain)?;
+    let _state_lock = lock_creator_state_file(&directory, builder)?;
+    if !creator_lock_is_held(&directory, builder)? {
+        anyhow::bail!("cannot finish BuildKit transaction without its live creator lease");
+    }
+    let path = builder_create_transaction_file(domain, builder);
+    let bytes = read_control_file_no_follow_with_limit(&path, MAX_PENDING_BUILDKIT_CREATE_BYTES)?
+        .context("pending BuildKit create transaction is missing")?;
+    let record: PendingBuildKitCreateTransaction =
+        serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "parse pending BuildKit create transaction {}",
+                path.display()
+            )
+        })?;
+    validate_pending_buildkit_create(&record, domain, builder)?;
+    if record.transaction_id != transaction_id
+        || record.container_id.as_deref() != Some(container_id)
+        || record.config_fingerprint != config_fingerprint
+        || record.archived_config_fingerprint.as_deref() != Some(config_fingerprint)
+        || !builder_readiness_matches(domain, builder, container_id, config_fingerprint)?
+    {
+        anyhow::bail!("BuildKit transaction lacks matching durable readiness proof");
+    }
+    let domain_dir = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&domain.root)?;
+    let transactions =
+        domain_dir.open_relative_directory(Path::new(BUILDER_CREATE_TRANSACTIONS_DIR))?;
+    transactions.remove_tree_entry(std::ffi::OsStr::new(
+        path.file_name().context("transaction filename missing")?,
+    ))?;
+    transactions
+        .sync_directory()
+        .context("sync completed BuildKit transaction removal")
+}
+
+/// Preserve a pre-journal runtime marker durably before removing it. Such a
+/// marker has no config or shape fingerprint and is intentionally not
+/// recoverable; it remains quarantined for operator repair.
+pub(crate) fn quarantine_legacy_pending_buildkit_create(
+    domain: &PersistentBuildKitDomain,
+    volume: &str,
+    marker_bytes: &[u8],
+) -> Result<()> {
+    let path = legacy_create_quarantine_file(domain, volume);
+    let marker_sha256 = Sha256::digest(marker_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if let Some(bytes) = read_control_file_no_follow_with_limit(&path, 4096)? {
+        let existing: LegacyPendingBuildKitCreateQuarantine = serde_json::from_slice(&bytes)
+            .context("parse existing legacy BuildKit create quarantine")?;
+        validate_legacy_create_quarantine(&existing, domain, volume, Some(&marker_sha256))?;
+        return Ok(());
+    }
+    let record = LegacyPendingBuildKitCreateQuarantine {
+        version: LEGACY_CREATE_QUARANTINE_VERSION,
+        engine_id: domain.engine_id.clone(),
+        domain_token: domain.token.clone(),
+        volume: volume.to_owned(),
+        legacy_marker_sha256: marker_sha256,
+    };
+    let bytes = serde_json::to_vec(&record).context("encode legacy BuildKit create quarantine")?;
+    write_atomic_document(&path, &bytes)
+}
+
+fn validate_legacy_create_quarantine(
+    record: &LegacyPendingBuildKitCreateQuarantine,
+    domain: &PersistentBuildKitDomain,
+    volume: &str,
+    expected_marker_sha256: Option<&str>,
+) -> Result<()> {
+    let digest_is_canonical = record.legacy_marker_sha256.len() == 64
+        && record
+            .legacy_marker_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if record.version != LEGACY_CREATE_QUARANTINE_VERSION
+        || record.engine_id != domain.engine_id
+        || record.domain_token != domain.token
+        || record.volume != volume
+        || !digest_is_canonical
+        || expected_marker_sha256.is_some_and(|expected| expected != record.legacy_marker_sha256)
+    {
+        anyhow::bail!("legacy BuildKit create quarantine identity or marker digest mismatch");
+    }
+    Ok(())
+}
+
+pub(crate) fn legacy_pending_buildkit_create_is_quarantined(
+    domain: &PersistentBuildKitDomain,
+    volume: &str,
+) -> Result<bool> {
+    let path = legacy_create_quarantine_file(domain, volume);
+    let Some(bytes) = read_control_file_no_follow_with_limit(&path, 4096)? else {
+        return Ok(false);
+    };
+    let record: LegacyPendingBuildKitCreateQuarantine =
+        serde_json::from_slice(&bytes).context("parse legacy BuildKit create quarantine")?;
+    validate_legacy_create_quarantine(&record, domain, volume, None)?;
+    Ok(true)
 }
 
 fn builder_creator_lock_name(builder: &str) -> String {
@@ -746,6 +1253,7 @@ fn validate_creator_record(
     if record.version != BUILDER_CREATOR_LEASE_VERSION
         || record.builder != builder
         || record.domain_token != domain.token
+        || record.generation == 0
         || record.config_fingerprint.trim().is_empty()
     {
         anyhow::bail!("BuildKit creator lease identity does not match {builder}");
@@ -809,6 +1317,13 @@ pub(crate) fn begin_persistent_builder_creator_lease(
             }
         }
     }
+    if let Some(transaction) = pending_buildkit_create_transaction(domain, builder)?
+        && transaction.config_fingerprint != config_fingerprint
+    {
+        anyhow::bail!(
+            "pending BuildKit create for {builder} has a different config fingerprint; operator repair required"
+        );
+    }
     let lease = PersistentBuildKitCreatorLease {
         domain: domain.clone(),
         builder: builder.to_owned(),
@@ -819,11 +1334,42 @@ pub(crate) fn begin_persistent_builder_creator_lease(
     write_builder_creator_record(
         &lease.domain,
         &lease.builder,
+        lease.generation,
         &lease.config_fingerprint,
         None,
         None,
     )?;
     Ok(lease)
+}
+
+pub(crate) fn pending_buildkit_create_access(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+    generation: u64,
+) -> Result<Option<PendingBuildKitCreateAccess>> {
+    let Some(record) = pending_buildkit_create_transaction(domain, builder)? else {
+        if legacy_pending_buildkit_create_is_quarantined(domain, &daemon_state_volume(builder))? {
+            anyhow::bail!("legacy BuildKit create remains quarantined for operator repair");
+        }
+        return Ok(None);
+    };
+    if record.config_fingerprint != config_fingerprint {
+        anyhow::bail!("pending BuildKit create does not match this setup generation");
+    }
+    if !creator_lock_is_held(&open_builder_creator_directory(domain)?, builder)? {
+        anyhow::bail!("pending BuildKit create has no live matching creator lease");
+    }
+    let live = read_live_builder_creator(domain, builder)?
+        .context("pending BuildKit create lacks a live creator record")?;
+    if live.config_fingerprint != config_fingerprint || live.generation != generation {
+        anyhow::bail!("pending BuildKit create creator config does not match");
+    }
+    Ok(Some(PendingBuildKitCreateAccess {
+        builder: builder.to_owned(),
+        generation: record.generation,
+        transaction_id: record.transaction_id,
+    }))
 }
 
 impl PersistentBuildKitCreatorLease {
@@ -845,6 +1391,7 @@ impl PersistentBuildKitCreatorLease {
 fn write_builder_creator_record(
     domain: &PersistentBuildKitDomain,
     builder: &str,
+    generation: u64,
     config_fingerprint: &str,
     container_id: Option<&str>,
     archived_config_fingerprint: Option<&str>,
@@ -853,6 +1400,7 @@ fn write_builder_creator_record(
         version: BUILDER_CREATOR_LEASE_VERSION,
         builder: builder.to_owned(),
         domain_token: domain.token.clone(),
+        generation,
         config_fingerprint: config_fingerprint.to_owned(),
         container_id: container_id.map(str::to_owned),
         archived_config_fingerprint: archived_config_fingerprint.map(str::to_owned),
@@ -864,6 +1412,7 @@ fn write_builder_creator_record(
 fn update_live_builder_creator(
     domain: &PersistentBuildKitDomain,
     builder: &str,
+    generation: u64,
     config_fingerprint: &str,
     container_id: &str,
     archived_config_fingerprint: Option<&str>,
@@ -879,7 +1428,7 @@ fn update_live_builder_creator(
     let mut record: BuilderCreatorLeaseRecord = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse BuildKit creator lease {}", path.display()))?;
     validate_creator_record(&record, domain, builder)?;
-    if record.config_fingerprint != config_fingerprint {
+    if record.generation != generation || record.config_fingerprint != config_fingerprint {
         anyhow::bail!("BuildKit creator config changed while creating {builder}");
     }
     if record
@@ -906,15 +1455,24 @@ fn update_live_builder_creator(
 pub(crate) fn bind_persistent_builder_creator_container(
     domain: &PersistentBuildKitDomain,
     builder: &str,
+    generation: u64,
     config_fingerprint: &str,
     container_id: &str,
 ) -> Result<()> {
-    update_live_builder_creator(domain, builder, config_fingerprint, container_id, None)
+    update_live_builder_creator(
+        domain,
+        builder,
+        generation,
+        config_fingerprint,
+        container_id,
+        None,
+    )
 }
 
 pub(crate) fn record_persistent_builder_creator_archive(
     domain: &PersistentBuildKitDomain,
     builder: &str,
+    generation: u64,
     config_fingerprint: &str,
     container_id: &str,
     archive_fingerprint: &str,
@@ -922,6 +1480,7 @@ pub(crate) fn record_persistent_builder_creator_archive(
     update_live_builder_creator(
         domain,
         builder,
+        generation,
         config_fingerprint,
         container_id,
         Some(archive_fingerprint),
@@ -963,7 +1522,7 @@ fn remove_builder_auxiliary_metadata(domain_root: &Path, builder: &str) -> Resul
     Ok(())
 }
 
-fn read_builder_readiness(
+fn read_builder_readiness_state(
     domain: &PersistentBuildKitDomain,
     builder: &str,
 ) -> Result<Option<BuilderReadinessRecord>> {
@@ -987,6 +1546,124 @@ fn read_builder_readiness(
     Ok(Some(proof))
 }
 
+/// Promote the exact historical v1 readiness document after a one-time
+/// locked re-attestation. Package installation drains every Velnor fleet
+/// unit before replacing the binary, so no v1 writer can overlap this
+/// transition. The atomic rename leaves the original v1 bytes intact until
+/// v2 is fully written and synced. Downgrade is deliberately fail-closed:
+/// old strict readers reject v2's epoch/phase fields, so rollback requires
+/// roll-forward or an operator-controlled builder rebootstrap; stale v1
+/// readiness is never restored as authority.
+#[cfg(unix)]
+pub(crate) fn promote_builder_readiness_v1_with<G>(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_config_fingerprint: &str,
+    acquire_volume_lock: impl Fn(&str) -> Result<G>,
+    verify_engine: impl Fn() -> Result<()>,
+    attest_container: impl Fn(&str, &str, &str) -> Result<()>,
+    probe_workers: impl Fn(&str) -> Result<()>,
+) -> Result<bool> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse readiness migration for a builder from another domain");
+    }
+    if expected_config_fingerprint.trim().is_empty() {
+        anyhow::bail!("BuildKit readiness migration requires an exact config fingerprint");
+    }
+    let volume = daemon_state_volume(builder);
+    let path = builder_readiness_file(domain, builder);
+    let (legacy, original_bytes) = {
+        let _volume_lock = acquire_volume_lock(&volume)?;
+        verify_engine()?;
+        let Some(bytes) = read_control_file_no_follow_with_limit(&path, 4096)? else {
+            return Ok(false);
+        };
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse BuildKit readiness proof {}", path.display()))?;
+        match envelope.get("version").and_then(serde_json::Value::as_u64) {
+            Some(version) if version == u64::from(BUILDER_READINESS_VERSION) => {
+                let proof = read_builder_readiness_state(domain, builder)?
+                    .context("v2 BuildKit readiness proof disappeared during migration check")?;
+                if proof.config_fingerprint != expected_config_fingerprint {
+                    anyhow::bail!(
+                        "persistent BuildKit config mode changed for existing builder {builder}"
+                    );
+                }
+                return Ok(false);
+            }
+            Some(version) if version == u64::from(BUILDER_READINESS_LEGACY_VERSION) => {}
+            _ => anyhow::bail!(
+                "unsupported BuildKit readiness schema in {}",
+                path.display()
+            ),
+        }
+        let legacy: BuilderReadinessRecordV1 = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse legacy BuildKit readiness proof {}", path.display()))?;
+        if legacy.version != BUILDER_READINESS_LEGACY_VERSION
+            || legacy.builder != builder
+            || legacy.domain_token != domain.token
+            || legacy.state_volume != volume
+            || legacy.container_id.trim().is_empty()
+            || legacy.container_id.chars().any(char::is_control)
+            || legacy.config_fingerprint != expected_config_fingerprint
+        {
+            anyhow::bail!(
+                "legacy BuildKit readiness proof {} has mismatched identity or config",
+                path.display()
+            );
+        }
+        if pending_buildkit_create_transaction(domain, builder)?.is_some()
+            || legacy_pending_buildkit_create_is_quarantined(domain, &volume)?
+        {
+            anyhow::bail!("BuildKit create state must settle before readiness migration");
+        }
+        attest_container(builder, &volume, &legacy.container_id)
+            .context("re-attest legacy BuildKit container before readiness migration")?;
+        (legacy, bytes)
+    };
+
+    // Worker polling happens outside the volume flock. We reacquire and
+    // re-attest the same immutable object before publishing the new epoch.
+    probe_workers(&legacy.container_id)
+        .context("re-probe BuildKit workers before v1 readiness promotion")?;
+
+    let _volume_lock = acquire_volume_lock(&volume)?;
+    verify_engine()?;
+    let current_bytes = read_control_file_no_follow_with_limit(&path, 4096)?
+        .context("legacy BuildKit readiness proof disappeared before promotion")?;
+    if current_bytes != original_bytes {
+        anyhow::bail!("BuildKit readiness proof changed during v1 promotion");
+    }
+    if pending_buildkit_create_transaction(domain, builder)?.is_some()
+        || legacy_pending_buildkit_create_is_quarantined(domain, &volume)?
+    {
+        anyhow::bail!("BuildKit create state changed during readiness migration");
+    }
+    attest_container(builder, &volume, &legacy.container_id)
+        .context("re-attest legacy BuildKit container before v2 publication")?;
+    let proof = BuilderReadinessRecord {
+        version: BUILDER_READINESS_VERSION,
+        builder: builder.to_owned(),
+        domain_token: domain.token.clone(),
+        state_volume: volume,
+        container_id: legacy.container_id,
+        config_fingerprint: legacy.config_fingerprint,
+        epoch: 1,
+        phase: BuilderReadinessPhase::Ready,
+    };
+    let bytes = serde_json::to_vec(&proof).context("encode promoted BuildKit readiness proof")?;
+    write_atomic_document(&path, &bytes).context("atomically promote BuildKit readiness schema")?;
+    Ok(true)
+}
+
+fn read_builder_readiness(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<Option<BuilderReadinessRecord>> {
+    Ok(read_builder_readiness_state(domain, builder)?
+        .filter(|proof| proof.phase == BuilderReadinessPhase::Ready))
+}
+
 pub(crate) fn builder_readiness_matches(
     domain: &PersistentBuildKitDomain,
     builder: &str,
@@ -997,6 +1674,290 @@ pub(crate) fn builder_readiness_matches(
         return Ok(false);
     };
     Ok(proof.container_id == container_id && proof.config_fingerprint == config_fingerprint)
+}
+
+/// Current durable start epoch. Missing state is epoch zero for a builder
+/// that has not dispatched its first persistent daemon start.
+pub(crate) fn builder_readiness_epoch(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<u64> {
+    Ok(read_builder_readiness_state(domain, builder)?.map_or(0, |state| state.epoch))
+}
+
+/// Seed a newly admitted lease with the persisted epoch while the caller
+/// holds the shared Engine/state-volume lock. A start already in flight or a
+/// config-mode mismatch must settle before setup exposes guest capabilities.
+pub(crate) fn builder_readiness_epoch_for_setup(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+) -> Result<u64> {
+    let Some(state) = read_builder_readiness_state(domain, builder)? else {
+        return Ok(0);
+    };
+    if state.phase != BuilderReadinessPhase::Ready {
+        anyhow::bail!("BuildKit start is still in progress for {builder}");
+    }
+    if state.config_fingerprint != config_fingerprint {
+        anyhow::bail!("persistent BuildKit config mode changed for existing builder {builder}");
+    }
+    Ok(state.epoch)
+}
+
+pub(crate) fn builder_readiness_matches_epoch(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+    expected_epoch: u64,
+) -> Result<bool> {
+    let Some(state) = read_builder_readiness_state(domain, builder)? else {
+        return Ok(false);
+    };
+    Ok(state.phase == BuilderReadinessPhase::Ready
+        && state.epoch == expected_epoch
+        && state.container_id == container_id
+        && state.config_fingerprint == config_fingerprint)
+}
+
+pub(crate) fn builder_starting_readiness_matches_epoch(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+    expected_epoch: u64,
+) -> Result<bool> {
+    let Some(state) = read_builder_readiness_state(domain, builder)? else {
+        return Ok(false);
+    };
+    Ok(state.phase == BuilderReadinessPhase::Starting
+        && state.epoch == expected_epoch
+        && state.container_id == container_id
+        && state.config_fingerprint == config_fingerprint)
+}
+
+/// Publish readiness only for the current start epoch. Callers must hold the
+/// shared Engine/state-volume lock and have just re-attested the immutable
+/// container ID and worker state.
+pub(crate) fn publish_builder_readiness_for_epoch(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+    expected_epoch: u64,
+) -> Result<()> {
+    let current = read_builder_readiness_state(domain, builder)?
+        .context("BuildKit start epoch disappeared before readiness publication")?;
+    if current.phase != BuilderReadinessPhase::Starting
+        || current.epoch != expected_epoch
+        || current.container_id != container_id
+        || current.config_fingerprint != config_fingerprint
+    {
+        anyhow::bail!("stale BuildKit worker probe cannot publish readiness");
+    }
+    let proof = BuilderReadinessRecord {
+        version: BUILDER_READINESS_VERSION,
+        builder: builder.to_owned(),
+        domain_token: domain.token.clone(),
+        state_volume: daemon_state_volume(builder),
+        container_id: container_id.to_owned(),
+        config_fingerprint: config_fingerprint.to_owned(),
+        epoch: expected_epoch,
+        phase: BuilderReadinessPhase::Ready,
+    };
+    let bytes = serde_json::to_vec(&proof).context("encode BuildKit readiness proof")?;
+    write_atomic_document(&builder_readiness_file(domain, builder), &bytes)
+}
+
+/// Remove old restart authority before Docker receives a start request. The
+/// caller holds the shared Engine/volume lock. A missing record is valid for
+/// a newly created daemon; a mismatched or corrupt record fails closed.
+pub(crate) fn invalidate_builder_readiness_before_start(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+    expected_epoch: u64,
+) -> Result<u64> {
+    // Caller holds the shared Engine/state-volume flock. Replacing Ready with
+    // Starting both revokes old authority and advances the publication epoch
+    // in one durable rename. A concurrent start advances it again; an older
+    // probe can then never restore readiness.
+    let previous = read_builder_readiness_state(domain, builder)?;
+    if let Some(previous) = previous.as_ref()
+        && (previous.container_id != container_id
+            || previous.config_fingerprint != config_fingerprint)
+    {
+        anyhow::bail!("refuse BuildKit start with mismatched durable readiness state");
+    }
+    let current_epoch = previous.as_ref().map_or(0, |proof| proof.epoch);
+    if current_epoch != expected_epoch {
+        anyhow::bail!("stale BuildKit start admission: expected epoch {expected_epoch}, current epoch {current_epoch}");
+    }
+    let epoch = current_epoch
+        .checked_add(1)
+        .context("BuildKit readiness epoch exhausted")?;
+    let record = BuilderReadinessRecord {
+        version: BUILDER_READINESS_VERSION,
+        builder: builder.to_owned(),
+        domain_token: domain.token.clone(),
+        state_volume: daemon_state_volume(builder),
+        container_id: container_id.to_owned(),
+        config_fingerprint: config_fingerprint.to_owned(),
+        epoch,
+        phase: BuilderReadinessPhase::Starting,
+    };
+    let bytes = serde_json::to_vec(&record).context("encode BuildKit start epoch")?;
+    write_atomic_document(&builder_readiness_file(domain, builder), &bytes)
+        .context("persist BuildKit start epoch before Docker start")?;
+    Ok(epoch)
+}
+
+/// Revoke exec readiness and advance the epoch before dispatching a host
+/// stop. The caller holds the exact Engine/state-volume flock. A failed or
+/// ambiguous stop leaves `Stopping`, which can only regain authority after a
+/// later exact-ID worker probe publishes a newer `Ready` epoch.
+pub(crate) fn invalidate_builder_readiness_before_stop(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+) -> Result<Option<(String, u64)>> {
+    let Some(previous) = read_builder_readiness_state(domain, builder)? else {
+        return Ok(None);
+    };
+    if previous.container_id != container_id {
+        anyhow::bail!("refuse stop: durable BuildKit readiness names another container ID");
+    }
+    let epoch = previous
+        .epoch
+        .checked_add(1)
+        .context("BuildKit readiness epoch exhausted before stop")?;
+    let record = BuilderReadinessRecord {
+        version: BUILDER_READINESS_VERSION,
+        builder: builder.to_owned(),
+        domain_token: domain.token.clone(),
+        state_volume: daemon_state_volume(builder),
+        container_id: container_id.to_owned(),
+        config_fingerprint: previous.config_fingerprint.clone(),
+        epoch,
+        phase: BuilderReadinessPhase::Stopping,
+    };
+    write_atomic_document(
+        &builder_readiness_file(domain, builder),
+        &serde_json::to_vec(&record).context("encode BuildKit stopping epoch")?,
+    )
+    .context("persist BuildKit readiness revocation before Docker stop")?;
+    Ok(Some((record.config_fingerprint, epoch)))
+}
+
+pub(crate) fn publish_builder_stopped_after_stop(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+    expected_epoch: u64,
+) -> Result<()> {
+    let current = read_builder_readiness_state(domain, builder)?
+        .context("BuildKit stop epoch disappeared before stopped publication")?;
+    if current.phase != BuilderReadinessPhase::Stopping
+        || current.epoch != expected_epoch
+        || current.container_id != container_id
+        || current.config_fingerprint != config_fingerprint
+    {
+        anyhow::bail!("stale BuildKit stop cannot publish a stopped state");
+    }
+    let stopped = BuilderReadinessRecord {
+        version: BUILDER_READINESS_VERSION,
+        phase: BuilderReadinessPhase::Stopped,
+        ..current
+    };
+    write_atomic_document(
+        &builder_readiness_file(domain, builder),
+        &serde_json::to_vec(&stopped).context("encode BuildKit stopped state")?,
+    )
+}
+
+/// Stop one already-attested immutable ID while its caller owns the shared
+/// volume lock. Readiness is durably revoked before Docker can stop it.
+fn stop_builder_under_volume_lock(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+) -> Result<bool> {
+    stop_builder_under_volume_lock_with(
+        domain,
+        builder,
+        container_id,
+        stop_attested_builder_confirmed,
+        |id| crate::docker::Docker::host().inspect_exit(id),
+    )
+}
+
+fn stop_builder_under_volume_lock_with(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    mut stop: impl FnMut(&str) -> Result<bool>,
+    mut inspect: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
+) -> Result<bool> {
+    let stopping = invalidate_builder_readiness_before_stop(domain, builder, container_id)?;
+    let stopped = stop(container_id)?;
+    let Some((config_fingerprint, epoch)) = stopping else {
+        return Ok(stopped);
+    };
+    if !stopped {
+        // The stop helper returns false only for a definitive immutable-ID
+        // 404, so this exact daemon is absent and cannot serve exec traffic.
+        publish_builder_stopped_after_stop(
+            domain,
+            builder,
+            container_id,
+            &config_fingerprint,
+            epoch,
+        )?;
+        return Ok(false);
+    }
+    let state = match inspect(container_id) {
+        Ok(state) => state.status,
+        Err(error) if crate::docker::client::is_not_found(&error) => None,
+        Err(error) => {
+            return Err(error).context("verify BuildKit daemon state after stop");
+        }
+    };
+    if !matches!(
+        state,
+        None | Some(
+            crate::docker::client::ContainerState::Created
+                | crate::docker::client::ContainerState::Exited
+                | crate::docker::client::ContainerState::Dead
+        )
+    ) {
+        anyhow::bail!("BuildKit stop did not leave daemon stopped: {state:?}");
+    }
+    publish_builder_stopped_after_stop(domain, builder, container_id, &config_fingerprint, epoch)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn write_test_builder_readiness(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+) -> Result<()> {
+    let proof = BuilderReadinessRecord {
+        version: BUILDER_READINESS_VERSION,
+        builder: builder.to_owned(),
+        domain_token: domain.token.clone(),
+        state_volume: daemon_state_volume(builder),
+        container_id: container_id.to_owned(),
+        config_fingerprint: config_fingerprint.to_owned(),
+        epoch: read_builder_readiness_state(domain, builder)?.map_or(1, |current| current.epoch),
+        phase: BuilderReadinessPhase::Ready,
+    };
+    let bytes = serde_json::to_vec(&proof).context("encode test BuildKit readiness proof")?;
+    write_atomic_document(&builder_readiness_file(domain, builder), &bytes)
 }
 
 pub(crate) fn builder_readiness_for_config(
@@ -1013,7 +1974,7 @@ pub(crate) fn builder_readiness_for_config(
     Ok(Some(proof.container_id))
 }
 
-fn config_mode_matches_command(fingerprint: &str, has_config_flag: bool) -> bool {
+pub(crate) fn config_mode_matches_command(fingerprint: &str, has_config_flag: bool) -> bool {
     (fingerprint == "no-config-v1") != has_config_flag
 }
 
@@ -1027,12 +1988,38 @@ pub(crate) fn persist_builder_readiness_after_start(
     builder: &str,
     expected_container_id: &str,
     config_fingerprint: &str,
+    expected_epoch: u64,
 ) -> Result<()> {
-    wait_for_attested_buildkit_ready(expected_container_id)
-        .with_context(|| format!("wait for BuildKit daemon {builder} after start"))?;
-    with_attested_domain_builder(
+    let pending = probe_builder_readiness_for_epoch(
         domain,
         builder,
+        expected_container_id,
+        config_fingerprint,
+        expected_epoch,
+        || wait_for_attested_buildkit_ready(expected_container_id),
+    )?;
+    let host_socket = crate::docker::engine::resolve_docker_endpoint()
+        .context("resolve Docker endpoint for BuildKit readiness attestation")?
+        .socket;
+    with_attested_domain_builder_with(
+        domain,
+        builder,
+        |_, _, volume| {
+            if let Some(transaction) = pending.as_ref() {
+                let access = PendingBuildKitCreateAccess {
+                    builder: builder.to_owned(),
+                    generation: transaction.generation,
+                    transaction_id: transaction.transaction_id.clone(),
+                };
+                crate::docker_lease::lock_host_volume_name_for_pending_create(
+                    domain, volume, &access,
+                )
+            } else {
+                crate::docker_lease::lock_host_volume_name_for_domain(domain, volume)
+            }
+        },
+        attest_buildkit_removal_volume,
+        attest_buildkit_removal_container,
         |_, daemon, volume, volume_present, container_id| {
             if !volume_present {
                 anyhow::bail!("BuildKit state volume for {daemon} disappeared after start");
@@ -1052,18 +2039,91 @@ pub(crate) fn persist_builder_readiness_after_start(
                     "BuildKit daemon {daemon} stopped before readiness proof publication"
                 );
             }
-            let proof = BuilderReadinessRecord {
-                version: BUILDER_READINESS_VERSION,
-                builder: builder.to_owned(),
-                domain_token: domain.token.clone(),
-                state_volume: volume.to_owned(),
-                container_id: container_id.to_owned(),
-                config_fingerprint: config_fingerprint.to_owned(),
-            };
-            let bytes = serde_json::to_vec(&proof).context("encode BuildKit readiness proof")?;
-            write_atomic_document(&builder_readiness_file(domain, builder), &bytes)
+            if let Some(transaction) = pending.as_ref() {
+                let (status, body) = crate::docker_lease::inspect_container_on_host(
+                    &host_socket,
+                    expected_container_id,
+                )
+                .context("re-inspect BuildKit daemon shape before readiness publication")?;
+                if !(200..300).contains(&status) {
+                    anyhow::bail!(
+                        "BuildKit daemon full-shape re-attestation returned HTTP {status}"
+                    );
+                }
+                let (id, shape, full_state) =
+                    crate::docker_lease::attest_pending_buildkit_create_inspect(
+                        &body,
+                        transaction,
+                    )?;
+                let expected_shape = transaction
+                    .attested_shape_sha256
+                    .as_deref()
+                    .context("BuildKit create transaction lacks a full-shape fingerprint")?;
+                if id != expected_container_id || shape != expected_shape || full_state != "running"
+                {
+                    anyhow::bail!(
+                        "BuildKit daemon shape or state changed before readiness publication"
+                    );
+                }
+            }
+            publish_builder_readiness_for_epoch(
+                domain,
+                builder,
+                container_id,
+                config_fingerprint,
+                expected_epoch,
+            )
         },
-    )
+    )?;
+    if let Some(transaction) = pending {
+        if transaction.container_id.as_deref() != Some(expected_container_id)
+            || transaction.config_fingerprint != config_fingerprint
+            || transaction.archived_config_fingerprint.as_deref() != Some(config_fingerprint)
+        {
+            anyhow::bail!("BuildKit readiness cannot settle a different create transaction");
+        }
+        finish_pending_buildkit_create_transaction(
+            domain,
+            builder,
+            &transaction.transaction_id,
+            expected_container_id,
+            config_fingerprint,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn probe_builder_readiness_for_epoch(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: &str,
+    config_fingerprint: &str,
+    expected_epoch: u64,
+    probe: impl FnOnce() -> Result<()>,
+) -> Result<Option<PendingBuildKitCreateTransaction>> {
+    let start_state = read_builder_readiness_state(domain, builder)?
+        .context("BuildKit start epoch disappeared before readiness probe")?;
+    if start_state.phase != BuilderReadinessPhase::Starting
+        || start_state.epoch != expected_epoch
+        || start_state.container_id != expected_container_id
+        || start_state.config_fingerprint != config_fingerprint
+    {
+        anyhow::bail!("BuildKit readiness probe does not match the current start epoch");
+    }
+    let pending = pending_buildkit_create_transaction(domain, builder)?;
+    if let Some(transaction) = pending.as_ref()
+        && (transaction.container_id.as_deref() != Some(expected_container_id)
+            || transaction.config_fingerprint != config_fingerprint
+            || transaction.archived_config_fingerprint.as_deref() != Some(config_fingerprint)
+            || !matches!(
+                transaction.phase,
+                PendingBuildKitCreatePhase::ArchiveAccepted | PendingBuildKitCreatePhase::Started
+            ))
+    {
+        anyhow::bail!("BuildKit start readiness does not match its durable create transaction");
+    }
+    probe().with_context(|| format!("wait for BuildKit daemon {builder} after start"))?;
+    Ok(pending)
 }
 
 fn claims_file(domain_root: &Path, builder: &str) -> PathBuf {
@@ -2132,13 +3192,29 @@ fn with_attested_domain_builder<T>(
     with_attested_domain_builder_with(
         domain,
         builder,
-        |identity_root, engine_id, volume| {
-            crate::docker_lease::lock_host_volume_name_for_domain(identity_root, engine_id, volume)
-        },
+        |_, _, volume| crate::docker_lease::lock_host_volume_name_for_domain(domain, volume),
         attest_buildkit_removal_volume,
         attest_buildkit_removal_container,
         operation,
     )
+}
+
+#[cfg(unix)]
+fn lock_domain_buildkit_volume_for_current_transaction(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+    volume: &str,
+) -> Result<crate::docker_lease::VolumeOperationLocks> {
+    if pending_buildkit_create_transaction(domain, builder)?.is_none() {
+        return crate::docker_lease::lock_host_volume_name_for_domain(domain, volume);
+    }
+    let creator = read_live_builder_creator(domain, builder)?
+        .context("pending BuildKit volume operation has no live creator lease")?;
+    let access =
+        pending_buildkit_create_access(domain, builder, config_fingerprint, creator.generation)?
+            .context("pending BuildKit volume operation has no matching transaction access")?;
+    crate::docker_lease::lock_host_volume_name_for_pending_create(domain, volume, &access)
 }
 
 fn with_attested_domain_builder_with<G, T>(
@@ -2192,7 +3268,7 @@ pub(crate) fn stop_builder_in_domain(
             let Some(container_id) = container_id else {
                 return Ok(false);
             };
-            stop_attested_builder_confirmed(container_id)
+            stop_builder_under_volume_lock(domain, builder, container_id)
                 .with_context(|| format!("stop BuildKit daemon {daemon}"))
         },
     )
@@ -2213,21 +3289,61 @@ pub(crate) fn start_builder_in_domain_matching_id(
     builder: &str,
     expected_container_id: Option<&str>,
 ) -> Result<bool> {
-    let Some(container_id) =
-        start_builder_container_in_domain_matching_id(domain, builder, expected_container_id)?
+    let readiness = read_builder_readiness_state(domain, builder)?
+        .context("refuse host restart without durable BuildKit readiness state")?;
+    if expected_container_id.is_some_and(|expected| expected != readiness.container_id) {
+        anyhow::bail!("refuse host restart: readiness state names another immutable container ID");
+    }
+    let Some((container_id, start_epoch)) = start_builder_container_in_domain_matching_id(
+        domain,
+        builder,
+        expected_container_id,
+        &readiness.config_fingerprint,
+    )?
     else {
         anyhow::bail!(
             "attested BuildKit daemon {} disappeared before restart",
             daemon_container_name(builder)
         );
     };
-    wait_for_attested_buildkit_ready(&container_id).with_context(|| {
-        format!(
-            "wait for BuildKit daemon {} after start",
-            daemon_container_name(builder)
-        )
-    })?;
+    persist_builder_readiness_after_start(
+        domain,
+        builder,
+        &container_id,
+        &readiness.config_fingerprint,
+        start_epoch,
+    )?;
     Ok(true)
+}
+
+/// Recover a previously-ready daemon whose last start attempt was durable but
+/// did not publish Ready. The exact immutable ID and config remain bound by
+/// the Starting record; restart logic re-attests both under the shared volume
+/// lock and advances the epoch before another start/probe attempt.
+pub(crate) fn recover_starting_builder_in_domain(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+) -> Result<()> {
+    let Some(state) = read_builder_readiness_state(domain, builder)? else {
+        return Ok(());
+    };
+    if state.config_fingerprint != config_fingerprint {
+        anyhow::bail!("persistent BuildKit config mode changed for existing builder {builder}");
+    }
+    if state.phase == BuilderReadinessPhase::Ready {
+        return Ok(());
+    }
+    if pending_buildkit_create_transaction(domain, builder)?.is_some() {
+        anyhow::bail!("pending BuildKit create must settle before start recovery");
+    }
+    if !start_builder_in_domain_matching_id(domain, builder, Some(&state.container_id))? {
+        anyhow::bail!("attested BuildKit daemon disappeared during start recovery");
+    }
+    if !builder_readiness_matches(domain, builder, &state.container_id, config_fingerprint)? {
+        anyhow::bail!("BuildKit start recovery did not publish current Ready proof");
+    }
+    Ok(())
 }
 
 fn require_buildkit_restart(result: Result<bool>) -> Result<()> {
@@ -2241,10 +3357,53 @@ fn start_builder_container_in_domain_matching_id(
     domain: &PersistentBuildKitDomain,
     builder: &str,
     expected_container_id: Option<&str>,
-) -> Result<Option<String>> {
-    with_attested_domain_builder(
+    expected_config_fingerprint: &str,
+) -> Result<Option<(String, u64)>> {
+    start_builder_container_in_domain_matching_id_with_lock(
         domain,
         builder,
+        expected_container_id,
+        Some(expected_config_fingerprint),
+        |_, _, volume| crate::docker_lease::lock_host_volume_name_for_domain(domain, volume),
+    )
+}
+
+#[cfg(unix)]
+fn start_builder_container_in_domain_matching_id_with_pending_create(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: Option<&str>,
+    config_fingerprint: &str,
+) -> Result<Option<(String, u64)>> {
+    start_builder_container_in_domain_matching_id_with_lock(
+        domain,
+        builder,
+        expected_container_id,
+        Some(config_fingerprint),
+        |_, _, volume| {
+            lock_domain_buildkit_volume_for_current_transaction(
+                domain,
+                builder,
+                config_fingerprint,
+                volume,
+            )
+        },
+    )
+}
+
+fn start_builder_container_in_domain_matching_id_with_lock<G>(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: Option<&str>,
+    expected_config_fingerprint: Option<&str>,
+    acquire_volume_lock: impl FnOnce(&Path, &str, &str) -> Result<G>,
+) -> Result<Option<(String, u64)>> {
+    with_attested_domain_builder_with(
+        domain,
+        builder,
+        acquire_volume_lock,
+        attest_buildkit_removal_volume,
+        attest_buildkit_removal_container,
         |_, daemon, _, volume_present, container_id| {
             if !volume_present {
                 return Ok(None);
@@ -2257,17 +3416,45 @@ fn start_builder_container_in_domain_matching_id(
                     "attested BuildKit daemon {daemon} changed immutable ID before restart"
                 );
             }
-            let proof = read_builder_readiness(domain, builder)?
-                .context("refuse host restart without durable BuildKit readiness proof")?;
+            let proof = read_builder_readiness_state(domain, builder)?
+                .context("refuse host restart without durable BuildKit readiness state")?;
             if proof.container_id != container_id {
                 anyhow::bail!(
                     "refuse host restart of {daemon}: readiness proof names another immutable ID"
                 );
             }
-            let started = start_attested_builder_confirmed(container_id)
-                .with_context(|| format!("start BuildKit daemon {daemon}"))?;
-            if started {
-                return Ok(Some(container_id.to_owned()));
+            if expected_config_fingerprint
+                .is_some_and(|expected| expected != proof.config_fingerprint)
+            {
+                anyhow::bail!(
+                    "refuse host restart of {daemon}: readiness proof has another config fingerprint"
+                );
+            }
+            if !matches!(
+                proof.phase,
+                BuilderReadinessPhase::Ready
+                    | BuilderReadinessPhase::Starting
+                    | BuilderReadinessPhase::Stopping
+                    | BuilderReadinessPhase::Stopped
+            ) {
+                anyhow::bail!("refuse start recovery from an unsupported readiness phase");
+            }
+            let start_epoch = start_builder_from_readiness_under_lock_with(
+                domain,
+                builder,
+                daemon,
+                container_id,
+                &proof.config_fingerprint,
+                proof.epoch,
+                |id| crate::docker::Docker::host().inspect_exit(id),
+                |id| {
+                    crate::docker::Docker::host()
+                        .container_start(id)
+                        .map(|_| ())
+                },
+            )?;
+            if let Some(start_epoch) = start_epoch {
+                return Ok(Some((container_id.to_owned(), start_epoch)));
             }
             Ok(None)
         },
@@ -2291,15 +3478,28 @@ pub(crate) fn ensure_conflicting_builder_ready_in_domain(
         anyhow::bail!("refuse conflict recovery for a BuildKit builder from another domain");
     }
     if !builder_readiness_matches(domain, builder, expected_container_id, config_fingerprint)? {
+        if let Some(starting) = read_builder_readiness_state(domain, builder)?
+            && starting.phase == BuilderReadinessPhase::Starting
+            && starting.container_id == expected_container_id
+            && starting.config_fingerprint == config_fingerprint
+            && pending_buildkit_create_transaction(domain, builder)?.is_none()
+        {
+            // A previously-ready daemon may have lost its response or failed
+            // the worker probe after `/start`. Retry only after the normal
+            // host path re-attests this same ID/volume under the shared lock.
+            recover_starting_builder_in_domain(domain, builder, config_fingerprint)?;
+            return Ok(true);
+        }
         ensure_conflicting_builder_creator_or_readiness(
             expected_container_id,
             config_fingerprint,
             Duration::from_secs(30),
             || {
                 let volume = daemon_state_volume(builder);
-                let _volume_lock = crate::docker_lease::lock_host_volume_name_for_domain(
-                    &domain.identity_root,
-                    &domain.engine_id,
+                let _volume_lock = lock_domain_buildkit_volume_for_current_transaction(
+                    domain,
+                    builder,
+                    config_fingerprint,
                     &volume,
                 )?;
                 if !attest_buildkit_removal_volume(domain, &volume)? {
@@ -2329,9 +3529,10 @@ pub(crate) fn ensure_conflicting_builder_ready_in_domain(
     ensure_conflicting_builder_ready_with_attestation(
         expected_container_id,
         || {
-            crate::docker_lease::lock_host_volume_name_for_domain(
-                &domain.identity_root,
-                &domain.engine_id,
+            lock_domain_buildkit_volume_for_current_transaction(
+                domain,
+                builder,
+                config_fingerprint,
                 &daemon_state_volume(builder),
             )
         },
@@ -2348,116 +3549,26 @@ pub(crate) fn ensure_conflicting_builder_ready_in_domain(
         |delay| std::thread::sleep(delay),
         |id, timeout| crate::docker::Docker::host().inspect_exit_bounded(id, timeout),
         |id| {
-            start_builder_container_in_domain_matching_id(domain, builder, Some(id))
-                .map(|started| started.is_some())
+            let started = start_builder_container_in_domain_matching_id_with_pending_create(
+                domain,
+                builder,
+                Some(id),
+                config_fingerprint,
+            )?;
+            let Some((started_id, start_epoch)) = started else {
+                return Ok(false);
+            };
+            persist_builder_readiness_after_start(
+                domain,
+                builder,
+                &started_id,
+                config_fingerprint,
+                start_epoch,
+            )?;
+            Ok(true)
         },
         wait_for_attested_buildkit_ready,
     )
-}
-
-/// Recover an exact stale `Created` daemon after the current request wins the
-/// serialized creator lease. Buildx's 409 path skips both archive and start,
-/// so only this path may transfer the approved archive and start the same
-/// immutable container. The Engine-volume lock covers re-attestation, archive,
-/// and start; worker polling happens after it is released.
-pub(crate) fn recover_conflicting_created_builder_in_domain(
-    domain: &PersistentBuildKitDomain,
-    builder: &str,
-    expected_container_id: &str,
-    config_fingerprint: &str,
-    mut upload_archive: impl FnMut(&str, &str) -> Result<()>,
-) -> Result<bool> {
-    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
-        anyhow::bail!("refuse Created recovery for a BuildKit builder from another domain");
-    }
-    if builder_readiness_matches(domain, builder, expected_container_id, config_fingerprint)? {
-        return Ok(true);
-    }
-    let creator = read_live_builder_creator(domain, builder)?
-        .context("refuse Created recovery without the current live creator lease")?;
-    if creator.config_fingerprint != config_fingerprint
-        || creator
-            .container_id
-            .as_deref()
-            .is_some_and(|id| id != expected_container_id)
-    {
-        anyhow::bail!("live BuildKit creator does not match Created recovery identity");
-    }
-    // A creator that has already bound this ID owns a different in-flight
-    // transaction. Its observer must publish readiness; this callback only
-    // recovers an unbound lease after all competing create attempts end.
-    if creator.container_id.is_some() {
-        return Ok(false);
-    }
-
-    let volume = daemon_state_volume(builder);
-    let volume_lock = crate::docker_lease::lock_host_volume_name_for_domain(
-        &domain.identity_root,
-        &domain.engine_id,
-        &volume,
-    )?;
-    if builder_readiness_matches(domain, builder, expected_container_id, config_fingerprint)? {
-        return Ok(true);
-    }
-    if !attest_buildkit_removal_volume(domain, &volume)? {
-        return Ok(false);
-    }
-    let daemon = daemon_container_name(builder);
-    let Some(container_id) = attest_buildkit_removal_container(domain, builder, &daemon, &volume)?
-    else {
-        return Ok(false);
-    };
-    if container_id != expected_container_id {
-        anyhow::bail!("BuildKit daemon changed immutable ID before Created recovery");
-    }
-    let creator = read_live_builder_creator(domain, builder)?
-        .context("BuildKit creator lease ended before Created recovery")?;
-    if creator.config_fingerprint != config_fingerprint || creator.container_id.is_some() {
-        return Ok(false);
-    }
-    let before = crate::docker::Docker::host()
-        .inspect_exit_bounded(&container_id, Duration::from_secs(2))
-        .context("inspect attested BuildKit daemon before Created recovery")?;
-    if before.status != Some(crate::docker::client::ContainerState::Created)
-        || before.finished.is_some()
-    {
-        return Ok(false);
-    }
-
-    bind_persistent_builder_creator_container(domain, builder, config_fingerprint, &container_id)?;
-    upload_archive(&container_id, config_fingerprint)
-        .context("upload approved BuildKit config archive for Created recovery")?;
-    record_persistent_builder_creator_archive(
-        domain,
-        builder,
-        config_fingerprint,
-        &container_id,
-        config_fingerprint,
-    )?;
-
-    if !attest_buildkit_removal_volume(domain, &volume)?
-        || attest_buildkit_removal_container(domain, builder, &daemon, &volume)?.as_deref()
-            != Some(container_id.as_str())
-    {
-        anyhow::bail!("BuildKit daemon identity changed after Created recovery archive");
-    }
-    let after_archive = crate::docker::Docker::host()
-        .inspect_exit_bounded(&container_id, Duration::from_secs(2))
-        .context("inspect attested BuildKit daemon after Created recovery archive")?;
-    if after_archive.status != Some(crate::docker::client::ContainerState::Created)
-        || after_archive.finished.is_some()
-    {
-        anyhow::bail!("BuildKit daemon state changed before Created recovery start");
-    }
-    if !start_attested_builder_confirmed(&container_id)? {
-        anyhow::bail!("attested BuildKit daemon disappeared during Created recovery start");
-    }
-    drop(volume_lock);
-
-    wait_for_attested_buildkit_ready(&container_id)
-        .context("wait for recovered BuildKit daemon workers")?;
-    persist_builder_readiness_after_start(domain, builder, &container_id, config_fingerprint)?;
-    Ok(true)
 }
 
 fn ensure_conflicting_builder_creator_or_readiness(
@@ -2701,44 +3812,132 @@ fn retry_until_buildkit_ready(
         .context("BuildKit daemon did not become ready before the pressure-prune deadline")
 }
 
-fn ensure_attested_builder_running(container_id: &str) -> Result<()> {
-    let mut docker = crate::docker::Docker::host();
-    let exit = docker
-        .inspect_exit(container_id)
-        .context("inspect attested BuildKit daemon before cache pruning")?;
-    match exit.status {
-        Some(crate::docker::client::ContainerState::Running) => {
-            return wait_for_attested_buildkit_ready(container_id);
-        }
-        Some(
-            crate::docker::client::ContainerState::Created
-            | crate::docker::client::ContainerState::Exited
-            | crate::docker::client::ContainerState::Dead,
-        ) => {}
-        state => anyhow::bail!("cannot safely run buildctl in BuildKit daemon state {state:?}"),
-    }
-    if let Err(start_error) = docker.container_start(container_id) {
-        let recovered = crate::docker::Docker::host()
-            .inspect_exit(container_id)
-            .context("verify BuildKit daemon after ambiguous start")?;
-        if recovered.status == Some(crate::docker::client::ContainerState::Running) {
-            tracing::warn!(
-                target: "velnor.buildkit",
+fn ensure_pressure_builder_ready(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: &str,
+    docker_root: &Path,
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    expected_volume_uuid: &str,
+    pressure_predicate: &dyn Fn(&crate::host_capacity::HostCapacity) -> bool,
+) -> Result<bool> {
+    // Decide whether this daemon is a candidate and, if stopped, persist its
+    // new Starting epoch and issue ContainerStart under the Engine-volume
+    // flock. Drop that flock before the worker probe; the readiness helper
+    // reacquires it and CAS-publishes only this start's epoch.
+    let start = with_attested_domain_builder(
+        domain,
+        builder,
+        |builder, daemon, volume, volume_present, container_id| {
+            if !volume_present {
+                return Ok(None);
+            }
+            let Some(container_id) = container_id else {
+                return Ok(None);
+            };
+            if container_id != expected_container_id {
+                anyhow::bail!("pressure candidate {daemon} changed immutable container ID");
+            }
+            let Some(proof) = read_builder_readiness_state(domain, builder)? else {
+                return Ok(None);
+            };
+            if proof.container_id != container_id {
+                anyhow::bail!("pressure candidate {daemon} has mismatched readiness identity");
+            }
+            if proof.config_fingerprint.is_empty() {
+                anyhow::bail!("pressure candidate {daemon} has an empty config fingerprint");
+            }
+            let projection = crate::docker::client::host_call(
+                &crate::docker_lease::inspect_persistent_buildkit_volume_pressure_args(volume),
+            )
+            .with_context(|| format!("inspect BuildKit pressure volume {volume}"))?;
+            let mountpoint = crate::docker_lease::attest_persistent_buildkit_volume_mountpoint(
+                &projection,
+                volume,
+                &domain.token,
+            )?;
+            let mountpoint = PathBuf::from(mountpoint);
+            if !pressure_mountpoint_matches_device(
+                &mountpoint,
+                docker_root,
+                expected_pressure.device_id(),
+            )? {
+                return Ok(None);
+            }
+            let mount_pin = crate::host_capacity::HostCapacityPin::open(&mountpoint)
+                .context("pin BuildKit volume before pressure restart")?;
+            let mount_sample = mount_pin
+                .probe()
+                .context("inspect BuildKit volume filesystem before pressure restart")?;
+            if mount_sample.filesystem_device != expected_pressure.device_id()
+                || mount_sample.volume_fingerprint.as_deref() != Some(expected_volume_uuid)
+            {
+                return Ok(None);
+            }
+            let pressure = pressure_sample_matches_pin(expected_pressure, expected_volume_uuid)?;
+            if !pressure_predicate(&pressure) {
+                return Ok(None);
+            }
+            let state = crate::docker::Docker::host()
+                .inspect_exit(container_id)
+                .context("inspect pressure candidate before restart")?;
+            if state.status == Some(crate::docker::client::ContainerState::Running) {
+                if proof.phase == BuilderReadinessPhase::Ready {
+                    return Ok(Some((proof.config_fingerprint, None)));
+                }
+                let epoch = invalidate_builder_readiness_before_start(
+                    domain,
+                    builder,
+                    container_id,
+                    &proof.config_fingerprint,
+                    proof.epoch,
+                )?;
+                return Ok(Some((proof.config_fingerprint, Some(epoch))));
+            }
+            if !matches!(
+                state.status,
+                Some(
+                    crate::docker::client::ContainerState::Created
+                        | crate::docker::client::ContainerState::Exited
+                        | crate::docker::client::ContainerState::Dead
+                )
+            ) {
+                anyhow::bail!(
+                    "cannot safely pressure-start BuildKit daemon in state {:?}",
+                    state.status
+                );
+            }
+            let epoch = invalidate_builder_readiness_before_start(
+                domain,
+                builder,
                 container_id,
-                error = format!("{start_error:#}"),
-            "BuildKit start returned an error but inspect confirms the daemon is running"
-            );
-            return wait_for_attested_buildkit_ready(container_id);
-        }
-        return Err(start_error).context(format!(
-            "start attested BuildKit daemon; inspect reports {:?}",
-            recovered.status
-        ));
+                &proof.config_fingerprint,
+                proof.epoch,
+            )?;
+            if !start_attested_builder_confirmed(container_id)? {
+                anyhow::bail!("attested BuildKit daemon disappeared during pressure restart");
+            }
+            Ok(Some((proof.config_fingerprint, Some(epoch))))
+        },
+    )?;
+    let Some((config_fingerprint, start_epoch)) = start else {
+        return Ok(false);
+    };
+    if let Some(start_epoch) = start_epoch {
+        persist_builder_readiness_after_start(
+            domain,
+            builder,
+            expected_container_id,
+            &config_fingerprint,
+            start_epoch,
+        )?;
+    } else {
+        wait_for_attested_buildkit_ready(expected_container_id)?;
     }
-    wait_for_attested_buildkit_ready(container_id)
+    Ok(true)
 }
 
-fn wait_for_attested_buildkit_ready(container_id: &str) -> Result<()> {
+pub(crate) fn wait_for_attested_buildkit_ready(container_id: &str) -> Result<()> {
     let args = buildctl_ready_args(container_id);
     retry_until_buildkit_ready(Duration::from_secs(30), |timeout| {
         crate::docker::client::host_call_bounded(&args, timeout).map(|_| ())
@@ -2840,6 +4039,52 @@ fn start_attested_builder_confirmed_with(
     }
 }
 
+/// Advance and retry one durable start while the caller holds the shared
+/// Engine/state-volume lock and has attested the immutable container shape.
+/// `Starting` is retryable only for the same ID, config, and epoch; an older
+/// probe can never publish over the new attempt.
+fn start_builder_from_readiness_under_lock_with(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    daemon: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+    expected_epoch: u64,
+    inspect: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
+    start: impl FnMut(&str) -> Result<()>,
+) -> Result<Option<u64>> {
+    let current = read_builder_readiness_state(domain, builder)?
+        .context("BuildKit start recovery lost its durable readiness record")?;
+    if !matches!(
+        current.phase,
+        BuilderReadinessPhase::Ready
+            | BuilderReadinessPhase::Starting
+            | BuilderReadinessPhase::Stopping
+            | BuilderReadinessPhase::Stopped
+    ) || current.epoch != expected_epoch
+        || current.container_id != container_id
+        || current.config_fingerprint != config_fingerprint
+    {
+        anyhow::bail!(
+            "BuildKit start recovery no longer matches the exact durable ID/config epoch"
+        );
+    }
+    let next_epoch = invalidate_builder_readiness_before_start(
+        domain,
+        builder,
+        container_id,
+        config_fingerprint,
+        expected_epoch,
+    )?;
+    if start_attested_builder_confirmed_with(container_id, inspect, start)
+        .with_context(|| format!("retry start for BuildKit daemon {daemon}"))?
+    {
+        Ok(Some(next_epoch))
+    } else {
+        Ok(None)
+    }
+}
+
 fn inspect_domain_builder_exit(
     domain: &PersistentBuildKitDomain,
     builder: &str,
@@ -2932,9 +4177,7 @@ pub(crate) fn remove_builder(domain: &PersistentBuildKitDomain, builder: &str) -
     remove_builder_with(
         domain,
         builder,
-        |identity_root, engine_id, volume| {
-            crate::docker_lease::lock_host_volume_name_for_domain(identity_root, engine_id, volume)
-        },
+        |_, _, volume| crate::docker_lease::lock_host_volume_name_for_domain(domain, volume),
         attest_buildkit_removal_volume,
         attest_buildkit_removal_container,
         |container_id, daemon| {
@@ -2990,17 +4233,37 @@ fn remove_builder_with<G>(
     // mutation. The container's inspected immutable ID survives a name race.
     let _volume_present = inspect_volume(domain, &volume)?;
     let container_id = inspect_container(domain, builder, &daemon, &volume)?;
+    let removal_epoch = if let Some(container_id) = container_id.as_deref() {
+        invalidate_builder_readiness_before_stop(domain, builder, container_id)?
+            .map(|(fingerprint, epoch)| (container_id.to_owned(), fingerprint, epoch))
+    } else {
+        None
+    };
     if let Some(container_id) = container_id {
         remove_container(&container_id, &daemon)?;
+    }
+
+    // Force-removing a running container also stops it. Confirm the exact
+    // immutable ID is absent, then publish Stopped before deleting its volume
+    // or releasing the shared lifecycle lock. An uncertain delete keeps the
+    // durable Stopping phase and therefore cannot restore exec authority.
+    if inspect_container(domain, builder, &daemon, &volume)?.is_some() {
+        anyhow::bail!("BuildKit daemon {daemon} remains after removal");
+    }
+    if let Some((container_id, config_fingerprint, epoch)) = removal_epoch {
+        publish_builder_stopped_after_stop(
+            domain,
+            builder,
+            &container_id,
+            &config_fingerprint,
+            epoch,
+        )?;
     }
 
     // Docker volumes have no immutable ID. Re-attest after container removal
     // and immediately before rm so a same-name replacement survives.
     if inspect_volume(domain, &volume)? {
         remove_volume(&volume)?;
-    }
-    if inspect_container(domain, builder, &daemon, &volume)?.is_some() {
-        anyhow::bail!("BuildKit daemon {daemon} remains after removal");
     }
     if inspect_volume(domain, &volume)? {
         anyhow::bail!("BuildKit state volume {volume} remains after removal");
@@ -3062,30 +4325,55 @@ pub(crate) struct PressurePruneReport {
 
 /// Reclaim BuildKit cache only when the exact domain volume is a local host
 /// mount on the pressured filesystem. `buildctl du` deltas do not prove host
-/// space was released, so this returns only the observed `statvfs` increase
-/// at the attested mountpoint.
+/// space was released, so `freed_bytes` reports only the observed `statvfs`
+/// increase on the pinned pressure filesystem; `pruned` lists successful calls.
 pub(crate) fn reclaim_domain_buildkit_for_device(
     domain: &PersistentBuildKitDomain,
-    target_bytes: u64,
-    pressure_device: u64,
-) -> Result<u64> {
-    if target_bytes == 0 {
-        return Ok(0);
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    pressure_predicate: &dyn Fn(&crate::host_capacity::HostCapacity) -> bool,
+) -> Result<PressurePruneReport> {
+    let mut report = PressurePruneReport::default();
+    let initial = expected_pressure
+        .probe()
+        .context("revalidate pinned pressure filesystem before BuildKit inventory")?;
+    if initial.filesystem_device != expected_pressure.device_id() {
+        anyhow::bail!("pinned pressure filesystem device changed before BuildKit reclaim");
     }
-    let docker_root = trusted_host_docker_root_for_pressure(domain)?;
+    let expected_volume_uuid = initial
+        .volume_fingerprint
+        .as_deref()
+        .filter(|uuid| !uuid.is_empty())
+        .context("pinned pressure filesystem has no stable UUID")?
+        .to_owned();
+    if !pressure_predicate(&initial) {
+        return Ok(report);
+    }
     let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&domain.root)
         .context("lock BuildKit domain for device-bound pressure reclaim")?;
+    let current = pressure_sample_matches_pin(expected_pressure, &expected_volume_uuid)?;
+    if !pressure_predicate(&current) {
+        return Ok(report);
+    }
+    let docker_root = trusted_host_docker_root_for_pressure(domain)?;
+    let docker_root_pin = crate::host_capacity::HostCapacityPin::open(&docker_root)
+        .context("pin attested Docker root for pressure prune")?;
     let registry_root = owner_registry_root(&domain.root);
     let builders = registered_domain_builders(&registry_root, &domain.token)
         .context("list domain BuildKit owners for device-bound pressure reclaim")?;
     if builders.is_empty() {
-        return Ok(0);
+        return Ok(report);
     }
     let present = running_container_names()
         .context("list Engine containers before device-bound BuildKit pressure reclaim")?;
-    let mut freed_bytes = 0_u64;
     for builder in builders {
-        if freed_bytes >= target_bytes {
+        let current = pressure_sample_matches_pin(expected_pressure, &expected_volume_uuid)?;
+        if !pressure_predicate(&current) {
+            break;
+        }
+        let _builder_lifecycle = lock_builder_lifecycle(&domain.root, &builder)
+            .with_context(|| format!("lock BuildKit builder {builder} for pressure prune"))?;
+        let current = pressure_sample_matches_pin(expected_pressure, &expected_volume_uuid)?;
+        if !pressure_predicate(&current) {
             break;
         }
         if !repair_pressure_claims(&domain.root, &registry_root, &builder, &present)
@@ -3093,28 +4381,66 @@ pub(crate) fn reclaim_domain_buildkit_for_device(
         {
             continue;
         }
-        match prune_domain_builder_on_device(domain, &builder, &docker_root, pressure_device) {
-            Ok(Some(bytes)) => freed_bytes = freed_bytes.saturating_add(bytes),
+        let prune_succeeded = std::cell::Cell::new(false);
+        match prune_domain_builder_on_device(
+            domain,
+            &builder,
+            &docker_root,
+            &docker_root_pin,
+            expected_pressure,
+            &expected_volume_uuid,
+            pressure_predicate,
+            &prune_succeeded,
+        ) {
+            Ok(Some(bytes)) => {
+                report.pruned.push(builder);
+                report.freed_bytes = report.freed_bytes.saturating_add(bytes);
+            }
             Ok(None) => {}
             Err(error) => {
+                if prune_succeeded.get() {
+                    report.pruned.push(builder.clone());
+                }
+                report.failures.push(format!(
+                    "skip BuildKit pressure prune for {builder}: {error:#}"
+                ));
                 tracing::warn!(
                     target: "velnor.buildkit",
                     builder,
                     error = format!("{error:#}"),
                     "skipping BuildKit pressure prune because host storage identity is unproven"
                 );
+                break;
             }
         }
     }
-    Ok(freed_bytes)
+    Ok(report)
 }
 
 fn prune_domain_builder_on_device(
     domain: &PersistentBuildKitDomain,
     builder: &str,
     docker_root: &Path,
-    pressure_device: u64,
+    docker_root_pin: &crate::host_capacity::HostCapacityPin,
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    expected_volume_uuid: &str,
+    pressure_predicate: &dyn Fn(&crate::host_capacity::HostCapacity) -> bool,
+    prune_succeeded: &std::cell::Cell<bool>,
 ) -> Result<Option<u64>> {
+    let Some(ready) = read_builder_readiness(domain, builder)? else {
+        return Ok(None);
+    };
+    if !ensure_pressure_builder_ready(
+        domain,
+        builder,
+        &ready.container_id,
+        docker_root,
+        expected_pressure,
+        expected_volume_uuid,
+        pressure_predicate,
+    )? {
+        return Ok(None);
+    }
     with_attested_domain_builder(domain, builder, |builder, daemon, _, volume_present, id| {
         if !volume_present {
             return Ok(None);
@@ -3141,31 +4467,138 @@ fn prune_domain_builder_on_device(
             &domain.token,
         )?;
         let mountpoint = PathBuf::from(mountpoint);
+        let mount_pin = crate::host_capacity::HostCapacityPin::open(&mountpoint)
+            .context("pin attested BuildKit volume mountpoint")?;
+        pressure_mountpoint_matches_pin(
+            &mount_pin,
+            expected_volume_uuid,
+            expected_pressure.device_id(),
+        )?;
         let freed = prune_candidate_for_device_with(
             Some(&mountpoint),
             docker_root,
-            pressure_device,
+            expected_pressure.device_id(),
             pressure_mountpoint_matches_device,
             || {
-                let before = crate::host_capacity::HostCapacity::probe(&mountpoint)
-                    .context("measure BuildKit volume host free space before prune")?
-                    .available_bytes;
-                ensure_attested_builder_running(id).with_context(|| {
-                    format!("start BuildKit daemon {daemon} for pressure prune")
-                })?;
-                crate::docker::client::host_call(&buildctl_prune_args(id))
-                    .with_context(|| format!("prune BuildKit cache in {daemon}"))?;
-                stop_attested_builder_confirmed(id).with_context(|| {
-                    format!("stop BuildKit daemon {daemon} after pressure prune")
-                })?;
-                let after = crate::host_capacity::HostCapacity::probe(&mountpoint)
-                    .context("measure BuildKit volume host free space after prune")?
-                    .available_bytes;
-                Ok(after.saturating_sub(before))
+                pressure_mountpoint_matches_pin(
+                    &mount_pin,
+                    expected_volume_uuid,
+                    expected_pressure.device_id(),
+                )?;
+                let before = pressure_sample_matches_pin(expected_pressure, expected_volume_uuid)?;
+                if !pressure_predicate(&before) {
+                    return Ok(0);
+                }
+                let state = crate::docker::Docker::host()
+                    .inspect_exit(id)
+                    .with_context(|| {
+                        format!("inspect BuildKit daemon {daemon} before pressure prune")
+                    })?;
+                if state.status != Some(crate::docker::client::ContainerState::Running) {
+                    anyhow::bail!("BuildKit daemon {daemon} stopped before pressure prune");
+                }
+                let prune_result = run_pressure_prune_with_pin(
+                    expected_pressure,
+                    expected_volume_uuid,
+                    pressure_predicate,
+                    || {
+                        docker_root_pin
+                            .revalidate()
+                            .context("revalidate pinned Docker root before buildctl")?;
+                        pressure_mountpoint_matches_pin(
+                            &mount_pin,
+                            expected_volume_uuid,
+                            expected_pressure.device_id(),
+                        )?;
+                        let before_buildctl =
+                            pressure_sample_matches_pin(expected_pressure, expected_volume_uuid)?;
+                        if !pressure_predicate(&before_buildctl) {
+                            return Ok(());
+                        }
+                        let buildctl_result =
+                            crate::docker::client::host_call(&buildctl_prune_args(id))
+                                .with_context(|| format!("prune BuildKit cache in {daemon}"))
+                                .map(|_| ());
+                        let docker_root_after = docker_root_pin.revalidate();
+                        let mountpoint_after = pressure_mountpoint_matches_pin(
+                            &mount_pin,
+                            expected_volume_uuid,
+                            expected_pressure.device_id(),
+                        );
+                        buildctl_result?;
+                        prune_succeeded.set(true);
+                        docker_root_after
+                            .context("revalidate pinned Docker root after buildctl")?;
+                        mountpoint_after
+                    },
+                );
+                let before_stop =
+                    pressure_sample_matches_pin(expected_pressure, expected_volume_uuid)
+                        .map(|capacity| pressure_predicate(&capacity));
+                let stop_result = stop_builder_under_volume_lock(domain, builder, id)
+                    .with_context(|| format!("stop BuildKit daemon {daemon} after pressure prune"));
+                let after_stop =
+                    pressure_sample_matches_pin(expected_pressure, expected_volume_uuid)
+                        .map(|capacity| pressure_predicate(&capacity));
+                stop_result?;
+                let _pressure_before_stop = before_stop?;
+                let _pressure_after_stop = after_stop?;
+                let prune_result = prune_result?;
+                Ok(prune_result.unwrap_or(0))
             },
         )?;
-        Ok(Some(freed))
+        Ok(prune_succeeded.get().then_some(freed))
     })
+}
+
+fn pressure_sample_matches_pin(
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    expected_volume_uuid: &str,
+) -> Result<crate::host_capacity::HostCapacity> {
+    let capacity = expected_pressure
+        .probe()
+        .context("revalidate pinned pressure filesystem during BuildKit prune")?;
+    if capacity.filesystem_device != expected_pressure.device_id()
+        || capacity.volume_fingerprint.as_deref() != Some(expected_volume_uuid)
+    {
+        anyhow::bail!("pinned pressure filesystem UUID or device changed during BuildKit prune");
+    }
+    Ok(capacity)
+}
+
+fn pressure_mountpoint_matches_pin(
+    mount_pin: &crate::host_capacity::HostCapacityPin,
+    expected_volume_uuid: &str,
+    expected_device: u64,
+) -> Result<()> {
+    let capacity = mount_pin
+        .probe()
+        .context("revalidate attested BuildKit volume mountpoint")?;
+    if capacity.filesystem_device != expected_device
+        || capacity.volume_fingerprint.as_deref() != Some(expected_volume_uuid)
+    {
+        anyhow::bail!("attested BuildKit volume mountpoint changed UUID or device");
+    }
+    Ok(())
+}
+
+fn run_pressure_prune_with_pin(
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    expected_volume_uuid: &str,
+    pressure_predicate: &dyn Fn(&crate::host_capacity::HostCapacity) -> bool,
+    prune: impl FnOnce() -> Result<()>,
+) -> Result<Option<u64>> {
+    let before = pressure_sample_matches_pin(expected_pressure, expected_volume_uuid)?;
+    if !pressure_predicate(&before) {
+        return Ok(None);
+    }
+    let prune_result = prune();
+    let after = pressure_sample_matches_pin(expected_pressure, expected_volume_uuid);
+    let after = after?;
+    prune_result?;
+    Ok(Some(
+        after.available_bytes.saturating_sub(before.available_bytes),
+    ))
 }
 
 fn prune_candidate_for_device_with(
@@ -3626,8 +5059,7 @@ pub(crate) fn reap_idle_builders(
         running_container_names,
         |builder| {
             let _lock = crate::docker_lease::lock_host_volume_name_for_domain(
-                &domain.identity_root,
-                &domain.engine_id,
+                domain,
                 &daemon_state_volume(builder),
             )?;
             Ok(())
@@ -4170,6 +5602,23 @@ mod tests {
         root
     }
 
+    fn legacy_readiness_fixture(
+        domain: &PersistentBuildKitDomain,
+        builder: &str,
+        container_id: &str,
+        config_fingerprint: &str,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "version": BUILDER_READINESS_LEGACY_VERSION,
+            "builder": builder,
+            "domain_token": domain.token.clone(),
+            "state_volume": daemon_state_volume(builder),
+            "container_id": container_id,
+            "config_fingerprint": config_fingerprint,
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn storage_env_stays_unset_so_claims_never_touch_real_state() {
         // Every claim/release/horizon call in the unit suite must take the
@@ -4197,6 +5646,41 @@ mod tests {
             persistent_buildkit_config_fingerprint(None).unwrap(),
             "no-config-v1"
         );
+    }
+
+    #[test]
+    fn legacy_marker_quarantine_records_sha256_for_exact_bytes() {
+        let root = temp_root("legacy-marker-quarantine-sha256");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("repo-key-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let volume = daemon_state_volume(&builder);
+        let marker_bytes = b"legacy runtime marker bytes";
+        quarantine_legacy_pending_buildkit_create(&domain, &volume, marker_bytes).unwrap();
+
+        let quarantine_path = legacy_create_quarantine_file(&domain, &volume);
+        let quarantine: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&quarantine_path).unwrap()).unwrap();
+        let expected_sha256 = Sha256::digest(marker_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(quarantine["version"], 2);
+        assert_eq!(quarantine["legacy_marker_sha256"], expected_sha256);
+        assert!(legacy_pending_buildkit_create_is_quarantined(&domain, &volume).unwrap());
+        let mut stale_v1 = quarantine;
+        stale_v1["version"] = serde_json::Value::from(1);
+        stale_v1["legacy_marker_sha256"] =
+            serde_json::Value::String(blake3::hash(marker_bytes).to_hex().to_string());
+        std::fs::write(&quarantine_path, serde_json::to_vec(&stale_v1).unwrap()).unwrap();
+        assert!(legacy_pending_buildkit_create_is_quarantined(&domain, &volume).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Test helper: drop every hold on `builder`.
@@ -5440,6 +6924,66 @@ mod tests {
     }
 
     #[test]
+    fn builder_force_removal_revokes_readiness_before_mutation() {
+        use std::cell::Cell;
+
+        let root = temp_root("remove-builder-revokes-readiness");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let container_id = "immutable-container-id";
+        let config_fingerprint = "no-config-v1";
+        write_test_builder_readiness(&domain, &builder, container_id, config_fingerprint).unwrap();
+        let container_inspections = Cell::new(0);
+        let result = remove_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Ok(()),
+            |_, _| Ok(true),
+            |_, _, _, _| {
+                let inspection = container_inspections.get() + 1;
+                container_inspections.set(inspection);
+                if inspection == 1 {
+                    Ok(Some(container_id.to_owned()))
+                } else {
+                    Ok(None)
+                }
+            },
+            |id, _| {
+                assert_eq!(id, container_id);
+                let stopping = read_builder_readiness_state(&domain, &builder)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stopping.phase, BuilderReadinessPhase::Stopping);
+                assert_eq!(stopping.epoch, 2);
+                Ok(())
+            },
+            |_| {
+                let stopped = read_builder_readiness_state(&domain, &builder)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stopped.phase, BuilderReadinessPhase::Stopped);
+                assert_eq!(stopped.epoch, 2);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(container_inspections.get(), 3);
+        let stopped = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.phase, BuilderReadinessPhase::Stopped);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn buildctl_pressure_commands_use_attested_immutable_id() {
         let id = "0123456789abcdef0123456789abcdef";
         assert_eq!(
@@ -5720,6 +7264,56 @@ mod tests {
         assert_eq!(calls.get(), 1, "unproven candidates must not prune");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pressure_prune_revalidates_pin_and_predicate_around_destructive_call() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("pressure-pin-revalidation");
+        let pressure_path = root.join("pressure");
+        let replacement = root.join("replacement");
+        std::fs::create_dir_all(&pressure_path).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        let pin = crate::host_capacity::HostCapacityPin::open(&pressure_path).unwrap();
+        let volume_uuid = pin
+            .probe()
+            .unwrap()
+            .volume_fingerprint
+            .expect("test filesystem must expose a stable UUID");
+        let prune_calls = std::cell::Cell::new(0);
+
+        let recovered = run_pressure_prune_with_pin(&pin, &volume_uuid, &|_| false, || {
+            prune_calls.set(prune_calls.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recovered, None);
+        assert_eq!(prune_calls.get(), 0, "recovered pressure still pruned");
+
+        let displaced = root.join("pressure-pinned");
+        let error = run_pressure_prune_with_pin(&pin, &volume_uuid, &|_| true, || {
+            prune_calls.set(prune_calls.get() + 1);
+            std::fs::rename(&pressure_path, &displaced).unwrap();
+            symlink(&replacement, &pressure_path).unwrap();
+            Ok(())
+        })
+        .expect_err("replacement during the prune must fail post-call validation");
+        assert!(format!("{error:#}").contains("pressure filesystem"));
+        assert_eq!(prune_calls.get(), 1);
+
+        let docker_root = root.join("docker-root");
+        std::fs::create_dir(&docker_root).unwrap();
+        let docker_root_pin = crate::host_capacity::HostCapacityPin::open(&docker_root).unwrap();
+        let displaced_docker_root = root.join("docker-root-pinned");
+        std::fs::rename(&docker_root, &displaced_docker_root).unwrap();
+        std::fs::create_dir(&docker_root).unwrap();
+        assert!(
+            docker_root_pin.revalidate().is_err(),
+            "same-device Docker-root replacement passed the retained pin"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn pressure_prune_skips_a_different_docker_process_root() {
@@ -5811,6 +7405,671 @@ mod tests {
     }
 
     #[test]
+    fn start_epoch_invalidates_only_matching_durable_readiness() {
+        let root = temp_root("builder-readiness-start-invalidation");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let container_id = "immutable-container-id";
+        let fingerprint = "no-config-v1";
+        write_test_builder_readiness(&domain, &builder, container_id, fingerprint).unwrap();
+
+        assert!(invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            "replacement-id",
+            fingerprint,
+            1,
+        )
+        .is_err());
+        assert!(builder_readiness_matches(&domain, &builder, container_id, fingerprint).unwrap());
+
+        let first_epoch = invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            1,
+        )
+        .unwrap();
+        assert_eq!(first_epoch, 2);
+        assert!(!builder_readiness_matches(&domain, &builder, container_id, fingerprint).unwrap());
+        // A second admitted start advances the epoch again; an old worker
+        // probe cannot publish after this point.
+        let second_epoch = invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            first_epoch,
+        )
+        .unwrap();
+        assert_eq!(second_epoch, 3);
+        assert!(!builder_readiness_matches(&domain, &builder, container_id, fingerprint).unwrap());
+        // A genuinely new builder begins at epoch one.
+        let new_builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "other-builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        assert_eq!(
+            invalidate_builder_readiness_before_start(
+                &domain,
+                &new_builder,
+                "new-container-id",
+                fingerprint,
+                0,
+            )
+            .unwrap(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_stop_revokes_ready_epoch_before_dispatch_and_requires_probe_to_restore() {
+        use crate::docker::client::{ContainerState, ExitInfo};
+
+        let root = temp_root("builder-readiness-stop-invalidation");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let container_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let fingerprint = "no-config-v1";
+        write_test_builder_readiness(&domain, &builder, container_id, fingerprint).unwrap();
+
+        let stop_calls = std::cell::Cell::new(0);
+        let stopped = stop_builder_under_volume_lock_with(
+            &domain,
+            &builder,
+            container_id,
+            |id| {
+                assert_eq!(id, container_id);
+                let state = read_builder_readiness_state(&domain, &builder)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(state.phase, BuilderReadinessPhase::Stopping);
+                assert_eq!(state.epoch, 2);
+                assert!(
+                    !builder_readiness_matches(&domain, &builder, container_id, fingerprint)
+                        .unwrap(),
+                    "readiness must be revoked before Docker receives stop"
+                );
+                stop_calls.set(stop_calls.get() + 1);
+                Ok(true)
+            },
+            |_| {
+                Ok(ExitInfo {
+                    status: Some(ContainerState::Exited),
+                    finished: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+                })
+            },
+        )
+        .unwrap();
+        assert!(stopped);
+        assert_eq!(stop_calls.get(), 1);
+        let durable_stopped = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable_stopped.phase, BuilderReadinessPhase::Stopped);
+        assert_eq!(durable_stopped.epoch, 2);
+        assert!(!builder_readiness_matches(&domain, &builder, container_id, fingerprint).unwrap());
+
+        let next_epoch = start_builder_from_readiness_under_lock_with(
+            &domain,
+            &builder,
+            &daemon_container_name(&builder),
+            container_id,
+            fingerprint,
+            durable_stopped.epoch,
+            |_| {
+                Ok(ExitInfo {
+                    status: Some(ContainerState::Exited),
+                    finished: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+                })
+            },
+            |_| Ok(()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(next_epoch, 3);
+        assert!(!builder_readiness_matches(&domain, &builder, container_id, fingerprint).unwrap());
+        probe_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            next_epoch,
+            || Ok(()),
+        )
+        .unwrap();
+        publish_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            next_epoch,
+        )
+        .unwrap();
+        assert!(builder_readiness_matches_epoch(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            next_epoch,
+        )
+        .unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v1_readiness_is_promoted_atomically_after_exact_probe_and_is_idempotent() {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct TestVolumeLock(Arc<AtomicBool>);
+
+        impl Drop for TestVolumeLock {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+
+        let root = temp_root("builder-readiness-v1-promotion");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let container_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let fingerprint = persistent_buildkit_config_fingerprint(Some(
+            "[registry.\"docker.io\"]\n mirrors = [\"mirror.gcr.io\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            fingerprint, "sha256:333c40f4fee6f473bee299aed751bb40967b9e8315af90378a5de0b5dc69a76b",
+            "v1 and v2 use the same Buildx-normalized approved-config fingerprint"
+        );
+        let path = builder_readiness_file(&domain, &builder);
+        let original = legacy_readiness_fixture(&domain, &builder, container_id, &fingerprint);
+        let legacy_value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        assert_eq!(legacy_value["version"], BUILDER_READINESS_LEGACY_VERSION);
+        assert!(legacy_value.get("epoch").is_none());
+        assert!(legacy_value.get("phase").is_none());
+        write_atomic_document(&path, &original).unwrap();
+
+        let lock_active = Arc::new(AtomicBool::new(false));
+        let attestations = Arc::new(AtomicUsize::new(0));
+        let probes = Arc::new(AtomicUsize::new(0));
+        let expected_volume = daemon_state_volume(&builder);
+        let promoted = promote_builder_readiness_v1_with(
+            &domain,
+            &builder,
+            &fingerprint,
+            {
+                let lock_active = Arc::clone(&lock_active);
+                let expected_volume = expected_volume.clone();
+                move |volume| {
+                    assert_eq!(volume, expected_volume);
+                    assert!(!lock_active.swap(true, Ordering::SeqCst));
+                    Ok(TestVolumeLock(Arc::clone(&lock_active)))
+                }
+            },
+            {
+                let lock_active = Arc::clone(&lock_active);
+                move || {
+                    assert!(lock_active.load(Ordering::SeqCst));
+                    Ok(())
+                }
+            },
+            {
+                let lock_active = Arc::clone(&lock_active);
+                let attestations = Arc::clone(&attestations);
+                let builder = builder.clone();
+                let container_id = container_id.to_owned();
+                move |candidate_builder, volume, id| {
+                    assert!(lock_active.load(Ordering::SeqCst));
+                    assert_eq!(candidate_builder, builder);
+                    assert_eq!(volume, daemon_state_volume(&builder));
+                    assert_eq!(id, container_id);
+                    attestations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+            {
+                let lock_active = Arc::clone(&lock_active);
+                let probes = Arc::clone(&probes);
+                let container_id = container_id.to_owned();
+                move |id| {
+                    assert_eq!(id, container_id);
+                    assert!(
+                        !lock_active.load(Ordering::SeqCst),
+                        "worker readiness polling must release the volume flock"
+                    );
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+        assert!(promoted);
+        assert_eq!(attestations.load(Ordering::SeqCst), 2);
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        let promoted_bytes = std::fs::read(&path).unwrap();
+        assert_ne!(promoted_bytes, original);
+        assert!(
+            serde_json::from_slice::<BuilderReadinessRecordV1>(&promoted_bytes).is_err(),
+            "a downgraded strict v1 reader must fail closed on v2 fields"
+        );
+        let promoted_state = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(promoted_state.version, BUILDER_READINESS_VERSION);
+        assert_eq!(promoted_state.container_id, container_id);
+        assert_eq!(promoted_state.config_fingerprint, fingerprint);
+        assert_eq!(promoted_state.epoch, 1);
+        assert_eq!(promoted_state.phase, BuilderReadinessPhase::Ready);
+
+        let repeated = promote_builder_readiness_v1_with(
+            &domain,
+            &builder,
+            &fingerprint,
+            |_| Ok(()),
+            || Ok(()),
+            |_, _, _| panic!("v2 readiness is not re-attested as v1"),
+            |_| panic!("v2 readiness does not repeat the migration probe"),
+        )
+        .unwrap();
+        assert!(!repeated, "v2 promotion is idempotent");
+        assert_eq!(std::fs::read(&path).unwrap(), promoted_bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v1_readiness_mismatch_or_probe_failure_preserves_bytes_and_can_retry() {
+        let root = temp_root("builder-readiness-v1-fail-closed");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let container_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let fingerprint = "no-config-v1";
+        let path = builder_readiness_file(&domain, &builder);
+        let original = legacy_readiness_fixture(&domain, &builder, container_id, fingerprint);
+        write_atomic_document(&path, &original).unwrap();
+
+        let mismatch = promote_builder_readiness_v1_with(
+            &domain,
+            &builder,
+            "sha256:another-config",
+            |_| Ok(()),
+            || Ok(()),
+            |_, _, _| panic!("config mismatch must fail before container operations"),
+            |_| panic!("config mismatch must fail before readiness probe"),
+        )
+        .unwrap_err();
+        assert!(mismatch
+            .to_string()
+            .contains("mismatched identity or config"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let attestation_error = promote_builder_readiness_v1_with(
+            &domain,
+            &builder,
+            fingerprint,
+            |_| Ok(()),
+            || Ok(()),
+            |_, _, id| {
+                assert_eq!(id, container_id);
+                anyhow::bail!("injected immutable-container attestation failure")
+            },
+            |_| panic!("failed attestation must not probe workers"),
+        )
+        .unwrap_err();
+        assert!(format!("{attestation_error:#}")
+            .contains("injected immutable-container attestation failure"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let probe_error = promote_builder_readiness_v1_with(
+            &domain,
+            &builder,
+            fingerprint,
+            |_| Ok(()),
+            || Ok(()),
+            |_, _, id| {
+                assert_eq!(id, container_id);
+                Ok(())
+            },
+            |_| anyhow::bail!("injected worker probe failure"),
+        )
+        .unwrap_err();
+        assert!(format!("{probe_error:#}").contains("injected worker probe failure"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "failed promotion keeps the recoverable v1 source document"
+        );
+
+        let retried = promote_builder_readiness_v1_with(
+            &domain,
+            &builder,
+            fingerprint,
+            |_| Ok(()),
+            || Ok(()),
+            |candidate_builder, volume, id| {
+                assert_eq!(candidate_builder, builder);
+                assert_eq!(volume, daemon_state_volume(&builder));
+                assert_eq!(id, container_id);
+                Ok(())
+            },
+            |id| {
+                assert_eq!(id, container_id);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(retried, "an unchanged v1 record remains retryable");
+        let promoted = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(promoted.phase, BuilderReadinessPhase::Ready);
+        assert_eq!(promoted.epoch, 1);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_start_probe_cannot_publish_over_newer_epoch() {
+        let root = temp_root("builder-readiness-epoch-cas");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("repo-key-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let container_id = "immutable-container-id";
+        let fingerprint = "no-config-v1";
+
+        let older_epoch = invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            0,
+        )
+        .unwrap();
+        let newer_epoch = invalidate_builder_readiness_before_start(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            older_epoch,
+        )
+        .unwrap();
+
+        assert!(publish_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            older_epoch,
+        )
+        .is_err());
+        assert!(!builder_readiness_matches_epoch(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            older_epoch,
+        )
+        .unwrap());
+        assert!(publish_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            newer_epoch,
+        )
+        .is_ok());
+        assert!(builder_readiness_matches_epoch(
+            &domain,
+            &builder,
+            container_id,
+            fingerprint,
+            newer_epoch,
+        )
+        .unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_reused_builder_start_is_retryable_from_exact_starting_epoch() {
+        let root = temp_root("builder-readiness-start-retry");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("repo-key-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let container_id = "immutable-container-id";
+        let config = "no-config-v1";
+        write_test_builder_readiness(&domain, &builder, container_id, config).unwrap();
+
+        let initial = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial.phase, BuilderReadinessPhase::Ready);
+        assert_eq!(initial.epoch, 1);
+        let first_start_inspections = std::cell::Cell::new(0);
+        let failed = start_builder_from_readiness_under_lock_with(
+            &domain,
+            &builder,
+            "buildkitd",
+            container_id,
+            config,
+            initial.epoch,
+            |id| {
+                assert_eq!(id, container_id);
+                first_start_inspections.set(first_start_inspections.get() + 1);
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Exited),
+                    finished: None,
+                })
+            },
+            |id| {
+                assert_eq!(id, container_id);
+                anyhow::bail!("ContainerStart response was lost")
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(first_start_inspections.get(), 2);
+        let failed_attempt = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed_attempt.phase, BuilderReadinessPhase::Starting);
+        assert_eq!(failed_attempt.epoch, 2);
+        assert!(!builder_readiness_matches_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            failed_attempt.epoch,
+        )
+        .unwrap());
+
+        // A new setup/recovery attempt must revalidate the same ID/config,
+        // advance again, and retry under its Engine-volume lock. Treat this
+        // retry's later worker-probe failure as an unpublished Starting
+        // epoch; a further retry must advance once more.
+        let retry_start_ids = std::cell::RefCell::new(Vec::new());
+        let retry_epoch = start_builder_from_readiness_under_lock_with(
+            &domain,
+            &builder,
+            "buildkitd",
+            container_id,
+            config,
+            failed_attempt.epoch,
+            |id| {
+                assert_eq!(id, container_id);
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Exited),
+                    finished: None,
+                })
+            },
+            |id| {
+                retry_start_ids.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry_start_ids.into_inner(), vec![container_id]);
+        assert_eq!(retry_epoch, 3);
+        let probe_failed = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(probe_failed.phase, BuilderReadinessPhase::Starting);
+        assert_eq!(probe_failed.epoch, retry_epoch);
+        assert!(!builder_readiness_matches_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            retry_epoch,
+        )
+        .unwrap());
+        let probe_calls = std::cell::Cell::new(0);
+        let failed_probe = probe_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            retry_epoch,
+            || {
+                probe_calls.set(probe_calls.get() + 1);
+                anyhow::bail!("BuildKit worker probe failed")
+            },
+        );
+        assert!(failed_probe.is_err());
+        assert_eq!(probe_calls.get(), 1);
+        let after_failed_probe = read_builder_readiness_state(&domain, &builder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_failed_probe.phase, BuilderReadinessPhase::Starting);
+        assert_eq!(after_failed_probe.epoch, retry_epoch);
+        assert!(!builder_readiness_matches_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            retry_epoch,
+        )
+        .unwrap());
+
+        let final_start_ids = std::cell::RefCell::new(Vec::new());
+        let final_epoch = start_builder_from_readiness_under_lock_with(
+            &domain,
+            &builder,
+            "buildkitd",
+            container_id,
+            config,
+            retry_epoch,
+            |id| {
+                assert_eq!(id, container_id);
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Exited),
+                    finished: None,
+                })
+            },
+            |id| {
+                final_start_ids.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(final_start_ids.into_inner(), vec![container_id]);
+        assert_eq!(final_epoch, 4);
+        assert!(probe_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            final_epoch,
+            || Ok(()),
+        )
+        .unwrap()
+        .is_none());
+        assert!(publish_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            failed_attempt.epoch,
+        )
+        .is_err());
+        assert!(publish_builder_readiness_for_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            retry_epoch,
+        )
+        .is_err());
+        assert!(!builder_readiness_matches(&domain, &builder, container_id, config).unwrap());
+        publish_builder_readiness_for_epoch(&domain, &builder, container_id, config, final_epoch)
+            .unwrap();
+        assert!(builder_readiness_matches_epoch(
+            &domain,
+            &builder,
+            container_id,
+            config,
+            final_epoch,
+        )
+        .unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn horizon_restart_false_is_an_error() {
+        assert!(require_buildkit_restart(Ok(false)).is_err());
+        assert!(require_buildkit_restart(Ok(true)).is_ok());
+    }
+
+    #[test]
     fn conflict_wait_rechecks_readiness_when_creator_disappears() {
         let root = temp_root("conflict-readiness-published-before-creator-disappears");
         let domain =
@@ -5846,6 +8105,8 @@ mod tests {
                     state_volume: daemon_state_volume(&builder),
                     container_id: container_id.to_owned(),
                     config_fingerprint: config.to_owned(),
+                    epoch: 1,
+                    phase: BuilderReadinessPhase::Ready,
                 };
                 write_atomic_document(
                     &builder_readiness_file(&domain, &builder),
@@ -5901,6 +8162,7 @@ mod tests {
                     bind_persistent_builder_creator_container(
                         &domain,
                         &builder,
+                        1,
                         config,
                         container_id,
                     )
@@ -5908,6 +8170,7 @@ mod tests {
                     record_persistent_builder_creator_archive(
                         &domain,
                         &builder,
+                        1,
                         config,
                         container_id,
                         config,
@@ -5920,6 +8183,8 @@ mod tests {
                         state_volume: daemon_state_volume(&builder),
                         container_id: container_id.to_owned(),
                         config_fingerprint: config.to_owned(),
+                        epoch: 1,
+                        phase: BuilderReadinessPhase::Ready,
                     };
                     write_atomic_document(
                         &builder_readiness_file(&domain, &builder),
