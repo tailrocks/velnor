@@ -129,7 +129,7 @@ impl StoreScope {
     /// boundary clap published at startup.
     pub(crate) fn current() -> Self {
         Self {
-            layout: crate::storage::StorageLayout::resolve(),
+            layout: crate::storage::selected_or_resolved_layout(),
             pool_trust_scope: crate::trust_scope::current(),
             daemon_environment: None,
         }
@@ -259,7 +259,7 @@ fn work_root(config_dir: Option<PathBuf>, work_dir: Option<PathBuf>) -> Result<P
     // Package units set VELNOR_STORAGE_ROOT=/var. Scanning
     // `$HOME/.velnor/runner/_work` reports 0 candidates while leftover job
     // UUID trees sit in `/var/lib/velnor*/work`.
-    if let Some(layout) = crate::storage::StorageLayout::resolve() {
+    if let Some(layout) = crate::storage::selected_or_resolved_layout() {
         let work = layout.lib_root.join("work");
         if work.is_dir() {
             return Ok(crate::container::daemon_shared_root(work));
@@ -904,19 +904,42 @@ pub fn reclaim(
         in_use_scopes,
         false,
         Some(layout),
+        None,
     )
 }
 
-/// Reclaim cache storage across all discovered daemon work roots.
-///
-/// Disk pressure is best effort: one unavailable root must not prevent the
-/// remaining roots from being reclaimed or make the caller fail open. Each
-/// root retains the lease and filesystem coordination enforced by
-/// [`reclaim_work_root`].
-pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
-    let roots = crate::leftover_disk::discover_daemon_work_roots();
-    let layout = crate::storage::StorageLayout::resolve();
-    reclaim_for_disk_pressure_with_context(target_bytes, &roots, layout.as_ref())
+/// Reclaim ordinary cache candidates after capacity admission fails for
+/// `pressure_path`. Candidate bytes from another filesystem cannot satisfy
+/// this reservation.
+pub(crate) fn reclaim_for_capacity_pressure_with_pin(
+    layout: &crate::storage::StorageLayout,
+    pressure_path: &Path,
+    target_bytes: u64,
+    in_use_scopes: &BTreeSet<String>,
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+) -> Result<ReclaimReport> {
+    let pressure = pin_pressure_path(pressure_path, expected_pressure)?;
+    let pressure_device = expected_pressure.device_id();
+    let available_bytes = |_: &Path| {
+        pressure
+            .probe()
+            .ok()
+            .map(|capacity| capacity.available_bytes)
+    };
+    reclaim_work_root_with_layout_on_device(
+        &layout.cache_root,
+        &layout.run_root,
+        &layout.log_root,
+        target_bytes,
+        in_use_scopes,
+        false,
+        Some(layout),
+        None,
+        Some(pressure_device),
+        &candidate_device_id,
+        Some(pressure_path),
+        &available_bytes,
+    )
 }
 
 /// Reclaim one work root using the current process storage layout.
@@ -925,7 +948,7 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
 /// callers that already hold a configuration snapshot. This wrapper preserves
 /// the existing crate-local test and operator entry point for callers that
 /// provide only filesystem roots.
-#[allow(dead_code, reason = "crate-local tests exercise the wrapper")]
+#[allow(dead_code, reason = "crate-local tests exercise the work-root wrapper")]
 pub(crate) fn reclaim_work_root(
     work_root: &Path,
     run_root: &Path,
@@ -934,7 +957,7 @@ pub(crate) fn reclaim_work_root(
     in_use_scopes: &BTreeSet<String>,
     emergency: bool,
 ) -> Result<ReclaimReport> {
-    let layout = crate::storage::StorageLayout::resolve();
+    let layout = crate::storage::selected_or_resolved_layout();
     reclaim_work_root_with_layout(
         work_root,
         run_root,
@@ -943,15 +966,101 @@ pub(crate) fn reclaim_work_root(
         in_use_scopes,
         emergency,
         layout.as_ref(),
+        None,
     )
 }
 
-fn reclaim_for_disk_pressure_with_context(
+/// Reclaim under an observed pressure-root pin. Every capacity measurement
+/// revalidates that same root identity before crediting filesystem free space.
+pub(crate) fn reclaim_for_disk_pressure_with_pin(
+    pressure_path: &Path,
     target_bytes: u64,
     roots: &[PathBuf],
     layout: Option<&crate::storage::StorageLayout>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
 ) -> ReclaimReport {
+    if target_bytes == 0 {
+        return ReclaimReport::default();
+    }
+    let pressure = match pin_pressure_path(pressure_path, expected_pressure) {
+        Ok(pressure) => pressure,
+        Err(error) => {
+            return ReclaimReport {
+                failures: vec![format!(
+                    "skip disk-pressure cache reclaim: pressured filesystem identity changed at {}: {error:#}",
+                    pressure_path.display()
+                )],
+                ..ReclaimReport::default()
+            };
+        }
+    };
+    let pressure_device = expected_pressure.device_id();
+    let available_bytes = |_: &Path| {
+        pressure
+            .probe()
+            .ok()
+            .map(|capacity| capacity.available_bytes)
+    };
+    reclaim_for_disk_pressure_on_device(
+        pressure_path,
+        target_bytes,
+        roots,
+        layout,
+        backend,
+        pressure_device,
+        &candidate_device_id,
+        &available_bytes,
+    )
+}
+
+fn pin_pressure_path(
+    pressure_path: &Path,
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+) -> Result<crate::host_capacity::HostCapacityPin> {
+    expected_pressure
+        .revalidate()
+        .context("revalidate pressure root captured by admission")?;
+    let pressure = crate::host_capacity::HostCapacityPin::open(pressure_path)
+        .with_context(|| format!("pin pressured filesystem at {}", pressure_path.display()))?;
+    if pressure.identity() != expected_pressure.identity() {
+        bail!(
+            "pressure path {} no longer identifies the admitted filesystem root",
+            pressure_path.display()
+        );
+    }
+    Ok(pressure)
+}
+
+fn reclaim_for_disk_pressure_on_device(
+    pressure_path: &Path,
+    target_bytes: u64,
+    roots: &[PathBuf],
+    layout: Option<&crate::storage::StorageLayout>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    pressure_device: u64,
+    candidate_device: &impl Fn(&Path, u64) -> Option<u64>,
+    available_bytes: &impl Fn(&Path) -> Option<u64>,
+) -> ReclaimReport {
+    let measurement_failed = std::cell::Cell::new(false);
+    let measure_available = |path: &Path| {
+        let available = available_bytes(path);
+        if available.is_none() {
+            measurement_failed.set(true);
+        }
+        available
+    };
     let mut report = ReclaimReport::default();
+    let baseline = match measure_available(pressure_path) {
+        Some(bytes) => bytes,
+        None => {
+            report.failures.push(format!(
+                "skip disk-pressure cache reclaim: cannot measure pressured filesystem at {}",
+                pressure_path.display()
+            ));
+            return report;
+        }
+    };
 
     for work_root in roots {
         let (run_root, log_root) = layout
@@ -963,11 +1072,22 @@ fn reclaim_for_disk_pressure_with_context(
                     work_root.join("_velnor_logs"),
                 )
             });
+        match measure_available(pressure_path) {
+            Some(current) => report.freed_bytes = observed_net_freed_bytes(baseline, current),
+            None => {
+                report.freed_bytes = 0;
+                report.failures.push(format!(
+                    "stop disk-pressure cache reclaim: cannot remeasure pressured filesystem at {}",
+                    pressure_path.display()
+                ));
+                break;
+            }
+        }
         let remaining = target_bytes.saturating_sub(report.freed_bytes);
         if remaining == 0 {
             break;
         }
-        match reclaim_work_root_with_layout(
+        match reclaim_work_root_with_layout_on_device(
             work_root,
             &run_root,
             &log_root,
@@ -975,16 +1095,53 @@ fn reclaim_for_disk_pressure_with_context(
             &BTreeSet::new(),
             true,
             layout,
+            backend,
+            Some(pressure_device),
+            candidate_device,
+            Some(pressure_path),
+            &measure_available,
         ) {
             Ok(root_report) => {
-                report.freed_bytes = report.freed_bytes.saturating_add(root_report.freed_bytes);
                 report.deleted.extend(root_report.deleted);
                 report.failures.extend(root_report.failures);
+                if measurement_failed.get() {
+                    report.freed_bytes = 0;
+                    report.failures.push(format!(
+                        "stop disk-pressure cache reclaim: pressured filesystem identity or capacity probe failed at {}",
+                        pressure_path.display()
+                    ));
+                    break;
+                }
+                match measure_available(pressure_path) {
+                    Some(current) => {
+                        report.freed_bytes = observed_net_freed_bytes(baseline, current);
+                    }
+                    None => {
+                        report.freed_bytes = 0;
+                        report.failures.push(format!(
+                            "cache reclaim completed for {} but pressured filesystem could not be remeasured at {}",
+                            work_root.display(),
+                            pressure_path.display()
+                        ));
+                    }
+                }
             }
             Err(error) => report
                 .failures
                 .push(format!("{}: {error:#}", work_root.display())),
         }
+    }
+
+    if measurement_failed.get() {
+        report.freed_bytes = 0;
+    } else if let Some(current) = measure_available(pressure_path) {
+        report.freed_bytes = observed_net_freed_bytes(baseline, current);
+    } else {
+        report.freed_bytes = 0;
+        report.failures.push(format!(
+            "disk-pressure cache reclaim completed but pressured filesystem could not be remeasured at {}",
+            pressure_path.display()
+        ));
     }
 
     report
@@ -998,6 +1155,37 @@ fn reclaim_work_root_with_layout(
     in_use_scopes: &BTreeSet<String>,
     emergency: bool,
     layout: Option<&crate::storage::StorageLayout>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+) -> Result<ReclaimReport> {
+    reclaim_work_root_with_layout_on_device(
+        work_root,
+        run_root,
+        log_root,
+        target_bytes,
+        in_use_scopes,
+        emergency,
+        layout,
+        backend,
+        None,
+        &candidate_device_id,
+        None,
+        &pressure_available_bytes,
+    )
+}
+
+fn reclaim_work_root_with_layout_on_device(
+    work_root: &Path,
+    run_root: &Path,
+    log_root: &Path,
+    target_bytes: u64,
+    in_use_scopes: &BTreeSet<String>,
+    emergency: bool,
+    layout: Option<&crate::storage::StorageLayout>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    pressure_device: Option<u64>,
+    candidate_device: &impl Fn(&Path, u64) -> Option<u64>,
+    pressure_path: Option<&Path>,
+    available_bytes: &impl Fn(&Path) -> Option<u64>,
 ) -> Result<ReclaimReport> {
     let _lock = match GcLeaderLock::acquire(run_root) {
         Ok(lock) => lock,
@@ -1016,7 +1204,114 @@ fn reclaim_work_root_with_layout(
         Duration::from_secs(24 * 3600),
     )?);
     let scope = StoreScope::with_layout(layout);
-    let mut entries = cache_listing(work_root, emergency, &scope)?;
+    let catalog_roots = store_roots(work_root, &scope);
+    let mut catalog_anchor_identities = BTreeMap::new();
+    if pressure_device.is_some() {
+        for root in &catalog_roots {
+            if let Some(anchor) =
+                trusted_catalog_anchor(work_root, layout, &catalog_roots, &root.path)
+            {
+                catalog_anchor_identities
+                    .entry(anchor.clone())
+                    .or_insert_with(|| {
+                        crate::leftover_disk::filesystem_directory_identity(&anchor).ok()
+                    });
+            }
+        }
+    }
+    let mut report = ReclaimReport::default();
+    let mut catalog_candidate_identities = BTreeMap::new();
+    let mut pinned_catalog_candidates = BTreeMap::new();
+    let mut entries = if let Some(expected_device) = pressure_device {
+        let mut entries = Vec::new();
+        for store in catalog_roots.iter().filter(|store| {
+            if emergency {
+                store.emergency_managed
+            } else {
+                store.gc_managed
+            }
+        }) {
+            let Some(anchor) =
+                trusted_catalog_anchor(work_root, layout, &catalog_roots, &store.path)
+            else {
+                report.failures.push(format!(
+                    "skip cache root {}: no trusted catalog anchor",
+                    store.path.display()
+                ));
+                continue;
+            };
+            let Some(anchor_identity) = catalog_anchor_identities
+                .get(&anchor)
+                .and_then(Option::as_ref)
+            else {
+                if matches!(
+                    fs::symlink_metadata(&anchor),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ) {
+                    continue;
+                }
+                report.failures.push(format!(
+                    "skip cache root {}: trusted catalog anchor cannot be proven",
+                    store.path.display()
+                ));
+                continue;
+            };
+            let snapshots = match crate::leftover_disk::filesystem_candidate_tree_snapshots_under(
+                &anchor,
+                &store.path,
+                anchor_identity,
+                store.candidate_depth,
+            ) {
+                Ok(snapshots) => snapshots,
+                Err(error) => {
+                    report.failures.push(format!(
+                        "skip cache root {}: secure inventory failed: {error:#}",
+                        store.path.display()
+                    ));
+                    continue;
+                }
+            };
+            for snapshot in snapshots {
+                if !snapshot.same_mount_tree
+                    || snapshot.identity.device != expected_device
+                    || candidate_device(&snapshot.path, snapshot.identity.device)
+                        != Some(expected_device)
+                    || snapshot.logical_bytes == 0
+                {
+                    continue;
+                }
+                if store.kind == CacheStore::Targets
+                    && (snapshot
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+                        || !target_generation_is_complete_at(&snapshot.directory)?)
+                {
+                    continue;
+                }
+                let entry = CacheEntry {
+                    path: snapshot.path.clone(),
+                    store: store.kind,
+                    scope: store
+                        .scope_prefix
+                        .iter()
+                        .cloned()
+                        .chain(scope_parts(&store.path, &snapshot.path, store.scope_depth))
+                        .filter(|part| part != ".")
+                        .collect(),
+                    bytes: snapshot.logical_bytes,
+                    modified: snapshot.newest_modified,
+                };
+                catalog_candidate_identities
+                    .insert(snapshot.path.clone(), snapshot.identity.clone());
+                pinned_catalog_candidates.insert(snapshot.path, snapshot.directory);
+                entries.push(entry);
+            }
+        }
+        entries
+    } else {
+        cache_listing(work_root, emergency, &scope)?
+    };
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: 0,
@@ -1051,10 +1346,43 @@ fn reclaim_work_root_with_layout(
             .then_with(|| left.modified.cmp(&right.modified))
             .then_with(|| left.path.cmp(&right.path))
     });
-    let mut report = ReclaimReport::default();
+    let pressure_pass_baseline = if let Some(pressure_path) = pressure_path {
+        match available_bytes(pressure_path) {
+            Some(bytes) => Some(bytes),
+            None => {
+                report.failures.push(format!(
+                    "skip cache reclaim: cannot measure pressured filesystem at {}",
+                    pressure_path.display()
+                ));
+                return Ok(report);
+            }
+        }
+    } else {
+        None
+    };
+    let pressure_measurements_valid = std::cell::Cell::new(pressure_pass_baseline.is_some());
     for entry in entries {
         if report.freed_bytes >= target_bytes {
             break;
+        }
+        if let (Some(pressure_path), Some(baseline)) = (pressure_path, pressure_pass_baseline) {
+            match available_bytes(pressure_path) {
+                Some(current) => {
+                    report.freed_bytes = observed_net_freed_bytes(baseline, current);
+                    if report.freed_bytes >= target_bytes {
+                        break;
+                    }
+                }
+                None => {
+                    report.freed_bytes = 0;
+                    pressure_measurements_valid.set(false);
+                    report.failures.push(format!(
+                        "stop cache reclaim before deletion: pressured filesystem could not be revalidated at {}",
+                        pressure_path.display()
+                    ));
+                    break;
+                }
+            }
         }
         let candidate = EvictionCandidate {
             path: entry.path,
@@ -1063,18 +1391,129 @@ fn reclaim_work_root_with_layout(
             bytes: entry.bytes,
             reason: "reclaim-target".into(),
         };
-        match remove_candidate(&candidate) {
+        let validate_pressure_before_delete = || {
+            if let Some(pressure_path) = pressure_path
+                && available_bytes(pressure_path).is_none()
+            {
+                pressure_measurements_valid.set(false);
+                bail!(
+                    "pressured filesystem could not be revalidated before deleting {}",
+                    candidate.path.display()
+                );
+            }
+            Ok(())
+        };
+        let removed = if let Some(pressure_device) = pressure_device {
+            match trusted_catalog_anchor(work_root, layout, &catalog_roots, &candidate.path) {
+                Some(anchor) => match catalog_anchor_identities
+                    .get(&anchor)
+                    .and_then(Option::as_ref)
+                {
+                    Some(anchor_identity) => {
+                        match catalog_candidate_identities.get(&candidate.path) {
+                            Some(candidate_identity) => {
+                                match pinned_catalog_candidates.get(&candidate.path) {
+                                    Some(pinned_candidate) => remove_candidate_on_device(
+                                        &candidate,
+                                        pressure_device,
+                                        &anchor,
+                                        anchor_identity,
+                                        candidate_identity,
+                                        pinned_candidate,
+                                        &validate_pressure_before_delete,
+                                    ),
+                                    None => Err(anyhow::anyhow!(
+                                        "cache candidate descriptor was not retained: {}",
+                                        candidate.path.display()
+                                    )),
+                                }
+                            }
+                            None => Err(anyhow::anyhow!(
+                                "cache candidate identity cannot be proven: {}",
+                                candidate.path.display()
+                            )),
+                        }
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "cache catalog anchor cannot be proven: {}",
+                        anchor.display()
+                    )),
+                },
+                None => Err(anyhow::anyhow!(
+                    "cache candidate has no trusted catalog anchor: {}",
+                    candidate.path.display()
+                )),
+            }
+        } else {
+            remove_candidate(&candidate)
+        };
+        match removed {
             Ok(()) => {
-                report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
                 report.deleted.push(candidate.path.clone());
-                append_gc_history(log_root, &candidate, None, "deleted")?;
+                let stop_after_delete = if let Some(pressure_path) = pressure_path {
+                    match (pressure_pass_baseline, available_bytes(pressure_path)) {
+                        (Some(baseline), Some(after)) => {
+                            report.freed_bytes = observed_net_freed_bytes(baseline, after);
+                            false
+                        }
+                        _ => {
+                            report.freed_bytes = 0;
+                            pressure_measurements_valid.set(false);
+                            report.failures.push(format!(
+                                "cache candidate deleted but pressure filesystem could not be remeasured at {}",
+                                pressure_path.display()
+                            ));
+                            true
+                        }
+                    }
+                } else {
+                    report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
+                    false
+                };
+                if let Err(error) = append_gc_history(log_root, &candidate, None, "deleted") {
+                    report.failures.push(format!(
+                        "{}: deleted but could not append GC history: {error:#}",
+                        candidate.path.display()
+                    ));
+                }
+                if stop_after_delete {
+                    break;
+                }
             }
             Err(error) => {
                 report
                     .failures
                     .push(format!("{}: {error}", candidate.path.display()));
-                append_gc_history(log_root, &candidate, None, "failed")?;
+                if let Err(history_error) = append_gc_history(log_root, &candidate, None, "failed")
+                {
+                    report.failures.push(format!(
+                        "{}: could not append GC failure history: {history_error:#}",
+                        candidate.path.display()
+                    ));
+                }
             }
+        }
+        if !pressure_measurements_valid.get() {
+            break;
+        }
+    }
+    if emergency && pressure_device.is_some() && pressure_measurements_valid.get() {
+        if let (Some(pressure_path), Some(baseline)) = (pressure_path, pressure_pass_baseline) {
+            match available_bytes(pressure_path) {
+                Some(current) => {
+                    report.freed_bytes = observed_net_freed_bytes(baseline, current);
+                }
+                None => {
+                    report.freed_bytes = 0;
+                    pressure_measurements_valid.set(false);
+                    report.failures.push(format!(
+                        "skip BuildKit reclaim: pressured filesystem could not be revalidated at {}",
+                        pressure_path.display()
+                    ));
+                }
+            }
+        } else {
+            pressure_measurements_valid.set(false);
         }
     }
     // The claim boundary this path used to lack now exists: builders with any
@@ -1083,23 +1522,90 @@ fn reclaim_work_root_with_layout(
     // the target does emergency reclaim stop and prune unclaimed builders,
     // largest first — bounded, measured, and cold-only. This is what makes
     // the claim-aware emergency BuildKit reclaim live.
-    if emergency && report.freed_bytes < target_bytes {
+    if emergency
+        && pressure_device.is_some()
+        && pressure_measurements_valid.get()
+        && report.freed_bytes < target_bytes
+    {
         let remaining = target_bytes.saturating_sub(report.freed_bytes);
-        let pruned = match crate::buildkit::PersistentBuildKitDomain::try_resolve() {
-            Ok(Some(domain)) => crate::buildkit::pressure_prune_builders(&domain, remaining),
-            Ok(None) => crate::buildkit::PressurePruneReport::default(),
-            Err(error) => crate::buildkit::PressurePruneReport {
-                failures: vec![format!("skip BuildKit pressure prune: {error:#}")],
-                ..crate::buildkit::PressurePruneReport::default()
+        let pruned = pressure_prune_buildkit_with_backend(
+            backend,
+            layout,
+            pressure_device,
+            remaining,
+            |domain, target_bytes, pressure_device| {
+                match crate::buildkit::reclaim_domain_buildkit_for_device(
+                    domain,
+                    target_bytes,
+                    pressure_device,
+                ) {
+                    Ok(freed_bytes) => crate::buildkit::PressurePruneReport {
+                        freed_bytes,
+                        ..crate::buildkit::PressurePruneReport::default()
+                    },
+                    Err(error) => crate::buildkit::PressurePruneReport {
+                        failures: vec![format!("skip BuildKit pressure reclaim: {error:#}")],
+                        ..crate::buildkit::PressurePruneReport::default()
+                    },
+                }
             },
+        );
+        report.freed_bytes = if let (Some(pressure_path), Some(baseline)) =
+            (pressure_path, pressure_pass_baseline)
+        {
+            match available_bytes(pressure_path) {
+                Some(after) => after.saturating_sub(baseline),
+                None => {
+                    report.freed_bytes = 0;
+                    report.failures.push(format!(
+                        "BuildKit reclaim ran but pressured filesystem could not be remeasured at {}",
+                        pressure_path.display()
+                    ));
+                    report.freed_bytes
+                }
+            }
+        } else {
+            report.freed_bytes.saturating_add(pruned.freed_bytes)
         };
-        report.freed_bytes = report.freed_bytes.saturating_add(pruned.freed_bytes);
         for builder in pruned.pruned {
             tracing::info!(builder = %builder, "emergency reclaim pruned unclaimed BuildKit builder");
         }
         report.failures.extend(pruned.failures);
     }
     Ok(report)
+}
+
+fn pressure_prune_buildkit_with_backend(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    layout: Option<&crate::storage::StorageLayout>,
+    pressure_device: Option<u64>,
+    target_bytes: u64,
+    prune: impl FnOnce(
+        &crate::buildkit::PersistentBuildKitDomain,
+        u64,
+        u64,
+    ) -> crate::buildkit::PressurePruneReport,
+) -> crate::buildkit::PressurePruneReport {
+    let Some(pressure_device) = pressure_device else {
+        return crate::buildkit::PressurePruneReport::default();
+    };
+    if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
+        return crate::buildkit::PressurePruneReport::default();
+    }
+    let resolved_domain = match layout {
+        Some(layout) => {
+            crate::buildkit::PersistentBuildKitDomain::resolve_from_layout(layout.clone()).map(Some)
+        }
+        None => crate::buildkit::PersistentBuildKitDomain::try_resolve(),
+    };
+    match resolved_domain {
+        Ok(Some(domain)) => prune(&domain, target_bytes, pressure_device),
+        Ok(None) => crate::buildkit::PressurePruneReport::default(),
+        Err(error) => crate::buildkit::PressurePruneReport {
+            failures: vec![format!("skip BuildKit pressure prune: {error:#}")],
+            ..crate::buildkit::PressurePruneReport::default()
+        },
+    }
 }
 
 /// Bring the compiler stores (mbx + sccache, every scope, repository and
@@ -1165,6 +1671,38 @@ pub(crate) fn enforce_compiler_store_budget(
 }
 
 fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
+    remove_candidate_with_device(candidate, None, None, None, None, None, &|| Ok(()))
+}
+
+fn remove_candidate_on_device(
+    candidate: &EvictionCandidate,
+    pressure_device: u64,
+    trusted_anchor: &Path,
+    anchor_identity: &crate::leftover_disk::FilesystemDirectoryIdentity,
+    candidate_identity: &crate::leftover_disk::FilesystemDirectoryIdentity,
+    pinned_candidate: &fs::File,
+    before_delete: &impl Fn() -> Result<()>,
+) -> Result<()> {
+    remove_candidate_with_device(
+        candidate,
+        Some(pressure_device),
+        Some(trusted_anchor),
+        Some(anchor_identity),
+        Some(candidate_identity),
+        Some(pinned_candidate),
+        before_delete,
+    )
+}
+
+fn remove_candidate_with_device(
+    candidate: &EvictionCandidate,
+    pressure_device: Option<u64>,
+    trusted_anchor: Option<&Path>,
+    anchor_identity: Option<&crate::leftover_disk::FilesystemDirectoryIdentity>,
+    candidate_identity: Option<&crate::leftover_disk::FilesystemDirectoryIdentity>,
+    pinned_candidate: Option<&fs::File>,
+    before_delete: &impl Fn() -> Result<()>,
+) -> Result<()> {
     let lock_path = if candidate.store == CacheStore::Targets {
         candidate.path.parent().unwrap_or(&candidate.path)
     } else {
@@ -1183,11 +1721,19 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
                 candidate.path.display()
             );
         }
-        if !target_generation_is_complete(&candidate.path) {
+        let complete = if let Some(directory) = pinned_candidate {
+            target_generation_is_complete_at(directory)?
+        } else {
+            target_generation_is_complete(&candidate.path)
+        };
+        if !complete {
             bail!(
                 "target generation changed or became incomplete before removal: {}",
                 candidate.path.display()
             );
+        }
+        if pressure_device.is_some() {
+            before_delete()?;
         }
         let parent = candidate
             .path
@@ -1197,11 +1743,98 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
             .path
             .file_name()
             .context("target generation has no name")?;
+        if let Some(pressure_device) = pressure_device {
+            let trusted_anchor =
+                trusted_anchor.context("cache target candidate has no catalog root anchor")?;
+            let anchor_identity = anchor_identity
+                .context("cache target candidate has no pinned catalog root identity")?;
+            return crate::leftover_disk::remove_dir_all_on_device_under_pinned(
+                trusted_anchor,
+                &candidate.path,
+                pressure_device,
+                anchor_identity,
+                candidate_identity.context("cache target candidate has no pinned identity")?,
+                pinned_candidate.context("cache target candidate has no pinned descriptor")?,
+            );
+        }
         let parent = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(parent)?;
         return parent.remove_tree_entry(name);
     }
+    if let Some(pressure_device) = pressure_device {
+        before_delete()?;
+        let trusted_anchor =
+            trusted_anchor.context("cache candidate has no catalog root anchor")?;
+        let anchor_identity =
+            anchor_identity.context("cache candidate has no pinned catalog root identity")?;
+        return crate::leftover_disk::remove_dir_all_on_device_under_pinned(
+            trusted_anchor,
+            &candidate.path,
+            pressure_device,
+            anchor_identity,
+            candidate_identity.context("cache candidate has no pinned identity")?,
+            pinned_candidate.context("cache candidate has no pinned descriptor")?,
+        );
+    }
     fs::remove_dir_all(&candidate.path)
         .with_context(|| format!("remove cache candidate {}", candidate.path.display()))
+}
+
+fn trusted_catalog_anchor(
+    work_root: &Path,
+    layout: Option<&crate::storage::StorageLayout>,
+    catalog_roots: &[StoreRoot],
+    candidate: &Path,
+) -> Option<PathBuf> {
+    if !catalog_roots
+        .iter()
+        .any(|root| candidate.strip_prefix(&root.path).is_ok())
+    {
+        return None;
+    }
+    if let Some(layout) = layout
+        && candidate.strip_prefix(&layout.cache_root).is_ok()
+    {
+        return Some(layout.cache_root.clone());
+    }
+    candidate
+        .strip_prefix(work_root)
+        .is_ok()
+        .then(|| work_root.to_path_buf())
+}
+
+/// Test helper for the nearest-existing-ancestor behavior of pressure pins.
+#[cfg(test)]
+pub(crate) fn filesystem_device_id(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut probe = path;
+    loop {
+        match fs::metadata(probe) {
+            Ok(metadata) => return Some(metadata.dev()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                probe = probe.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn observed_net_freed_bytes(baseline: u64, current: u64) -> u64 {
+    current.saturating_sub(baseline)
+}
+
+/// Test seam for candidate-device filtering. Production uses the device
+/// captured by the descriptor-relative inventory, never a later path lookup.
+fn candidate_device_id(_path: &Path, captured_device: u64) -> Option<u64> {
+    Some(captured_device)
+}
+
+fn pressure_available_bytes(path: &Path) -> Option<u64> {
+    crate::host_capacity::HostCapacityPin::open(path)
+        .ok()?
+        .probe()
+        .ok()
+        .map(|capacity| capacity.available_bytes)
 }
 
 fn reclaim_priority(store: CacheStore) -> u8 {
@@ -1594,6 +2227,21 @@ fn is_older_than(modified: SystemTime, now: SystemTime, max_age: Duration) -> bo
 
 fn target_generation_is_complete(path: &Path) -> bool {
     target_generation_size(path).is_some()
+}
+
+fn target_generation_is_complete_at(directory: &fs::File) -> Result<bool> {
+    let entries = crate::leftover_disk::filesystem_entries_at(directory)?;
+    let marker = entries.iter().any(|entry| {
+        entry.name == ".velnor-target-complete-v1"
+            && entry.kind == crate::leftover_disk::FilesystemEntryKind::RegularFile
+            && !entry.is_mountpoint
+    });
+    let data = entries.iter().any(|entry| {
+        entry.name == "data"
+            && entry.kind == crate::leftover_disk::FilesystemEntryKind::Directory
+            && !entry.is_mountpoint
+    });
+    Ok(marker && data)
 }
 
 fn target_generation_size(path: &Path) -> Option<(u64, SystemTime)> {
@@ -2181,18 +2829,19 @@ mod tests {
 
     #[test]
     fn cache_gc_skips_in_use_scopes() {
+        let trust_key = crate::trust_scope::filesystem_key("trusted");
         let entries = vec![
             entry(
                 "/cache/active",
                 CacheStore::ActionsCache,
-                &["trusted", "active"],
+                &[trust_key.as_str(), "active"],
                 90,
                 100,
             ),
             entry(
                 "/cache/idle",
                 CacheStore::ActionsCache,
-                &["trusted", "idle"],
+                &[trust_key.as_str(), "idle"],
                 90,
                 100,
             ),
@@ -2200,7 +2849,7 @@ mod tests {
         let mut policy = policy();
         policy
             .in_use_scopes
-            .insert("actions-cache/trusted/active".to_string());
+            .insert(format!("actions-cache/{trust_key}/active"));
 
         let candidates = select_eviction_candidates(&entries, &policy);
 
@@ -2371,7 +3020,10 @@ mod tests {
         let temp_root =
             fs::canonicalize(std::env::temp_dir()).expect("canonicalize temporary test root");
         let root = temp_root.join(format!("velnor-target-race-{}", uuid::Uuid::new_v4()));
-        let scope = root.join("targets/trusted/workspace/repo/workflow/job");
+        let scope = root
+            .join("targets")
+            .join(crate::trust_scope::filesystem_key("trusted"))
+            .join("workspace/repo/workflow/job");
         let generation = scope.join("target-generation-race");
         fs::create_dir_all(generation.join("data")).unwrap();
         fs::write(generation.join("data/output"), b"output").unwrap();
@@ -2448,7 +3100,10 @@ mod tests {
         fs::write(orphan.join("marker"), b"job").unwrap();
         test_clock::backdate(&orphan, crate::leftover_disk::WORKSPACE_MIN_IDLE * 2);
         // A cache entry old enough to evict, so the eviction pass has work too.
-        let stale_cache = work.join("_velnor_caches/trusted/stale/key");
+        let stale_cache =
+            crate::store_catalog::StoreCatalog::for_work_root_with_layout(&work, Some(&layout))
+                .actions_cache("trusted")
+                .join("stale/key");
         fs::create_dir_all(&stale_cache).unwrap();
         fs::write(stale_cache.join("data"), vec![0; 16]).unwrap();
         test_clock::backdate(&stale_cache, DAY * 40);
@@ -2523,9 +3178,14 @@ mod tests {
     fn reclaim_stops_at_target_and_skips_in_use_scope() {
         let root = std::env::temp_dir().join(format!("velnor-reclaim-{}", uuid::Uuid::new_v4()));
         let work = root.join("work");
-        let active = work.join("_velnor_caches/trusted/active/key");
-        let first = work.join("_velnor_caches/trusted/first/key");
-        let second = work.join("_velnor_caches/trusted/second/key");
+        let trust_key = crate::trust_scope::filesystem_key("trusted");
+        let actions_cache =
+            crate::store_catalog::StoreCatalog::for_work_root_with_layout(&work, None)
+                .actions_cache("trusted")
+                .join(&trust_key);
+        let active = actions_cache.join("active/key");
+        let first = actions_cache.join("first/key");
+        let second = actions_cache.join("second/key");
         for path in [&active, &first, &second] {
             fs::create_dir_all(path).unwrap();
             fs::write(path.join("data"), vec![0; 16]).unwrap();
@@ -2535,8 +3195,9 @@ mod tests {
             &root.join("run"),
             &root.join("log"),
             16,
-            &BTreeSet::from(["actions-cache/trusted/active".into()]),
+            &BTreeSet::from([format!("actions-cache/{trust_key}/active")]),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -2562,8 +3223,8 @@ mod tests {
         ));
         let work = root.join("lib/velnor-test/work");
         let layout = crate::storage::StorageLayout::from_prefix(&root);
-        let trusted = root.join("cache/velnor/v1/trusted/caches/repo/key");
-        let untrusted = root.join("cache/velnor/v1/untrusted/caches/repo/key");
+        let trusted = layout.cache_class("trusted", "caches").join("repo/key");
+        let untrusted = layout.cache_class("untrusted", "caches").join("repo/key");
         for path in [&trusted, &untrusted] {
             fs::create_dir_all(path).unwrap();
             fs::write(path.join("data"), vec![0; 16]).unwrap();
@@ -2577,6 +3238,7 @@ mod tests {
             &BTreeSet::new(),
             false,
             Some(&layout),
+            None,
         )
         .unwrap();
 
@@ -2587,14 +3249,63 @@ mod tests {
     }
 
     #[test]
+    fn gc_keeps_colliding_custom_trust_namespaces_separate() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        let pool_scope = "pool/a";
+        assert_eq!(crate::trust_scope::resolve(pool_scope).as_str(), pool_scope);
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-gc-trust-collision-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("lib/velnor-test/work");
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let pool = layout.cache_class(pool_scope, "caches").join("repo/key");
+        let colliding = layout.cache_class("pool_a", "caches").join("repo/key");
+        let floor = layout
+            .cache_class(crate::trust_scope::FAIL_CLOSED, "caches")
+            .join("repo/key");
+        for path in [&pool, &colliding, &floor] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("data"), vec![0; 16]).unwrap();
+        }
+
+        let report = reclaim_work_root_with_layout(
+            &work,
+            &root.join("run"),
+            &root.join("log"),
+            32,
+            &BTreeSet::new(),
+            false,
+            Some(&layout),
+            None,
+        )
+        .unwrap();
+
+        assert!(!pool.exists(), "selected pool namespace was not swept");
+        assert!(!floor.exists(), "fork-job namespace was not swept");
+        assert!(
+            colliding.exists(),
+            "a scope whose old lossy spelling collided was swept"
+        );
+        assert!(report.failures.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn disk_pressure_reclaimer_reclaims_discovered_work_root() {
         let root = std::env::temp_dir().join(format!(
             "velnor-disk-pressure-reclaim-{}",
             uuid::Uuid::new_v4()
         ));
         let work = root.join("lib/velnor-test/work");
-        let cache = root.join("cache/velnor/v1/untrusted/caches/idle/key");
-        let compiler_cache = work.join("_velnor_sccache/untrusted/idle/key");
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let cache = layout.cache_class("untrusted", "caches").join("idle/key");
+        let compiler_cache = work
+            .join("_velnor_sccache")
+            .join(crate::trust_scope::filesystem_key("untrusted"))
+            .join("idle/key");
         fs::create_dir_all(&work).unwrap();
         fs::create_dir_all(&cache).unwrap();
         fs::create_dir_all(&compiler_cache).unwrap();
@@ -2605,18 +3316,341 @@ mod tests {
         backdate(&cache, EMERGENCY_MIN_IDLE * 2);
         backdate(compiler_cache.parent().unwrap(), EMERGENCY_MIN_IDLE * 2);
 
-        let layout = crate::storage::StorageLayout::from_prefix(&root);
         let work_roots = crate::leftover_disk::discover_daemon_work_roots_in(&root.join("lib"));
         assert_eq!(work_roots, vec![work.clone()]);
-        let report = reclaim_for_disk_pressure_with_context(32, &work_roots, Some(&layout));
+        // Inject a different device for candidates while preserving the real
+        // pressure device used by the descriptor-bound deleter.
+        let pressure_device = filesystem_device_id(&root).unwrap();
+        let off_device =
+            |_path: &Path, _captured_device: u64| Some(pressure_device.saturating_add(1));
+        let no_measurement = |_path: &Path| Some(0);
+        let skipped = reclaim_for_disk_pressure_on_device(
+            &root,
+            16,
+            &work_roots,
+            Some(&layout),
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            pressure_device,
+            &off_device,
+            &no_measurement,
+        );
+        assert_eq!(skipped.freed_bytes, 0);
+        assert!(skipped.deleted.is_empty());
+        assert!(cache.exists());
+        assert!(compiler_cache.exists());
 
-        assert_eq!(report.freed_bytes, 32);
+        // The canonical cache candidate is modeled off-device; the legacy
+        // work-root cache remains on-device.
+        let off_device_cache = cache.clone();
+        let device_of = |path: &Path, _captured_device: u64| {
+            if path.starts_with(&off_device_cache) {
+                Some(pressure_device.saturating_add(1))
+            } else {
+                Some(pressure_device)
+            }
+        };
+        let measure = |_: &Path| {
+            Some(
+                10_000
+                    + if compiler_cache.parent().unwrap().exists() {
+                        0
+                    } else {
+                        4096
+                    },
+            )
+        };
+        let report = reclaim_for_disk_pressure_on_device(
+            &root,
+            16,
+            &work_roots,
+            Some(&layout),
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            pressure_device,
+            &device_of,
+            &measure,
+        );
+
+        assert_eq!(report.freed_bytes, 4096);
         assert_eq!(
             report.deleted,
-            vec![cache, compiler_cache.parent().unwrap().to_path_buf()]
+            vec![compiler_cache.parent().unwrap().to_path_buf()]
         );
+        assert!(cache.exists(), "off-device cache candidate was deleted");
+        assert!(!compiler_cache.parent().unwrap().exists());
         assert!(report.failures.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pressure_device_uses_nearest_existing_ancestor() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-device-ancestor-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let expected_device = fs::metadata(&root).unwrap().dev();
+        let not_created_yet = root.join("new/cache/root");
+
+        assert_eq!(
+            filesystem_device_id(&not_created_yet),
+            Some(expected_device)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pressure_capacity_pin_rejects_replaced_path_identity() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-capacity-pin-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let pressure = root.join("pressure");
+        let replacement = root.join("replacement");
+        let work = root.join("work");
+        let candidate = work
+            .join("_velnor_sccache")
+            .join(crate::trust_scope::filesystem_key("untrusted"))
+            .join("idle");
+        fs::create_dir_all(&pressure).unwrap();
+        fs::create_dir_all(&replacement).unwrap();
+        fs::create_dir_all(candidate.join("key")).unwrap();
+        fs::write(candidate.join("key/payload"), b"preserve").unwrap();
+        backdate(&candidate, EMERGENCY_MIN_IDLE * 2);
+        let pin = crate::host_capacity::HostCapacityPin::open(&pressure).unwrap();
+        assert!(pin.probe().is_ok());
+
+        let displaced = root.join("pressure-pinned");
+        fs::rename(&pressure, &displaced).unwrap();
+        symlink(&replacement, &pressure).unwrap();
+        assert!(pin.revalidate().is_err());
+        assert!(pin.probe().is_err());
+        let report = reclaim_for_disk_pressure_with_pin(
+            &pressure,
+            16,
+            std::slice::from_ref(&work),
+            None,
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            &pin,
+        );
+        assert!(report.deleted.is_empty());
+        assert!(!report.failures.is_empty());
+        assert!(
+            candidate.exists(),
+            "same-device replacement path deleted cache"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn net_pressure_delta_uses_one_pass_baseline() {
+        assert_eq!(observed_net_freed_bytes(1_000, 1_100), 100);
+        // A concurrent allocator consumes 50 bytes after the initial gain.
+        // Rechecking against the pass baseline reports 50, not 100.
+        assert_eq!(observed_net_freed_bytes(1_000, 1_050), 50);
+        assert_eq!(observed_net_freed_bytes(1_000, 900), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pressure_reclaim_reports_net_capacity_after_concurrent_allocation() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-net-capacity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let candidate = work
+            .join("_velnor_sccache")
+            .join(crate::trust_scope::filesystem_key("untrusted"))
+            .join("idle");
+        fs::create_dir_all(candidate.join("key")).unwrap();
+        fs::write(candidate.join("key/payload"), vec![0; 32]).unwrap();
+        backdate(&candidate, EMERGENCY_MIN_IDLE * 2);
+        let pressure_device = filesystem_device_id(&root).unwrap_or_else(|| {
+            fs::create_dir_all(&root).unwrap();
+            filesystem_device_id(&root).unwrap()
+        });
+        let post_delete_samples = std::cell::Cell::new(0_usize);
+        let available = |_: &Path| {
+            if candidate.exists() {
+                Some(1_000)
+            } else {
+                let sample = post_delete_samples.get();
+                post_delete_samples.set(sample + 1);
+                Some(if sample == 0 { 1_100 } else { 1_040 })
+            }
+        };
+
+        let report = reclaim_for_disk_pressure_on_device(
+            &root,
+            500,
+            std::slice::from_ref(&work),
+            None,
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            pressure_device,
+            &candidate_device_id,
+            &available,
+        );
+
+        assert_eq!(report.deleted, vec![candidate]);
+        assert_eq!(report.freed_bytes, 40);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pressure_inventory_captures_candidate_tree_without_following_links() {
+        use std::os::unix::fs::{symlink, MetadataExt as _};
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-tree-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let anchor = root.join("anchor");
+        let store = anchor.join("store");
+        let candidate = store.join("scope/candidate");
+        let outside = root.join("outside");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(candidate.join("payload"), b"owned").unwrap();
+        fs::write(outside.join("secret"), vec![0; 128]).unwrap();
+        symlink(&outside, candidate.join("external")).unwrap();
+
+        let anchor_identity = crate::leftover_disk::filesystem_directory_identity(&anchor).unwrap();
+        let snapshots = crate::leftover_disk::filesystem_candidate_tree_snapshots_under(
+            &anchor,
+            &store,
+            &anchor_identity,
+            1,
+        )
+        .unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].path, store.join("scope"));
+        assert_eq!(snapshots[0].logical_bytes, 5);
+        assert!(snapshots[0].same_mount_tree);
+        let identity =
+            crate::leftover_disk::filesystem_object_identity(&snapshots[0].directory).unwrap();
+        assert_eq!(identity, snapshots[0].identity);
+        assert_eq!(
+            identity.inode,
+            fs::metadata(store.join("scope")).unwrap().ino()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pressure_reclaim_keeps_deleted_report_when_history_append_fails() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-history-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let trust = crate::trust_scope::filesystem_key("untrusted");
+        let candidate = work.join("_velnor_sccache").join(trust).join("idle");
+        fs::create_dir_all(candidate.join("key")).unwrap();
+        fs::write(candidate.join("key/payload"), vec![0; 32]).unwrap();
+        backdate(&candidate, EMERGENCY_MIN_IDLE * 2);
+        let run_root = root.join("run");
+        let log_root = root.join("log");
+        fs::write(&log_root, b"not a directory").unwrap();
+        let pressure_device = fs::metadata(&root).unwrap().dev();
+        let available = |_: &Path| Some(if candidate.exists() { 10_000 } else { 10_100 });
+
+        let report = reclaim_work_root_with_layout_on_device(
+            &work,
+            &run_root,
+            &log_root,
+            50,
+            &BTreeSet::new(),
+            true,
+            None,
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            Some(pressure_device),
+            &candidate_device_id,
+            Some(&root),
+            &available,
+        )
+        .unwrap();
+
+        assert!(!candidate.exists());
+        assert_eq!(report.freed_bytes, 100);
+        assert_eq!(report.deleted, vec![candidate]);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("deleted but could not append GC history")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_config_pressure_reclaims_selected_work_root_and_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-explicit-config-pressure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = root.join("daemon-config");
+        let work = config.join("_work");
+        let selected_cache = work
+            .join("_velnor_sccache")
+            .join(crate::trust_scope::filesystem_key("untrusted"))
+            .join("idle/key");
+        let decoy_work = root.join("other-domain/work");
+        let decoy_cache = decoy_work
+            .join("_velnor_sccache")
+            .join(crate::trust_scope::filesystem_key("untrusted"))
+            .join("idle/key");
+        fs::create_dir_all(&selected_cache).unwrap();
+        fs::create_dir_all(&decoy_cache).unwrap();
+        fs::write(selected_cache.join("payload"), vec![0; 16]).unwrap();
+        fs::write(decoy_cache.join("payload"), vec![0; 16]).unwrap();
+        backdate(selected_cache.parent().unwrap(), EMERGENCY_MIN_IDLE * 2);
+        backdate(decoy_cache.parent().unwrap(), EMERGENCY_MIN_IDLE * 2);
+        let layout = crate::storage::StorageLayout {
+            cache_root: config.join("cache"),
+            lib_root: config.clone(),
+            run_root: config.join("run"),
+            log_root: config.join("log"),
+            mode: "explicit-config",
+        };
+
+        let pressure = crate::host_capacity::HostCapacityPin::open(&config).unwrap();
+        let report = reclaim_for_disk_pressure_with_pin(
+            &config,
+            128,
+            &[work],
+            Some(&layout),
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            &pressure,
+        );
+
+        assert!(!selected_cache.exists());
+        assert!(decoy_cache.exists());
+        assert_eq!(report.deleted.len(), 1);
+        assert!(config.join("log/gc-history.jsonl").exists());
+        assert!(report.failures.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn microvm_and_unknown_pressure_skip_buildkit_before_domain_resolution() {
+        for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
+            let mut prune_calls = 0;
+            let report =
+                pressure_prune_buildkit_with_backend(backend, None, Some(1), 1, |_, _, _| {
+                    prune_calls += 1;
+                    crate::buildkit::PressurePruneReport::default()
+                });
+            assert_eq!(prune_calls, 0, "backend {backend:?} reached host BuildKit");
+            assert!(report.failures.is_empty());
+        }
     }
 
     /// Emergency reclaim must not delete the store of a job that is merely
@@ -2629,9 +3663,13 @@ mod tests {
         let work = root.join("lib/velnor-test/work");
         // Mid artifact upload and mid sccache write: touched right now.
         let artifacts = work.join("_velnor_artifacts/run-1");
-        let sccache = work.join("_velnor_sccache/untrusted/hot/key");
+        let trust_key = crate::trust_scope::filesystem_key("untrusted");
+        let sccache = work
+            .join("_velnor_sccache")
+            .join(&trust_key)
+            .join("hot/key");
         // A genuinely cold store, so the pass is not vacuously empty.
-        let cold = work.join("_velnor_sccache/untrusted/cold");
+        let cold = work.join("_velnor_sccache").join(&trust_key).join("cold");
         for dir in [&artifacts, &sccache, &cold.join("key")] {
             fs::create_dir_all(dir).unwrap();
             fs::write(dir.join("payload"), vec![0; 16]).unwrap();
@@ -2646,6 +3684,7 @@ mod tests {
             u64::MAX,
             &BTreeSet::new(),
             true,
+            None,
         )
         .unwrap();
 
@@ -2691,12 +3730,10 @@ mod tests {
         fs::write(registry.join("cache/index/crate"), b"crate").unwrap();
         fs::create_dir_all(canonical_bin.join("tailrocks_playground")).unwrap();
         fs::write(canonical_bin.join("tailrocks_playground/tool"), b"tool").unwrap();
-        fs::create_dir_all(legacy_bin.join("trusted/tailrocks_playground")).unwrap();
-        fs::write(
-            legacy_bin.join("trusted/tailrocks_playground/tool"),
-            b"tool",
-        )
-        .unwrap();
+        let trust_key = crate::trust_scope::filesystem_key("trusted");
+        let legacy_repo = legacy_bin.join(&trust_key).join("tailrocks_playground");
+        fs::create_dir_all(&legacy_repo).unwrap();
+        fs::write(legacy_repo.join("tool"), b"tool").unwrap();
 
         let roots = [
             StoreRoot {
@@ -2740,7 +3777,7 @@ mod tests {
             .any(|entry| entry.scope_key() == "bin/tailrocks_playground"));
         assert!(entries
             .iter()
-            .any(|entry| entry.scope_key() == "bin/trusted/tailrocks_playground"));
+            .any(|entry| entry.scope_key() == format!("bin/{trust_key}/tailrocks_playground")));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2925,6 +3962,8 @@ mod tests {
         let effective = trust.effective_scope();
         assert_eq!(effective, "public-forks");
         let repository_key = crate::container::sanitize_store_key("octo/base");
+        let pool_key = crate::trust_scope::filesystem_key(effective);
+        let floor_key = crate::trust_scope::filesystem_key(crate::trust_scope::FAIL_CLOSED);
 
         let cargo_root = crate::container::cargo_store_host(&temp_host, effective);
         let mise_root = crate::container::mise_store_host(&temp_host, effective);
@@ -2939,7 +3978,9 @@ mod tests {
             crate::container::cargo_executable_store_host(&temp_host, effective, &repository_key);
         assert_eq!(
             live_bin,
-            work.join("_velnor_cargo/bin/public-forks/octo_base"),
+            work.join("_velnor_cargo/bin")
+                .join(&pool_key)
+                .join("octo_base"),
             "a trusted custom-pool job mounts its admitted namespace"
         );
         let live_installs =
@@ -2949,10 +3990,22 @@ mod tests {
 
         // An idle same-pool store and an idle floor store, so the pass is not
         // vacuously empty: both must be evictable while the live store stands.
-        let idle_bin = work.join("_velnor_cargo/bin/public-forks/octo_idle");
-        let floor_bin = work.join("_velnor_cargo/bin/untrusted/octo_base");
-        let idle_installs = work.join("_velnor_mise/installs/public-forks/octo_idle");
-        let idle_binaries = work.join("_velnor_mise/binaries/public-forks/octo_idle");
+        let idle_bin = work
+            .join("_velnor_cargo/bin")
+            .join(&pool_key)
+            .join("octo_idle");
+        let floor_bin = work
+            .join("_velnor_cargo/bin")
+            .join(&floor_key)
+            .join("octo_base");
+        let idle_installs = work
+            .join("_velnor_mise/installs")
+            .join(&pool_key)
+            .join("octo_idle");
+        let idle_binaries = work
+            .join("_velnor_mise/binaries")
+            .join(&pool_key)
+            .join("octo_idle");
         for path in [
             &live_bin,
             &live_installs,
@@ -2990,9 +4043,9 @@ mod tests {
                 crate::storage::gc_scope_below_root(&live_binaries, &mise_root).unwrap(),
             ),
         ];
-        assert_eq!(scopes[0].1, "bin/public-forks/octo_base");
-        assert_eq!(scopes[1].1, "installs/public-forks/octo_base");
-        assert_eq!(scopes[2].1, "binaries/public-forks/octo_base");
+        assert_eq!(scopes[0].1, format!("bin/{pool_key}/octo_base"));
+        assert_eq!(scopes[1].1, format!("installs/{pool_key}/octo_base"));
+        assert_eq!(scopes[2].1, format!("binaries/{pool_key}/octo_base"));
         let leases: Vec<_> = scopes
             .iter()
             .map(|(class, scope)| {
