@@ -43,7 +43,10 @@ use std::{
 use anyhow::Context as _;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::unix::ffi::OsStrExt as _;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStringExt as _;
 
 #[cfg(target_os = "macos")]
 use std::{cell::RefCell, collections::HashMap};
