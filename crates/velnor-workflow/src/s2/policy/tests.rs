@@ -1608,7 +1608,7 @@ fn mutate_verifier_presence(jobs: &mut Mapping, mutation: &str) {
                 .unwrap_or_else(|| panic!("canonical verifier exists"));
             jobs.insert("verify-renamed-artifacts".to_owned(), verifier);
         }
-        _ => unreachable!("dispatcher selects verifier presence mutations"),
+        mutation => panic!("unknown verifier presence mutation: {mutation}"),
     }
 }
 
@@ -1663,7 +1663,7 @@ fn mutate_verifier_settings(jobs: &mut Mapping, mutation: &str) {
         }
         "altered-runner" => insert_yaml(verifier, "runs-on", yaml_string("windows-latest")),
         "verifier-if-always" => insert_yaml(verifier, "if", yaml_string("${{ always() }}")),
-        _ => unreachable!("dispatcher selects verifier setting mutations"),
+        mutation => panic!("unknown verifier setting mutation: {mutation}"),
     }
 }
 
@@ -1695,7 +1695,7 @@ fn mutate_verifier_step_semantics(jobs: &mut Mapping, mutation: &str) {
                 .unwrap_or_else(|| panic!("runner guard mapping exists"));
             insert_yaml(guard, "run", yaml_string("echo guard skipped\n"));
         }
-        _ => unreachable!("dispatcher selects verifier step mutations"),
+        mutation => panic!("unknown verifier step mutation: {mutation}"),
     }
 }
 
@@ -1716,7 +1716,7 @@ fn mutate_artifact_config_path(root: &Path, workflow: &mut Value, mutation: &str
             );
             replace_yaml_strings(workflow, "target/evidence.json", "target/report.");
         }
-        _ => unreachable!("dispatcher selects artifact path mutations"),
+        mutation => panic!("unknown artifact path mutation: {mutation}"),
     }
 }
 
@@ -1768,7 +1768,7 @@ fn mutate_producer_dependencies(jobs: &mut Mapping, mutation: &str) {
             insert_yaml(jobs, "optional", optional);
             set_producer_needs(jobs, vec![yaml_string("optional")]);
         }
-        _ => unreachable!("dispatcher selects producer dependency mutations"),
+        mutation => panic!("unknown producer dependency mutation: {mutation}"),
     }
 }
 
@@ -1820,7 +1820,7 @@ fn mutate_producer_job_controls(jobs: &mut Mapping, mutation: &str) {
             insert_yaml(&mut strategy, "fail-fast", Value::Bool(false));
             set_job_field(jobs, "strict", "strategy", Value::Mapping(strategy));
         }
-        _ => unreachable!("dispatcher selects producer job control mutations"),
+        mutation => panic!("unknown producer job control mutation: {mutation}"),
     }
 }
 
@@ -1871,7 +1871,7 @@ fn mutate_producer_upload(jobs: &mut Mapping, mutation: &str) {
                 .unwrap_or_else(|| panic!("optional ancestor upload inputs exist"));
             insert_yaml(with, "path", yaml_string("."));
         }
-        _ => unreachable!("dispatcher selects artifact upload mutations"),
+        mutation => panic!("unknown artifact upload mutation: {mutation}"),
     }
 }
 
@@ -1902,7 +1902,7 @@ fn mutate_workflow_inherited_controls(workflow: &mut Value, mutation: &str) {
                 Value::Mapping(defaults),
             );
         }
-        _ => unreachable!("dispatcher selects workflow control mutations"),
+        mutation => panic!("unknown workflow control mutation: {mutation}"),
     }
 }
 
@@ -1954,7 +1954,7 @@ fn mutate_consumer_policy(jobs: &mut Mapping, mutation: &str) {
         "consumer-if-failure" => set_consumer_if(jobs, "${{ failure() }}"),
         "consumer-if-cancelled" => set_consumer_if(jobs, "${{ cancelled() }}"),
         "consumer-if-not-cancelled" => set_consumer_if(jobs, "${{ !cancelled() }}"),
-        _ => unreachable!("dispatcher selects consumer policy mutations"),
+        mutation => panic!("unknown consumer policy mutation: {mutation}"),
     }
 }
 
@@ -1994,7 +1994,7 @@ fn mutate_producer_and_ancestor_runners(jobs: &mut Mapping, mutation: &str) {
                 super::super::TRUSTED_EVENT_EXPRESSION
             ),
         ),
-        _ => unreachable!("dispatcher selects runner and ancestor mutations"),
+        mutation => panic!("unknown runner or ancestor mutation: {mutation}"),
     }
 }
 
@@ -2045,7 +2045,7 @@ fn mutate_producer_tasks(jobs: &mut Mapping, mutation: &str) {
                 .unwrap_or_else(|| panic!("prep steps exist"));
             steps.push(super::canonical_profile_task_step("unconfigured"));
         }
-        _ => unreachable!("dispatcher selects producer task mutations"),
+        mutation => panic!("unknown producer task mutation: {mutation}"),
     }
 }
 
@@ -2255,8 +2255,7 @@ fn assert_consumer_mutation_finding(mutation: &str, findings: &[String]) {
             findings.iter().any(|finding| {
                 finding.contains("consumer") && finding.contains("complete scheduled-check job")
             }),
-            "consumer mutation should name its renderer mismatch: {:?}",
-            findings
+            "consumer mutation should name its renderer mismatch: {findings:?}"
         );
     }
 }
@@ -2279,8 +2278,7 @@ fn assert_verifier_mutation_finding(mutation: &str, findings: &[String]) {
                 finding.contains("verifier")
                     && finding.contains("complete fail-closed artifact-verifier job")
             }),
-            "verifier mutation should name its renderer mismatch: {:?}",
-            findings
+            "verifier mutation should name its renderer mismatch: {findings:?}"
         );
     }
 }
@@ -2308,8 +2306,7 @@ fn assert_producer_mutation_finding(mutation: &str, findings: &[String]) {
                 finding.contains("producer profile `strict`")
                     && finding.contains("complete scheduled-check job")
             }),
-            "producer mutation should name its renderer mismatch: {:?}",
-            findings
+            "producer mutation should name its renderer mismatch: {findings:?}"
         );
     }
 }
@@ -2324,14 +2321,12 @@ fn assert_ancestor_mutation_finding(mutation: &str, findings: &[String]) {
         if mutation == "producer-transitive-skipped-prep" {
             assert!(
                 finding_matches,
-                "skipped configured ancestor should name its failure: {:?}",
-                findings
+                "skipped configured ancestor should name its failure: {findings:?}"
             );
         } else {
             assert!(
                 finding_matches,
-                "ancestor mutation should name its renderer mismatch: {:?}",
-                findings
+                "ancestor mutation should name its renderer mismatch: {findings:?}"
             );
         }
     }
@@ -2343,8 +2338,7 @@ fn assert_trailing_dot_path_finding(mutation: &str, findings: &[String]) {
             findings
                 .iter()
                 .any(|finding| { finding.contains("unsafe path `target/report.`") }),
-            "trailing-dot path must match config's rejection: {:?}",
-            findings
+            "trailing-dot path must match config's rejection: {findings:?}"
         );
     }
 }
