@@ -507,10 +507,10 @@ struct MbxEntryStat {
 #[cfg(target_os = "linux")]
 impl MbxEntryStat {
     fn from_statx(stat: rustix::fs::Statx) -> anyhow::Result<Self> {
-        if !stat.stx_mask.contains(rustix::fs::StatxFlags::MNT_ID) {
+        if stat.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
             anyhow::bail!("filesystem does not provide MBX mount identity");
         }
-        let kind = rustix::fs::FileType::from_raw_mode(stat.stx_mode);
+        let kind = rustix::fs::FileType::from_raw_mode(u32::from(stat.stx_mode));
         Ok(Self {
             kind: if kind == rustix::fs::FileType::Directory {
                 MbxEntryKind::Directory
@@ -1211,7 +1211,7 @@ fn statx_at(
         flags,
         rustix::fs::StatxFlags::BASIC_STATS | rustix::fs::StatxFlags::MNT_ID,
     )?;
-    if !stat.stx_mask.contains(rustix::fs::StatxFlags::MNT_ID) {
+    if stat.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
         return Err(rustix::io::Errno::NOSYS);
     }
     Ok(stat)
