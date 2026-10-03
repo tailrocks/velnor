@@ -1482,6 +1482,10 @@ fn required_artifact_optional_dependency_tree(name: &str, workflow: &str) -> Pat
 
 fn required_artifact_split_workflow_tree(name: &str) -> PathBuf {
     let root = required_artifact_tree(name, "");
+    write(
+        &root.join("mise.toml"),
+        "[tasks.check]\nrun = \"true\"\n\n[tasks.consume]\nrun = \"true\"\n",
+    );
     let config_path = root.join(GENERATION_CONFIG);
     let generation = must(
         fs::read_to_string(&config_path),
