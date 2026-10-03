@@ -3680,10 +3680,10 @@ fn reap_idle_builders_with_domain(
     now: SystemTime,
     list_builders: impl FnOnce() -> Result<Vec<String>>,
     list_present_containers: impl FnOnce() -> Result<BTreeSet<String>>,
-    mut inspect_exit: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
-    mut stop: impl FnMut(&str) -> Result<bool>,
-    mut start: impl FnMut(&str) -> Result<bool>,
-    mut remove: impl FnMut(&str) -> Result<()>,
+    inspect_exit: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
+    stop: impl FnMut(&str) -> Result<bool>,
+    start: impl FnMut(&str) -> Result<bool>,
+    remove: impl FnMut(&str) -> Result<()>,
 ) -> HorizonReport {
     reap_idle_builders_with_domain_and_volume_gate(
         run_root,
@@ -3791,8 +3791,12 @@ fn reap_idle_builders_with_domain_and_volume_gate(
                         ));
                         continue;
                     }
-                    match delete_registered_builder(run_root, registry_root, &builder, &mut remove)
-                    {
+                    match delete_registered_builder(
+                        run_root,
+                        Some(registry_root),
+                        &builder,
+                        &mut remove,
+                    ) {
                         Ok(true) => report.deleted.push(builder.clone()),
                         Ok(false) => {}
                         Err(error) => report.failures.push(format!(
@@ -4241,7 +4245,10 @@ mod tests {
             Some("octocat/hello-world"),
         );
         assert_ne!(default, case_distinct_scope);
-        assert!(case_distinct_scope.is_ascii_lowercase());
+        assert_eq!(
+            case_distinct_scope,
+            case_distinct_scope.to_ascii_lowercase()
+        );
         let no_repo = persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, None);
         let named_no_repo = persistent_builder_name(
             "velnor-builder",
@@ -5281,7 +5288,7 @@ mod tests {
         let lock_error = remove_builder_with(
             &domain,
             &builder,
-            |_, _, _| Err(anyhow::anyhow!("lock uncertainty")),
+            |_, _, _| -> Result<()> { Err(anyhow::anyhow!("lock uncertainty")) },
             |_, _| {
                 inspect_called.set(true);
                 Ok(true)
