@@ -9546,7 +9546,7 @@ fn observe_persistent_bootstrap_response_with(
     status: u16,
     body: &[u8],
     inspect: impl FnMut(&str) -> Result<(u16, Vec<u8>)>,
-    start_conflict: impl FnMut(&DockerLeasePolicy, &str) -> Result<()>,
+    mut start_conflict: impl FnMut(&DockerLeasePolicy, &str) -> Result<()>,
 ) -> Result<()> {
     observe_persistent_bootstrap_response_fenced(
         policy,
