@@ -87,6 +87,7 @@ fn debian_preinst_requires_whole_host_drain() {
 fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
     use std::{
         fs,
+        os::unix::fs::PermissionsExt,
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -106,14 +107,60 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
     fs::create_dir_all(&root).unwrap();
     let lock = root.join("package-transaction.lock");
     let script = root.join("preinst");
+    let systemd_dir = root.join("systemd");
+    let mock_bin = root.join("mock-bin");
+    let dbus_config = root.join("system.conf");
+    let systemctl_log = root.join("systemctl.log");
+    let busctl_log = root.join("busctl.log");
+    fs::create_dir_all(&systemd_dir).unwrap();
+    fs::create_dir_all(&mock_bin).unwrap();
+    fs::write(&dbus_config, "<busconfig>\n</busconfig>\n").unwrap();
+    let systemctl = mock_bin.join("systemctl");
+    fs::write(
+        &systemctl,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+case "$*" in
+  'show --property=Version --value') printf '256.1\n' ;;
+  'show --property=ActiveState --value dbus.service') printf 'active\n' ;;
+  'show --property=NeedDaemonReload --value dbus.service') printf 'no\n' ;;
+  'show --property=ExecStart --value dbus.service') printf '{ path=/usr/bin/dbus-daemon ; argv[]=/usr/bin/dbus-daemon --config-file=%s --nofork --nopidfile --systemd-activation --syslog ; ignore_errors=no ; start_time=[] ; stop_time=[] ; pid=1 ; code=(exited) ; status=0 }\n' "$DBUS_CONFIG" ;;
+  'list-units --all --type=service --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-units --all --type=timer --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-units --all --type=socket --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-units --all --type=path --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-unit-files --type=service --no-legend --no-pager --full') exit 0 ;;
+  'list-jobs --no-legend --no-pager --full') printf 'No jobs running.\n' ;;
+  'show --property=LoadState --value velnor-guardian.service') printf 'not-found\n' ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    let busctl = mock_bin.join("busctl");
+    fs::write(
+        &busctl,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "${BUSCTL_LOG:-/dev/null}"
+case "$*" in
+  '--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s org.freedesktop.systemd1') printf 's ":1.42"\n' ;;
+  '--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig') exit 0 ;;
+  '--system call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager ListJobs') printf 'a(usssoo) 0\n' ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&busctl, fs::Permissions::from_mode(0o755)).unwrap();
     let script_source = include_str!("../../debian/preinst")
         .replace(
             "PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock",
             &format!("PACKAGE_TRANSACTION_LOCK={}", lock.display()),
         )
         .replace(
-            "if [ -d /run/systemd/system ]; then",
-            "if [ -d /__velnor-lock-test-no-systemd ]; then",
+            "[ -d /run/systemd/system ]",
+            &format!("[ -d {} ]", systemd_dir.display()),
         );
     fs::write(&script, script_source).unwrap();
 
@@ -139,6 +186,10 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
             .arg(&lock)
             .arg(&script)
             .arg(mode)
+            .env("PATH", format!("{}:/usr/bin:/bin", mock_bin.display()))
+            .env("DBUS_CONFIG", &dbus_config)
+            .env("SYSTEMCTL_LOG", &systemctl_log)
+            .env("BUSCTL_LOG", &busctl_log)
             .output()
             .unwrap()
     };
@@ -154,6 +205,37 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
         "the explicit exclusive wrapper must pass: {}",
         String::from_utf8_lossy(&exclusive_wrapper.stderr)
     );
+
+    let systemctl_calls = fs::read_to_string(&systemctl_log).unwrap();
+    for expected_call in [
+        "show --property=Version --value",
+        "show --property=ActiveState --value dbus.service",
+        "show --property=NeedDaemonReload --value dbus.service",
+        "show --property=ExecStart --value dbus.service",
+        "list-units --all --type=service --no-legend --no-pager --plain --full",
+        "list-units --all --type=timer --no-legend --no-pager --plain --full",
+        "list-units --all --type=socket --no-legend --no-pager --plain --full",
+        "list-units --all --type=path --no-legend --no-pager --plain --full",
+        "list-unit-files --type=service --no-legend --no-pager --full",
+        "list-jobs --no-legend --no-pager --full",
+        "show --property=LoadState --value velnor-guardian.service",
+    ] {
+        assert!(
+            systemctl_calls.lines().any(|call| call == expected_call),
+            "preinst did not query systemctl with `{expected_call}`; calls were:\n{systemctl_calls}"
+        );
+    }
+    let busctl_calls = fs::read_to_string(&busctl_log).unwrap();
+    for expected_call in [
+        "--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s org.freedesktop.systemd1",
+        "--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig",
+        "--system call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager ListJobs",
+    ] {
+        assert!(
+            busctl_calls.lines().any(|call| call == expected_call),
+            "preinst did not query busctl with `{expected_call}`; calls were:\n{busctl_calls}"
+        );
+    }
 
     fs::remove_dir_all(root).unwrap();
 }
