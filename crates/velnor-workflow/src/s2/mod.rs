@@ -6767,7 +6767,7 @@ PY
               echo "::error::commit pull request lookup reached its 100-result limit; refusing an incomplete association" >&2
               exit 1
             fi
-            merged_pulls="$(jq -c --arg merge_sha "$MERGE_SHA" --arg repository "$GITHUB_REPOSITORY" --arg default_branch "$DEFAULT_BRANCH" '[.[] | select(.merge_commit_sha == $merge_sha and .merged_at != null and .base.ref == $default_branch and .base.repo.full_name == $repository and .head.repo.full_name == $repository) | {head_sha: .head.sha, head_repository: .head.repo.full_name}]' <<<"$merged_pulls")"
+            merged_pulls="$(jq -c --arg merge_sha "$MERGE_SHA" --arg repository "$GITHUB_REPOSITORY" --arg default_branch "$DEFAULT_BRANCH" '[.[] | select(.merge_commit_sha == $merge_sha and .merged_at != null and .base.ref == $default_branch and .base.repo.full_name == $repository and .head.repo.full_name == $repository) | {{head_sha: .head.sha, head_repository: .head.repo.full_name}}]' <<<"$merged_pulls")"
             if [[ "$(jq 'length' <<<"$merged_pulls")" != "1" ]]; then
               echo "::error::push $MERGE_SHA is not associated with exactly one merged same-repository pull request; direct pushes and ambiguous squash merges fail closed" >&2
               exit 1
@@ -6813,12 +6813,12 @@ PY
             marker_completed_at="$(jq -er '.marker_completed_at | strings' <<<"$publisher")"
             expected_publisher_job="$(jq -er '.publisher_job | strings' <<<"$publisher")"
             log_headers="$transport_dir/job-log.headers"
-            log_api_status="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl --disable --config - --silent --show-error --proto '=https' --connect-timeout 10 --max-time 30 --output /dev/null --dump-header "$log_headers" --write-out '%{http_code}' -- "$job_log_url")"
+            log_api_status="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl --disable --config - --silent --show-error --proto '=https' --connect-timeout 10 --max-time 30 --output /dev/null --dump-header "$log_headers" --write-out '%{{http_code}}' -- "$job_log_url")"
             [[ "$log_api_status" == "302" ]] || {{ echo "::error::job logs API expected a 302 download redirect, got $log_api_status" >&2; exit 1; }}
             signed_log_url="$(python3 "$transport_helper" redirect "$log_headers")"
             log_path="$transport_dir/producer-job.log"
             log_status="$transport_dir/log-transfer.status"
-            curl --disable --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 --max-filesize 16777216 --write-out '%{stderr}%{http_code}' -- "$signed_log_url" 2>"$log_status" | python3 "$transport_helper" copy-job-log "$log_path" 16777216 >/dev/null
+            curl --disable --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 --max-filesize 16777216 --write-out '%{{stderr}}%{{http_code}}' -- "$signed_log_url" 2>"$log_status" | python3 "$transport_helper" copy-job-log "$log_path" 16777216 >/dev/null
             [[ "$(tail -c 3 "$log_status")" == "200" ]] || {{ echo "::error::signed job log URL did not return HTTP 200" >&2; exit 1; }}
             marker="$(python3 "$transport_helper" marker "$log_path" "$run_id" "$run_attempt" "$expected_publisher_job" "$name")"
             publisher_job="$(jq -er '.publisher_job | strings' <<<"$marker")"
@@ -6846,13 +6846,13 @@ PY
           (( artifact_size > 0 && artifact_size <= MAX_ARCHIVE_BYTES )) || {{ echo "::error::candidate artifact $artifact_id exceeds the 256 MiB archive limit" >&2; exit 1; }}
           candidate="$(mktemp -d "$RUNNER_TEMP/velnor-workflow-candidate.XXXXXXXX")"
           redirect_headers="$transport_dir/redirect.headers"
-          api_status="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl --disable --config - --silent --show-error --proto '=https' --connect-timeout 10 --max-time 30 --output /dev/null --dump-header "$redirect_headers" --write-out '%{http_code}' -- "$archive_url")"
+          api_status="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl --disable --config - --silent --show-error --proto '=https' --connect-timeout 10 --max-time 30 --output /dev/null --dump-header "$redirect_headers" --write-out '%{{http_code}}' -- "$archive_url")"
           [[ "$api_status" == "302" ]] || {{ echo "::error::artifact API expected a 302 download redirect, got $api_status" >&2; exit 1; }}
           signed_url="$(python3 "$transport_helper" redirect "$redirect_headers")"
           archive_part="$transport_dir/candidate.zip.part"
           transfer_status="$transport_dir/transfer.status"
           download_stats="$transport_dir/download.stats"
-          curl --disable --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 --max-filesize "$MAX_ARCHIVE_BYTES" --write-out '%{stderr}%{http_code}' -- "$signed_url" 2>"$transfer_status" | python3 "$transport_helper" copy "$archive_part" "$MAX_ARCHIVE_BYTES" > "$download_stats"
+          curl --disable --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 --max-filesize "$MAX_ARCHIVE_BYTES" --write-out '%{{stderr}}%{{http_code}}' -- "$signed_url" 2>"$transfer_status" | python3 "$transport_helper" copy "$archive_part" "$MAX_ARCHIVE_BYTES" > "$download_stats"
           [[ "$(tail -c 3 "$transfer_status")" == "200" ]] || {{ echo "::error::signed artifact URL did not return HTTP 200" >&2; exit 1; }}
           IFS=$'\t' read -r downloaded_size downloaded_digest < "$download_stats"
           (( downloaded_size > 0 && downloaded_size <= MAX_ARCHIVE_BYTES )) || {{ echo "::error::downloaded candidate archive exceeds the 256 MiB limit" >&2; exit 1; }}
@@ -22887,6 +22887,15 @@ lockfile = true
     #[test]
     fn policy_candidate_step_binds_manifest_to_head_and_exports_it() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        assert!(
+            owner.contains("| {head_sha: .head.sha, head_repository: .head.repo.full_name}]"),
+            "the rendered squash-merge jq object keeps its literal braces: {owner}"
+        );
+        assert!(
+            owner.contains("--write-out '%{http_code}'")
+                && owner.contains("--write-out '%{stderr}%{http_code}'"),
+            "the rendered curl write-out directives keep their literal braces: {owner}"
+        );
         assert!(
             owner.contains(
                 "head_candidate=\"$(velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
