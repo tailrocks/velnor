@@ -5159,7 +5159,7 @@ fn inspect_jobs(
             continue;
         };
         let (inspected_job, lanes_gate_valid) = match canonical_lanes_input_profile_runner(
-            job_id.as_str(),
+            Some(job_id.as_str()),
             path,
             job,
             generation,
@@ -5177,7 +5177,7 @@ fn inspect_jobs(
             }
         };
         let profile_gate_valid = match canonical_check_profile_admission_gate(
-            job_id.as_str(),
+            Some(job_id.as_str()),
             path,
             job,
             generation,

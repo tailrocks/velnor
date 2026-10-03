@@ -4335,12 +4335,7 @@ fn trusted_check_profile_render(
             )));
         }
         for (job_id, value) in jobs {
-            let Some(job_id) = job_id.as_str() else {
-                return Err(GeneratorError::usage(format!(
-                    "trusted scheduled-check workflow {} has a non-string job id",
-                    relative_path.display()
-                )));
-            };
+            let job_id = job_id.as_str();
             let job = value.as_mapping().ok_or_else(|| {
                 GeneratorError::usage(format!(
                     "trusted scheduled-check job `{job_id}` is not a mapping"
