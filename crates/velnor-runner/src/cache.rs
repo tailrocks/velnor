@@ -3684,7 +3684,6 @@ mod tests {
             u64::MAX,
             &BTreeSet::new(),
             true,
-            None,
         )
         .unwrap();
 
