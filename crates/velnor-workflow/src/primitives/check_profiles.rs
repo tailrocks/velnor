@@ -1249,6 +1249,16 @@ mod tests {
             "select producer and consumer",
         );
         let workflow = render(&config, None, &selected);
+        assert_required_artifact_producer(&workflow, &admission);
+        assert_required_artifact_verifier(&workflow, &admission);
+        assert_required_artifact_consumer(&workflow);
+
+        let verifier = required_artifact_verifier_job(&workflow);
+        assert_required_artifact_verifier_order(verifier);
+        assert_required_artifact_verifier_security(verifier);
+    }
+
+    fn assert_required_artifact_producer(workflow: &str, admission: &str) {
         assert!(
             workflow.contains(&format!("if: ${{{{ ({admission}) }}}}")),
             "the Velnor artifact producer retains canonical lane admission: {workflow}"
@@ -1273,6 +1283,9 @@ mod tests {
             workflow.contains("destination=\"$stage/target/ci-evidence/rollup.json\""),
             "the staging tree preserves the declared path: {workflow}"
         );
+    }
+
+    fn assert_required_artifact_verifier(workflow: &str, admission: &str) {
         assert!(
             workflow.contains(
                 &format!("  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && ({admission}) }}}}\n    runs-on: ubuntu-latest\n")
@@ -1292,17 +1305,26 @@ mod tests {
             workflow.contains("permissions:\n      actions: read\n    steps:"),
             "the verifier has read-only permissions: {workflow}"
         );
+    }
+
+    fn assert_required_artifact_consumer(workflow: &str) {
         assert!(
             workflow.contains(
                 "  consumer:\n    name: \"consumer check\"\n    needs: [verify-strict-artifacts]"
             ),
             "consumers wait for verification: {workflow}"
         );
+    }
+
+    fn required_artifact_verifier_job(workflow: &str) -> &str {
         let verifier_start = must_some(
             workflow.find("  verify-strict-artifacts:"),
             "find verifier job",
         );
-        let verifier = &workflow[verifier_start..];
+        &workflow[verifier_start..]
+    }
+
+    fn assert_required_artifact_verifier_order(verifier: &str) {
         let guard = must_some(
             verifier.find("- name: Require GitHub-hosted runner"),
             "find hosted-runner guard",
@@ -1323,6 +1345,9 @@ mod tests {
             guard < clear && clear < download && download < path_check,
             "hosted guard must precede all verifier work: {verifier}"
         );
+    }
+
+    fn assert_required_artifact_verifier_security(verifier: &str) {
         assert!(
             verifier.contains("VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}"),
             "the guard binds its value from runner.environment: {verifier}"
