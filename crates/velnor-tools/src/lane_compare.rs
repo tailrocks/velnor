@@ -49,7 +49,9 @@ pub struct LaneCompareArgs {
     /// Velnor-vs-GitHub slowdown percentage tolerated above the baseline.
     #[arg(long, default_value_t = 25.0)]
     pub regress_threshold: f64,
-    /// Number of recent completed both-lane runs to inspect in --watch mode.
+    /// Number of newest workflow runs to inspect in --watch mode. Every run in
+    /// this raw window must be completed successfully with a valid full paired-lane
+    /// census and evidence; incomplete runs fail instead of falling back to older history.
     #[arg(long, default_value_t = 5)]
     pub since: usize,
     /// Compare this GitHub-lane job id as a diagnostic subset after full-run validation.
@@ -710,12 +712,33 @@ fn recent_complete_both_lane_runs(
     workflow: &str,
     limit: usize,
 ) -> Result<Vec<RunListItem>> {
+    recent_complete_both_lane_runs_with(
+        repo,
+        workflow,
+        limit,
+        recent_run_items,
+        fetch_run_summary,
+        fetch_run_jobs,
+    )
+}
+
+fn recent_complete_both_lane_runs_with<ListRuns, FetchSummary, FetchJobs>(
+    repo: &str,
+    workflow: &str,
+    limit: usize,
+    mut list_runs: ListRuns,
+    mut fetch_summary: FetchSummary,
+    mut fetch_jobs: FetchJobs,
+) -> Result<Vec<RunListItem>>
+where
+    ListRuns: FnMut(&str, &str, usize) -> Result<Vec<RunListItem>>,
+    FetchSummary: FnMut(&str, u64) -> Result<RunSummary>,
+    FetchJobs: FnMut(&str, u64, &RunSummary) -> Result<FetchedJobs>,
+{
     let target = limit.max(2);
-    let candidates = recent_run_items(repo, workflow, target)?;
-    if candidates.len() < target {
-        return Ok(candidates);
-    }
-    for run in candidates.iter().take(target) {
+    let candidates = list_runs(repo, workflow, target)?;
+    validate_run_list(&candidates, target)?;
+    for run in &candidates {
         if !run.status.eq_ignore_ascii_case("completed")
             || !run
                 .conclusion
@@ -729,34 +752,59 @@ fn recent_complete_both_lane_runs(
                 run.conclusion.as_deref().unwrap_or("missing")
             );
         }
-        let summary = fetch_run_summary(repo, run.database_id).with_context(|| {
+        let summary = fetch_summary(repo, run.database_id).with_context(|| {
             format!(
                 "inspect run identity for successful run {}",
                 run.database_id
             )
         })?;
-        validate_run_summary(&summary, run.database_id).with_context(|| {
+        validate_run_summary_identity(&summary, repo, run.database_id).with_context(|| {
             format!(
                 "validate run identity for successful run {}",
                 run.database_id
             )
         })?;
-        let fetched_jobs = fetch_run_jobs(repo, run.database_id, &summary).with_context(|| {
+        let fetched_jobs = fetch_jobs(repo, run.database_id, &summary).with_context(|| {
             format!(
                 "inspect both-lane census for successful run {}",
                 run.database_id
             )
         })?;
-        if !has_complete_both_lane_census(&fetched_jobs.jobs) {
-            bail!(
-                "run {} does not have a complete both-lane census; watch sample is not proven",
+        let census = pair_lane_census(&fetched_jobs.jobs);
+        validate_census(&census, run.database_id).with_context(|| {
+            format!(
+                "validate both-lane census for successful run {}",
                 run.database_id
-            );
+            )
+        })?;
+        for (github, velnor, _) in &census.matched {
+            validate_job_success(github, Lane::GitHub, run.database_id)?;
+            validate_job_success(velnor, Lane::Velnor, run.database_id)?;
         }
     }
-    Ok(candidates.into_iter().take(target).collect())
+    Ok(candidates)
 }
 
+fn validate_run_list(candidates: &[RunListItem], limit: usize) -> Result<()> {
+    if candidates.len() > limit {
+        bail!(
+            "gh run list returned {} items for requested limit {limit}",
+            candidates.len()
+        );
+    }
+    let mut seen_ids = BTreeSet::new();
+    for run in candidates {
+        if run.database_id == 0 {
+            bail!("gh run list returned run id 0");
+        }
+        if !seen_ids.insert(run.database_id) {
+            bail!("gh run list repeated run id {}", run.database_id);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn has_complete_both_lane_census(jobs: &[Job]) -> bool {
     let census = pair_lane_census(jobs);
     !census.matched.is_empty() && !census.has_parity_failures()
@@ -3033,6 +3081,63 @@ mod tests {
         }
     }
 
+    fn run_item(id: u64, status: &str, conclusion: Option<&str>) -> RunListItem {
+        RunListItem {
+            database_id: id,
+            status: status.to_owned(),
+            conclusion: conclusion.map(str::to_owned),
+        }
+    }
+
+    fn summary_for_run_item(run: &RunListItem) -> RunSummary {
+        let mut summary = successful_summary();
+        summary.id = run.database_id;
+        summary.status.clone_from(&run.status);
+        summary.conclusion.clone_from(&run.conclusion);
+        summary.url = format!(
+            "https://api.github.com/repos/tailrocks/velnor/actions/runs/{}",
+            run.database_id
+        );
+        summary.html_url = format!(
+            "https://github.com/tailrocks/velnor/actions/runs/{}",
+            run.database_id
+        );
+        summary
+    }
+
+    fn successful_pair_jobs() -> Vec<Job> {
+        vec![
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job(2, "Rust · rust-policy / Velnor"),
+        ]
+    }
+
+    fn select_watch_fixture(
+        runs: &[RunListItem],
+        jobs_by_run: &BTreeMap<u64, Vec<Job>>,
+        since: usize,
+    ) -> Result<Vec<RunListItem>> {
+        recent_complete_both_lane_runs_with(
+            "tailrocks/velnor",
+            "compat.yml",
+            since,
+            |_, _, limit| Ok(runs.iter().take(limit).cloned().collect()),
+            |_, run_id| {
+                let run = runs
+                    .iter()
+                    .find(|run| run.database_id == run_id)
+                    .with_context(|| format!("missing fixture run {run_id}"))?;
+                Ok(summary_for_run_item(run))
+            },
+            |_, run_id, _| {
+                Ok(FetchedJobs {
+                    jobs: jobs_by_run.get(&run_id).cloned().unwrap_or_default(),
+                    identities: Vec::new(),
+                })
+            },
+        )
+    }
+
     fn artifact_ref(id: u64, name: &str) -> ArtifactRef {
         ArtifactRef {
             id,
@@ -3227,6 +3332,171 @@ mod tests {
                 "--json".to_owned(),
                 "databaseId,status,conclusion".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn watch_since_sets_the_newest_raw_run_window() {
+        let args = recent_run_args("tailrocks/velnor", "compat.yml", 5);
+        let limit_index = args
+            .iter()
+            .position(|argument| argument == "--limit")
+            .unwrap();
+        assert_eq!(args[limit_index + 1], "5");
+        assert_eq!(args[args.len() - 1], "databaseId,status,conclusion");
+    }
+
+    #[test]
+    fn watch_uses_only_the_newest_since_runs_as_its_raw_window() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(8, "completed", Some("success")),
+            run_item(7, "completed", Some("success")),
+        ];
+        let jobs_by_run = BTreeMap::from([
+            (9, successful_pair_jobs()),
+            (8, successful_pair_jobs()),
+            (7, successful_pair_jobs()),
+        ]);
+
+        let selected = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|run| run.database_id)
+                .collect::<Vec<_>>(),
+            vec![9, 8]
+        );
+    }
+
+    #[test]
+    fn watch_fails_on_newest_in_progress_run_without_falling_back() {
+        let runs = vec![
+            run_item(9, "in_progress", None),
+            run_item(8, "completed", Some("success")),
+        ];
+        let mut list_calls = 0;
+        let error = recent_complete_both_lane_runs_with(
+            "tailrocks/velnor",
+            "compat.yml",
+            2,
+            |_, _, limit| {
+                list_calls += 1;
+                assert_eq!(limit, 2);
+                Ok(runs.clone())
+            },
+            |_, _| bail!("in-progress run summary should not be fetched"),
+            |_, _, _| bail!("in-progress run jobs should not be fetched"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("run 9 is not a successful completed run"),
+            "{error:#}"
+        );
+        assert_eq!(list_calls, 1, "watch must not expand past its raw window");
+    }
+
+    #[test]
+    fn watch_fails_on_newest_workflow_failure_without_falling_back() {
+        let runs = vec![
+            run_item(9, "completed", Some("failure")),
+            run_item(8, "completed", Some("success")),
+        ];
+        let jobs_by_run =
+            BTreeMap::from([(9, successful_pair_jobs()), (8, successful_pair_jobs())]);
+        let error = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("run 9 is not a successful completed run"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn watch_fails_on_newest_control_only_or_incomplete_pair_run() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(8, "completed", Some("success")),
+        ];
+
+        let control_only =
+            BTreeMap::from([(9, vec![named_job(3, "lint")]), (8, successful_pair_jobs())]);
+        let error = select_watch_fixture(&runs, &control_only, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("empty comparison census"),
+            "{error:#}"
+        );
+
+        let missing_counterpart = BTreeMap::from([
+            (9, vec![named_job(1, "Rust · rust-policy / GitHub")]),
+            (8, successful_pair_jobs()),
+        ]);
+        let error = select_watch_fixture(&runs, &missing_counterpart, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("successful run 9"),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("census"), "{error:#}");
+
+        let skipped_counterpart = BTreeMap::from([
+            (
+                9,
+                vec![
+                    named_job(1, "Rust · rust-policy / GitHub"),
+                    named_job_status(
+                        2,
+                        "Rust · rust-policy / Velnor",
+                        "completed",
+                        Some("skipped"),
+                    ),
+                ],
+            ),
+            (8, successful_pair_jobs()),
+        ]);
+        let error = select_watch_fixture(&runs, &skipped_counterpart, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("successful run 9"),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("census"), "{error:#}");
+
+        let ambiguous = BTreeMap::from([
+            (9, vec![named_job(1, "github-to-velnor sync")]),
+            (8, successful_pair_jobs()),
+        ]);
+        let error = select_watch_fixture(&runs, &ambiguous, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("successful run 9"),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("census"), "{error:#}");
+    }
+
+    #[test]
+    fn watch_fails_on_newest_paired_lane_failure_without_falling_back() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(8, "completed", Some("success")),
+        ];
+        let mut failed_pair = successful_pair_jobs();
+        failed_pair[1].conclusion = Some("failure".to_owned());
+        let jobs_by_run = BTreeMap::from([(9, failed_pair), (8, successful_pair_jobs())]);
+
+        let error = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap_err();
+        assert!(format!("{error:#}").contains("Velnor job 2"), "{error:#}");
+        assert!(format!("{error:#}").contains("not success"), "{error:#}");
+    }
+
+    #[test]
+    fn watch_selection_rejects_duplicate_run_ids() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(9, "completed", Some("success")),
+        ];
+        let jobs_by_run = BTreeMap::from([(9, successful_pair_jobs())]);
+        let error = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("repeated run id 9"),
+            "{error:#}"
         );
     }
 
