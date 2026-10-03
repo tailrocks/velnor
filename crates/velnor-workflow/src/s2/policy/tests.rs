@@ -1499,9 +1499,13 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
     let workflow_path = root.join(".github/workflows/ci-scheduled.yml");
     let content = must(fs::read_to_string(&workflow_path), "read test workflow");
     let mut workflow: Value = must(serde_yaml::from_str(&content), "parse test workflow");
-    let jobs = test_mapping_value_mut(&mut workflow, "jobs")
-        .and_then(Value::as_mapping_mut)
+    let mut jobs_document = workflow
+        .as_mapping()
+        .and_then(|workflow| workflow.get("jobs"))
+        .and_then(Value::as_mapping)
+        .cloned()
         .unwrap_or_else(|| panic!("workflow jobs mapping exists"));
+    let jobs = &mut jobs_document;
     let verifier_id = "verify-strict-artifacts";
     match mutation {
         "missing-verifier" => {
@@ -1777,19 +1781,31 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
         "workflow-inherited-env" => {
             let mut env = Mapping::new();
             insert_yaml(&mut env, "BASH_ENV", yaml_string("/tmp/attacker.sh"));
-            insert_yaml(&mut workflow, "env", Value::Mapping(env));
+            insert_yaml(
+                test_as_mapping_mut(&mut workflow),
+                "env",
+                Value::Mapping(env),
+            );
         }
         "workflow-inherited-permissions" => {
             let mut permissions = Mapping::new();
             insert_yaml(&mut permissions, "contents", yaml_string("write"));
-            insert_yaml(&mut workflow, "permissions", Value::Mapping(permissions));
+            insert_yaml(
+                test_as_mapping_mut(&mut workflow),
+                "permissions",
+                Value::Mapping(permissions),
+            );
         }
         "workflow-inherited-defaults" => {
             let mut run = Mapping::new();
             insert_yaml(&mut run, "working-directory", yaml_string("/tmp"));
             let mut defaults = Mapping::new();
             insert_yaml(&mut defaults, "run", Value::Mapping(run));
-            insert_yaml(&mut workflow, "defaults", Value::Mapping(defaults));
+            insert_yaml(
+                test_as_mapping_mut(&mut workflow),
+                "defaults",
+                Value::Mapping(defaults),
+            );
         }
         "consumer-skips-verifier" => {
             let consumer = jobs
@@ -1924,6 +1940,8 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
         ),
         _ => panic!("unknown test mutation: {mutation}"),
     }
+    *test_mapping_value_mut(test_as_mapping_mut(&mut workflow), "jobs")
+        .unwrap_or_else(|| panic!("workflow jobs mapping exists")) = Value::Mapping(jobs_document);
     let content = must(
         serde_yaml::to_string(&workflow),
         "serialize mutated test workflow",
@@ -1983,7 +2001,7 @@ fn producer_upload_step(jobs: &mut Mapping) -> &mut Mapping {
     profile_upload_step(jobs, "strict")
 }
 
-fn profile_upload_step(jobs: &mut Mapping, job_id: &str) -> &mut Mapping {
+fn profile_upload_step<'a>(jobs: &'a mut Mapping, job_id: &str) -> &'a mut Mapping {
     let profile = jobs
         .get_mut(job_id)
         .and_then(Value::as_mapping_mut)
@@ -2001,7 +2019,7 @@ fn producer_task_step(jobs: &mut Mapping) -> &mut Mapping {
     profile_task_step(jobs, "strict")
 }
 
-fn profile_task_step(jobs: &mut Mapping, job_id: &str) -> &mut Mapping {
+fn profile_task_step<'a>(jobs: &'a mut Mapping, job_id: &str) -> &'a mut Mapping {
     let producer = jobs
         .get_mut(job_id)
         .and_then(Value::as_mapping_mut)
@@ -2040,6 +2058,16 @@ fn replace_yaml_strings(value: &mut Value, from: &str, to: &str) {
 
 fn test_mapping_value_mut<'a>(mapping: &'a mut Mapping, name: &str) -> Option<&'a mut Value> {
     mapping.get_mut(name)
+}
+
+fn test_mapping_value<'a>(mapping: &'a Mapping, name: &str) -> Option<&'a Value> {
+    mapping.get(name)
+}
+
+fn test_as_mapping_mut(value: &mut Value) -> &mut Mapping {
+    value
+        .as_mapping_mut()
+        .unwrap_or_else(|| panic!("YAML value is a mapping"))
 }
 
 #[test]
@@ -2416,7 +2444,7 @@ fn velnor_artifact_verifier_keeps_the_producer_admission_gate() {
     let workflow_path = root.join(".github/workflows/ci-scheduled.yml");
     let content = must(fs::read_to_string(&workflow_path), "read Velnor workflow");
     let mut workflow: Value = must(serde_yaml::from_str(&content), "parse Velnor workflow");
-    let jobs = test_mapping_value_mut(&mut workflow, "jobs")
+    let jobs = test_mapping_value_mut(test_as_mapping_mut(&mut workflow), "jobs")
         .and_then(Value::as_mapping_mut)
         .unwrap_or_else(|| panic!("workflow jobs mapping exists"));
     let verifier = jobs

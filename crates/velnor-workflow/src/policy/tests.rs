@@ -1621,7 +1621,7 @@ fn required_artifact_transitive_findings(name: &str, workflow: &str) -> Vec<Stri
 
 fn required_artifact_lanes_findings(name: &str, workflow: &str, runner: &str) -> Vec<String> {
     let root = required_artifact_tree_with_settings(name, workflow, runner, "both", true);
-    let mut audit = must(
+    let audit = must(
         audit_workflows(&root),
         "audit required-artifact lanes workflow",
     );
@@ -1788,7 +1788,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "velnor_labels = [\"self-hosted\", \"velnor\"]\nvelnor_runner_group = \"fleet\"\n",
     );
     write(&generation_path, &generation);
-    let mut audit = must(
+    let audit = must(
         audit_workflows(&grouped_root),
         "audit lanes_input runner group",
     );
