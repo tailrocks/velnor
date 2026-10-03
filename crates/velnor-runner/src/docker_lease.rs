@@ -11479,6 +11479,27 @@ mod tests {
         crate::buildkit::persistent_builder_name("", "scope", tier, Some("org/repo"))
     }
 
+    fn register_test_persistent_volume_projection(
+        policy: &DockerLeasePolicy,
+        volume: &str,
+        domain_token: &str,
+    ) {
+        let projection = [
+            serde_json::to_string(volume).unwrap(),
+            serde_json::to_string("local").unwrap(),
+            serde_json::to_string(&BTreeMap::from([
+                (JOB_ID_LABEL.to_owned(), "previous-job".to_owned()),
+                (BUILDKIT_DOMAIN_LABEL.to_owned(), domain_token.to_owned()),
+            ]))
+            .unwrap(),
+            serde_json::to_string(&BTreeMap::<String, String>::new()).unwrap(),
+        ]
+        .join("\t");
+        policy
+            .record_persistent_volume_projection(volume, projection.as_bytes(), domain_token)
+            .unwrap();
+    }
+
     fn test_storage_root(prefix: &str) -> PathBuf {
         let canonical_temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let root = canonical_temp.join(format!(
@@ -12715,7 +12736,7 @@ mod tests {
         let (host_two, _host_peer_two) = UnixStream::pair().unwrap();
         let (client_two, _client_peer_two) = UnixStream::pair().unwrap();
         let tunnel_two = authorization
-            .register_tunnel(&host_two, &client_two)
+            .register_persistent_tunnel(&host_two, &client_two)
             .unwrap();
         drop(authorization);
 
@@ -13446,14 +13467,46 @@ mod tests {
     fn persistent_exec_response_failure_cannot_fall_through_owned() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let builder = test_persistent_builder("branch");
+        let domain_token = persistent_buildkit_domain_token(&builder).unwrap();
+        let container = crate::buildkit::daemon_container_name(&builder);
+        let volume = crate::buildkit::daemon_state_volume(&builder);
+        policy.allow_persistent_builder(&builder).unwrap();
+        policy
+            .register_persistent_builder_image(&builder, "sha256:persistent-image")
+            .unwrap();
+        register_test_persistent_volume_projection(&policy, &volume, domain_token);
+        let container_inspect = format!(
+            r#"{{"Id":"persistent-container-id","Image":"sha256:persistent-image","Name":"/{container}","Config":{{"Image":"moby/buildkit:buildx-stable-1","Env":["BUILDKIT_SETUP_CGROUPV2_ROOT=1"],"Entrypoint":["/usr/bin/buildkitd-entrypoint"],"Cmd":[],"Labels":{{"velnor.job-id":"creator-job","velnor.buildkit-domain":"{domain_token}"}}}},"HostConfig":{{"NetworkMode":"bridge","Privileged":true,"Init":true,"CgroupParent":"/docker/buildx","RestartPolicy":{{"Name":"unless-stopped","MaximumRetryCount":0}}}},"Mounts":[{{"Type":"volume","Name":"{volume}","Destination":"/var/lib/buildkit"}}]}}}}"#
+        );
+        policy
+            .record_persistent_container_inspect(&container, 200, container_inspect.as_bytes())
+            .unwrap();
+        let owned_container_id = policy.persistent_container_id(&container).unwrap();
+        let generation = policy
+            .resources
+            .lock()
+            .unwrap()
+            .persistent_builder_generations[&builder];
         let request = api_request("POST", "/v1.43/exec/exec-id/start", b"");
         assert!(policy.authorize(&request).is_err());
         assert!(policy
-            .note_persistent_exec(201, br#"{"unexpected":true}"#, &builder)
+            .note_persistent_exec(
+                201,
+                br#"{"unexpected":true}"#,
+                &builder,
+                &owned_container_id,
+                generation,
+            )
             .is_err());
         assert!(policy.authorize(&request).is_err());
         policy
-            .note_persistent_exec(201, br#"{"Id":"exec-id"}"#, &builder)
+            .note_persistent_exec(
+                201,
+                br#"{"Id":"exec-id"}"#,
+                &builder,
+                &owned_container_id,
+                generation,
+            )
             .unwrap();
         let mut upgrade_request = request.clone();
         let header_end = upgrade_request
@@ -16478,7 +16531,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
         let first_lease = DockerLeasePolicy::new("first-job").unwrap();
         first_lease.allow_persistent_builder(&builder).unwrap();
-        register_volume(&first_lease);
+        register_test_persistent_volume_projection(&first_lease, &volume, domain_token);
         first_lease
             .register_persistent_builder_image(&builder, "sha256:persistent-image")
             .unwrap();
@@ -16504,7 +16557,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         // then let the response forwarder return these exact 409 bytes.
         let second_lease = DockerLeasePolicy::new("second-job").unwrap();
         second_lease.allow_persistent_builder(&builder).unwrap();
-        register_volume(&second_lease);
+        register_test_persistent_volume_projection(&second_lease, &volume, domain_token);
         second_lease
             .register_persistent_builder_image(&builder, "sha256:persistent-image")
             .unwrap();
@@ -16571,7 +16624,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
         let running_lease = DockerLeasePolicy::new("third-job-running-reuse").unwrap();
         running_lease.allow_persistent_builder(&builder).unwrap();
-        register_volume(&running_lease);
+        register_test_persistent_volume_projection(&running_lease, &volume, domain_token);
         running_lease
             .register_persistent_builder_image(&builder, "sha256:persistent-image")
             .unwrap();
@@ -16614,7 +16667,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         for invalid in [wrong_domain, wrong_mount] {
             let lease = DockerLeasePolicy::new("third-job").unwrap();
             lease.allow_persistent_builder(&builder).unwrap();
-            register_volume(&lease);
+            register_test_persistent_volume_projection(&lease, &volume, domain_token);
             lease
                 .register_persistent_builder_image(&builder, "sha256:persistent-image")
                 .unwrap();
