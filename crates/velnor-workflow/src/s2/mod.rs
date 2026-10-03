@@ -5935,93 +5935,6 @@ fn audited_pin_script() -> &'static str {
 "#
 }
 
-/// Compatibility renderer used while `[generator].revision` is the legacy
-/// bootstrap pin. It looks up the artifact for `HEAD_SHA`, verifies its
-/// manifest, digest, and candidate closure, then exports it through the
-/// existing pinned-binary slot plus its manifest. Keep this fragment byte
-/// compatible with the bootstrap workflow until the pin is promoted.
-fn policy_candidate_step_legacy(revision: &str) -> String {
-    format!(
-        r#"      - name: Acquire candidate generator product
-        working-directory: policy-checkout
-        env:
-          GH_TOKEN: ${{{{ github.token }}}}
-          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
-          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}
-          BASE_PIN: {revision}
-        run: |
-          set -euo pipefail
-{pin_script}          base_closure="$(env -u GH_TOKEN velnor-workflow closure --rev="$BASE_PIN")"
-          pin_closure="$(env -u GH_TOKEN velnor-workflow closure --rev="$pin")"
-          if [[ "$pin_closure" == "$base_closure" ]]; then
-            # Same closure means the running base validator IS the pin's
-            # renderer, so --check decides tree==pin-render with no extra
-            # provisioning. A match exits early; a differ falls through to
-            # the candidate path (a generator change in flight) instead of
-            # stranding the validator with a cleared manifest and a red pin
-            # leg. The check output stays visible: on a fall-through it is
-            # the diagnosis, on a match it is one line.
-            if env -u GH_TOKEN velnor-workflow --plain --check; then
-              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
-              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
-          fi
-          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
-          if ! git cat-file -e "$HEAD_SHA^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
-          fi
-          head_candidate="$(env -u GH_TOKEN velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
-          name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
-          deadline=$((SECONDS + 900))
-          run_id=""
-          while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
-            waiting=false
-            seen=false
-            while read -r candidate_run; do
-              test "$candidate_run" != '' || continue
-              seen=true
-              status="$(jq -r .status <<<"$candidate_run")"
-              id="$(jq -r .id <<<"$candidate_run")"
-              # $name in the filter is a jq variable, not a shell expansion.
-              # shellcheck disable=SC2016
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-                run_id="$id"
-                break 2
-              fi
-              [[ "$status" == "completed" ]] || waiting=true
-            done <<<"$(jq -c '.[]' <<<"$runs")"
-            # No runs yet means the API has not indexed the sibling run, not
-            # that it will never come: keep polling until the deadline.
-            [[ "$seen" == "true" ]] || waiting=true
-            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
-            sleep 15
-          done
-          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
-          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
-          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
-          else
-            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{{print $1}}')"
-          fi
-          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
-          [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
-          chmod 0755 "$candidate/velnor-workflow"
-          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
-          [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
-          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
-"#,
-        pin_script = audited_pin_script(),
-    )
-}
-
 /// Owner policy step acquiring the PR run's candidate generator product.
 /// When the audited pin shares the base validator's closure AND the tree
 /// matches the pin's render the step exits immediately (the Stage-0
@@ -6050,15 +5963,739 @@ fn policy_candidate_step_legacy(revision: &str) -> String {
 /// generator changes fail closed: only same-repository runs are even
 /// considered. The same-repository select compares the embedded
 /// `.head_repository.id` object: the runs-list endpoint exposes no
-/// `.head_repository_id` scalar, and selecting on it matches nothing.
-/// The artifact check pipes the listing through real jq for the same
-/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
-/// never report the match.
+/// `.head_repository_id` scalar, and selecting on it matches nothing. Artifact
+/// metadata has no attempt or producer-job identifier. The producer therefore
+/// puts the run attempt and portable GITHUB_JOB key in the artifact name and
+/// manifest, then logs the upload action's artifact ID. Acquisition fetches
+/// logs for the exact REST publisher job, verifies that marker, binds artifact
+/// creation time to its Publish step, and re-fetches the artifact by ID.
+const POLICY_CANDIDATE_TRANSPORT_HELPER: &str = r##"#!/usr/bin/env python3
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import re
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import zipfile
+
+RUNS_JQ = "{total_count: .total_count, page_count: (.workflow_runs | length), workflow_runs: [.workflow_runs[] | select(.head_repository.id == .repository.id)]}"
+PAGE_SIZE = 100
+MAX_PAGES = 10
+MAX_ITEMS = PAGE_SIZE * MAX_PAGES
+MAX_JSON_BYTES = 16 * 1024 * 1024
+MAX_GH_STDERR_BYTES = 1024 * 1024
+MAX_ARCHIVE_BYTES = 268435456
+MAX_JOB_LOG_BYTES = 16777216
+MAX_CENTRAL_DIRECTORY_BYTES = 65536
+EXPECTED_FILES = {"velnor-workflow", "candidate-manifest.json"}
+OPERATION_DEADLINE = None
+
+
+class TransportError(Exception):
+    pass
+
+
+def fail(message):
+    raise TransportError(message)
+
+
+def positive_integer(value, label):
+    if type(value) is int and value > 0:
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdigit() and int(value) > 0:
+        return int(value)
+    fail(f"{label} is not a positive integer")
+
+
+def run_gh(host, endpoint, jq_filter=None):
+    command = ["gh", "api", "--hostname", host]
+    if jq_filter is not None:
+        command.extend(["--jq", jq_filter])
+    command.append(endpoint)
+    timeout = 30
+    if OPERATION_DEADLINE is not None:
+        remaining = OPERATION_DEADLINE - time.monotonic()
+        if remaining <= 0:
+            fail("candidate artifact selection exceeded its overall deadline")
+        timeout = min(timeout, remaining)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    stdout = bytearray()
+    stderr = bytearray()
+    overflow = threading.Event()
+
+    def drain(stream, output, limit):
+        while True:
+            chunk = stream.read(min(65536, limit - len(output) + 1))
+            if not chunk:
+                return
+            output.extend(chunk)
+            if len(output) > limit:
+                overflow.set()
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                return
+
+    stdout_thread = threading.Thread(target=drain, args=(process.stdout, stdout, MAX_JSON_BYTES), daemon=True)
+    stderr_thread = threading.Thread(target=drain, args=(process.stderr, stderr, MAX_GH_STDERR_BYTES), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        fail(f"gh api timed out after {timeout:.1f} seconds for {endpoint}")
+    stdout_thread.join()
+    stderr_thread.join()
+    if overflow.is_set():
+        if len(stdout) > MAX_JSON_BYTES:
+            fail(f"gh api response exceeded {MAX_JSON_BYTES} bytes for {endpoint}")
+        fail(f"gh api error output exceeded {MAX_GH_STDERR_BYTES} bytes for {endpoint}")
+    if return_code != 0:
+        detail = stderr.decode("utf-8", "replace").strip()
+        fail(f"gh api failed for {endpoint}: {detail or return_code}")
+    try:
+        return json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"gh api returned malformed JSON for {endpoint}: {error}")
+
+
+def api_base_for_host(host):
+    if host == "github.com":
+        return "https://api.github.com"
+    if host.endswith(".ghe.com"):
+        if "." in host[:-len(".ghe.com")]:
+            fail(f"invalid GitHub Enterprise Cloud tenant hostname: {host}")
+        return f"https://api.{host}"
+    return f"https://{host}/api/v3"
+
+
+def validate_api_base(host, value):
+    expected = api_base_for_host(host)
+    if not value or value.rstrip("/") != expected:
+        fail(f"GITHUB_API_URL does not match trusted GitHub server {host}")
+    return expected
+
+
+def list_pages(host, endpoint, key, jq_filter=None):
+    result = []
+    seen_ids = set()
+    expected_total = None
+    raw_count = 0
+    for page_number in range(1, MAX_PAGES + 1):
+        separator = "&" if "?" in endpoint else "?"
+        page_url = f"{endpoint}{separator}per_page={PAGE_SIZE}&page={page_number}"
+        page = run_gh(host, page_url, jq_filter)
+        if not isinstance(page, dict) or not isinstance(page.get(key), list):
+            fail(f"gh api page has no {key} array: {page_url}")
+        total = page.get("total_count")
+        if type(total) is not int or total < 0:
+            fail(f"gh api page has invalid total_count: {page_url}")
+        if total >= MAX_ITEMS:
+            fail(f"{endpoint} reached the {MAX_ITEMS}-item pagination limit; refusing a potentially incomplete snapshot")
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            fail(f"{endpoint} changed during pagination; refusing an incomplete snapshot")
+        items = page[key]
+        raw_page_count = page.get("page_count", len(items))
+        if type(raw_page_count) is not int or not 0 <= raw_page_count <= PAGE_SIZE:
+            fail(f"gh api page has invalid page_count: {page_url}")
+        if len(items) > raw_page_count or raw_page_count == 0 and total > raw_count:
+            fail(f"gh api page count is inconsistent: {page_url}")
+        raw_count += raw_page_count
+        for item in items:
+            if not isinstance(item, dict):
+                fail(f"gh api {key} contains a non-object entry")
+            identifier = positive_integer(item.get("id"), f"{key} id")
+            if identifier in seen_ids:
+                fail(f"gh api {key} repeats id {identifier}")
+            seen_ids.add(identifier)
+            result.append(item)
+        if raw_count == expected_total:
+            return result
+        if raw_count > expected_total:
+            fail(f"gh api {key} returned more entries than total_count")
+        if raw_count >= MAX_ITEMS:
+            fail(f"{endpoint} reached the {MAX_ITEMS}-item pagination limit")
+    fail(f"{endpoint} exceeded the {MAX_PAGES}-page pagination limit")
+
+
+def timestamp(value, label):
+    if not isinstance(value, str):
+        fail(f"{label} is missing")
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        fail(f"{label} is malformed: {error}")
+    if parsed.tzinfo is None:
+        fail(f"{label} has no timezone")
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def publisher_key_for_job_name(job, publisher_profiles):
+    name = job.get("name")
+    matches = [key for key, display in publisher_profiles.items() if display == name]
+    if len(matches) != 1:
+        fail(f"producer REST job name {name!r} does not identify exactly one trusted publisher profile")
+    return matches[0]
+
+
+def parse_publisher_profiles(raw):
+    try:
+        profiles = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        fail(f"trusted publisher profiles are malformed: {error}")
+    if not isinstance(profiles, dict):
+        fail("trusted publisher profiles are not an object")
+    displays = []
+    for key, display in profiles.items():
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+            fail("trusted publisher profile contains an invalid YAML job key")
+        if not isinstance(display, str) or not display or "\n" in display or "\r" in display:
+            fail(f"trusted publisher profile {key!r} has an invalid REST display name")
+        displays.append(display)
+    if len(set(displays)) != len(displays):
+        fail("trusted publisher profiles contain duplicate REST display names")
+    return profiles
+
+
+def successful_publish_windows(jobs, run_id, attempt, publisher_profiles):
+    windows = []
+    pending = False
+    producer_jobs = 0
+    producer_job = None
+    for job in jobs:
+        if job.get("run_id") != run_id or job.get("run_attempt") != attempt:
+            continue
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            fail(f"producer job {job.get('id')} has no step list")
+        prepares = [step for step in steps if isinstance(step, dict) and step.get("name") == "Prepare candidate generator product"]
+        publishes = [step for step in steps if isinstance(step, dict) and step.get("name") == "Publish candidate generator product"]
+        records = [step for step in steps if isinstance(step, dict) and step.get("name") == "Record candidate artifact identity"]
+        if not prepares and not publishes and not records:
+            continue
+        producer_jobs += 1
+        if producer_jobs > 1:
+            fail(f"run {run_id} attempt {attempt} has multiple candidate producer jobs")
+        producer_job = job
+        check_run_id = job.get("check_run_id")
+        if check_run_id is not None and positive_integer(check_run_id, "producer check run id") != positive_integer(job.get("id"), "producer job id"):
+            fail(f"producer job {job.get('id')} does not match its check-run identity")
+        if len(prepares) != 1 or len(publishes) != 1 or len(records) != 1:
+            if job.get("status") != "completed":
+                pending = True
+                continue
+            fail(f"producer job {job.get('id')} has ambiguous candidate steps")
+        prepare = prepares[0]
+        publish = publishes[0]
+        record = records[0]
+        if (
+            job.get("status") != "completed"
+            or job.get("conclusion") is None
+            or publish.get("status") != "completed"
+            or record.get("status") != "completed"
+        ):
+            pending = True
+            continue
+        if (
+            job.get("conclusion") != "success"
+            or prepare.get("conclusion") != "success"
+            or publish.get("conclusion") != "success"
+            or record.get("conclusion") != "success"
+        ):
+            continue
+        publisher_job_key = publisher_key_for_job_name(job, publisher_profiles)
+        job_start = timestamp(job.get("started_at"), f"producer job {job.get('id')} start")
+        job_end = timestamp(job.get("completed_at"), f"producer job {job.get('id')} completion")
+        publish_start = timestamp(publish.get("started_at"), f"producer publish step {job.get('id')} start")
+        publish_end = timestamp(publish.get("completed_at"), f"producer publish step {job.get('id')} completion")
+        marker_start = timestamp(record.get("started_at"), f"artifact identity step {job.get('id')} start")
+        marker_end = timestamp(record.get("completed_at"), f"artifact identity step {job.get('id')} completion")
+        if not job_start <= publish_start <= publish_end <= marker_start <= marker_end <= job_end:
+            fail(f"producer job {job.get('id')} has an invalid candidate publish interval")
+        windows.append((job, publisher_job_key, publish_start, publish_end, marker_start, marker_end))
+    return windows, pending, producer_job
+
+
+def artifact_fields(artifact, run_id, expected_name, api_base, repository, candidate_sha):
+    if not isinstance(artifact, dict):
+        fail("artifact metadata is not an object")
+    artifact_id = positive_integer(artifact.get("id"), "artifact id")
+    if artifact.get("name") != expected_name or artifact.get("expired") is not False:
+        fail(f"artifact {artifact_id} no longer matches its selected name or expiry state")
+    workflow_run = artifact.get("workflow_run")
+    if not isinstance(workflow_run, dict):
+        fail(f"artifact {artifact_id} has no workflow run identity")
+    if workflow_run.get("id") != run_id:
+        fail(f"artifact {artifact_id} no longer belongs to run {run_id}")
+    if workflow_run.get("head_sha") != candidate_sha:
+        fail(f"artifact {artifact_id} does not belong to candidate revision {candidate_sha}")
+    size = artifact.get("size_in_bytes")
+    if type(size) is not int or size <= 0:
+        fail(f"artifact {artifact_id} has invalid size_in_bytes")
+    if size > MAX_ARCHIVE_BYTES:
+        fail(f"artifact {artifact_id} is {size} bytes; limit is {MAX_ARCHIVE_BYTES}")
+    digest = artifact.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        fail(f"artifact {artifact_id} has no valid REST SHA-256 digest")
+    archive_url = artifact.get("archive_download_url")
+    expected_path = urllib.parse.urlsplit(api_base).path.rstrip("/") + f"/repos/{repository}/actions/artifacts/{artifact_id}/zip"
+    try:
+        parsed_url = urllib.parse.urlsplit(archive_url)
+    except (TypeError, ValueError) as error:
+        fail(f"artifact {artifact_id} has an invalid archive URL: {error}")
+    api = urllib.parse.urlsplit(api_base)
+    if parsed_url.scheme != "https" or parsed_url.netloc.casefold() != api.netloc.casefold() or parsed_url.path.casefold() != expected_path.casefold() or parsed_url.query or parsed_url.fragment or parsed_url.username or parsed_url.password:
+        fail(f"artifact {artifact_id} archive URL is outside the trusted API endpoint")
+    return artifact_id, size, digest, archive_url
+
+
+def select_candidate(host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json):
+    api_base = validate_api_base(host, api_url)
+    publisher_profiles = parse_publisher_profiles(publisher_profiles_json)
+    runs_endpoint = f"repos/{repository}/actions/workflows/ci-pr.yml/runs?head_sha={candidate_sha}&event=pull_request&sort=created&direction=desc"
+    runs = list_pages(host, runs_endpoint, "workflow_runs", RUNS_JQ)
+    ordered_runs = []
+    previous_created = None
+    for run in runs:
+        created = timestamp(run.get("created_at"), f"workflow run {run.get('id')} created_at")
+        if previous_created is not None and created > previous_created:
+            fail("workflow run API did not preserve created-descending order")
+        previous_created = created
+        ordered_runs.append((run, created))
+    eligible_runs = []
+    for run, created in ordered_runs:
+        if run.get("head_sha") != candidate_sha or run.get("event") != "pull_request":
+            continue
+        repo = run.get("repository")
+        head_repo = run.get("head_repository")
+        if not isinstance(repo, dict) or not isinstance(head_repo, dict):
+            continue
+        repo_id = repo.get("id")
+        head_repo_id = head_repo.get("id")
+        repo_name = repo.get("full_name")
+        head_repo_name = head_repo.get("full_name")
+        if type(repo_id) is not int or repo_id <= 0 or head_repo_id != repo_id:
+            continue
+        if not isinstance(repo_name, str) or not isinstance(head_repo_name, str):
+            continue
+        if repo_name.casefold() != repository.casefold() or head_repo_name.casefold() != repository.casefold():
+            continue
+        eligible_runs.append((run, created))
+    for previous, current in zip(eligible_runs, eligible_runs[1:]):
+        if previous[1] == current[1]:
+            fail("same-head workflow runs share a creation timestamp; refusing ambiguous newest-run ordering")
+    if not eligible_runs:
+        return {"state": "waiting"}
+    for run, _created in eligible_runs:
+        if OPERATION_DEADLINE is not None and time.monotonic() >= OPERATION_DEADLINE:
+            fail("candidate artifact selection exceeded its overall deadline")
+        run_id = positive_integer(run.get("id"), "workflow run id")
+        attempt = positive_integer(run.get("run_attempt"), f"workflow run {run_id} attempt")
+        jobs_endpoint = f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}/jobs"
+        jobs = list_pages(host, jobs_endpoint, "jobs")
+        windows, job_pending, producer_job = successful_publish_windows(
+            jobs, run_id, attempt, publisher_profiles
+        )
+        if job_pending:
+            return {"state": "waiting"}
+        if producer_job is None:
+            if run.get("status") != "completed":
+                return {"state": "waiting"}
+            continue
+        if not windows:
+            if producer_job.get("status") != "completed":
+                return {"state": "waiting"}
+            continue
+        producer_job_id = positive_integer(producer_job.get("id"), "producer job id")
+        _job, publisher_job, publish_start, publish_end, marker_start, marker_end = windows[0]
+        if OPERATION_DEADLINE is not None and time.monotonic() >= OPERATION_DEADLINE:
+            fail("candidate artifact selection exceeded its overall deadline")
+        return {
+            "state": "publisher",
+            "run_id": str(run_id),
+            "run_attempt": attempt,
+            "producer_job_id": producer_job_id,
+            "publisher_job": publisher_job,
+            "publish_started_at": publish_start.isoformat(),
+            "publish_completed_at": publish_end.isoformat(),
+            "marker_started_at": marker_start.isoformat(),
+            "marker_completed_at": marker_end.isoformat(),
+            "job_log_url": f"{api_base}/repos/{repository}/actions/jobs/{producer_job_id}/logs",
+        }
+    return {"state": "missing"}
+
+
+def select_artifact(host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json, run_id, attempt, producer_job_id, publish_started_at, publish_completed_at, marker_started_at, marker_completed_at, publisher_job, artifact_id, artifact_name):
+    api_base = validate_api_base(host, api_url)
+    parse_publisher_profiles(publisher_profiles_json)
+    run_id = positive_integer(run_id, "workflow run id")
+    attempt = positive_integer(attempt, "workflow run attempt")
+    producer_job_id = positive_integer(producer_job_id, "producer job id")
+    artifact_id = positive_integer(artifact_id, "artifact id from producer log marker")
+    if not isinstance(publisher_job, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", publisher_job):
+        fail("producer log marker has an invalid GITHUB_JOB key")
+    expected_name = f"{name_prefix}-r{run_id}-a{attempt}-j{publisher_job}"
+    if artifact_name != expected_name:
+        fail("producer log marker artifact name does not match its run, attempt, job, and candidate")
+    publish_start = timestamp(publish_started_at, "producer publish start")
+    publish_end = timestamp(publish_completed_at, "producer publish completion")
+    marker_start = timestamp(marker_started_at, "artifact identity step start")
+    marker_end = timestamp(marker_completed_at, "artifact identity step completion")
+    if not publish_start < publish_end <= marker_start <= marker_end:
+        fail("candidate producer step intervals are inconsistent")
+
+    # Re-evaluate run ordering after downloading the job log. A newer same-head
+    # run may have appeared while the previous snapshot was being inspected.
+    current = select_candidate(
+        host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json
+    )
+    if current.get("state") == "waiting":
+        return {"state": "waiting"}
+    if current.get("state") != "publisher":
+        fail(f"candidate publisher run {run_id} ceased to be eligible during artifact verification")
+    current_run_id = positive_integer(current.get("run_id"), "current workflow run id")
+    current_attempt = positive_integer(current.get("run_attempt"), "current workflow run attempt")
+    current_job_id = positive_integer(current.get("producer_job_id"), "current producer job id")
+    if (current_run_id, current_attempt, current_job_id) != (run_id, attempt, producer_job_id):
+        return {"state": "waiting"}
+    if current.get("publisher_job") != publisher_job:
+        fail("producer marker GITHUB_JOB key does not match the trusted REST job display")
+    current_publish_start = timestamp(current.get("publish_started_at"), "current producer publish start")
+    current_publish_end = timestamp(current.get("publish_completed_at"), "current producer publish completion")
+    current_marker_start = timestamp(current.get("marker_started_at"), "current identity step start")
+    current_marker_end = timestamp(current.get("marker_completed_at"), "current identity step completion")
+    if (
+        current_publish_start != publish_start
+        or current_publish_end != publish_end
+        or current_marker_start != marker_start
+        or current_marker_end != marker_end
+    ):
+        return {"state": "waiting"}
+
+    artifacts_endpoint = f"repos/{repository}/actions/runs/{run_id}/artifacts"
+    artifacts = list_pages(host, artifacts_endpoint, "artifacts")
+    matches = [artifact for artifact in artifacts if artifact.get("id") == artifact_id and artifact.get("name") == expected_name]
+    if not matches:
+        conflicting = [artifact for artifact in artifacts if artifact.get("name") == expected_name]
+        if not conflicting:
+            return {"state": "waiting"}
+        fail(f"producer marker artifact id {artifact_id} conflicts with artifact metadata")
+    if len(matches) != 1:
+        fail(f"producer marker does not identify one artifact {artifact_id} named {expected_name}")
+    artifact = matches[0]
+    created = timestamp(artifact.get("created_at"), f"artifact {artifact_id} created_at")
+    if not current_publish_start < created < current_publish_end:
+        fail(f"artifact {artifact_id} is not inside its exact publisher step window")
+    artifact_id, size, digest, archive_url = artifact_fields(artifact, run_id, expected_name, api_base, repository, candidate_sha)
+    exact = run_gh(host, f"repos/{repository}/actions/artifacts/{artifact_id}")
+    exact_fields = artifact_fields(exact, run_id, expected_name, api_base, repository, candidate_sha)
+    if exact_fields != (artifact_id, size, digest, archive_url) or exact.get("created_at") != artifact.get("created_at"):
+        fail(f"artifact {artifact_id} changed during exact-identity verification")
+    if OPERATION_DEADLINE is not None and time.monotonic() >= OPERATION_DEADLINE:
+        fail("candidate artifact selection exceeded its overall deadline")
+    latest = select_candidate(
+        host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json
+    )
+    if latest.get("state") == "waiting":
+        return {"state": "waiting"}
+    if latest.get("state") != "publisher":
+        fail(f"candidate publisher run {run_id} ceased to be eligible before download")
+    if (
+        positive_integer(latest.get("run_id"), "latest workflow run id") != run_id
+        or positive_integer(latest.get("run_attempt"), "latest workflow run attempt") != attempt
+        or positive_integer(latest.get("producer_job_id"), "latest producer job id") != producer_job_id
+        or latest.get("publisher_job") != publisher_job
+    ):
+        return {"state": "waiting"}
+    return {
+        "state": "ready",
+        "run_id": str(run_id),
+        "run_attempt": attempt,
+        "producer_job_id": producer_job_id,
+        "publisher_job": publisher_job,
+        "artifact_name": expected_name,
+        "artifact_id": artifact_id,
+        "size_in_bytes": size,
+        "digest": digest,
+        "archive_download_url": archive_url,
+    }
+
+
+def parse_redirect(path):
+    raw = pathlib.Path(path).read_bytes()
+    if not raw or len(raw) > 65536:
+        fail("GitHub API redirect headers are empty or oversized")
+    text = raw.decode("latin-1")
+    blocks = re.split(r"\r?\n\r?\n", text)
+    responses = [block for block in blocks if re.match(r"^HTTP/[^\s]+\s+\d{3}(?:\s|$)", block)]
+    if not responses:
+        fail("artifact API did not return an HTTP status block")
+    response = responses[-1]
+    first_line, *headers = response.splitlines()
+    status_match = re.match(r"^HTTP/[^\s]+\s+(\d{3})(?:\s|$)", first_line)
+    if status_match is None or status_match.group(1) != "302":
+        fail(f"GitHub API expected one 302 redirect, got {first_line}")
+    locations = [line.split(":", 1)[1].strip() for line in headers if line.lower().startswith("location:")]
+    if len(locations) != 1:
+        fail("GitHub API redirect must contain exactly one Location header")
+    location = locations[0]
+    if (
+        len(location) > 8192
+        or "#" in location
+        or "\\" in location
+        or any(ord(char) < 0x21 or ord(char) == 0x7f for char in location)
+    ):
+        fail("GitHub API redirect Location is malformed")
+    try:
+        parsed = urllib.parse.urlsplit(location)
+        port = parsed.port
+    except ValueError as error:
+        fail(f"GitHub API redirect Location is malformed: {error}")
+    hostname = parsed.hostname or ""
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password or parsed.fragment or port not in (None, 443):
+        fail("GitHub API redirect must be an absolute credential-free HTTPS URL")
+    labels = hostname.split(".")
+    if (
+        len(hostname) > 253
+        or len(labels) < 2
+        or any(
+            len(label) > 63
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+            for label in labels
+        )
+        or not any(char.isalpha() for char in hostname)
+    ):
+        fail("GitHub API redirect has an invalid host")
+    try:
+        socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM, flags=socket.AI_NUMERICHOST)
+        fail("GitHub API redirect cannot target an IP address")
+    except socket.gaierror:
+        pass
+    if not parsed.path.startswith("/"):
+        fail("GitHub API redirect has no absolute path")
+    return location
+
+
+def copy_archive(path, limit):
+    limit = positive_integer(limit, "archive byte limit")
+    digest = hashlib.sha256()
+    total = 0
+    with open(path, "xb") as output:
+        while True:
+            chunk = sys.stdin.buffer.read(min(1024 * 1024, limit - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                fail(f"artifact archive exceeded the {limit}-byte download limit")
+            digest.update(chunk)
+            output.write(chunk)
+    print(f"{total}\t{digest.hexdigest()}")
+
+
+def copy_job_log(path, limit):
+    limit = positive_integer(limit, "job log byte limit")
+    total = 0
+    with open(path, "xb") as output:
+        while True:
+            chunk = sys.stdin.buffer.read(min(1024 * 1024, limit - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                fail(f"producer job log exceeded the {limit}-byte limit")
+            output.write(chunk)
+    if total == 0:
+        fail("producer job log is empty")
+    print(total)
+
+
+def parse_job_marker(path, expected_run_id, expected_attempt, expected_publisher_job, name_prefix):
+    expected_run_id = str(positive_integer(expected_run_id, "workflow run id"))
+    expected_attempt = str(positive_integer(expected_attempt, "workflow run attempt"))
+    if not isinstance(expected_publisher_job, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", expected_publisher_job):
+        fail("selected REST producer has an invalid trusted YAML job key")
+    raw = pathlib.Path(path).read_bytes()
+    if not raw or len(raw) > MAX_JOB_LOG_BYTES:
+        fail("producer job log is empty or oversized")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        fail(f"producer job log is not valid UTF-8: {error}")
+    marker_pattern = re.compile(
+        r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z )?"
+        r"VELNOR_CANDIDATE_ARTIFACT\t([1-9][0-9]*)\t([1-9][0-9]*)\t"
+        r"([A-Za-z0-9_-]+)\t([1-9][0-9]*)\t([A-Za-z0-9._-]+)$"
+    )
+    markers = []
+    for line in text.splitlines():
+        match = marker_pattern.fullmatch(line)
+        if match is not None:
+            markers.append(match.groups())
+    if len(markers) != 1:
+        fail(f"producer job log must contain exactly one complete artifact identity marker; found {len(markers)}")
+    run_id, attempt, publisher_job, artifact_id, artifact_name = markers[0]
+    if run_id != expected_run_id or attempt != expected_attempt:
+        fail("producer job log marker belongs to another run attempt")
+    if publisher_job != expected_publisher_job:
+        fail("producer job log GITHUB_JOB key does not match its selected REST job profile")
+    expected_name = f"{name_prefix}-r{run_id}-a{attempt}-j{publisher_job}"
+    if artifact_name != expected_name:
+        fail("producer job log marker name does not match its run, attempt, job, and candidate")
+    return {
+        "run_id": run_id,
+        "run_attempt": int(attempt),
+        "publisher_job": publisher_job,
+        "artifact_id": int(artifact_id),
+        "artifact_name": artifact_name,
+    }
+
+
+def extract_archive(archive_path, destination, limit):
+    limit = positive_integer(limit, "extracted byte limit")
+    root = pathlib.Path(destination)
+    if not root.is_dir() or any(root.iterdir()):
+        fail("candidate extraction directory is not fresh")
+    try:
+        archive_size = os.path.getsize(archive_path)
+        with open(archive_path, "rb") as archive_file:
+            tail_size = min(archive_size, 65557)
+            archive_file.seek(archive_size - tail_size)
+            tail = archive_file.read(tail_size)
+        signature = b"PK\x05\x06"
+        eocd_offset = tail.rfind(signature)
+        if eocd_offset < 0 or eocd_offset + 22 > len(tail):
+            fail("candidate ZIP has no complete end-of-directory record")
+        comment_size = struct.unpack_from("<H", tail, eocd_offset + 20)[0]
+        if eocd_offset + 22 + comment_size != len(tail):
+            fail("candidate ZIP has trailing or malformed end-of-directory data")
+        entries_on_disk, entry_count = struct.unpack_from("<HH", tail, eocd_offset + 8)
+        directory_size, directory_offset = struct.unpack_from("<II", tail, eocd_offset + 12)
+        if entries_on_disk == 0xFFFF or entry_count == 0xFFFF or directory_size == 0xFFFFFFFF or directory_offset == 0xFFFFFFFF:
+            fail("candidate ZIP64 archives are unsupported")
+        if entries_on_disk != 2 or entry_count != 2:
+            fail("candidate ZIP must contain exactly two entries")
+        eocd_absolute = archive_size - tail_size + eocd_offset
+        if (
+            comment_size != 0
+            or directory_size > MAX_CENTRAL_DIRECTORY_BYTES
+            or directory_offset + directory_size > eocd_absolute
+        ):
+            fail("candidate ZIP directory exceeds the accepted bounds")
+    except (OSError, struct.error) as error:
+        fail(f"candidate ZIP preflight failed: {error}")
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            entries = archive.infolist()
+            names = [entry.filename for entry in entries]
+            if len(entries) != len(EXPECTED_FILES) or len(set(names)) != len(names) or set(names) != EXPECTED_FILES:
+                fail("candidate ZIP must contain exactly one binary and one manifest")
+            declared_total = 0
+            for entry in entries:
+                if entry.is_dir() or entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                    fail(f"candidate ZIP contains an unsupported entry: {entry.filename}")
+                file_type = (entry.external_attr >> 16) & 0o170000
+                if file_type not in (0, stat.S_IFREG):
+                    fail(f"candidate ZIP contains a non-regular entry: {entry.filename}")
+                if entry.file_size < 0 or entry.compress_size < 0:
+                    fail(f"candidate ZIP has invalid sizes for {entry.filename}")
+                declared_total += entry.file_size
+                if declared_total > limit:
+                    fail(f"candidate ZIP extracted size exceeds the {limit}-byte limit")
+            actual_total = 0
+            for entry in entries:
+                target = root / entry.filename
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(target, flags, 0o600)
+                written = 0
+                with os.fdopen(descriptor, "wb") as output, archive.open(entry, "r") as source:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        actual_total += len(chunk)
+                        if written > entry.file_size or actual_total > limit:
+                            fail("candidate ZIP expanded beyond its declared or total size")
+                        output.write(chunk)
+                if written != entry.file_size:
+                    fail(f"candidate ZIP size mismatch for {entry.filename}")
+    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+        fail(f"candidate ZIP extraction failed: {error}")
+
+
+def main():
+    global OPERATION_DEADLINE
+    mode = sys.argv[1]
+    if mode == "api":
+        host, endpoint = sys.argv[2:4]
+        jq_filter = sys.argv[4] if len(sys.argv) > 4 else None
+        value = run_gh(host, endpoint, jq_filter)
+        print(json.dumps(value, separators=(",", ":")))
+    elif mode == "select":
+        host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json, deadline = sys.argv[2:9]
+        OPERATION_DEADLINE = float(deadline)
+        value = select_candidate(
+            host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json
+        )
+        print(json.dumps(value, separators=(",", ":")))
+    elif mode == "select-artifact":
+        (host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json, run_id, attempt, producer_job_id,
+         publish_started_at, publish_completed_at, marker_started_at, marker_completed_at,
+         publisher_job, artifact_id, artifact_name, deadline) = sys.argv[2:19]
+        OPERATION_DEADLINE = float(deadline)
+        value = select_artifact(
+            host, repository, candidate_sha, name_prefix, api_url, publisher_profiles_json, run_id, attempt,
+            producer_job_id, publish_started_at, publish_completed_at, marker_started_at,
+            marker_completed_at, publisher_job, artifact_id, artifact_name
+        )
+        print(json.dumps(value, separators=(",", ":")))
+    elif mode == "redirect":
+        print(parse_redirect(sys.argv[2]))
+    elif mode == "copy":
+        copy_archive(sys.argv[2], sys.argv[3])
+    elif mode == "copy-job-log":
+        copy_job_log(sys.argv[2], sys.argv[3])
+    elif mode == "marker":
+        value = parse_job_marker(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
+        print(json.dumps(value, separators=(",", ":")))
+    elif mode == "extract":
+        extract_archive(sys.argv[2], sys.argv[3], sys.argv[4])
+    else:
+        fail(f"unknown transport helper mode: {mode}")
+
+
+try:
+    main()
+except (TransportError, OSError, ValueError, IndexError) as error:
+    print(f"::error::{error}", file=sys.stderr)
+    sys.exit(1)
+"##;
+
 #[expect(
     clippy::too_many_lines,
     reason = "the candidate acquisition shell keeps its provenance gates together"
 )]
-fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
+fn policy_candidate_step(
+    revision: &str,
+    default_branch: &str,
+    publisher_profiles_json: &str,
+) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
         working-directory: policy-checkout
@@ -6072,13 +6709,24 @@ fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
           BASE_PIN: {revision}
         run: |
           set -euo pipefail
-          # gh can otherwise route hostless requests through runner or user
-          # configuration. Pin every request to the trusted Actions server.
+          # gh and curl can otherwise route through inherited runner/user
+          # configuration. Pin API routing and keep signed-URL fetches direct.
           unset GH_HOST GH_CONFIG_DIR GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_REPO
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy CURL_HOME CURL_CA_BUNDLE
+          transport_dir=""
+          candidate=""
+          keep_candidate=false
+          cleanup_candidate() {{
+            status=$?
+            if [[ -n "$transport_dir" ]]; then rm -rf -- "$transport_dir" || true; fi
+            if [[ "$keep_candidate" != true && -n "$candidate" ]]; then rm -rf -- "$candidate" || true; fi
+            return "$status"
+          }}
+          trap cleanup_candidate EXIT
           server_url="${{GITHUB_SERVER_URL:-}}"
           # gh's --hostname and --repo flags reject hostnames with ports.
           if [[ "$server_url" =~ ^https://([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*)/?$ ]]; then
-            trusted_github_hostname="${{BASH_REMATCH[1]}}"
+            trusted_github_hostname="${{BASH_REMATCH[1],,}}"
           else
             echo "::error::GITHUB_SERVER_URL must be an HTTPS hostname without a port or path" >&2
             exit 1
@@ -6106,8 +6754,20 @@ fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
             fi
             echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
           fi
+          umask 077
+          transport_dir="$(mktemp -d "$RUNNER_TEMP/velnor-workflow-acquire.XXXXXXXX")"
+          transport_helper="$transport_dir/transport.py"
+          cat > "$transport_helper" <<'PY'
+{transport_helper}
+PY
+          chmod 0700 "$transport_helper"
           if [[ "$EVENT_NAME" == "push" ]]; then
-            merged_pulls="$(gh api --hostname "$trusted_github_host" "repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls" | jq -c --arg merge_sha "$MERGE_SHA" --arg repository "$GITHUB_REPOSITORY" --arg default_branch "$DEFAULT_BRANCH" '[.[] | select(.merge_commit_sha == $merge_sha and .merged_at != null and .base.ref == $default_branch and .base.repo.full_name == $repository and .head.repo.full_name == $repository) | {{head_sha: .head.sha, head_repository: .head.repo.full_name}}]')"
+            merged_pulls="$(python3 "$transport_helper" api "$trusted_github_host" "repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls?per_page=100")"
+            if (( $(jq 'length' <<<"$merged_pulls") >= 100 )); then
+              echo "::error::commit pull request lookup reached its 100-result limit; refusing an incomplete association" >&2
+              exit 1
+            fi
+            merged_pulls="$(jq -c --arg merge_sha "$MERGE_SHA" --arg repository "$GITHUB_REPOSITORY" --arg default_branch "$DEFAULT_BRANCH" '[.[] | select(.merge_commit_sha == $merge_sha and .merged_at != null and .base.ref == $default_branch and .base.repo.full_name == $repository and .head.repo.full_name == $repository) | {head_sha: .head.sha, head_repository: .head.repo.full_name}]' <<<"$merged_pulls")"
             if [[ "$(jq 'length' <<<"$merged_pulls")" != "1" ]]; then
               echo "::error::push $MERGE_SHA is not associated with exactly one merged same-repository pull request; direct pushes and ambiguous squash merges fail closed" >&2
               exit 1
@@ -6132,36 +6792,74 @@ fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
           render_candidate="$(velnor-workflow closure --rev="$RENDER_SHA" --candidate)"
           name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
           deadline=$((SECONDS + 900))
-          run_id=""
+          helper_deadline="$(python3 -c 'import time; print(time.monotonic() + 840)')"
+          selection=''
+          selection_state=''
           while (( SECONDS < deadline )); do
-            runs="$(gh api --hostname "$trusted_github_host" "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
-            waiting=false
-            seen=false
-            while read -r candidate_run; do
-              test "$candidate_run" != '' || continue
-              seen=true
-              status="$(jq -r .status <<<"$candidate_run")"
-              id="$(jq -r .id <<<"$candidate_run")"
-              # $name in the filter is a jq variable, not a shell expansion.
-              # shellcheck disable=SC2016
-              if gh api --hostname "$trusted_github_host" "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-                run_id="$id"
-                break 2
-              fi
-              [[ "$status" == "completed" ]] || waiting=true
-            done <<<"$(jq -c '.[]' <<<"$runs")"
-            # No runs yet means the API has not indexed the sibling run, not
-            # that it will never come: keep polling until the deadline.
-            [[ "$seen" == "true" ]] || waiting=true
-            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
+            publisher="$(python3 "$transport_helper" select "$trusted_github_host" "$GITHUB_REPOSITORY" "$CANDIDATE_SHA" "$name" "$GITHUB_API_URL" {publisher_profiles} "$helper_deadline")"
+            publisher_state="$(jq -er '.state' <<<"$publisher")"
+            if [[ "$publisher_state" == "waiting" ]]; then
+              sleep 15
+              continue
+            fi
+            [[ "$publisher_state" == "publisher" ]] || {{ echo "::error::no current-attempt publisher produced candidate $name" >&2; exit 1; }}
+            run_id="$(jq -er '.run_id | strings' <<<"$publisher")"
+            run_attempt="$(jq -er '.run_attempt | numbers' <<<"$publisher")"
+            producer_job_id="$(jq -er '.producer_job_id | numbers' <<<"$publisher")"
+            job_log_url="$(jq -er '.job_log_url | strings' <<<"$publisher")"
+            publish_started_at="$(jq -er '.publish_started_at | strings' <<<"$publisher")"
+            publish_completed_at="$(jq -er '.publish_completed_at | strings' <<<"$publisher")"
+            marker_started_at="$(jq -er '.marker_started_at | strings' <<<"$publisher")"
+            marker_completed_at="$(jq -er '.marker_completed_at | strings' <<<"$publisher")"
+            expected_publisher_job="$(jq -er '.publisher_job | strings' <<<"$publisher")"
+            log_headers="$transport_dir/job-log.headers"
+            log_api_status="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl --disable --config - --silent --show-error --proto '=https' --connect-timeout 10 --max-time 30 --output /dev/null --dump-header "$log_headers" --write-out '%{http_code}' -- "$job_log_url")"
+            [[ "$log_api_status" == "302" ]] || {{ echo "::error::job logs API expected a 302 download redirect, got $log_api_status" >&2; exit 1; }}
+            signed_log_url="$(python3 "$transport_helper" redirect "$log_headers")"
+            log_path="$transport_dir/producer-job.log"
+            log_status="$transport_dir/log-transfer.status"
+            curl --disable --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 --max-filesize 16777216 --write-out '%{stderr}%{http_code}' -- "$signed_log_url" 2>"$log_status" | python3 "$transport_helper" copy-job-log "$log_path" 16777216 >/dev/null
+            [[ "$(tail -c 3 "$log_status")" == "200" ]] || {{ echo "::error::signed job log URL did not return HTTP 200" >&2; exit 1; }}
+            marker="$(python3 "$transport_helper" marker "$log_path" "$run_id" "$run_attempt" "$expected_publisher_job" "$name")"
+            publisher_job="$(jq -er '.publisher_job | strings' <<<"$marker")"
+            marker_artifact_id="$(jq -er '.artifact_id | numbers' <<<"$marker")"
+            marker_artifact_name="$(jq -er '.artifact_name | strings' <<<"$marker")"
+            selection="$(python3 "$transport_helper" select-artifact "$trusted_github_host" "$GITHUB_REPOSITORY" "$CANDIDATE_SHA" "$name" "$GITHUB_API_URL" {publisher_profiles} "$run_id" "$run_attempt" "$producer_job_id" "$publish_started_at" "$publish_completed_at" "$marker_started_at" "$marker_completed_at" "$publisher_job" "$marker_artifact_id" "$marker_artifact_name" "$helper_deadline")"
+            selection_state="$(jq -er '.state' <<<"$selection")"
+            [[ "$selection_state" != "ready" ]] || break
+            [[ "$selection_state" == "waiting" ]] || {{ echo "::error::publisher marker did not resolve to candidate artifact $marker_artifact_id" >&2; exit 1; }}
             sleep 15
           done
-          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
-          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
-          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$trusted_github_host/$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" --arg revision "$CANDIDATE_SHA" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and .revision == $revision and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          [[ "$selection_state" == "ready" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
+          run_id="$(jq -er '.run_id' <<<"$selection")"
+          run_attempt="$(jq -er '.run_attempt | numbers' <<<"$selection")"
+          producer_job_id="$(jq -er '.producer_job_id | numbers' <<<"$selection")"
+          publisher_job="$(jq -er '.publisher_job | strings' <<<"$selection")"
+          artifact_name="$(jq -er '.artifact_name | strings' <<<"$selection")"
+          artifact_id="$(jq -er '.artifact_id | numbers' <<<"$selection")"
+          artifact_size="$(jq -er '.size_in_bytes | numbers' <<<"$selection")"
+          service_digest="$(jq -er '.digest | strings' <<<"$selection")"
+          archive_url="$(jq -er '.archive_download_url | strings' <<<"$selection")"
+          printf 'Using candidate artifact %s from run %s attempt %s producer job %s\n' "$artifact_id" "$run_id" "$run_attempt" "$producer_job_id"
+          MAX_ARCHIVE_BYTES=268435456
+          MAX_EXTRACTED_BYTES=268435456
+          (( artifact_size > 0 && artifact_size <= MAX_ARCHIVE_BYTES )) || {{ echo "::error::candidate artifact $artifact_id exceeds the 256 MiB archive limit" >&2; exit 1; }}
+          candidate="$(mktemp -d "$RUNNER_TEMP/velnor-workflow-candidate.XXXXXXXX")"
+          redirect_headers="$transport_dir/redirect.headers"
+          api_status="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl --disable --config - --silent --show-error --proto '=https' --connect-timeout 10 --max-time 30 --output /dev/null --dump-header "$redirect_headers" --write-out '%{http_code}' -- "$archive_url")"
+          [[ "$api_status" == "302" ]] || {{ echo "::error::artifact API expected a 302 download redirect, got $api_status" >&2; exit 1; }}
+          signed_url="$(python3 "$transport_helper" redirect "$redirect_headers")"
+          archive_part="$transport_dir/candidate.zip.part"
+          transfer_status="$transport_dir/transfer.status"
+          download_stats="$transport_dir/download.stats"
+          curl --disable --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 --max-filesize "$MAX_ARCHIVE_BYTES" --write-out '%{stderr}%{http_code}' -- "$signed_url" 2>"$transfer_status" | python3 "$transport_helper" copy "$archive_part" "$MAX_ARCHIVE_BYTES" > "$download_stats"
+          [[ "$(tail -c 3 "$transfer_status")" == "200" ]] || {{ echo "::error::signed artifact URL did not return HTTP 200" >&2; exit 1; }}
+          IFS=$'\t' read -r downloaded_size downloaded_digest < "$download_stats"
+          (( downloaded_size > 0 && downloaded_size <= MAX_ARCHIVE_BYTES )) || {{ echo "::error::downloaded candidate archive exceeds the 256 MiB limit" >&2; exit 1; }}
+          [[ "sha256:$downloaded_digest" == "$service_digest" ]] || {{ echo "::error::candidate artifact service digest mismatch" >&2; exit 1; }}
+          python3 "$transport_helper" extract "$archive_part" "$candidate" "$MAX_EXTRACTED_BYTES"
+          rm -f -- "$archive_part"
+          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" --arg attempt "$run_attempt" --arg publisher_job "$publisher_job" --arg artifact_name "$artifact_name" --arg revision "$CANDIDATE_SHA" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and .run_attempt == ($attempt | tonumber) and .publisher_job == $publisher_job and .artifact_name == $artifact_name and .revision == $revision and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
           if command -v sha256sum >/dev/null 2>&1; then
             actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
           else
@@ -6175,8 +6873,11 @@ fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
           [[ "$manifest_closure" == "$render_candidate" ]] || {{ echo "::error::candidate revision $CANDIDATE_SHA closure $manifest_closure differs from audited render $RENDER_SHA closure $render_candidate; update the PR branch/rebuild the candidate after main changes" >&2; exit 1; }}
           echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+          keep_candidate=true
 "#,
+        transport_helper = POLICY_CANDIDATE_TRANSPORT_HELPER,
         pin_script = audited_pin_script(),
+        publisher_profiles = shell_quote(publisher_profiles_json),
     )
 }
 
@@ -6299,7 +7000,7 @@ fn audited_generator_pin_step() -> String {
     .to_owned()
 }
 
-fn policy_job_parts(spec: &PolicyJobSpec<'_>) -> PolicyJobParts {
+fn policy_job_parts(spec: &PolicyJobSpec<'_>, publisher_profiles_json: &str) -> PolicyJobParts {
     let PolicyJobSpec {
         revision,
         runner,
@@ -6308,7 +7009,6 @@ fn policy_job_parts(spec: &PolicyJobSpec<'_>) -> PolicyJobParts {
         trusted_gate,
         default_branch,
         declared_ruleset_contexts,
-        candidate_artifact_wiring,
         ..
     } = *spec;
     let hosted = cache_backend == "github";
@@ -6359,11 +7059,7 @@ fn policy_job_parts(spec: &PolicyJobSpec<'_>) -> PolicyJobParts {
     };
     let renderer = if hosted {
         if owner {
-            if candidate_artifact_wiring {
-                policy_candidate_step(revision, default_branch)
-            } else {
-                policy_candidate_step_legacy(revision)
-            }
+            policy_candidate_step(revision, default_branch, publisher_profiles_json)
         } else {
             policy_renderer_steps(repository, revision)
         }
@@ -6389,14 +7085,28 @@ fn policy_job_parts(spec: &PolicyJobSpec<'_>) -> PolicyJobParts {
 }
 
 pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
-    render_policy_job(spec, policy_job_parts(spec))
+    policy_job_with_publisher_profiles(spec, "{}")
+}
+
+pub(crate) fn policy_job_with_publisher_profiles(
+    spec: &PolicyJobSpec<'_>,
+    publisher_profiles_json: &str,
+) -> String {
+    render_policy_job(spec, policy_job_parts(spec, publisher_profiles_json))
+}
+
+pub(crate) fn candidate_publisher_profiles_json(profiles: &BTreeMap<String, String>) -> String {
+    // String maps always serialize; an impossible writer error yields an
+    // empty profile that the transport helper rejects before API selection.
+    serde_json::to_string(profiles).unwrap_or_else(|_| "{}".to_owned())
 }
 
 fn render_policy_job(spec: &PolicyJobSpec<'_>, parts: PolicyJobParts) -> String {
     let PolicyJobSpec {
         name,
         revision,
-        candidate_artifact_wiring,
+        repository,
+        cache_backend,
         ..
     } = *spec;
     let PolicyJobParts {
@@ -6410,7 +7120,9 @@ fn render_policy_job(spec: &PolicyJobSpec<'_>, parts: PolicyJobParts) -> String 
         renderer,
         actionlint_setup,
     } = parts;
-    let permission_comment = if candidate_artifact_wiring {
+    let owner_candidate_acquire =
+        cache_backend == "github" && repository == workflow_setup_action_repository();
+    let permission_comment = if owner_candidate_acquire {
         "# Permissions are read-only: `actions: read`, `contents: read`, and\n    # `pull-requests: read` for candidate artifact and ruleset API access.\n"
     } else {
         "# Permissions are limited to `contents: read`.\n"
@@ -6420,7 +7132,7 @@ fn render_policy_job(spec: &PolicyJobSpec<'_>, parts: PolicyJobParts) -> String 
         ActionPin::Checkout.reference(),
         actionlint_setup = actionlint_setup,
     );
-    if candidate_artifact_wiring {
+    if owner_candidate_acquire {
         job_rendered.replace(
             "    permissions:\n      contents: read\n    steps:\n",
             "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n",
@@ -6529,23 +7241,36 @@ pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
 }
 
 pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> Result<String, GeneratorError> {
+    render_policy_entrypoint_with_contracts(config, None)
+}
+
+fn render_policy_entrypoint_with_contracts(
+    config: &ProjectConfig,
+    contracts: Option<&BTreeMap<String, primitives::UnitContract>>,
+) -> Result<String, GeneratorError> {
     let runner = control_plane_runner(config)?;
     let local = provider::control_plane_provider(&config.providers).is_local();
     let gate = local.then(|| control_plane_trusted_gate(&config.default_branch));
     let declared_ruleset_contexts = declared_ruleset_contexts_literal(config);
-    let policy_job = policy_job(&PolicyJobSpec {
-        name: "Policy",
-        revision: &config.workflow_revision,
-        runner: &runner,
-        repository: &config.repository,
-        cache_backend: if local { "local" } else { "github" },
-        trusted_gate: gate.as_deref(),
-        default_branch: &config.default_branch,
-        declared_ruleset_contexts: &declared_ruleset_contexts,
-        candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
-            &config.workflow_revision,
-        ),
-    });
+    let publisher_profiles =
+        WorkflowIr::from_config(config).candidate_publisher_profiles(contracts);
+    let publisher_profiles_json = candidate_publisher_profiles_json(&publisher_profiles);
+    let policy_job = policy_job_with_publisher_profiles(
+        &PolicyJobSpec {
+            name: "Policy",
+            revision: &config.workflow_revision,
+            runner: &runner,
+            repository: &config.repository,
+            cache_backend: if local { "local" } else { "github" },
+            trusted_gate: gate.as_deref(),
+            default_branch: &config.default_branch,
+            declared_ruleset_contexts: &declared_ruleset_contexts,
+            candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
+                &config.workflow_revision,
+            ),
+        },
+        &publisher_profiles_json,
+    );
     let concurrency = policy_concurrency_block(config);
     // `workflow_dispatch` lets a maintainer prove the validator the base
     // branch carries passes on the base tree itself (head = base = the
@@ -7561,7 +8286,10 @@ fn generated_files_with_surface(
             None if config.adopted_workflow_surface => None,
             None => match workflow_file.as_str() {
                 "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
-                "ci-policy.yml" => Some(generated_ci_policy(&config)?),
+                "ci-policy.yml" => Some(generated_ci_policy_with_contracts(
+                    &config,
+                    surface.map(|surface| &surface.contracts),
+                )?),
                 "ci-release-package-signer.yml" => Some(generated_release_package_signer(&config)),
                 "ci-main.yml" => Some(generated_ci_main(&workflow)),
                 "nightly.yml" => Some(generated_nightly(&workflow)),
@@ -7750,6 +8478,13 @@ fn legacy_plan(workflow: &WorkflowIr) -> Vec<crate::s2::primitives::GraphNode> {
 
 fn generated_ci_policy(config: &ProjectConfig) -> Result<String, GeneratorError> {
     render_policy_entrypoint(config)
+}
+
+fn generated_ci_policy_with_contracts(
+    config: &ProjectConfig,
+    contracts: Option<&BTreeMap<String, primitives::UnitContract>>,
+) -> Result<String, GeneratorError> {
+    render_policy_entrypoint_with_contracts(config, contracts)
 }
 
 fn generated_release_package_signer(config: &ProjectConfig) -> String {
@@ -21968,7 +22703,7 @@ lockfile = true
     }
 
     #[test]
-    fn legacy_generator_pin_keeps_candidate_wiring_at_its_byte_compatible_default() {
+    fn legacy_generator_pin_still_uses_hardened_owner_artifact_transport() {
         assert!(!crate::candidate_artifact_wiring_enabled(
             crate::LEGACY_CANDIDATE_POLICY_PIN
         ));
@@ -21990,13 +22725,20 @@ lockfile = true
             ),
         });
         assert!(
-            job.contains("    permissions:\n      contents: read\n    steps:\n"),
-            "the bootstrap pin retains the established permission bytes: {job}"
+            job.contains(
+                "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n"
+            ),
+            "the owner acquisition has read-only REST API permissions: {job}"
         );
-        assert!(job.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"));
-        assert!(job.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"));
-        assert!(!job.contains("EVENT_NAME: ${{ github.event_name }}"));
-        assert!(!job.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"));
+        assert!(job.contains("EVENT_NAME: ${{ github.event_name }}"));
+        assert!(job.contains("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}"));
+        assert!(job.contains("/attempts/{attempt}/jobs"));
+        assert!(job.contains("actions/artifacts/{artifact_id}/zip"));
+        assert!(job.contains("sha256:$downloaded_digest"));
+        assert!(!job.contains("gh run download"));
+        assert!(!job.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"));
+        assert!(!job.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"));
+        assert!(job.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"));
     }
 
     #[test]
@@ -22153,7 +22895,20 @@ lockfile = true
         );
         assert!(
             owner.contains("name=\"velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""),
-            "the polled artifact name keys off the head candidate, as published: {owner}"
+            "the artifact name prefix keys off the head candidate and platform: {owner}"
+        );
+        assert!(
+            owner.contains("expected_name = f\"{name_prefix}-r{run_id}-a{attempt}-j{publisher_job}\"")
+                && owner.contains(".publisher_job == $publisher_job")
+                && owner.contains(".artifact_name == $artifact_name")
+                && owner.contains("/actions/jobs/{producer_job_id}/logs"),
+            "job logs bind the portable publisher key and exact artifact identity to the REST job: {owner}"
+        );
+        assert!(
+            owner.contains("Record candidate artifact identity")
+                && owner.contains("select-artifact")
+                && owner.contains("marker_artifact_id"),
+            "acquisition reads the post-upload marker before selecting an exact artifact ID: {owner}"
         );
         assert!(
             !owner.contains("pin_candidate"),
