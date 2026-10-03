@@ -3257,6 +3257,7 @@ fn canonical_api_step_findings(
             velnor_policy.default_branch.as_str()
         };
         let rendered = super::policy_job(&super::PolicyJobSpec {
+            #[cfg(test)]
             candidate_artifact_wiring: true,
             name: "Policy",
             revision: &revision,

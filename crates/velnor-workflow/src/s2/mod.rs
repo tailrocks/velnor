@@ -5918,6 +5918,8 @@ pub(crate) struct PolicyJobSpec<'a> {
     /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
     /// rulesets API answers 403 on private repositories.
     pub(crate) declared_ruleset_contexts: &'a str,
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) candidate_artifact_wiring: bool,
 }
 
@@ -5965,7 +5967,7 @@ fn audited_pin_script() -> &'static str {
 /// `.head_repository.id` object: the runs-list endpoint exposes no
 /// `.head_repository_id` scalar, and selecting on it matches nothing. Artifact
 /// metadata has no attempt or producer-job identifier. The producer therefore
-/// puts the run attempt and portable GITHUB_JOB key in the artifact name and
+/// puts the run attempt and portable `GITHUB_JOB` key in the artifact name and
 /// manifest, then logs the upload action's artifact ID. Acquisition fetches
 /// logs for the exact REST publisher job, verifies that marker, binds artifact
 /// creation time to its Publish step, and re-fetches the artifact by ID.
@@ -7240,6 +7242,7 @@ pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> Result<String, GeneratorError> {
     render_policy_entrypoint_with_contracts(config, None)
 }
@@ -7265,6 +7268,7 @@ fn render_policy_entrypoint_with_contracts(
             trusted_gate: gate.as_deref(),
             default_branch: &config.default_branch,
             declared_ruleset_contexts: &declared_ruleset_contexts,
+            #[cfg(test)]
             candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
                 &config.workflow_revision,
             ),
@@ -8476,6 +8480,7 @@ fn legacy_plan(workflow: &WorkflowIr) -> Vec<crate::s2::primitives::GraphNode> {
     nodes
 }
 
+#[cfg(test)]
 fn generated_ci_policy(config: &ProjectConfig) -> Result<String, GeneratorError> {
     render_policy_entrypoint(config)
 }
