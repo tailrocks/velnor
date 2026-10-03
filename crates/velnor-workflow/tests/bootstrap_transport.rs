@@ -82,6 +82,7 @@ enum FailureCase {
     JobLogTooLarge,
     OldAttemptArtifactOnly,
     WrongProducerRestName,
+    WrongProducerRestNameWithoutCheckRunId,
     DuplicatePublishers,
     RunsOverflow,
     RunsResponseTooLarge,
@@ -516,6 +517,13 @@ impl TransportFixture {
             }
             Some(FailureCase::WrongProducerRestName) => {
                 scenario["jobs"][0]["name"] = json!("untrusted producer display name");
+            }
+            Some(FailureCase::WrongProducerRestNameWithoutCheckRunId) => {
+                scenario["jobs"][0]["name"] = json!("untrusted producer display name");
+                scenario["jobs"][0]
+                    .as_object_mut()
+                    .expect("producer job object")
+                    .remove("check_run_id");
             }
             Some(FailureCase::DuplicatePublishers) => {
                 let mut duplicate = scenario["jobs"][0].clone();
@@ -1278,6 +1286,19 @@ fn generated_acquire_resolves_push_to_exactly_one_merged_same_repository_pull_re
 #[test]
 fn generated_acquire_pins_ghes_server_and_replaces_ambient_enterprise_token() {
     let fixture = TransportFixture::new();
+    let policy_yaml = read_workflow(&fixture.root.join("generated"), "ci-policy.yml");
+    let policy = parse_workflow(&policy_yaml);
+    assert!(
+        policy["jobs"]["policy"]["steps"].is_sequence(),
+        "generated ci-policy.yml must parse before the production acquisition regression"
+    );
+    let trusted_profile_arg =
+        format!("'{{\"{PUBLISHER_JOB}\":\"{PRODUCER_REST_JOB_DISPLAY_NAME}\"}}'");
+    assert!(
+        fixture.generated.acquire.contains(&trusted_profile_arg),
+        "parsed production acquire step must embed the Rust IR's trusted job-ID/display-name mapping: {}",
+        fixture.generated.acquire
+    );
     fixture.valid_artifact();
     let output = fixture.run_acquire_at_server_url(None, "Linux", "X64", "https://ghe.example");
     assert!(
@@ -1383,6 +1404,7 @@ fn generated_acquire_rejects_transport_and_identity_faults() {
         FailureCase::JobLogTooLarge,
         FailureCase::OldAttemptArtifactOnly,
         FailureCase::WrongProducerRestName,
+        FailureCase::WrongProducerRestNameWithoutCheckRunId,
         FailureCase::DuplicatePublishers,
         FailureCase::RunsOverflow,
         FailureCase::RunsResponseTooLarge,
@@ -1468,7 +1490,8 @@ fn generated_acquire_rejects_transport_and_identity_faults() {
                 stderr.contains("producer job log GITHUB_JOB key does not match its selected REST job profile"),
                 "wrong but well-formed marker job key was not rejected against the REST publisher: {stderr}"
             ),
-            FailureCase::WrongProducerRestName => assert!(
+            FailureCase::WrongProducerRestName
+            | FailureCase::WrongProducerRestNameWithoutCheckRunId => assert!(
                 stderr.contains("does not identify exactly one trusted publisher profile"),
                 "unrecognized REST producer display name was not rejected: {stderr}"
             ),

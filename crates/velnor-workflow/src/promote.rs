@@ -256,11 +256,11 @@ pub(crate) fn run_promote(options: &PromoteOptions) -> Result<PromoteReport, Gen
         Some(branch) => branch.clone(),
         None => resolve_default_branch(&repo)?,
     };
-    // Capture the old sidecar's complete output set before stamping the pin.
-    // The next render may stop emitting a previously recorded path; that path
-    // still belongs in rollback so a failed promotion cannot lose it.
-    let previous_outputs = super::s2::generator_owned_output_paths(&repo)
-        .map_err(|error| GeneratorError::usage(error.to_string()))?;
+    // Capture the previous renderer's output set before stamping the pin.
+    // Sidecar rows omitted by this render are untrusted and cannot enlarge the
+    // promotion snapshot or git-add ownership set.
+    let previous_render = PromotedRender::render(&repo, options.runners, &default_branch)?;
+    let previous_outputs = previous_render.output_paths();
     let mut snapshot = Snapshot::capture(
         &repo,
         promotion_snapshot_paths(&previous_outputs, stamped != pin_content),
@@ -508,6 +508,14 @@ impl PromotedRender {
             Self::V1(rendered) => &rendered.symlinks,
             Self::V2(rendered) => &rendered.symlinks,
         }
+    }
+
+    fn output_paths(&self) -> BTreeSet<PathBuf> {
+        self.files()
+            .keys()
+            .chain(self.symlinks().keys())
+            .cloned()
+            .collect()
     }
 
     /// Write the render with promotion (force) semantics.
@@ -2258,7 +2266,9 @@ mod tests {
             Err(error) => error,
         };
         assert!(
-            error.contains("no longer matches the captured preimage"),
+            error
+                .to_string()
+                .contains("no longer matches the captured preimage"),
             "{error}"
         );
         assert_eq!(
@@ -2489,10 +2499,7 @@ mod tests {
             "write ownership state",
         );
 
-        let previous_outputs = must(
-            super::super::s2::generator_owned_output_paths(&root),
-            "read prior generator-owned outputs",
-        );
+        let previous_outputs = BTreeSet::from([output.clone()]);
         assert!(previous_outputs.contains(&output));
         let state_before = must(std::fs::read(&state_path), "read prior ownership state");
         let mut snapshot = must(

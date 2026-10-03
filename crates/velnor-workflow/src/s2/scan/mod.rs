@@ -146,10 +146,22 @@ pub(crate) fn scan_shape_with_precondition_phases_and_static_files_with_owned_pa
         verified_owned_paths,
     )?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
+    let mut renderer_output_paths = verified_owned_paths.cloned().unwrap_or_default();
+    renderer_output_paths.extend(
+        static_outputs
+            .iter()
+            .map(|output| PathBuf::from(output.as_str())),
+    );
+    renderer_output_paths.extend(
+        generated_aliases
+            .iter()
+            .map(|alias| alias.as_path().to_owned()),
+    );
     let context = ScanContext {
         root,
         files: &files,
         file_set: &file_set,
+        renderer_output_paths,
         apple,
     };
     let mut shape = RepositoryShape {
@@ -498,6 +510,7 @@ pub(crate) struct ScanContext<'a> {
     root: &'a Path,
     files: &'a [String],
     file_set: &'a BTreeSet<String>,
+    pub(crate) renderer_output_paths: BTreeSet<PathBuf>,
     pub(crate) apple: &'a rust::AppleNativePolicy,
 }
 

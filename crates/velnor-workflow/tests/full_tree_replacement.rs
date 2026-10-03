@@ -39,6 +39,49 @@ fn fixture(pipeline: Pipeline, name: &str) -> (PathBuf, PathBuf) {
     (root, output)
 }
 
+fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+fn forge_sidecar_claim(output: &Path, relative: &str, bytes: &[u8]) {
+    let state_path = output.join(".github/ci/.github-actions-generator-state");
+    let state = fs::read_to_string(&state_path).unwrap();
+    let (prefix, output_rows) = state.split_once("[outputs]\n").unwrap();
+    let mut rows = output_rows
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter(|line| line.split_once('\t').map(|(path, _)| path) != Some(relative))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    rows.push(format!("{relative}\t{:016x}", fnv64(bytes)));
+    rows.sort_by(|left, right| {
+        left.split_once('\t')
+            .unwrap()
+            .0
+            .cmp(right.split_once('\t').unwrap().0)
+    });
+    let forged = format!("{prefix}[outputs]\n{}\n", rows.join("\n"));
+    fs::write(state_path, forged).unwrap();
+}
+
+fn remove_sidecar_claim(output: &Path, relative: &str) {
+    let state_path = output.join(".github/ci/.github-actions-generator-state");
+    let state = fs::read_to_string(&state_path).unwrap();
+    let (prefix, output_rows) = state.split_once("[outputs]\n").unwrap();
+    let rows = output_rows
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter(|line| line.split_once('\t').map(|(path, _)| path) != Some(relative))
+        .collect::<Vec<_>>();
+    fs::write(
+        state_path,
+        format!("{prefix}[outputs]\n{}\n", rows.join("\n")),
+    )
+    .unwrap();
+}
+
 fn write_outside(dir: &Path, name: &str, content: &str) -> PathBuf {
     let path = dir.join(name);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -154,6 +197,174 @@ fn v1_unknown_content_blocks_without_force_and_removes_with_force() {
 #[test]
 fn s2_unknown_content_blocks_without_force_and_removes_with_force() {
     unknown_content_blocks_without_force_and_removes_with_force(Pipeline::S2);
+}
+
+fn exact_digest_sidecar_claim_does_not_expand_cli_force_authority(pipeline: Pipeline) {
+    let (root, output) = fixture(pipeline, "forged-sidecar-force-boundary");
+    let claimed = ".github/workflows/zz-forged.yml";
+    let claimed_bytes = b"name: handwritten\n";
+    let readme_bytes = b"human-owned documentation\n";
+    fs::write(output.join(claimed), claimed_bytes).unwrap();
+    fs::write(output.join("README.md"), readme_bytes).unwrap();
+    forge_sidecar_claim(&output, claimed, claimed_bytes);
+    forge_sidecar_claim(&output, "README.md", readme_bytes);
+    let forged_state = fs::read(output.join(".github/ci/.github-actions-generator-state")).unwrap();
+
+    let default = run_generate(&root, &output, false);
+    assert!(
+        !default.status.success(),
+        "exact-digest unrendered `.github` claim must remain unknown"
+    );
+    assert!(output.join(claimed).is_file());
+    assert_eq!(fs::read(output.join("README.md")).unwrap(), readme_bytes);
+    assert_eq!(
+        fs::read(output.join(".github/ci/.github-actions-generator-state")).unwrap(),
+        forged_state,
+        "a refused default run must preserve the forged sidecar"
+    );
+
+    let forced = run_generate(&root, &output, true);
+    assert!(
+        forced.status.success(),
+        "force should remove only the unknown `.github` file: {}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(
+        fs::symlink_metadata(output.join(claimed)).is_err(),
+        "force must remove the unknown `.github` file"
+    );
+    assert_eq!(
+        fs::read(output.join("README.md")).unwrap(),
+        readme_bytes,
+        "forged sidecar claim must not expand force outside `.github`"
+    );
+    let rewritten_state =
+        fs::read_to_string(output.join(".github/ci/.github-actions-generator-state")).unwrap();
+    assert!(!rewritten_state.contains("zz-forged.yml\t"));
+    assert!(!rewritten_state.contains("README.md\t"));
+    check_ok(&root, &output);
+}
+
+#[test]
+fn v1_exact_digest_sidecar_claim_does_not_expand_force_authority() {
+    exact_digest_sidecar_claim_does_not_expand_cli_force_authority(Pipeline::V1);
+}
+
+#[test]
+fn s2_exact_digest_sidecar_claim_does_not_expand_force_authority() {
+    exact_digest_sidecar_claim_does_not_expand_cli_force_authority(Pipeline::S2);
+}
+
+fn force_rejects_modified_current_workflow(pipeline: Pipeline) {
+    let (root, output) = fixture(pipeline, "force-modified-current-workflow");
+    let workflow = output.join(".github/workflows/ci-pr.yml");
+    assert!(workflow.is_file(), "fixture must render the PR workflow");
+    fs::write(&workflow, "# manual edit\n").unwrap();
+
+    let forced = run_generate(&root, &output, true);
+    assert!(
+        !forced.status.success(),
+        "--force must not overwrite a modified current-renderer output"
+    );
+    let stderr = String::from_utf8_lossy(&forced.stderr);
+    assert!(
+        stderr.contains("manually modified generated file"),
+        "refusal must name the ownership failure: {stderr}"
+    );
+    assert_eq!(fs::read(&workflow).unwrap(), b"# manual edit\n");
+}
+
+#[test]
+fn v1_force_rejects_modified_current_workflow() {
+    force_rejects_modified_current_workflow(Pipeline::V1);
+}
+
+#[test]
+fn s2_force_rejects_modified_current_workflow() {
+    force_rejects_modified_current_workflow(Pipeline::S2);
+}
+
+fn forged_digest_current_workflow_still_conflicts_without_force(pipeline: Pipeline) {
+    let (root, output) = fixture(pipeline, "forged-current-workflow-no-force");
+    let relative = ".github/workflows/ci-pr.yml";
+    let manual = b"# manual edit with forged ownership digest\n";
+    let workflow = output.join(relative);
+    assert!(workflow.is_file(), "fixture must render the PR workflow");
+    fs::write(&workflow, manual).unwrap();
+    forge_sidecar_claim(&output, relative, manual);
+    let forged_state = fs::read(output.join(".github/ci/.github-actions-generator-state")).unwrap();
+
+    let refused = run_generate(&root, &output, false);
+    assert!(
+        !refused.status.success(),
+        "unforced run must refuse changed current-renderer output"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains(relative),
+        "refusal must identify the current output: {stderr}"
+    );
+    assert_eq!(fs::read(&workflow).unwrap(), manual);
+    assert_eq!(
+        fs::read(output.join(".github/ci/.github-actions-generator-state")).unwrap(),
+        forged_state,
+        "refused run must not refresh the forged claim"
+    );
+}
+
+#[test]
+fn v1_forged_digest_current_workflow_conflicts_without_force() {
+    forged_digest_current_workflow_still_conflicts_without_force(Pipeline::V1);
+}
+
+#[test]
+fn s2_forged_digest_current_workflow_conflicts_without_force() {
+    forged_digest_current_workflow_still_conflicts_without_force(Pipeline::S2);
+}
+
+fn force_adopts_unowned_current_workflow(pipeline: Pipeline) {
+    let (root, output) = fixture(pipeline, "force-adopt-unowned-current-workflow");
+    let relative = ".github/workflows/ci-pr.yml";
+    let workflow = output.join(relative);
+    let generated = fs::read(&workflow).unwrap();
+    fs::write(&workflow, b"# unowned workflow\n").unwrap();
+    remove_sidecar_claim(&output, relative);
+    let state_without_claim =
+        fs::read(output.join(".github/ci/.github-actions-generator-state")).unwrap();
+
+    let refused = run_generate(&root, &output, false);
+    assert!(
+        !refused.status.success(),
+        "unowned current output must require explicit force"
+    );
+    assert_eq!(fs::read(&workflow).unwrap(), b"# unowned workflow\n");
+    assert_eq!(
+        fs::read(output.join(".github/ci/.github-actions-generator-state")).unwrap(),
+        state_without_claim,
+        "default refusal must preserve state"
+    );
+
+    let forced = run_generate(&root, &output, true);
+    assert!(
+        forced.status.success(),
+        "force must adopt an unowned current workflow: {}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert_eq!(fs::read(&workflow).unwrap(), generated);
+    let updated_state =
+        fs::read_to_string(output.join(".github/ci/.github-actions-generator-state")).unwrap();
+    assert!(updated_state.contains(".github/workflows/ci-pr.yml\t"));
+    check_ok(&root, &output);
+}
+
+#[test]
+fn v1_force_adopts_unowned_current_workflow() {
+    force_adopts_unowned_current_workflow(Pipeline::V1);
+}
+
+#[test]
+fn s2_force_adopts_unowned_current_workflow() {
+    force_adopts_unowned_current_workflow(Pipeline::S2);
 }
 
 fn repeat_regen_is_identical_noop(pipeline: Pipeline) {
@@ -741,7 +952,7 @@ fn s2_replacement_recovery_preserves_tree_on_failure() {
     replacement_recovery_preserves_tree_on_failure(Pipeline::S2);
 }
 
-fn stale_recorded_file_removes_without_force(pipeline: Pipeline) {
+fn stale_recorded_workflow_is_unknown_until_force(pipeline: Pipeline) {
     let root = minimal_root(&format!("{}-stale", pipeline.name()));
     write_config(pipeline, &root);
     let output = output_for(&root);
@@ -764,26 +975,36 @@ fn stale_recorded_file_removes_without_force(pipeline: Pipeline) {
         "note\n"
     );
 
-    // Dropping the row makes the recorded file stale: digest-verified, so
-    // plain generation removes it — no `--force` needed.
+    // The sidecar row no longer proves ownership after the renderer drops it.
+    // The `.github` walk reports the file as unknown and force owns removal.
     fs::write(&config, &base).unwrap();
-    generate_ok(&root, &output, false);
+    let blocked = run_generate(&root, &output, false);
+    assert!(
+        !blocked.status.success(),
+        "stale workflow must block without force"
+    );
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr).contains("will not be imported"),
+        "refusal must name the unknown-content gate"
+    );
+    assert!(output.join(".github/note.md").is_file());
+    generate_ok(&root, &output, true);
     assert!(
         fs::symlink_metadata(output.join(".github/note.md")).is_err(),
-        "a stale recorded file must be removed without force"
+        "force removes the unknown stale workflow output"
     );
     assert_no_staging_leftovers(&output);
     check_ok(&root, &output);
 }
 
 #[test]
-fn v1_stale_recorded_file_removes_without_force() {
-    stale_recorded_file_removes_without_force(Pipeline::V1);
+fn v1_stale_recorded_workflow_is_unknown_until_force() {
+    stale_recorded_workflow_is_unknown_until_force(Pipeline::V1);
 }
 
 #[test]
-fn s2_stale_recorded_file_removes_without_force() {
-    stale_recorded_file_removes_without_force(Pipeline::S2);
+fn s2_stale_recorded_workflow_is_unknown_until_force() {
+    stale_recorded_workflow_is_unknown_until_force(Pipeline::S2);
 }
 
 fn generated_static_source_is_retained_during_output_migration(pipeline: Pipeline) {
@@ -850,7 +1071,7 @@ fn s2_generated_static_source_is_retained_during_output_migration() {
     generated_static_source_is_retained_during_output_migration(Pipeline::S2);
 }
 
-fn separate_output_keeps_static_source_while_removing_stale_output(pipeline: Pipeline) {
+fn separate_output_keeps_static_source_and_unrendered_output(pipeline: Pipeline) {
     let root = minimal_root(&format!("{}-separate-static-source", pipeline.name()));
     write_config(pipeline, &root);
     let output = output_for(&root);
@@ -887,21 +1108,22 @@ fn separate_output_keeps_static_source_while_removing_stale_output(pipeline: Pip
         fs::read(output.join(".github/migrated.env")).unwrap(),
         source_bytes
     );
-    assert!(
-        fs::symlink_metadata(&generated_sidecar).is_err(),
-        "the stale sidecar under the separate output root must be removed"
+    assert_eq!(
+        fs::read(&generated_sidecar).unwrap(),
+        source_bytes,
+        "unrendered output outside `.github` remains an ordinary file"
     );
     check_ok(&root, &output);
 }
 
 #[test]
-fn v1_separate_output_keeps_static_source_while_removing_stale_output() {
-    separate_output_keeps_static_source_while_removing_stale_output(Pipeline::V1);
+fn v1_separate_output_keeps_static_source_and_unrendered_output() {
+    separate_output_keeps_static_source_and_unrendered_output(Pipeline::V1);
 }
 
 #[test]
-fn s2_separate_output_keeps_static_source_while_removing_stale_output() {
-    separate_output_keeps_static_source_while_removing_stale_output(Pipeline::S2);
+fn s2_separate_output_keeps_static_source_and_unrendered_output() {
+    separate_output_keeps_static_source_and_unrendered_output(Pipeline::S2);
 }
 
 fn static_output_case_alias_transition_is_rejected(pipeline: Pipeline) {

@@ -26,8 +26,9 @@ use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
 use super::{
     apply_generated_write_plan_with_static_sources, generated_files, generated_symlinks,
-    plan_generated_write_with_static_sources, scan_target, Checkout, Cli, GeneratedWritePlan,
-    GenerationInputs, GeneratorError, ProjectConfig, RepositorySource, RunnerMode, WriteOutcome,
+    plan_generated_write_with_static_sources_and_options, scan_target, Checkout, Cli,
+    GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
+    RunnerMode, WriteOutcome,
 };
 use crate::StaticSourceSnapshot;
 
@@ -550,12 +551,13 @@ impl App {
             return;
         };
         let symlinks = generated_symlinks();
-        let plan = match plan_generated_write_with_static_sources(
+        let plan = match plan_generated_write_with_static_sources_and_options(
             output_root,
             &files,
             &symlinks,
             &inputs,
             &self.static_sources,
+            self.cli.force && !self.cli.check,
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -722,12 +724,13 @@ fn complete_generation_with_static_sources(
     force: bool,
     reviewed_plan: &GeneratedWritePlan,
 ) -> Result<GenerationCompletion, GeneratorError> {
-    let plan = plan_generated_write_with_static_sources(
+    let plan = plan_generated_write_with_static_sources_and_options(
         output_root,
         files,
         symlinks,
         inputs,
         static_sources,
+        force && !check,
     )?;
     if &plan != reviewed_plan {
         return Ok(GenerationCompletion::PlanChanged(plan));
@@ -1265,7 +1268,6 @@ mod tests {
                 preimage: crate::FilePreimage::Missing,
             }],
             changed: Vec::new(),
-            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: true,
@@ -1297,7 +1299,6 @@ mod tests {
                 preimage: crate::FilePreimage::Missing,
             }],
             changed: vec![PathBuf::from(".github/workflows/ci-pr.yml")],
-            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: vec![PathBuf::from(".github/workflows/ci-pr.yml")],
             ownership_present: true,

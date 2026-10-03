@@ -2896,6 +2896,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn candidate_transport_binds_rest_name_and_marker_to_trusted_publisher_profile() {
+        let owner_repository = workflow_setup_action_repository();
+        let mut owner = rust_unit("rust-velnor-workflow", "crates/velnor-workflow");
+        owner.label = "Rust crate (velnor-workflow)".to_owned();
+        let ir = owner_test_ir(owner_repository, vec![owner]);
+        let profiles = ir.candidate_publisher_profiles(None);
+        let publisher_job = "verify-github-hosted";
+        let rest_name = profiles
+            .get(publisher_job)
+            .expect("trusted collapsed profile includes the Rust publisher");
+        let helper = crate::s2::POLICY_CANDIDATE_TRANSPORT_HELPER
+            .split_once("\ndef main():\n")
+            .expect("transport helper definitions end before main")
+            .0;
+        let assertions = r#"
+import os
+import pathlib
+
+profiles = parse_publisher_profiles(os.environ["PUBLISHER_PROFILES_JSON"])
+rest_name = os.environ["TRUSTED_REST_NAME"]
+publish_started_at = "2026-10-01T00:00:10Z"
+publish_completed_at = "2026-10-01T00:00:20Z"
+job = {
+    "id": 9100,
+    "run_id": 900,
+    "run_attempt": 2,
+    "name": "untrusted producer display name",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-01T00:00:00Z",
+    "completed_at": "2026-10-01T00:01:00Z",
+    "steps": [
+        {"name": "Prepare candidate generator product", "status": "completed", "conclusion": "success"},
+        {"name": "Publish candidate generator product", "status": "completed", "conclusion": "success", "started_at": publish_started_at, "completed_at": publish_completed_at},
+        {"name": "Record candidate artifact identity", "status": "completed", "conclusion": "success", "started_at": "2026-10-01T00:00:21Z", "completed_at": "2026-10-01T00:00:22Z"},
+    ],
+}
+assert "check_run_id" not in job
+try:
+    successful_publish_windows([job], 900, 2, profiles)
+except TransportError as error:
+    assert "does not identify exactly one trusted publisher profile" in str(error), str(error)
+else:
+    raise AssertionError("REST name without check_run_id was not bound to a trusted profile")
+
+job["name"] = rest_name
+windows, pending, producer_job = successful_publish_windows([job], 900, 2, profiles)
+assert not pending
+assert producer_job is job
+assert len(windows) == 1
+assert windows[0][1] == "verify-github-hosted"
+
+marker_path = pathlib.Path(os.environ["MARKER_PATH"])
+marker_path.write_text(
+    "VELNOR_CANDIDATE_ARTIFACT\t900\t2\tverify-github-hosted\t12345\t"
+    "candidate-r900-a2-jverify-github-hosted\n",
+    encoding="utf-8",
+)
+marker = parse_job_marker(marker_path, 900, 2, windows[0][1], "candidate")
+assert marker["publisher_job"] == windows[0][1]
+
+marker_path.write_text(
+    "VELNOR_CANDIDATE_ARTIFACT\t900\t2\tother-job\t12345\t"
+    "candidate-r900-a2-jother-job\n",
+    encoding="utf-8",
+)
+try:
+    parse_job_marker(marker_path, 900, 2, windows[0][1], "candidate")
+except TransportError as error:
+    assert "GITHUB_JOB key does not match its selected REST job profile" in str(error), str(error)
+else:
+    raise AssertionError("marker GITHUB_JOB was not bound to the mapped trusted profile")
+"#;
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-publisher-profile-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create publisher profile test directory");
+        let marker_path = root.join("producer.log");
+        let program = format!("{helper}\n{assertions}");
+        let output = Command::new("python3")
+            .arg("-c")
+            .arg(program)
+            .env(
+                "PUBLISHER_PROFILES_JSON",
+                crate::s2::candidate_publisher_profiles_json(&profiles),
+            )
+            .env("TRUSTED_REST_NAME", rest_name)
+            .env("MARKER_PATH", &marker_path)
+            .output()
+            .expect("run candidate transport profile assertions");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "transport profile binding failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one implication pinned at facts, render, and caller level"

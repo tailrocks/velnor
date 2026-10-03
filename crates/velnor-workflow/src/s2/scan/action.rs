@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
@@ -1572,13 +1572,19 @@ pub(crate) fn detect(
     shape: &mut RepositoryShape,
 ) -> Result<(), crate::s2::GeneratorError> {
     for source in discover_action_sources(context.root, context.files)? {
-        let (metadata, references) = inspect_action_source(&source, context.root, context.files)?;
+        let (metadata, references) = inspect_action_source(
+            &source,
+            context.root,
+            context.files,
+            &context.renderer_output_paths,
+        )?;
         let dependencies = if let Some(metadata) = metadata.as_ref() {
             local_action_dependency_closure(
                 context.root,
                 &metadata.runs,
                 references,
                 context.files,
+                &context.renderer_output_paths,
             )?
         } else {
             LocalActionDependencyClosure {
@@ -1631,6 +1637,7 @@ fn local_action_dependency_closure(
     runs: &ActionRuns,
     references: Vec<String>,
     files: &[String],
+    renderer_output_paths: &BTreeSet<PathBuf>,
 ) -> Result<LocalActionDependencyClosure, crate::s2::GeneratorError> {
     let candidates = discover_action_source_candidates(files);
     let mut visited = BTreeSet::new();
@@ -1642,6 +1649,7 @@ fn local_action_dependency_closure(
         root,
         runs,
         files,
+        renderer_output_paths,
         &candidates,
         &mut visited,
         &mut closure,
@@ -1653,6 +1661,7 @@ fn collect_local_action_dependency_closure(
     root: &Path,
     runs: &ActionRuns,
     files: &[String],
+    renderer_output_paths: &BTreeSet<PathBuf>,
     candidates: &BTreeMap<String, ActionSource>,
     visited: &mut BTreeSet<String>,
     closure: &mut LocalActionDependencyClosure,
@@ -1674,13 +1683,15 @@ fn collect_local_action_dependency_closure(
         if let Some(source) = candidates.get(&dependency_root)
             && source.kind == ActionSourceKind::Metadata
         {
-            let (metadata, references) = inspect_action_source(source, root, files)?;
+            let (metadata, references) =
+                inspect_action_source(source, root, files, renderer_output_paths)?;
             closure.references.extend(references);
             if let Some(metadata) = metadata {
                 collect_local_action_dependency_closure(
                     root,
                     &metadata.runs,
                     files,
+                    renderer_output_paths,
                     candidates,
                     visited,
                     closure,
@@ -1709,6 +1720,7 @@ pub(crate) fn verify_action(
         )));
     }
     let files = super::file_walk::repository_files(root, &[])?;
+    let renderer_output_paths = BTreeSet::new();
     let Some(canonical) = discover_action_sources(root, &files)?
         .into_iter()
         .find(|candidate| candidate.path == source_path)
@@ -1717,7 +1729,7 @@ pub(crate) fn verify_action(
             "GitHub Action source `{source_path}` is not the canonical action entrypoint"
         )));
     };
-    inspect_action_source(&canonical, root, &files).map(|_| ())
+    inspect_action_source(&canonical, root, &files, &renderer_output_paths).map(|_| ())
 }
 
 /// Discover the entrypoint that actions/runner would prepare for every action
@@ -1996,12 +2008,19 @@ fn inspect_action_source(
     source: &ActionSource,
     root: &Path,
     files: &[String],
+    renderer_output_paths: &BTreeSet<PathBuf>,
 ) -> Result<(Option<ActionMetadata>, Vec<String>), crate::s2::GeneratorError> {
     match source.kind {
         ActionSourceKind::Dockerfile => Ok((None, Vec::new())),
         ActionSourceKind::Metadata => {
             let metadata = parse_metadata(root, &source.path)?;
-            let references = local_references(root, &metadata.runs, &source.root, files)?;
+            let references = local_references(
+                root,
+                &metadata.runs,
+                &source.root,
+                files,
+                renderer_output_paths,
+            )?;
             Ok((Some(metadata), references))
         }
     }
@@ -2334,6 +2353,7 @@ fn local_references(
     runs: &ActionRuns,
     action_root: &str,
     files: &[String],
+    renderer_output_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<String>, crate::s2::GeneratorError> {
     let using = runs.using.to_ascii_lowercase();
     let mut references = BTreeSet::new();
@@ -2360,7 +2380,14 @@ fn local_references(
                     let run = resolve_action_path_expression(run, action_root);
                     for reference in shell_references(&run) {
                         if let Some(reference) = strip_action_path_marker(&reference) {
-                            add_local_reference(&mut references, reference, ".", root, files)?;
+                            add_local_reference(
+                                &mut references,
+                                reference,
+                                ".",
+                                root,
+                                files,
+                                renderer_output_paths,
+                            )?;
                         } else {
                             let working_directory = normalize_working_directory(
                                 root,
@@ -2372,6 +2399,7 @@ fn local_references(
                                 &working_directory,
                                 root,
                                 files,
+                                renderer_output_paths,
                             )?;
                         }
                     }
@@ -2405,7 +2433,14 @@ fn local_references(
                     "GitHub JavaScript action ({using}) metadata must declare runs.main"
                 ))
             })?;
-            add_action_path_reference(&mut references, main, action_root, root, files)?;
+            add_action_path_reference(
+                &mut references,
+                main,
+                action_root,
+                root,
+                files,
+                renderer_output_paths,
+            )?;
             for reference in [&runs.pre, &runs.post] {
                 if let Some(reference) = reference.as_deref() {
                     add_action_path_reference(
@@ -2414,6 +2449,7 @@ fn local_references(
                         action_root,
                         root,
                         files,
+                        renderer_output_paths,
                     )?;
                 }
             }
@@ -2430,7 +2466,14 @@ fn local_references(
                 ));
             }
             if is_dockerfile_reference(image) {
-                add_action_path_reference(&mut references, image, action_root, root, files)?;
+                add_action_path_reference(
+                    &mut references,
+                    image,
+                    action_root,
+                    root,
+                    files,
+                    renderer_output_paths,
+                )?;
             } else if !is_docker_image_reference(image) {
                 return Err(crate::s2::GeneratorError::usage(format!(
                     "GitHub Docker action metadata `runs.image` must be a Dockerfile path or docker:// image reference, got `{image}`"
@@ -2601,6 +2644,7 @@ fn add_action_path_reference(
     action_root: &str,
     root: &Path,
     files: &[String],
+    renderer_output_paths: &BTreeSet<PathBuf>,
 ) -> Result<(), crate::s2::GeneratorError> {
     let normalized_action_root = action_root.replace('\\', "/");
     let action_root_components = normalized_action_root
@@ -2629,7 +2673,7 @@ fn add_action_path_reference(
         .collect::<Vec<_>>();
     reject_symlink_components(root, &path_components, reference)?;
     if !files.iter().any(|file| file == &repository_path)
-        && !is_excluded_action_file(root, &repository_path)?
+        && !is_excluded_action_file(root, &repository_path, renderer_output_paths)?
     {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action entrypoint `{reference}` resolves to missing file `{repository_path}`"
@@ -2645,6 +2689,7 @@ fn add_local_reference(
     base_path: &str,
     root: &Path,
     files: &[String],
+    renderer_output_paths: &BTreeSet<PathBuf>,
 ) -> Result<(), crate::s2::GeneratorError> {
     let reference = reference.trim().trim_matches(['"', '\'']);
     if reference.is_empty()
@@ -2704,7 +2749,7 @@ fn add_local_reference(
     let borrowed_components = components.iter().map(String::as_str).collect::<Vec<_>>();
     reject_symlink_components(root, &borrowed_components, reference)?;
     if !files.iter().any(|file| file == &repository_path)
-        && !is_excluded_action_file(root, &repository_path)?
+        && !is_excluded_action_file(root, &repository_path, renderer_output_paths)?
     {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action entrypoint `{reference}` resolves to missing file `{repository_path}`"
@@ -2718,16 +2763,17 @@ fn add_local_reference(
 /// the ordinary source walk. A checked-in root action may still use that
 /// directory as its Runner entrypoint, so validate that one narrow path
 /// directly without broadening the repository walk or admitting generator
-/// owned outputs.
+/// outputs proven by the current render.
 fn is_excluded_action_file(
     root: &Path,
     repository_path: &str,
+    renderer_output_paths: &BTreeSet<PathBuf>,
 ) -> Result<bool, crate::s2::GeneratorError> {
     let first = repository_path.split('/').next();
     if first != Some("dist") {
         return Ok(false);
     }
-    if crate::s2::generator_owned_output_paths(root)?.contains(Path::new(repository_path)) {
+    if renderer_output_paths.contains(Path::new(repository_path)) {
         return Ok(false);
     }
     let path = root.join(repository_path);
@@ -2895,6 +2941,7 @@ mod tests {
         reason = "test assertions name missing fixture evidence"
     )]
 
+    use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::fs;
     use std::path::PathBuf;
@@ -2930,6 +2977,46 @@ mod tests {
             "editing {path} must select action unit {}",
             action.id
         );
+    }
+
+    #[test]
+    fn raw_sidecar_claim_does_not_hide_dist_action_entrypoint() {
+        let root = fixture("forged-dist-action-claim");
+        let relative = PathBuf::from("dist/index.js");
+        let bytes = "process.exit(0)\n";
+        must(
+            fs::create_dir_all(root.join("dist")),
+            "create dist directory",
+        );
+        must(
+            fs::write(root.join(&relative), bytes),
+            "write dist action entrypoint",
+        );
+        let files = std::collections::BTreeMap::from([(relative.clone(), bytes.to_owned())]);
+        let sidecar = crate::s2::ownership_state_content(
+            &files,
+            &std::collections::BTreeMap::new(),
+            &crate::s2::GenerationInputs::parts(0, 0),
+        );
+        let state_path = root.join(crate::s2::OWNERSHIP_STATE);
+        must(
+            fs::create_dir_all(state_path.parent().unwrap_or(&root)),
+            "create ownership state directory",
+        );
+        must(
+            fs::write(state_path, sidecar),
+            "write exact-digest forged sidecar claim",
+        );
+
+        assert!(must(
+            super::is_excluded_action_file(&root, "dist/index.js", &BTreeSet::new()),
+            "classify unrendered dist action entrypoint",
+        ));
+        assert!(!must(
+            super::is_excluded_action_file(&root, "dist/index.js", &BTreeSet::from([relative]),),
+            "exclude current-renderer dist output",
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[expect(
@@ -4662,6 +4749,7 @@ mod tests {
                 .runs,
                 "actions/parent",
                 &files,
+                &BTreeSet::new(),
             ),
             "resolve nested action from workspace root",
         );
@@ -4743,7 +4831,13 @@ mod tests {
             "parse composite working-directory metadata",
         );
         let references = must(
-            super::local_references(&root, &metadata.runs, "actions/child", &files),
+            super::local_references(
+                &root,
+                &metadata.runs,
+                "actions/child",
+                &files,
+                &BTreeSet::new(),
+            ),
             "resolve composite script paths",
         );
         assert_eq!(
@@ -4926,6 +5020,7 @@ mod tests {
                 "linked-root/action",
                 &root,
                 &["linked-root/action/main.js".to_owned()],
+                &BTreeSet::new(),
             )
             .err()
             .unwrap_or_else(|| panic!("symlinked action root ancestor entrypoint was accepted"));

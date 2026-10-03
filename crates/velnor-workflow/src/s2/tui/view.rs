@@ -306,7 +306,8 @@ fn plan_summary(app: &App) -> String {
         .files
         .iter()
         .filter(|file| file.action == PlannedAction::Delete)
-        .count();
+        .count()
+        + plan.unknown.len();
     if created + updated + deleted == 0 {
         "No changes needed".to_owned()
     } else {
@@ -329,6 +330,12 @@ fn push_file_lines(lines: &mut Vec<Line<'static>>, app: &App, system: &DesignSys
             };
             lines.push(Line::from(vec![
                 Span::styled(marker, system.style(role)),
+                Span::raw(file.path.display().to_string()),
+            ]));
+        }
+        for file in &plan.unknown {
+            lines.push(Line::from(vec![
+                Span::styled("- DELETE ", system.style(Role::Danger)),
                 Span::raw(file.path.display().to_string()),
             ]));
         }
@@ -919,11 +926,6 @@ mod tests {
         app.plan = Some(crate::s2::GeneratedWritePlan {
             files: vec![
                 crate::s2::PlannedFile {
-                    path: PathBuf::from(".github/workflows/old.yml"),
-                    action: crate::s2::PlannedAction::Delete,
-                    preimage: crate::s2::FilePreimage::Missing,
-                },
-                crate::s2::PlannedFile {
                     path: PathBuf::from(".github/ci/unchanged.toml"),
                     action: crate::s2::PlannedAction::Same,
                     preimage: crate::s2::FilePreimage::Missing,
@@ -935,8 +937,11 @@ mod tests {
                 },
             ],
             changed: Vec::new(),
-            stale: vec![PathBuf::from(".github/workflows/old.yml")],
-            unknown: Vec::new(),
+            unknown: vec![crate::s2::PlannedFile {
+                path: PathBuf::from(".github/workflows/old.yml"),
+                action: crate::s2::PlannedAction::Delete,
+                preimage: crate::s2::FilePreimage::Missing,
+            }],
             conflicts: Vec::new(),
             ownership_present: true,
             ownership_needs_refresh: true,
