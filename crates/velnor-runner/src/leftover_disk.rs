@@ -1685,6 +1685,7 @@ fn remove_dir_all_at(
             expected_candidate,
             pinned_candidate,
             &|_, device, mount_id| (device, mount_id),
+            &|_| Ok(()),
         )
     }
     #[cfg(target_os = "macos")]
@@ -1991,6 +1992,7 @@ fn remove_dir_all_with_identity(
             None,
             None,
             identity_of,
+            &|_| Ok(()),
         )
     }
     #[cfg(not(target_os = "linux"))]
@@ -2012,6 +2014,7 @@ fn remove_dir_all_with_identity_at(
     expected_candidate: Option<&FilesystemDirectoryIdentity>,
     pinned_candidate: Option<&fs::File>,
     identity_of: &impl Fn(&Path, u64, u64) -> (u64, u64),
+    after_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     let anchor_mount_id = match &expected_anchor.mount {
         FilesystemMountIdentity::LinuxMountId(mount_id) => *mount_id,
@@ -2115,6 +2118,7 @@ fn remove_dir_all_with_identity_at(
             return Err(error);
         }
     };
+    let mut preflight_deletion_started = false;
     let preflight = walk_directory_tree(
         &quarantined_root,
         root_path,
@@ -2123,6 +2127,8 @@ fn remove_dir_all_with_identity_at(
         identity_of,
         0,
         false,
+        &mut preflight_deletion_started,
+        after_unlink,
     );
     if let Err(error) = preflight {
         restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
@@ -2169,6 +2175,7 @@ fn remove_dir_all_with_identity_at(
             root_path.display()
         );
     }
+    let mut deletion_started = false;
     if let Err(error) = walk_directory_tree(
         &deletion_root,
         root_path,
@@ -2177,7 +2184,12 @@ fn remove_dir_all_with_identity_at(
         identity_of,
         0,
         true,
+        &mut deletion_started,
+        after_unlink,
     ) {
+        if deletion_started {
+            return Err(error).context("partial workspace cleanup remains in quarantine");
+        }
         restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
         return Err(error).context("delete quarantined workspace tree");
     }
@@ -3303,6 +3315,8 @@ fn walk_directory_tree(
     identity_of: &impl Fn(&Path, u64, u64) -> (u64, u64),
     depth: usize,
     remove: bool,
+    deletion_started: &mut bool,
+    after_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     use std::os::unix::ffi::OsStringExt as _;
 
@@ -3365,6 +3379,8 @@ fn walk_directory_tree(
                 identity_of,
                 depth + 1,
                 remove,
+                deletion_started,
+                after_unlink,
             )?;
             if remove {
                 unlink_checked_directory(
@@ -3376,6 +3392,8 @@ fn walk_directory_tree(
                     expected_mount_id,
                     identity_of,
                 )?;
+                *deletion_started = true;
+                after_unlink(&child_path)?;
             }
         } else {
             if remove {
@@ -3388,6 +3406,8 @@ fn walk_directory_tree(
                     expected_mount_id,
                     identity_of,
                 )?;
+                *deletion_started = true;
+                after_unlink(&child_path)?;
             }
         }
     }
@@ -4220,6 +4240,72 @@ mod tests {
         let data_mount =
             macos_directory_mount_identity(&File::open("/System/Volumes/Data").unwrap()).unwrap();
         assert_ne!(system, data_mount);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_partial_cleanup_remains_quarantined_after_first_unlink() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-linux-partial-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let anchor_path = root.join("configured");
+        let candidate = anchor_path.join("work/slot-1/job-12345678");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::write(candidate.join("first"), b"first").unwrap();
+        fs::write(candidate.join("later"), b"later").unwrap();
+
+        let anchor = open_configured_directory(&anchor_path).unwrap();
+        let anchor_identity = directory_identity(&anchor).unwrap();
+        let (parent, name, root_path, opened_anchor_identity) =
+            open_parent_beneath_anchor(&anchor_path, &candidate, Some(&anchor_identity)).unwrap();
+        assert_eq!(opened_anchor_identity, anchor_identity);
+        let pinned_candidate = open_directory_child(&parent, &name).unwrap();
+        let candidate_identity = directory_identity(&pinned_candidate).unwrap();
+        let FilesystemMountIdentity::LinuxMountId(mount_id) = &anchor_identity.mount else {
+            panic!("expected Linux mount identity");
+        };
+        let identity_of = |_: &Path, device, mount_id| (device, mount_id);
+        let fail_after_first_unlink =
+            |_: &Path| -> Result<()> { bail!("injected failure after first successful unlink") };
+
+        let error = remove_dir_all_with_identity_at(
+            &parent,
+            &name,
+            &anchor,
+            &anchor_identity,
+            &root_path,
+            anchor_identity.device,
+            Some(*mount_id),
+            Some(&candidate_identity),
+            Some(&pinned_candidate),
+            &identity_of,
+            &fail_after_first_unlink,
+        )
+        .expect_err("partial deletion must fail closed in quarantine");
+        assert!(format!("{error:#}").contains("partial workspace cleanup remains in quarantine"));
+        assert!(!candidate.exists(), "partially deleted tree was restored");
+
+        let quarantine = fs::read_dir(&anchor_path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-reclaim-"))
+            })
+            .expect("partial tree must remain under quarantine");
+        let quarantined_candidate = quarantine.join("entry");
+        let remaining_entries = fs::read_dir(&quarantined_candidate)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining_entries.len(), 1);
+        assert!(remaining_entries[0].is_file());
+
+        drop(pinned_candidate);
+        drop(parent);
+        drop(anchor);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]
