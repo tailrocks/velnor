@@ -1046,7 +1046,6 @@ enum AuthorizedDockerRoute {
     DaemonTunnel,
 }
 
-#[derive(Debug)]
 struct PersistentBuilderAdmission {
     resources: Arc<Mutex<OwnedDockerResources>>,
     changed: Arc<Condvar>,
@@ -1055,6 +1054,22 @@ struct PersistentBuilderAdmission {
     container_id: Option<String>,
     is_bootstrap_create: bool,
     is_bootstrap_conflict_waiter: bool,
+}
+
+impl fmt::Debug for PersistentBuilderAdmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PersistentBuilderAdmission")
+            .field("builder", &self.builder)
+            .field("generation", &self.generation)
+            .field("container_id", &self.container_id)
+            .field("is_bootstrap_create", &self.is_bootstrap_create)
+            .field(
+                "is_bootstrap_conflict_waiter",
+                &self.is_bootstrap_conflict_waiter,
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 struct PersistentBuilderRecoveryAdmission {
@@ -1860,6 +1875,7 @@ impl DockerLeasePolicy {
             || resources
                 .persistent_builder_config_fingerprints
                 .get(builder)
+                .map(String::as_str)
                 != Some(config_fingerprint)
         {
             bail!("persistent BuildKit creator admission changed while acquiring its lease");
@@ -1945,7 +1961,7 @@ impl DockerLeasePolicy {
         )?;
         let network = validate_owned_resource_id(network, "Docker network")?;
         let body = docker_request_body(request)?;
-        let mut object = parse_create_value(body)
+        let object = parse_create_value(body)
             .context("parse Docker network container request")?
             .as_object()
             .cloned()
@@ -2010,7 +2026,10 @@ impl DockerLeasePolicy {
             resources
                 .persistent_containers
                 .iter()
-                .find_map(|(name, id)| (name == &target || id == &target).then_some(name))
+                .find_map(|(name, id)| {
+                    (name.as_str() == target.as_str() || id.as_str() == target.as_str())
+                        .then_some(name)
+                })
                 .and_then(|name| persistent_buildkit_builder_name(name))
                 .map(str::to_owned)
                 .context("persistent container is not bound to an active builder")?
@@ -2019,7 +2038,7 @@ impl DockerLeasePolicy {
             route,
             AuthorizedDockerRoute::PersistentInspect(DockerResourceKind::Container)
         ) && !resources.persistent_containers.iter().any(|(name, id)| {
-            (name == &target || id == &target)
+            (name.as_str() == target.as_str() || id.as_str() == target.as_str())
                 && persistent_buildkit_builder_name(name) == Some(builder.as_str())
         }) {
             bail!("persistent container route has no attested immutable container binding");
@@ -2032,7 +2051,7 @@ impl DockerLeasePolicy {
                 .persistent_containers
                 .iter()
                 .find(|(name, id)| {
-                    (name == &target || id == &target)
+                    (name.as_str() == target.as_str() || id.as_str() == target.as_str())
                         && persistent_buildkit_builder_name(name) == Some(builder.as_str())
                 })
                 .context("persistent start route lost its container binding")?;
@@ -2083,6 +2102,7 @@ impl DockerLeasePolicy {
         let container_id = resources
             .persistent_exec_containers
             .get(&exec_id)
+            .cloned()
             .context("persistent BuildKit exec has no immutable container binding")?;
         let generation = resources
             .persistent_exec_generations
@@ -2091,13 +2111,13 @@ impl DockerLeasePolicy {
             .context("persistent BuildKit exec has no capability generation")?;
         ensure_persistent_builder_generation_locked(&resources, &builder, generation)?;
         if !resources.persistent_containers.iter().any(|(name, id)| {
-            id == container_id && persistent_buildkit_builder_name(name) == Some(builder.as_str())
+            id == &container_id && persistent_buildkit_builder_name(name) == Some(builder.as_str())
         }) {
             bail!("persistent BuildKit exec container binding is stale");
         }
         let mut admission = self.admit_persistent_builder_locked(&mut resources, &builder)?;
         debug_assert_eq!(admission.generation, generation);
-        admission.container_id = Some(container_id.clone());
+        admission.container_id = Some(container_id);
         authorization._persistent_builder = Some(admission);
         Ok(authorization)
     }
@@ -2455,7 +2475,7 @@ impl DockerLeasePolicy {
         }
         let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
             .context("resolve persistent BuildKit archive domain")?;
-        let mut resources = self
+        let resources = self
             .resources
             .lock()
             .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
@@ -5307,8 +5327,12 @@ fn validate_persistent_archive_request(request: &[u8], target: &str) -> Result<S
         .context("persistent BuildKit archive request omitted its header terminator")?;
     for line in request[..header_end].split(|byte| *byte == b'\n').skip(1) {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if let Some((name, value)) = line.split_once(|byte| *byte == b':')
-            && name.eq_ignore_ascii_case(b"content-encoding")
+        let Some(separator) = line.iter().position(|byte| *byte == b':') else {
+            continue;
+        };
+        let (name, value) = line.split_at(separator);
+        let value = &value[1..];
+        if name.eq_ignore_ascii_case(b"content-encoding")
             && !value.iter().all(u8::is_ascii_whitespace)
         {
             bail!("persistent BuildKit archive rejects Content-Encoding");
@@ -9024,7 +9048,7 @@ fn handle_client_with(
                             .as_deref()
                             .context("persistent BuildKit create omitted its container name")?;
                         observe_persistent_bootstrap_response_fenced(
-                            policy,
+                            policy.as_ref(),
                             target,
                             status,
                             body,
@@ -9521,8 +9545,8 @@ fn observe_persistent_bootstrap_response_with(
     target: &str,
     status: u16,
     body: &[u8],
-    mut inspect: impl FnMut(&str) -> Result<(u16, Vec<u8>)>,
-    mut start_conflict: impl FnMut(&DockerLeasePolicy, &str) -> Result<()>,
+    inspect: impl FnMut(&str) -> Result<(u16, Vec<u8>)>,
+    start_conflict: impl FnMut(&DockerLeasePolicy, &str) -> Result<()>,
 ) -> Result<()> {
     observe_persistent_bootstrap_response_fenced(
         policy,
@@ -9869,7 +9893,7 @@ fn docker_upgrade_state(request: &[u8]) -> Result<bool> {
 #[cfg(unix)]
 fn proxy_until_closed(
     host: std::os::unix::net::UnixStream,
-    client: std::os::unix::net::UnixStream,
+    mut client: std::os::unix::net::UnixStream,
     host_preface: &[u8],
 ) -> Result<()> {
     if !host_preface.is_empty() {
@@ -10586,7 +10610,7 @@ fn forward_exact_response_body_captured(
     host: &mut std::os::unix::net::UnixStream,
     buffered: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
-    mut remaining: usize,
+    remaining: usize,
     captured: &mut Option<Vec<u8>>,
     forward_to_client: bool,
 ) -> Result<()> {
@@ -12146,11 +12170,14 @@ mod tests {
         assert_eq!(captured_generation, 1);
 
         let revoke_policy = policy.clone();
+        let revoke_builder = builder.clone();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let revoker = std::thread::spawn(move || {
             entered_tx.send(()).unwrap();
-            revoke_policy.revoke_persistent_builder(&builder).unwrap();
+            revoke_policy
+                .revoke_persistent_builder(&revoke_builder)
+                .unwrap();
             finished_tx.send(()).unwrap();
         });
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -12328,7 +12355,7 @@ mod tests {
         }
         drop(recovery);
 
-        let mut ordinary = {
+        let ordinary = {
             let mut resources = policy.resources.lock().unwrap();
             policy
                 .admit_persistent_builder_locked(&mut resources, &builder)
@@ -12774,7 +12801,7 @@ mod tests {
         // Acquiring the mutex after the closer marks itself active proves it
         // has entered Condvar::wait with the live admission still outstanding.
         let marker_deadline = std::time::Instant::now() + Duration::from_secs(1);
-        let mut resources = loop {
+        let resources = loop {
             let resources = policy.resources.lock().unwrap();
             if resources
                 .persistent_builder_requests_closer_active
